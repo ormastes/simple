@@ -5,6 +5,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_lowering.pattern_enum_substitution.{declared_pattern_slot_type_is_concrete}
 use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_types_alias_equal, enum_payload_named_alias_equal, enum_payload_nominal_kind}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_lowering_types.{MirLowering}
@@ -217,6 +218,12 @@ impl MirLowering:
                 case _: ()
         ""
 
+    me is_generic_enum_constructor_owner(key: text) -> bool:
+        """Return true when `key` is explicitly registered as a generic enum owner."""
+        if key == "":
+            return false
+        self.generic_enum_constructor_owners.has(key) and self.generic_enum_constructor_owners[key]
+
     me enum_keys_match_declaration_v1(left_key: text, right_key: text) -> bool:
         if not self.enum_variant_index_q.has(left_key) or not self.enum_variant_index_q.has(right_key):
             return false
@@ -224,7 +231,7 @@ impl MirLowering:
         val right_variants = self.enum_variant_index_q[right_key]
         if left_variants.len() != right_variants.len():
             return false
-        if (self.generic_enum_constructor_owners.get(left_key) ?? false) != (self.generic_enum_constructor_owners.get(right_key) ?? false):
+        if self.is_generic_enum_constructor_owner(left_key) != self.is_generic_enum_constructor_owner(right_key):
             return false
         val has_left_disc = self.enum_variant_discriminants_q.has(left_key)
         val has_right_disc = self.enum_variant_discriminants_q.has(right_key)
@@ -259,7 +266,7 @@ impl MirLowering:
     me enum_constructor_metadata_owner(enum_name: text) -> text:
         if self.enum_variant_index_q.has(enum_name) and self.enum_bare_of(enum_name) != enum_name:
             return enum_name
-        if (self.enum_bare_ambiguous.get(enum_name) ?? false):
+        if self.enum_bare_ambiguous.has(enum_name) and self.enum_bare_ambiguous[enum_name]:
             return ""
         # A bare legacy constructor carries no declaration symbol. Do not
         # select the last registered sibling, even when its variants happen
@@ -287,7 +294,7 @@ impl MirLowering:
         val separator = key.last_index_of("::")
         if separator < 0: return false
         val owner = key.substring(0, separator)
-        not (self.generic_enum_constructor_owners.get(owner) ?? false)
+        not self.is_generic_enum_constructor_owner(owner)
 
     me enum_positional_payload_reason(enum_key: text, variant: text, count: i64) -> text:
         if self.enum_variant_discriminant(enum_key, variant) < 0:
@@ -337,10 +344,52 @@ impl MirLowering:
         # owner's `None` still lowers to the nil word, as `nil` did; generic
         # owners (Option/Result/user generics) keep the Option object.
         val bare_owner = self.enum_bare_of(owner_key)
-        val generic_owner = bare_owner == "Option" or bare_owner == "Result" or (self.generic_enum_constructor_owners.get(owner_key) ?? false) or (self.generic_enum_constructor_owners.get(bare_owner) ?? false)
+        val generic_owner = bare_owner == "Option" or bare_owner == "Result" or self.is_generic_enum_constructor_owner(owner_key) or self.is_generic_enum_constructor_owner(bare_owner)
         if not generic_owner and self.enum_payload_is_builtin_none(expression):
             return self.emit_enum_payload_nil_word()
         self.lower_expr(expression)
+
+    me declared_enum_payload_slot_for_construct(key: text, index: i64, typed_slots: bool) -> HirType?:
+        """Return the concrete declared HirType for payload slot `index` when
+        the owner is non-generic OR when a generic enum's declared slot carries
+        a concrete scalar/text type (e.g. `u64` or `f64` inside `Mix<T>`)."""
+        if typed_slots:
+            if self.enum_variant_payload_types.has(key):
+                val slots: [HirType] = self.enum_variant_payload_types[key]
+                if index >= 0 and index < slots.len():
+                    return Some(slots[index])
+            return None
+        self.ensure_declaration_enum_payloads_v1(key)
+        if key == "" or not self.enum_variant_payload_types.has(key):
+            return None
+        val separator = key.last_index_of("::")
+        if separator < 0:
+            return None
+        val owner = key.substring(0, separator)
+        if not self.is_generic_enum_constructor_owner(owner):
+            return None
+        val slots: [HirType] = self.enum_variant_payload_types[key]
+        if index < 0 or index >= slots.len():
+            return None
+        val slot_type: HirType = slots[index]
+        if declared_pattern_slot_type_is_concrete(slot_type):
+            match slot_type.kind:
+                case HirTypeKind.Float(_) | HirTypeKind.Int(_, _) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str:
+                    return Some(slot_type)
+                case _: ()
+        None
+
+    me lower_enum_constructor_slot_v1(slot_key: text, slot_index: i64, typed_slots: bool, untyped_owner: text, value: HirExpr, err_span: Span, err_loc: text) -> LocalId?:
+        """Lower and adapt one enum constructor payload slot uniformly across
+        single-field, multi-field, and method-call constructors."""
+        if val expected = self.declared_enum_payload_slot_for_construct(slot_key, slot_index, typed_slots):
+            val local = self.lower_declared_enum_payload_expression(expected, value)
+            if not self.enum_payload_local_compatible(expected, value, local):
+                self.enum_payload_mismatch_trace(expected, value, local)
+                self.error_fatal(self.enum_payload_mismatch_message(err_loc, slot_index, expected, value), Some(err_span))
+                return None
+            return Some(self.adapt_declared_enum_payload(expected, local))
+        Some(self.lower_untyped_enum_payload_expression(untyped_owner, value))
 
     me lower_declared_enum_payload_expression(expected: HirType, expression: HirExpr) -> LocalId:
         # Context is passed down this literal tree only. Every child is lowered
@@ -671,20 +720,21 @@ impl MirLowering:
         subject_type
 
     me decode_instantiated_enum_payload_slot_v1(slot: LocalId, declared: HirType, instantiated: HirType) -> LocalId:
-        """A `T` slot instantiated to a record (`Box<Lid>`, `Two<Lid, i64>`):
-        field access resolves its owner through struct_value_syms, which the
-        `T` decode never set, so `item.id` lowered to a Unit GetField and the
-        arm returned an uninitialised slot. Re-decode as the instantiated
-        Named type. Scalar instantiations keep the `T` decode.
-        A slot declared as a concrete record inside a generic owner
-        (`M(a: T, l: Lid)` in `Mix<T>`) gets the same tagging: the generic
-        owner withholds the declared-slot decode, so `l.id` read field 0.
-        Concrete enum / text / collection slots are left as they were.
+        """A `T` slot instantiated to a record (`Box<Lid>`, `Two<Lid, i64>`)
+        or scalar/text (`Box<f64>`, `Two<f32, u64>`, `Two<f64, text>`):
+        field access resolves its owner through struct_value_syms and
+        float/u64/bool/text payloads need bitcast/unbox/retag via
+        `decode_declared_enum_payload_slot` matching the encoder.
+        A slot declared as a concrete record or scalar/text inside a generic
+        owner (`M(a: T, l: Lid)` or `M(a: T, f: f64)` in `Mix<T>`) gets the
+        same decode when `slot` has not already been decoded from `i64`.
+        Concrete enum / collection slots are left as they were.
         doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md"""
+        val slot_mir = self.local_mir_type_of(slot) ?? MirType.unit()
         match declared.kind:
             case HirTypeKind.TypeParam(_, _):
                 match instantiated.kind:
-                    case HirTypeKind.Named(_, _):
+                    case HirTypeKind.Named(_, _) | HirTypeKind.Float(_) | HirTypeKind.Int(_, _) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str:
                         return self.decode_declared_enum_payload_slot(slot, instantiated)
                     case _: ()
             case HirTypeKind.Named(declared_symbol, _):
@@ -696,6 +746,12 @@ impl MirLowering:
                         case Class:
                             return self.decode_declared_enum_payload_slot(slot, instantiated)
                         case _: ()
+            case HirTypeKind.Float(_) | HirTypeKind.Int(_, _) | HirTypeKind.Bool | HirTypeKind.Char:
+                if slot_mir.kind == MirTypeKind.I64:
+                    return self.decode_declared_enum_payload_slot(slot, instantiated)
+            case HirTypeKind.Str:
+                if not self.local_is_str(slot):
+                    return self.decode_declared_enum_payload_slot(slot, instantiated)
             case _: ()
         slot
 
@@ -708,7 +764,7 @@ impl MirLowering:
                 # Restore both its text ABI and MIR type, as Result.unwrap
                 # does, before concatenation can stringify the handle.
                 value = self.option_text_value(raw, self.bootstrap_text_type())
-            case HirTypeKind.Int(_, _):
+            case HirTypeKind.Int(_, _) | HirTypeKind.Char:
                 val actual = self.local_mir_type_of(value) ?? MirType.unit()
                 if actual.kind != target.kind:
                     var builder = self.builder
@@ -753,6 +809,140 @@ impl MirLowering:
             case _: ()
         self.remember_local_hir_type(value.id, expected, 0, 0)
         value
+
+    fn sanitize_deep_slot_hir_type_v1(ty: HirType, span: Span) -> HirType:
+        """Rebuild a pattern HirType with a fresh safe Span so stage3 native
+        remember_local_hir_type never copies a sentinel pat.type_.span word."""
+        match ty.kind:
+            case HirTypeKind.Str: HirType(kind: HirTypeKind.Str, span: span)
+            case HirTypeKind.Float(bits): HirType(kind: HirTypeKind.Float(bits), span: Span.empty())
+            case HirTypeKind.Int(bits, signed): HirType(kind: HirTypeKind.Int(bits, signed), span: Span.empty())
+            case HirTypeKind.Bool: HirType(kind: HirTypeKind.Bool, span: Span.empty())
+            case HirTypeKind.Char: HirType(kind: HirTypeKind.Char, span: Span.empty())
+            case HirTypeKind.Named(sym, args): HirType(kind: HirTypeKind.Named(sym, args), span: Span.empty())
+            case HirTypeKind.Array(elem_ty, _): HirType(kind: HirTypeKind.Array(elem_ty, None), span: Span.empty())
+            case HirTypeKind.Slice(elem_ty): HirType(kind: HirTypeKind.Slice(elem_ty), span: Span.empty())
+            case HirTypeKind.Dict(k_ty, v_ty): HirType(kind: HirTypeKind.Dict(k_ty, v_ty), span: Span.empty())
+            case _: ty
+
+    me deep_slot_instantiated_hir_type_v1(slot_owner: text, slot_variant: text, slot_i: i64, slot_enum_type: HirType?, top_level: bool, pats_len: i64, subject_payload_type: HirType?, sub_pat: HirPattern) -> (HirType?, HirType?):
+        """Resolve (declared, instantiated) HirType for one nested enum-pattern
+        slot inside `emit_enum_payload_deep`."""
+        if pats_len == 1:
+            if val subj_ty = subject_payload_type:
+                return (Some(subj_ty), Some(subj_ty))
+        if slot_owner != "" and slot_variant != "":
+            val slot_key = "{slot_owner}::{slot_variant}"
+            self.ensure_declaration_enum_payloads_v1(slot_key)
+            if self.enum_variant_payload_types.has(slot_key):
+                val slot_types: [HirType] = self.enum_variant_payload_types[slot_key]
+                if slot_i >= 0 and slot_i < slot_types.len():
+                    val declared_slot: HirType = slot_types[slot_i]
+                    var instantiated = self.substitute_enum_payload_type_params_v1(slot_owner, self.enum_bare_of(slot_owner), declared_slot, slot_enum_type)
+                    val still_unresolved = match instantiated.kind:
+                        case HirTypeKind.TypeParam(_, _) | HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: true
+                        case _: false
+                    if still_unresolved and sub_pat.has_type_ and declared_pattern_slot_type_is_concrete(sub_pat.type_):
+                        instantiated = self.sanitize_deep_slot_hir_type_v1(sub_pat.type_, sub_pat.span)
+                    return (Some(declared_slot), Some(instantiated))
+        (None, None)
+
+    fn nested_enum_instance_type_v1(nested_etype: HirType, slot_hir_type: HirType?, pat: HirPattern) -> HirType?:
+        """Pick the most informative instantiated `Named(_, args)` HirType for a
+        nested Enum sub-pattern (`args.len() > 0` wins over bare pattern types)."""
+        match nested_etype.kind:
+            case HirTypeKind.Named(_, args):
+                if args.len() > 0:
+                    return Some(nested_etype)
+            case _: ()
+        if val slot_ty = slot_hir_type:
+            match slot_ty.kind:
+                case HirTypeKind.Named(_, s_args):
+                    if s_args.len() > 0:
+                        return Some(slot_ty)
+                case _: ()
+        if pat.has_type_:
+            match pat.type_.kind:
+                case HirTypeKind.Named(_, p_args):
+                    if p_args.len() > 0:
+                        return Some(pat.type_)
+                case _: ()
+        Some(nested_etype)
+
+    fn nested_optional_inner_type_v1(slot_hir_type: HirType?, pat: HirPattern) -> HirType?:
+        """Recover the inner `T` of a nested `Optional<T>` sub-pattern."""
+        if val slot_ty = slot_hir_type:
+            match slot_ty.kind:
+                case HirTypeKind.Optional(inner): return Some(inner)
+                case _: ()
+        if pat.has_type_:
+            match pat.type_.kind:
+                case HirTypeKind.Optional(p_inner): return Some(p_inner)
+                case _: ()
+        None
+
+    fn nested_result_payload_type_v1(slot_hir_type: HirType?, pat: HirPattern, variant: text) -> HirType?:
+        """Recover the inner `Ok`/`Err` type of a nested `Result<T, E>` sub-pattern."""
+        if variant != "Ok" and variant != "Err":
+            return None
+        if val slot_ty = slot_hir_type:
+            match slot_ty.kind:
+                case HirTypeKind.Result(ok_ty, err_ty):
+                    return Some(if variant == "Ok": ok_ty else: err_ty)
+                case _: ()
+        if pat.has_type_:
+            match pat.type_.kind:
+                case HirTypeKind.Result(p_ok, p_err):
+                    return Some(if variant == "Ok": p_ok else: p_err)
+                case _: ()
+        None
+
+    me decode_deep_binding_slot_v1(value_local: LocalId, pat: HirPattern, slot_hir_type: HirType?) -> LocalId:
+        """Decode a nested Binding slot once from its raw carrier without
+        double-decoding locals already typed by the enclosing walker."""
+        val effective: HirType? = if slot_hir_type != None: slot_hir_type elif pat.has_type_: Some(pat.type_) else: None
+        if effective == None:
+            return value_local
+        val ty: HirType = effective.unwrap()
+        val cur_mir = self.local_mir_type_of(value_local) ?? MirType.unit()
+        val scalar_hir: HirType? = match ty.kind:
+            case HirTypeKind.Float(_) | HirTypeKind.Int(_, _) | HirTypeKind.Bool | HirTypeKind.Char:
+                Some(self.sanitize_deep_slot_hir_type_v1(ty, pat.span))
+            case _: None
+        if val st = scalar_hir:
+            if cur_mir.kind == MirTypeKind.I64:
+                val decoded = self.decode_declared_enum_payload_slot(value_local, st)
+                self.remember_local_hir_type(decoded.id, st, 0, 0)
+                return decoded
+            return value_local
+        match ty.kind:
+            case HirTypeKind.Str:
+                if not self.local_is_str(value_local):
+                    val str_type = HirType(kind: HirTypeKind.Str, span: pat.span)
+                    val bound_value = self.decode_declared_enum_payload_slot(value_local, str_type)
+                    self.remember_local_hir_type(bound_value.id, str_type, 0, 0)
+                    return bound_value
+            case HirTypeKind.Named(record_sym, record_args):
+                if record_args.len() == 0 and not self.struct_value_syms.has(value_local.id):
+                    if val present_sym = self.symbols.get_symbol_raw(record_sym.id):
+                        val decl_sym: HirSymbol = present_sym
+                        if decl_sym.kind == SymbolKind.Struct or decl_sym.kind == SymbolKind.Class:
+                            val record_type = HirType(kind: HirTypeKind.Named(record_sym, []), span: Span.empty())
+                            return self.decode_declared_enum_payload_slot(value_local, record_type)
+            case HirTypeKind.Array(elem_ty, _):
+                if not self.runtime_array_locals.contains(value_local.id):
+                    val arr_type = HirType(kind: HirTypeKind.Array(elem_ty, None), span: Span.empty())
+                    return self.decode_declared_enum_payload_slot(value_local, arr_type)
+            case HirTypeKind.Slice(elem_ty):
+                if not self.runtime_array_locals.contains(value_local.id):
+                    val slice_type = HirType(kind: HirTypeKind.Slice(elem_ty), span: Span.empty())
+                    return self.decode_declared_enum_payload_slot(value_local, slice_type)
+            case HirTypeKind.Dict(k_ty, v_ty):
+                if not self.runtime_dict_locals.contains(value_local.id):
+                    val dict_type = HirType(kind: HirTypeKind.Dict(k_ty, v_ty), span: Span.empty())
+                    return self.decode_declared_enum_payload_slot(value_local, dict_type)
+            case _: ()
+        value_local
 
 fn enum_payload_type_unsettled_v1(t: HirType) -> bool:
     match t.kind:

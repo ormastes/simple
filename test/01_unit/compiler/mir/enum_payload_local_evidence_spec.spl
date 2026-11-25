@@ -21,6 +21,7 @@ use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 
 fn ty(kind: HirTypeKind) -> HirType:
     HirType(kind: kind, span: Span.empty())
@@ -302,12 +303,15 @@ describe "enum constructor registry helpers":
 
     it "uses declared slots for a registered non-generic owner only":
         var lowering = _lowered()
+        lowering.generic_enum_constructor_owners["probe.E"] = false
+        expect(lowering.is_generic_enum_constructor_owner("probe.E")).to_equal(false)
         expect(lowering.enum_payload_key_uses_declared_slots("probe.E::N")).to_equal(true)
         expect(lowering.enum_payload_key_uses_declared_slots("")).to_equal(false)
         expect(lowering.enum_payload_key_uses_declared_slots("probe.E::Nope")).to_equal(false)
         lowering.enum_variant_payload_types["flat"] = []
         expect(lowering.enum_payload_key_uses_declared_slots("flat")).to_equal(false)
         lowering.generic_enum_constructor_owners["probe.E"] = true
+        expect(lowering.is_generic_enum_constructor_owner("probe.E")).to_equal(true)
         expect(lowering.enum_payload_key_uses_declared_slots("probe.E::N")).to_equal(false)
 
 describe "declared payload literals":
@@ -371,6 +375,84 @@ describe "declared payload slot carriers":
         lowering.builder = signed_builder
         expect(lowering.encode_declared_enum_payload_slot(unsigned).id != unsigned.id).to_equal(true)
         expect(lowering.encode_declared_enum_payload_slot(signed).id).to_equal(signed.id)
+
+    it "encodes F64, F32, and U64 slots in box_lowered_enum_tuple_payload even when typed_slots is false":
+        var lowering = _lowered()
+        var b = lowering.builder
+        b.begin_function(SymbolId(id: 95), "untyped_tuple_box_probe", MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        val f64_l = b.new_temp(mty(MirTypeKind.F64))
+        val f32_l = b.new_temp(mty(MirTypeKind.F32))
+        val u64_l = b.new_temp(mty(MirTypeKind.U64))
+        lowering.builder = b
+        val srcs = [_untyped(), _untyped(), _untyped()]
+        # Unregistered construct key: typed_slots is false.
+        expect(lowering.enum_payload_key_uses_declared_slots("untyped.Enum::Pair")).to_equal(false)
+        val _t1 = lowering.box_lowered_enum_tuple_payload([f64_l, f32_l, u64_l], "untyped.Enum::Pair", srcs)
+        # Registered generic owner: typed_slots is also false.
+        lowering.generic_enum_constructor_owners["probe.E"] = true
+        expect(lowering.enum_payload_key_uses_declared_slots("probe.E::N")).to_equal(false)
+        val _t2 = lowering.box_lowered_enum_tuple_payload([f64_l, f32_l, u64_l], "probe.E::N", srcs)
+        var fn_builder = lowering.builder
+        val built = fn_builder.end_function()
+        lowering.builder = fn_builder
+        var rt_set_count = 0
+        for block in built.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(_, callee, args):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                if name == "rt_tuple_set":
+                                    rt_set_count = rt_set_count + 1
+                                    expect(args.len()).to_equal(3)
+                                    val stored_local = match args[2].kind:
+                                        case MirOperandKind.Copy(l) | MirOperandKind.Move(l): l ?? LocalId(id: -1)
+                                        case _: LocalId(id: -1)
+                                    val stored_ty = lowering.local_mir_type_of(stored_local) ?? MirType.unit()
+                                    expect(stored_ty.kind == MirTypeKind.I64).to_equal(true)
+                            case _: ()
+                    case _: ()
+        expect(rt_set_count).to_equal(6)
+
+    it "decodes instantiated scalar TypeParam and concrete generic slots symmetrically":
+        var lowering = _lowered()
+        var b = lowering.builder
+        b.begin_function(SymbolId(id: 96), "instantiated_decode_probe", MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        val raw = b.new_temp(mty(MirTypeKind.I64))
+        val already_f64 = b.new_temp(mty(MirTypeKind.F64))
+        val already_u64 = b.new_temp(mty(MirTypeKind.U64))
+        lowering.builder = b
+        val tp = ty(HirTypeKind.TypeParam("T", []))
+        val f64_t = ty(HirTypeKind.Float(64))
+        val f32_t = ty(HirTypeKind.Float(32))
+        val u64_t = ty(HirTypeKind.Int(64, false))
+        val bool_t = ty(HirTypeKind.Bool)
+        val str_t = ty(HirTypeKind.Str)
+        val dec_f64 = lowering.decode_instantiated_enum_payload_slot_v1(raw, tp, f64_t)
+        expect((lowering.local_mir_type_of(dec_f64) ?? MirType.unit()).kind == MirTypeKind.F64).to_equal(true)
+        val dec_f32 = lowering.decode_instantiated_enum_payload_slot_v1(raw, tp, f32_t)
+        expect((lowering.local_mir_type_of(dec_f32) ?? MirType.unit()).kind == MirTypeKind.F32).to_equal(true)
+        val dec_u64 = lowering.decode_instantiated_enum_payload_slot_v1(raw, tp, u64_t)
+        expect((lowering.local_mir_type_of(dec_u64) ?? MirType.unit()).kind == MirTypeKind.U64).to_equal(true)
+        val dec_bool = lowering.decode_instantiated_enum_payload_slot_v1(raw, tp, bool_t)
+        expect((lowering.local_mir_type_of(dec_bool) ?? MirType.unit()).kind == MirTypeKind.Bool).to_equal(true)
+        val dec_str = lowering.decode_instantiated_enum_payload_slot_v1(raw, tp, str_t)
+        expect(lowering.local_is_str(dec_str)).to_equal(true)
+        # Concrete float/u64 inside a generic owner: multi-binder raw i64 decodes,
+        # while an already-decoded single-binder local stays untouched.
+        val conc_f64 = lowering.decode_instantiated_enum_payload_slot_v1(raw, f64_t, f64_t)
+        expect((lowering.local_mir_type_of(conc_f64) ?? MirType.unit()).kind == MirTypeKind.F64).to_equal(true)
+        val conc_u64 = lowering.decode_instantiated_enum_payload_slot_v1(raw, u64_t, u64_t)
+        expect((lowering.local_mir_type_of(conc_u64) ?? MirType.unit()).kind == MirTypeKind.U64).to_equal(true)
+        expect(lowering.decode_instantiated_enum_payload_slot_v1(already_f64, f64_t, f64_t).id).to_equal(already_f64.id)
+        expect(lowering.decode_instantiated_enum_payload_slot_v1(already_u64, u64_t, u64_t).id).to_equal(already_u64.id)
+        val as_char = lowering.decode_declared_enum_payload_slot(raw, ty(HirTypeKind.Char))
+        expect((lowering.local_mir_type_of(as_char) ?? MirType.unit()).kind == MirTypeKind.Char).to_equal(true)
+        var fn_builder = lowering.builder
+        val _built = fn_builder.end_function()
+        lowering.builder = fn_builder
 
     it "restores the declared identity of a decoded slot":
         var lowering = _lowered()
