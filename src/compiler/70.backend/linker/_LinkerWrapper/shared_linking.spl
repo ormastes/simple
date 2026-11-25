@@ -112,6 +112,35 @@ pub fn mingw_link_driver_error(env_cc: text, discovered_cc: text) -> text:
         "discovered C compiler='{discovered_cc}' (set CC to llvm-mingw clang.exe " +
         "or put llvm-mingw's bin directory on PATH)"
 
+pub fn mingw_default_windows_libs_v1() -> [text]:
+    """Default Win32 system libraries for Windows GNU (MinGW) links.
+
+    Matches MSVC default library coverage (`msvc.spl` / `native_linking.spl`)
+    without optional third-party SDKs (SDL2 is runtime-loaded via
+    `runtime_sdl2.c`)."""
+    ["kernel32", "user32", "ws2_32", "winhttp", "mswsock", "bcrypt", "advapi32", "userenv", "ntdll", "shell32", "psapi", "ole32", "synchronization", "d3d11", "dxgi"]
+
+pub fn mingw_strip_unix_rpath_args(extra_flags: [text]) -> [text]:
+    """Drop Unix rpath options before they reach a Windows GNU (MinGW) clang/lld argv.
+
+    Mirrors `msvc_strip_unix_rpath_args` (`msvc.spl`): `-rpath` is an ELF/Mach-O
+    runtime-search-path mechanism rejected by PE/COFF lld. Drops bare
+    `"-rpath"` plus its following argument and `"-Wl,-rpath,..."` tokens."""
+    var result: [text] = []
+    var index = 0
+    while index < extra_flags.len():
+        val flag = extra_flags[index]
+        if flag == "-rpath":
+            index = index + 1
+            if index < extra_flags.len():
+                index = index + 1
+        elif flag.starts_with("-Wl,-rpath,"):
+            index = index + 1
+        else:
+            result.push(flag)
+            index = index + 1
+    result
+
 # @workaround bug=rti007_any_return_rows_2026-11-01 reason=bare Result return is Any in interface row (E-RTI-007); spell Result<text, text>
 fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     """Link using the bootstrap-owned Windows GNU Clang driver.
@@ -172,8 +201,7 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     # Windows system libraries (MinGW names)
     # SDL is runtime-loaded through runtime_sdl2.c; requiring its import library
     # makes every otherwise self-contained compiler link depend on an optional SDK.
-    val mingw_libs: [text] = ["kernel32", "ws2_32", "winhttp", "mswsock", "bcrypt", "userenv", "ntdll", "ole32", "synchronization", "d3d11", "dxgi"]
-    for lib in mingw_libs:
+    for lib in mingw_default_windows_libs_v1():
         args = args.push("-l{lib}")
     for flag in native_mingw_clang_link_args(support_inputs):
         args = args.push(flag)
@@ -198,8 +226,8 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     if config.allow_duplicate_definitions:
         args = args.push("-Wl,--allow-multiple-definition")
 
-    # Extra flags
-    for flag in config.extra_flags:
+    # Extra flags (drop ELF/Mach-O -rpath options before MinGW/COFF lld)
+    for flag in mingw_strip_unix_rpath_args(config.extra_flags):
         args = args.push(flag)
 
     args = args.push("-o")
@@ -453,8 +481,7 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
             support_inputs.push(arg)
 
     # Windows system libraries
-    val mingw_libs: [text] = ["kernel32", "ws2_32", "winhttp", "mswsock", "bcrypt", "userenv", "ntdll", "ole32", "synchronization", "d3d11", "dxgi"]
-    for lib in mingw_libs:
+    for lib in mingw_default_windows_libs_v1():
         args = args.push("-l{lib}")
     for flag in native_mingw_clang_link_args(support_inputs):
         args = args.push(flag)
@@ -470,8 +497,8 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
     args = args.push("-Wl,--gc-sections")
     args = args.push("-Wl,-s")
 
-    # Extra flags
-    for flag in config.extra_flags:
+    # Extra flags (drop ELF/Mach-O -rpath options before MinGW/COFF lld)
+    for flag in mingw_strip_unix_rpath_args(config.extra_flags):
         args = args.push(flag)
 
     args = args.push("-o")
