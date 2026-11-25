@@ -104,3 +104,23 @@ baseline for the same source; separate root, not a text-return typing issue).
 Resolution section records strict-llvm parity fixed (HIR signature predeclaration + self.field typing).
 Strict-cranelift is blocked by a separate backend failure. Status fix-implemented-verification-pending.
 Verify: `scripts/check/check-native-seed-parity.shs` case `method_text_return` on stage3, both backends.
+
+## Triage 2026-11-25 (work/p2w4-af-20261125)
+
+The "Open 2026-09-16 — needs owner triage" header is stale bookkeeping; the
+body already records RESOLVED for strict-llvm (2026-07-16) with
+verification pending on a stage3 binary (2026-11-04). Both root-fixes are
+confirmed present at `origin/release/1.0.0`:
+the `self.<field>` typing shim via `current_method_self_type`
+(`src/compiler/20.hir/hir_lowering/types.spl:1611-1619`, field set from
+`_Items/declaration_lowering.spl`) and the static-method fallback attaching
+the full `declared_callable_type` signature
+(`src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl:245-266`).
+The parity case `method_text_return` exists at
+`scripts/check/check-native-seed-parity.shs:2268` expecting `widget:w1/static`.
+
+Re-execution on stage3, both backends, remains pending: this session has
+only the pinned Rust seed v1.0.0-rc.1, which is bootstrap-only and cannot
+drive the pure-Simple native-build parity harness. The strict-cranelift
+"Failed to declare module statics" blocker noted above is unchanged and
+separately owned. Not independently re-verified here.
