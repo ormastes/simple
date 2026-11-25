@@ -1,5 +1,21 @@
 # Project statistics self-hosted generation blocked
 ## Closed 2026-09-16 — Status Resolved; PPTX generated and validated, specs pass
+## Verified 2026-11-25 — feature system spec re-run green on release/1.0.0
+
+2026-11-25 re-verification (work/p3-baq-20261125): re-ran the feature system
+spec on this Windows host with the tracked self-hosted binary:
+`SIMPLE_LIB=src bin/simple.exe test
+test/03_system/app/stats/feature/project_statistics_quality_reporting_spec.spl
+--mode=interpreter` → `outcome=OK ... passed=3 failed=0`. Resolution stands.
+
+Caveat recorded for honesty, not a re-open: the related unit spec
+`test/01_unit/compiler/mir/verification_ir_spec.spl` currently fails 4/16 in
+interpreter mode on release/1.0.0 (`semantic: function
+'semantic_coverage_for_mir_type_v2' not found` despite the pub fn existing at
+`src/compiler/50.mir/verification_semantic_coverage.spl:220`, plus
+`expected true to equal false` rows). That is a pre-existing condition on the
+release branch, not caused by this bug's fix, and is reported to the ledger
+owners separately.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a

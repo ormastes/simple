@@ -1,5 +1,17 @@
 # Bootstrap progress watcher reports only wrapper RSS
 ## Closed 2026-09-16 — Status Fixed for future canonical runs; tree_* fields added, tests cover
+## Verified 2026-11-25 — closure confirmed on release/1.0.0
+
+2026-11-25 re-verification (work/p3-baq-20261125): the fix is real in the
+current tree. `scripts/bootstrap/bootstrap-progress-watch.shs` emits
+`tree_cpu_pct`/`tree_rss_kb`/`tree_processes` (plus pgroup and root_rss_kb
+fields) from a single process-table snapshot, and the tests named by the fix
+exist: `test/01_unit/scripts/bootstrap_progress_watch_tree_test.shs` and
+`test/01_unit/scripts/bootstrap_progress_watch_macos_test.shs`, plus the wired
+guards `scripts/check/check-bootstrap-progress-watch.shs` and
+`check-bootstrap-progress-watch-windows.shs`. Verified by code inspection on a
+Windows host (the shell watcher tests are POSIX-side); no re-run of the live
+canonical-run repro. Remains resolved.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
