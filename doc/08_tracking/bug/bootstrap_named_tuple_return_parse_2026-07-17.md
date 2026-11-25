@@ -58,3 +58,15 @@ three-cycle bootstrap cap. The repository-local Rust seed `check` command is
 not independent evidence here: it delegates to the absent isolated
 `bin/simple` and exits 127.
 
+
+## Verification 2026-11-25 (work/p2w1-ak-20261125)
+
+Source fix re-verified present on release/1.0.0 @ 3e04c857a56:
+`parser_parse_tuple_element_type` at `src/compiler/10.frontend/core/parser.spl:820`
+parses `label: T` tuple elements by discarding the provisional label type and
+retaining `T` (lines 817-825 carry the exact comment describing this), and is
+consumed by the tuple-type parse loop at lines 1398/1406. The remaining
+acceptance (fresh Stage3 rebuild with `SIMPLE_NO_STUB_FALLBACK=1`, SMF print
+oracle, macOS live-window gate) is bootstrap/deploy work, out of scope for a
+doc-ledger pass on a Windows host with the pinned seed — left as recorded.
+Row stays Closed.

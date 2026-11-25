@@ -1,11 +1,14 @@
 # Bare field reference inside methods is illegal in every lane, yet ~740 product-code sites use it
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — fenced population qualified, baseline regenerated to 0 known sites
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+Superseded by the 2026-11-11 triage at the end of this file, which flipped
+the row to fixed; the header was not updated at the time and is corrected
+here (2026-11-25).
 
 - **Filed:** 2026-08-10
-- Status: OPEN (P2)
+- Status: FIXED (2026-11-11 triage below; re-verified 2026-11-25)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   modules fixed; the wider 62-file family is filed here as systemic follow-up.
 - **Severity:** High — this is a *coverage suppression* defect, not a lane defect. Every
@@ -642,3 +645,18 @@ preserved in the guard). Full mode then passes end-to-end: 6 distinct checks
 (3 controls + static + 2 spec legs).
 
 Status flipped open → fixed (code: regenerated baseline; doc: this addendum).
+
+## Verification 2026-11-25 (work/p2w1-ak-20261125)
+
+Re-ran the guard on release/1.0.0 @ 3e04c857a56 (Windows host, Git Bash):
+
+```
+sh scripts/check/check-bare-field-references.shs --static-only
+controlA OK / controlB OK / controlC OK
+static OK — 161 files scanned, 0 known site(s), 0 new, 0 stale
+PASS — 4 checks ran, all green
+```
+
+The regenerated empty baseline holds: 0 known sites over the 161 fenced files,
+all three controls fire. The 2026-11-11 resolution stands; header status
+corrected from the stale "OPEN (P2)".
