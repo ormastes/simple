@@ -305,3 +305,21 @@ Perl scripts (sibling row `architecture_rule_audit_2026-08-10`, BLOCKED with
 grant recorded by lane p3-ne20 same day), and MDSOC/ECS adoption (directory-
 wide migration, explicitly not unilateral). Status flipped to SUPERSEDED.
 Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.
+
+## Verification 2026-11-25 (lane p3-bac) — SUPERSEDED status confirmed on release/1.0.0
+
+Fresh spot re-verification on `origin/release/1.0.0` (worktree @fcd95d41d60),
+confirming the 2026-11-11 triage rather than resting on it:
+
+- **F1:** `host_vulkan_lavapipe_provider.spl` imports
+  `vulkan_sffi_device_name` from `std.nogc_sync_mut.gpu.engine2d.sffi_vulkan`
+  (own-family facade) with an explicit comment citing this doc's F1 — no
+  `std.gpu` gc-alias import remains.
+- **F2:** `nogc_async_mut/async/runtime.spl:12-14` import
+  `std.nogc_async_mut.async.{future,poll,combinators}`.
+- **F7:** `rules.sdl` is committed at tip (`git ls-tree origin/release/1.0.0
+  rules.sdl` → blob present).
+- **F4:** grep for `class X(Y)` declaration shapes under `src/compiler/`
+  returns only comment/docstring mentions, no declarations.
+
+Status remains SUPERSEDED; no code change made by this lane.

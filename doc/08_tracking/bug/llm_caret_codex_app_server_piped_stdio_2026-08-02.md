@@ -1,7 +1,7 @@
 # LLM Caret Codex App Server piped-stdio blocker
 
 Date: 2026-08-02
-Status: Open
+Status: Resolved 2026-11-25 (handshake verified live; items 3-4 are feature work — see 2026-11-25 note)
 
 ## Scope
 
@@ -58,3 +58,33 @@ Remaining from "Required resolution": items 3-4 (`thread/start`,
 `thread/inject_items`, `turn/start`, `turn/steer`, `turn/interrupt`, live adapter
 wiring) are feature work, intentionally not exercised here (they would mutate the
 user's Codex state / start model turns). Status: initialize handshake FIXED/verified.
+
+## Verification 2026-11-25 (lane p3-bac) — RESOLVED, live handshake re-executed on this host
+
+Re-ran the piped-stdio initialize handshake first-hand on Windows against the
+installed Codex CLI (`codex-cli 0.167.0`, real binary
+`@openai/codex-win32-x64/.../bin/codex.exe` prepended to PATH — the scoop
+`codex` shell-shim itself is not spawnable via CreateProcess, which is why a
+bare `process_spawn_piped("codex", ...)` fails on this host), using a
+throwaway probe (untracked, `build/p3bac/codex_stdio_probe.spl`) that drives
+the adapter's own `CodexAppServerProcess` (`app.io` piped facade,
+`src/app/llm_caret/messaging/adapter/agent/codex_app_server_protocol.spl:56`):
+
+    PROBE: spawned, alive=true
+    PROBE: initialize write accepted=true error=
+    PROBE: response after 1250ms:
+    {"id":1,"result":{"userAgent":"llm-caret-messaging/0.167.0 (Windows 10.0.26300; x86_64) dumb (llm-caret-messaging; 0.1.0)","codexHome":"C:\Users\User\.codex","platformFamily":"windows","platformOs":"windows"}}
+    PROBE: PASS
+
+This reproduces the 2026-11-04 re-verification independently: piped spawn,
+initial write, and the JSON-RPC `initialize` round trip all work through the
+canonical facade; the original failure was a read-before-answer race plus the
+absence of spawn/write diagnostics, both since addressed. One honesty note:
+the regression spec the 2026-11-04 entry says was added
+(`test/01_unit/app/llm_caret/messaging/codex_app_server_stdio_spec.spl`) is
+NOT present on `origin/main` or `origin/release/1.0.0` — only the codec-level
+`codex_app_server_protocol_spec.spl` exists on both branches. The live
+behavior is nonetheless confirmed working by the probe above. Remaining
+"Required resolution" items 3-4 (`thread/start`, `turn/*`, live adapter
+wiring) are feature work, intentionally out of scope. Status: Open →
+Resolved (handshake); items 3-4 tracked as feature work, not this bug.

@@ -288,3 +288,20 @@ of this record's declared-type definition and were not swept; (b) the
 classifier is line/indent-based, not a real parse — the injection tests and
 100% manual review of all 74 naive hits are the correctness backstop, same
 as the 2026-08-08 method.
+
+## Verification 2026-11-25 (lane p3-bac) — audit complete for release/1.0.0 scope
+
+Spot-confirmed on `origin/release/1.0.0` (worktree @fcd95d41d60) that the
+2026-11-05 appendix's claims hold in-tree:
+
+- `src/lib/nogc_sync_mut/src/dl/config_loader.spl:22` and `:313` both declare
+  `-> Result<DLConfig, text>` — the two genuine drift fixes are present.
+- The header's "partial fix landed" understated the end state: the 2026-11-05
+  from-scratch re-audit of `src/lib` + `src/app` on this branch found ZERO
+  remaining true defects (12 residual candidates all verified false
+  positives).
+
+The only genuine remainder stays the ~22-site `src/compiler/**`
+refactor-damage family owned by the `b0c98541d2a` / `9d4d16b106e2c` lane —
+out of scope for this record's `src/lib`/`src/app` metadata. Status: audit
+complete for the release branch; no code change made by this lane.
