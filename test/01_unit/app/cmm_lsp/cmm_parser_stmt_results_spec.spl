@@ -1,0 +1,90 @@
+# Regression coverage for retired phase2_result_payload_native_crash_2026_10_26
+# sites in examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser_stmts.spl.
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use app.cmm_lsp.cmm_ast.{CmmStmt, CmmProgram}
+use app.cmm_lsp.cmm_parser.{parse_cmm_source}
+
+fn stmt_kind_name(program: CmmProgram) -> text:
+    if program.statements.len() == 0:
+        return "Empty"
+    match program.statements[0]:
+        case CmmStmt.DoCall(_, _, _): "DoCall"
+        case CmmStmt.RunCall(_, _, _): "RunCall"
+        case CmmStmt.CloseFile(_, _): "CloseFile"
+        case CmmStmt.ReadFile(_, _, _): "ReadFile"
+        case CmmStmt.WriteFile(_, _, _): "WriteFile"
+        case CmmStmt.WriteBFile(_, _, _): "WriteBFile"
+        case CmmStmt.AppendFile(_, _, _): "AppendFile"
+        case CmmStmt.WaitStmt(_, _): "WaitStmt"
+        case CmmStmt.MacroAssign(_, _, _): "MacroAssign"
+        case CmmStmt.MacroRecAssign(_, _, _): "MacroRecAssign"
+        case CmmStmt.ErrorNode(_, _): "ErrorNode"
+        case _: "Other"
+
+describe "CMM parser statement Result unwrapping":
+    it "retires the phase2_result_payload_native_crash_2026_10_26 workaround markers":
+        step("Verify cmm_parser_stmts.spl contains no remaining workaround markers for this bug")
+        val src = file_read("examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser_stmts.spl")
+        expect(src.contains("phase2_result_payload_native_crash_2026_10_26")).to_equal(false)
+
+    it "parses all nine statement forms directly via match self.parse_expression()":
+        step("Parse DO, RUN, CLOSE, READ, WRITE, WRITEB, APPEND, WAIT, MacroAssign, and MacroRecAssign")
+        val p_do = parse_cmm_source("  DO \"sub.cmm\" 1 2\n")
+        expect(stmt_kind_name(p_do)).to_equal("DoCall")
+        expect(p_do.errors.len()).to_equal(0)
+
+        val p_run = parse_cmm_source("  RUN \"next.cmm\" 3\n")
+        expect(stmt_kind_name(p_run)).to_equal("RunCall")
+        expect(p_run.errors.len()).to_equal(0)
+
+        val p_close = parse_cmm_source("  CLOSE #1\n")
+        expect(stmt_kind_name(p_close)).to_equal("CloseFile")
+        expect(p_close.errors.len()).to_equal(0)
+
+        val p_read = parse_cmm_source("  READ #1 &line &extra\n")
+        expect(stmt_kind_name(p_read)).to_equal("ReadFile")
+        expect(p_read.errors.len()).to_equal(0)
+
+        val p_write = parse_cmm_source("  WRITE #1 \"ok\" &line\n")
+        expect(stmt_kind_name(p_write)).to_equal("WriteFile")
+        expect(p_write.errors.len()).to_equal(0)
+
+        val p_writeb = parse_cmm_source("  WRITEB #1 0x55\n")
+        expect(stmt_kind_name(p_writeb)).to_equal("WriteBFile")
+        expect(p_writeb.errors.len()).to_equal(0)
+
+        val p_append = parse_cmm_source("  APPEND \"out.log\" \"done\"\n")
+        expect(stmt_kind_name(p_append)).to_equal("AppendFile")
+        expect(p_append.errors.len()).to_equal(0)
+
+        val p_wait = parse_cmm_source("  WAIT 10ms\n")
+        expect(stmt_kind_name(p_wait)).to_equal("WaitStmt")
+        expect(p_wait.errors.len()).to_equal(0)
+
+        val p_macro = parse_cmm_source("  &sum=1+2\n")
+        expect(stmt_kind_name(p_macro)).to_equal("MacroAssign")
+        expect(p_macro.errors.len()).to_equal(0)
+
+        val p_rec = parse_cmm_source("  &&rec=0x10\n")
+        expect(stmt_kind_name(p_rec)).to_equal("MacroRecAssign")
+        expect(p_rec.errors.len()).to_equal(0)
+
+    it "propagates parse_expression errors across all nine statement parsers":
+        step("Verify malformed leading expressions fail cleanly and produce ErrorNode diagnostics")
+        val bad_stmts = [
+            "  DO )\n",
+            "  RUN )\n",
+            "  CLOSE )\n",
+            "  READ )\n",
+            "  WRITE )\n",
+            "  WRITEB )\n",
+            "  APPEND )\n",
+            "  WAIT )\n",
+            "  &bad=)\n"
+        ]
+        for snippet in bad_stmts:
+            val prog = parse_cmm_source(snippet)
+            expect(prog.errors.len() > 0).to_equal(true)
+            expect(stmt_kind_name(prog)).to_equal("ErrorNode")
