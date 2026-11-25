@@ -86,6 +86,8 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "collection_algorithm",
     "error_not",
     "warn_not",
+    // A5 representation boundary manifest (`@representation_boundary(...)`)
+    "representation_boundary",
 ];
 
 /// Check if a name is a known attribute (should produce Attribute, not Decorator)
@@ -700,5 +702,19 @@ mod collection_site_hash_tests {
         assert_eq!(hash("var  hot = x  # c"), hash("var hot=x"));
         assert_ne!(hash("var hot = ab"), hash("var hot = a b"));
         assert!(hash("var hot = x").starts_with("n1."));
+    }
+
+    #[test]
+    fn representation_boundary_parses_as_attribute_not_decorator() {
+        let src = "@representation_boundary(kind: \"ffi\", reason: \"test\", reviewers: [\"ormastes\", \"opus-review\"], capabilities: [\"ffi\"])\npub fn f():\n    0\n";
+        let mut parser = crate::Parser::new(src);
+        let module = parser.parse().expect("parse @representation_boundary");
+        match &module.items[0] {
+            crate::ast::Node::Function(f) => {
+                assert!(f.decorators.is_empty(), "must not be parsed as runtime decorator");
+                assert!(f.attributes.iter().any(|a| a.name == "representation_boundary"));
+            }
+            other => panic!("expected Function, got {:?}", other),
+        }
     }
 }

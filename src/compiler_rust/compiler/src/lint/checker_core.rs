@@ -601,6 +601,8 @@ impl LintChecker {
         "clocked",
         "generic",
         "flatten_struct_output",
+        // A5 representation boundary manifest
+        "representation_boundary",
     ];
 
     /// Known attribute names (whitelist)
@@ -630,5 +632,7 @@ impl LintChecker {
         // Determinism guard (GAME-DET-LINT-001): #[deterministic]
         "deterministic",
         "name_checked",
+        // A5 representation boundary manifest
+        "representation_boundary",
     ];
 }
