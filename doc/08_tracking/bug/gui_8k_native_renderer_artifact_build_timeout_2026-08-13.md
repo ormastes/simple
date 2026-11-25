@@ -128,3 +128,13 @@ benchmarks before it is fixed would only re-derive the same blocker. Detail:
   `BENCH_TIMEOUT_SECS=30 bash tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 1 --dpi 300`
   and confirm `gui_perf_benchmark_artifact_build_status=completed`. The interpreter
   spec run cannot show the native-codegen gain (11 s wall, 193 MB RSS before and after).
+
+## WA-S8 Verification (2026-11-26)
+
+- **Classification:** `KEPT-WITH-REASON`
+- **Disposition:** Kept compact text-encoded tables and `@workaround` markers in `src/lib/common/web/public_suffix_data.spl` and `src/lib/gc_async_mut/gpu/browser_engine/html_named_character_references.spl`. `src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl` (`case Array(_):`) still emits `rt_array_new` plus per-element `rt_array_push` calls, so restoring multi-thousand-element array literals would reintroduce the native-build LLVM blowup and violate `large_literal_build_budget_spec.spl`.
+- **Verification (`SIMPLE_BINARY=wa_shared_bin/simple.exe`, build-commit `03a407dabae`, `--mode=interpreter`):**
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/large_literal_build_budget_spec.spl` (4/4 passed)
+  - `test/01_unit/app/devhub/wa_src_lane8_retirement_spec.spl` (5/5 passed — verifies `html_named_reference_names`/`values` and `is_public_suffix`)
+  - `test/01_unit/compiler/mir/wa_src_lane8_lowering_spec.spl` (4/4 passed — guards that `MirToLlvm` still uses `rt_array_push` for `Array` aggregates)
+  - Note: Linux 8K native renderer benchmark was not executed on this Windows host.

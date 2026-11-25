@@ -29,3 +29,14 @@ Not reproducible from source: both providers already accept packed and boxed [u8
 Added regression spec `test/01_unit/lib/common/crypto/sha256_u8_accelerated_carrier_spec.spl` (octets 0,128,255 + empty, independent goldens; passes interpreted).
 
 Stage3 verify: native-build `test/fixtures/devhub/native_minio_binary_put/main.spl` and the spec with a current producer; if both pass, delete the copy loop in `_minio_binary_payload_hash` and call `sha256_u8_fast_hex`.
+
+## WA-S8 Verification (2026-11-26)
+
+- **Classification:** `ROOT-FIXED+RETIRED`
+- **Source change:** Removed `@workaround bug=phase2_u8_accelerated_sha256_ffi_carrier_2026_10_27` and the `[u8] -> [i64]` copy + `_bytes_to_hex` loop in `src/app/devhub/adapter_minio.spl`; `_minio_binary_payload_hash(body: [u8]) -> text` now calls `sha256_u8_fast_hex(body)` directly.
+- **Verification (`SIMPLE_BINARY=wa_shared_bin/simple.exe`, build-commit `03a407dabae`, `--mode=interpreter`):**
+  - `test/01_unit/app/devhub/wa_src_lane8_retirement_spec.spl` (5/5 passed — verifies empty, high-byte `0x00/0x80/0xff`, mixed, UTF-8 `"café"`, and multi-block 70-byte vectors against independent SHA-256 digests and `sha256_u8_fast_hex`)
+  - `test/01_unit/app/devhub/adapter_minio_spec.spl` (18/18 passed)
+  - `test/01_unit/lib/common/crypto/sha256_u8_accelerated_carrier_spec.spl` (2/2 passed)
+  - `test/01_unit/compiler/mir/wa_src_lane8_lowering_spec.spl` (4/4 passed — verifies HIR+MIR lowering of direct `[u8]` forwarding)
+  - Note: Verified via interpreter-mode specs and compiler HIR/MIR lowering; no full native Stage 2/Stage 3 binary build was run in this Windows lane.
