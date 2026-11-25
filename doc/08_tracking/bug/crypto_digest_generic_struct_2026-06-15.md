@@ -53,3 +53,26 @@ inside the impl body.
 
 Ensure type parameters declared on the struct head are propagated into the
 impl block's type environment before resolving member types and return types.
+
+## Verification 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+CLOSED status re-confirmed by execution. The entry's minimal repro (const
+generic struct with the type parameter referenced in `impl`) was run verbatim
+with `SIMPLE_LIB=src bin/simple.exe run`:
+
+```spl
+struct Digest<N>:
+    payload: [u8]
+
+impl Digest<N>:
+    fn len() -> i64:
+        self.payload.len()
+
+fn main():
+    val d = Digest<i64>(payload: [1u8, 2u8])
+    print "{d.len()}"
+main()
+```
+
+Output: `2`, exit 0 — no `Unknown type: N`. The 2026-09-13 closure stands; no
+further action.

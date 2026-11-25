@@ -23,7 +23,7 @@ the same test file and plausibly the same collision family. OPEN, out of
 scope for a full close in this pass: remaining gap is blink layout/cascade
 internals (src/lib/blink/style/cascade.spl-class code).
 
-Status: OPEN (P2)
+Status: FIXED 2026-11-25 (PR #11539; re-verified 2026-11-25 — see bottom note)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 exit criterion 5 (stylesheet sources), not caused by that work.
 
@@ -231,3 +231,39 @@ just avoided by the one migrated caller.
   a by-name resolution artifact elsewhere in the spec's co-compiled closure
   (`fn friend` lives in `src/app/cli/_QueryVisibility/query_commands.spl`),
   unrelated to this collision; filed here as observed-only.
+
+## Verification 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+STALE-CLOSED confirmed; the PR #11539 fix described in the Resolution section
+above is real and present at HEAD. The header's leftover "Status: OPEN (P2)"
+line is corrected to FIXED.
+
+`bin/simple.exe test test/01_unit/app/browser/browser_render_lane_spec.spl`
+cannot run on this host (the known `unknown decorator
+'@representation_boundary'` source/binary inconsistency aborts the test
+runner at load), so verification was done by source inspection plus a
+co-compilation probe:
+
+- Source inspection: `src/lib/blink/css_parser/parser.spl` defines only
+  `blink_parse_declarations` (line 623) — the unprefixed `fn
+  parse_declarations` alias is gone; `grep` finds no unprefixed definition
+  anywhere under `src/lib/blink/` (only explanatory comments).
+  `src/lib/common/css/shorthand.spl:758` defines `pub fn
+  expand_shorthand_longhands`; the browser_engine lane's own `pub fn
+  parse_declarations` / private `fn expand_shorthand`
+  (`style_block_parse.spl:469,587`) are untouched.
+- Probe: a standalone file importing BOTH lanes —
+  `std.blink.css_parser.parser.{blink_parse_declarations}` and
+  `std.gc_async_mut.gpu.browser_engine.style_block_parse.{parse_declarations}`
+  — and calling each with `"color: red; width: 10px"` prints `2 2` (each call
+  resolves to its own lane's declaration type). The run emits NO
+  `parse_declarations` / `expand_shorthand` differing-signature
+  `[compiler_cross_module_private_symbol_collision]` warning (only the
+  unrelated generic same-signature collision notice remains). The
+  wrong-dispatch window is closed structurally, matching the Resolution
+  section's claim.
+
+The `blink_parse_declarations_symbol_spec.spl` load failure noted in the
+Resolution section (`error[E1002]: function `friend` not found`,
+pre-existing) was not re-investigated here; it is a separate by-name
+resolution artifact, not this collision.
