@@ -62,7 +62,6 @@ use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlow
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner}
-use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
 use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_stage4_streaming}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use compiler.frontend.rt_criticality_registry.{rt_criticality_claim_keys}
@@ -318,12 +317,8 @@ fn driver_register_reverse_reference_name_v1(
     reverse_reference_owner_register_source_alias_v1(
         "{emitted_owner}__{name}", source)
 
-# Takes the flattened owner (a class: by-reference transport) instead of the
-# 30-limb ParserModule struct by value — the by-value copy read back garbage
-# handles (SIGSEGV in the functions.keys() loop). Same family as
-# ModuleSurfaceParserOwner's inline-struct field defect; element reads use
-# the annotated-rebind hazard-sweep pattern.
-# @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_struct_transport_corrupts
+# Takes the by-reference ModuleSurfaceParserOwner rather than copying the
+# ParserModule struct by value.
 fn driver_register_parser_module_source_aliases_v1(
         owner: ModuleSurfaceParserOwner, source: text):
     val module_name: text = owner.name
@@ -374,12 +369,6 @@ fn driver_register_reverse_reference_sources_v1(ctx: CompileContext):
         reverse_reference_owner_register_source_alias_v1(
             source.module_name, source.path)
         if ctx.modules.contains_key(source.module_name):
-            # Bind the Dict value to a typed local before it crosses any
-            # further boundary: the inline `ctx.modules[k]` form fed a corrupt
-            # copy (SIGSEGV in the aliases walk). The annotated rebind is the
-            # hazard-sweep primitive used everywhere else (cf.
-            # driver_orchestration.spl's source_module bind).
-            # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=dict_value_read_needs_typed_bind
             val module_binding: ParserModule = ctx.modules[source.module_name]
             driver_register_parser_module_source_aliases_v1(
                 ModuleSurfaceParserOwner.new(module_binding), source.path)
@@ -610,9 +599,6 @@ impl CompilerDriver:
 
     me lower_retained_surface_module(lowering: HirLowering, module: ParserModule, source_path: text, is_entry: bool, source: SourceFile) -> Result<HirModule, text>:
         self.ctx.directory_aspect_semantics_v2.remove(source.path)
-        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_retained_hir_path_to_fault
-        val nscope_trace = (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1"
-        if nscope_trace: eprint("[nscope-hir] retained-enter path={source_path} entry={is_entry}")
         if not rt_transient_array_scope_begin():
             return Err("transient HIR scope unavailable for {source_path}")
         val reverse_token = reverse_reference_module_begin_v1()
@@ -621,16 +607,13 @@ impl CompilerDriver:
             return Err("transient HIR scope reverse-reference owner unavailable for {source_path}")
         val flat_row_count_before = bootstrap_hir_module_count()
         val parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(module)
-        if nscope_trace: eprint("[nscope-hir] retained-pre-lower path={source_path}")
         val hir_module: HirModule = lowering.lower_parser_module_unstub(module, is_entry)
         val aspect_semantic = driver_directory_aspect_semantic_v2(self.ctx, hir_module,
             source.path, source.content, lowering.lowering_error_count())
-        if nscope_trace: eprint("[nscope-hir] retained-lowered path={source_path}")
         if not rt_transient_array_scope_pause():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("transient HIR scope pause failed for {source_path}")
-        if nscope_trace: eprint("[nscope-hir] retained-paused path={source_path}")
         if aspect_semantic.is_some() and not rt_transient_heap_promote(aspect_semantic):
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             if not driver_abort_reverse_reference_parse_scope_v1(reverse_token):
@@ -640,7 +623,6 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("HIR ownership promotion failed for {source_path}")
-        if nscope_trace: eprint("[nscope-hir] retained-promoted path={source_path}")
         # Cycle-137 REVERT of the cycle-135 deep-promotion block: the
         # runtime promote is a recursive plan walker (runtime_native.c:2776 --
         # RAW structs scan words for children, DICT nodes walk every occupied
@@ -667,16 +649,7 @@ impl CompilerDriver:
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("flat HIR row publication failed for {source_path}")
-        # driver_promote_frontend_registry_owners() omits
-        # frontend_parse_cache_promote_transient_owner: the frontend-cache
-        # scope memo (set on the first frontend_parse_cache_scope() call, often
-        # inside an earlier transient scope) died un-promoted, and the hir-cache
-        # store's header then concatenated a dead limb — rt_file_write_text
-        # failed every store (io-write), forcing a re-lower. Promote it here
-        # (paused state, same as the other owners in this chain).
-        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=missing_cache_scope_memo_promote
-        val cache_scope_ok = frontend_parse_cache_promote_transient_owner()
-        if not (driver_promote_frontend_registry_owners() and cache_scope_ok):
+        if not driver_promote_frontend_registry_owners():
             driver_rollback_flat_hir_row_or_abort(flat_row_count_before)
             val _ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             return Err("frontend registry promotion failed during retained HIR lowering for {source_path}")
@@ -692,9 +665,6 @@ impl CompilerDriver:
 
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
         self.ctx.directory_aspect_semantics_v2.remove(source.path)
-        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=trace_noscope_hir_path_to_fault
-        val nscope_trace = (env_get_opt("SIMPLE_NSCOPE_HIR_TRACE") ?? "") == "1"
-        if nscope_trace: eprint("[nscope-hir] enter path={source.path} entry={is_entry}")
         val parser_generation = parser_initialization_generation_v1()
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
@@ -726,13 +696,11 @@ impl CompilerDriver:
             ModuleSurfaceParserOwner.new(module), source.path)
         if par_had_error_get():
             return Err(driver_finish_failed_parse_scope(source.path, reverse_token))
-        if nscope_trace: eprint("[nscope-hir] parsed path={source.path}")
         val flat_row_count_before = bootstrap_hir_module_count()
         val parsed_code_less = driver_native_parsed_module_has_no_runtime_body_v1(module)
         val hir_module: HirModule = lowering.lower_parser_module_unstub(module, is_entry)
         val aspect_semantic = driver_directory_aspect_semantic_v2(self.ctx, hir_module,
             source.path, source.content, lowering.lowering_error_count())
-        if nscope_trace: eprint("[nscope-hir] lowered path={source.path}")
         # Keep the scope active through the complete lowering. The reparsed AST
         # and all lowering scratch graphs are transient; only the canonical HIR,
         # its diagnostics, and frontend registries escape this file boundary.

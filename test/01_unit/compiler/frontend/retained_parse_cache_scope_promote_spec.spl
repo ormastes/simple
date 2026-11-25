@@ -1,0 +1,77 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Retained parse registry owner promotion & retired sanity-probe workarounds
+
+Pins the root fix for `stage2_sanity_module_path_naming_probe_segv_2026_10_22`:
+- `frontend_promote_parse_registry_owners_v1()` promotes the frontend parse
+  cache scope memo (`frontend_parse_cache_promote_transient_owner()`), so
+  `driver_hir_pipeline_lowering.spl` no longer needs an ad-hoc duplicate call.
+- Temporary `SIMPLE_NSCOPE_HIR_TRACE` probes are removed from
+  `driver_hir_pipeline_lowering.spl`, `driver_hir_cache.spl`, and
+  `driver_entry_closure_core.spl`.
+- `HirLowering.lower_module(parsed)` reads `module.nogc_strict` and
+  declaration intents directly without a redundant `module_local` rebind.
+"""
+
+# @tag: unit, compiler, frontend
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+use compiler.common.config.{Logger}
+use compiler.driver.driver_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope, frontend_parse_cache_promote_transient_owner}
+use compiler.frontend.retained_parse_owners_v1.{frontend_promote_parse_registry_owners_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface_declarations.{ModuleSurfaceParserOwner, module_surface_from_owner}
+
+fn _fn_body(source: text, start_marker: text, next_marker: text) -> text:
+    val parts = source.split(start_marker)
+    if parts.len() < 2:
+        return ""
+    val tail = parts[1]
+    val end_parts = tail.split(next_marker)
+    end_parts[0]
+
+describe "retained parse cache-scope owner promotion":
+    it "promotes frontend parse cache scope inside frontend_promote_parse_registry_owners_v1":
+        val owners = file_read("src/compiler/10.frontend/retained_parse_owners_v1.spl")
+        val body = _fn_body(
+            owners,
+            "pub fn frontend_promote_parse_registry_owners_v1() -> bool:",
+            "pub fn frontend_promote_retained_parse_owners_v1(")
+        expect(body).to_contain("frontend_parse_cache_promote_transient_owner()")
+
+        expect(transient_scope_begin()).to_equal(true)
+        val _scope = frontend_parse_cache_scope()
+        expect(transient_scope_pause()).to_equal(true)
+        expect(frontend_promote_parse_registry_owners_v1()).to_equal(true)
+        expect(frontend_parse_cache_promote_transient_owner()).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+
+    it "keeps temporary SIMPLE_NSCOPE_HIR_TRACE and ad-hoc cache_scope_ok workarounds removed":
+        val lowering = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val hir_cache = file_read("src/compiler/80.driver/driver_hir_cache.spl")
+        val entry_core = file_read("src/compiler/80.driver/driver_entry_closure_core.spl")
+        expect(lowering).to_not_contain("SIMPLE_NSCOPE_HIR_TRACE")
+        expect(lowering).to_not_contain("val cache_scope_ok = frontend_parse_cache_promote_transient_owner()")
+        expect(hir_cache).to_not_contain("SIMPLE_NSCOPE_HIR_TRACE")
+        expect(entry_core).to_not_contain("SIMPLE_NSCOPE_HIR_TRACE")
+
+    it "builds ModuleSurface from ModuleSurfaceParserOwner and lowers module directly":
+        val src = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+        val file = "testdata/sanity_owner_probe.spl"
+        val parsed = parse_full_frontend(src, file, "sanity_owner_probe", Logger(level: 0))
+        val source_file = SourceFile(
+            path: file,
+            module_name: "sanity_owner_probe",
+            content: src
+        )
+        val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source_file, 0)
+        expect(surface.is_ok()).to_equal(true)
+        var hir_lowering = HirLowering.with_filename(file)
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir.nogc_strict).to_equal(false)
+        expect(hir.functions.len() >= 1).to_equal(true)
