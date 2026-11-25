@@ -5,30 +5,63 @@
 
 use std.common.path_pure.{path_normalize, to_slash}
 
+fn _path_is_ascii_letter(ch: text) -> bool:
+    ch.byte_len() == 1 and "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(ch)
+
+fn _path_has_drive_prefix(path: text) -> bool:
+    if path.len() < 2:
+        return false
+    return _path_is_ascii_letter(path[0:1]) and path[1:2] == ":"
+
+fn _path_is_drive_rooted(path: text) -> bool:
+    if path.len() < 3 or not _path_has_drive_prefix(path):
+        return false
+    val sep = path[2:3]
+    return sep == "/" or sep == "\\"
+
+fn _path_ends_with_sep(path: text) -> bool:
+    path.ends_with("/") or path.ends_with("\\")
+
+fn _path_trim_trailing_seps(path: text) -> text:
+    val min_len = if _path_is_drive_rooted(path): 3 else: 1
+    var clean_path = path
+    while clean_path.byte_len() > min_len and _path_ends_with_sep(clean_path):
+        clean_path = clean_path.substring(0, clean_path.byte_len() - 1)
+    clean_path
+
+fn _path_rfind_sep(path: text) -> i64:
+    val slash_idx = path.rfind("/")
+    val backslash_idx = path.rfind("\\")
+    if slash_idx > backslash_idx:
+        return slash_idx
+    return backslash_idx
+
 pub fn basename(path: text) -> text:
     if path == "":
         return ""
-    var clean_path = path
-    while clean_path.ends_with("/") and clean_path.len() > 1:
-        clean_path = clean_path.substring(0, clean_path.byte_len() - 1)
-    val parts: [text] = clean_path.split("/")
-    return parts.last() ?? ""
+    val clean_path = _path_trim_trailing_seps(path)
+    val sep_idx = _path_rfind_sep(clean_path)
+    if sep_idx < 0:
+        return clean_path
+    if sep_idx + 1 >= clean_path.byte_len():
+        return ""
+    return clean_path.substring(sep_idx + 1)
 
 pub fn dirname(path: text) -> text:
     if path == "":
         return "."
-    if path == "/":
-        return "/"
-    var clean_path = path
-    while clean_path.ends_with("/") and clean_path.len() > 1:
-        clean_path = clean_path.substring(0, clean_path.byte_len() - 1)
+    if path == "/" or path == "\\":
+        return path
+    val clean_path = _path_trim_trailing_seps(path)
     # `rfind` returns a raw i64 sentinel (-1 = not found), NOT an Optional.
     # Matching Some/nil here bound idx = -1 and returned substring(0, -1).
-    val sep_idx = clean_path.rfind("/")
+    val sep_idx = _path_rfind_sep(clean_path)
     if sep_idx < 0:
         return "."
     if sep_idx == 0:
-        return "/"
+        return clean_path.substring(0, 1)
+    if sep_idx == 2 and _path_has_drive_prefix(clean_path):
+        return clean_path.substring(0, 3)
     return clean_path.substring(0, sep_idx)
 
 pub fn extension(path: text) -> text:
