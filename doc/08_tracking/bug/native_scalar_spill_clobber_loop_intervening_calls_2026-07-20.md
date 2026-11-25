@@ -60,3 +60,15 @@ Stage3 command:
 ```sh
 env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <stage3-simple> native-build --entry test/03_system/native/scalar_spill_loop_intervening_calls.spl -o /tmp/b && /tmp/b; echo rc=$?
 ```
+
+## Triage 2026-11-25 (p2w4-ag lane)
+
+SKIP — verification requires a stage3 self-hosted native build, which is
+env-blocked on this host: the pinned Rust seed (v1.0.0-rc.1) cannot run
+`native-build` at release/1.0.0 HEAD because it rejects the
+`@representation_boundary` decorators added repo-wide by cfd89933699
+(fails at `src/app/cli/native_build_main.spl:239`). The defect itself lives
+in seed spill-slot codegen, so any fix/verification also needs a full
+bootstrap cycle, not a pure-Simple source edit. Status left OPEN; the
+2026-11-04 fixture + stage3 command above remains the correct admission
+check once a self-hosted binary is available.
