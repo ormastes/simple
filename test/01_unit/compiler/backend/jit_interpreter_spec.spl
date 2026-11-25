@@ -117,3 +117,29 @@ describe "JitInterpreterBackend":
             val err2 = backend.jit_failed["compute_v2"] ?? ""
             expect(err2.contains("MIR lowering failed")).to_equal(false)
             expect(backend.module_prescans).to_equal(2)
+
+        it "handles Any, nil, Tuple, and payload enums in cache-key signatures without colliding":
+            val src_t1 = "enum Shape:\n    Circle(i64)\n    Unit = 7\n\nfn handle_misc(a: Any, b: nil, t: (i64, text), s: Shape) -> i64:\n    val x = t.0\n    match s:\n        Shape.Circle(r): x + r\n        Shape.Unit: x\n"
+            val src_t2 = "enum Shape:\n    Circle(f64)\n    Unit = 9\n\nfn handle_misc(a: Any, b: nil, t: (i64, f64), s: Shape) -> i64:\n    val x = t.0\n    match s:\n        Shape.Circle(_): x + 1\n        Shape.Unit: x\n"
+            val mod_t1 = _jit_spec_lower(src_t1, "jit_type_sig_mod")
+            val mod_t2 = _jit_spec_lower(src_t2, "jit_type_sig_mod")
+
+            # Use AlwaysJit so the second call with the identical fn name "handle_misc"
+            # is not short-circuited by jit_failed and must consult the module cache key.
+            var backend = JitInterpreterBackend.new(JitInterpreterConfig.always_jit())
+
+            val r1 = backend.try_jit_compile(_jit_spec_find_fn(mod_t1, "handle_misc"), mod_t1)
+            match r1:
+                case Ok(_): pass
+                case Err(err):
+                    expect(err.message.contains("MIR lowering failed")).to_equal(false)
+                    expect(err.message.contains("unknown variant")).to_equal(false)
+            expect(backend.module_prescans).to_equal(1)
+
+            val r2 = backend.try_jit_compile(_jit_spec_find_fn(mod_t2, "handle_misc"), mod_t2)
+            match r2:
+                case Ok(_): pass
+                case Err(err):
+                    expect(err.message.contains("MIR lowering failed")).to_equal(false)
+                    expect(err.message.contains("unknown variant")).to_equal(false)
+            expect(backend.module_prescans).to_equal(2)

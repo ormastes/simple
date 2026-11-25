@@ -126,6 +126,12 @@ pub struct JitInterpreterBackend:
     jit_prescan_cache: Dict<text, MirLowering>
     module_prescans: i64
 
+fn _jit_hir_type_list_sig(tys: [HirType]) -> text:
+    var parts: [text] = []
+    for t in tys:
+        parts.push(_jit_hir_type_sig(t))
+    parts.join(",")
+
 fn _jit_hir_type_sig(ty: HirType) -> text:
     match ty.kind:
         case HirTypeKind.Int(bits, signed): "i{bits}_{signed}"
@@ -134,20 +140,46 @@ fn _jit_hir_type_sig(ty: HirType) -> text:
         case HirTypeKind.Char: "char"
         case HirTypeKind.Str: "str"
         case HirTypeKind.Unit: "unit"
-        case HirTypeKind.Named(sym, args): "named:{sym.id}:{args.len()}"
-        case HirTypeKind.Optional(inner): "opt({_jit_hir_type_sig(inner)})"
-        case HirTypeKind.Result(ok_t, err_t): "res({_jit_hir_type_sig(ok_t)},{_jit_hir_type_sig(err_t)})"
-        case HirTypeKind.Array(elem, _): "arr({_jit_hir_type_sig(elem)})"
+        case HirTypeKind.Tuple(elems): "tup({_jit_hir_type_list_sig(elems)})"
+        case HirTypeKind.Array(elem, size): "arr({size ?? -1},{_jit_hir_type_sig(elem)})"
         case HirTypeKind.Slice(elem): "slice({_jit_hir_type_sig(elem)})"
-        case HirTypeKind.Tuple(elems): "tup({elems.len()})"
         case HirTypeKind.Dict(k, v): "dict({_jit_hir_type_sig(k)},{_jit_hir_type_sig(v)})"
         case HirTypeKind.Ref(inner, mut_): "ref({mut_},{_jit_hir_type_sig(inner)})"
         case HirTypeKind.Ptr(inner, mut_): "ptr({mut_},{_jit_hir_type_sig(inner)})"
-        case HirTypeKind.TypeParam(name, _): "tp:{name}"
-        case HirTypeKind.Union(members): "union({members.len()})"
+        case HirTypeKind.Optional(inner): "opt({_jit_hir_type_sig(inner)})"
+        case HirTypeKind.Result(ok_t, err_t): "res({_jit_hir_type_sig(ok_t)},{_jit_hir_type_sig(err_t)})"
+        case HirTypeKind.Named(sym, args): "named:{sym.id}:({_jit_hir_type_list_sig(args)})"
+        case HirTypeKind.TypeParam(name, bounds): "tp:{name}:({_jit_hir_type_list_sig(bounds)})"
+        case HirTypeKind.Union(members): "union({_jit_hir_type_list_sig(members)})"
         case HirTypeKind.DynTrait(tr): "dyn:{tr.id}"
-        case HirTypeKind.Function(ps, ret, _): "fn({ps.len()}->{_jit_hir_type_sig(ret)})"
+        case HirTypeKind.Function(ps, ret, _): "fn(({_jit_hir_type_list_sig(ps)})->{_jit_hir_type_sig(ret)})"
         case HirTypeKind.Projection(base, assoc): "proj({_jit_hir_type_sig(base)},{assoc})"
+        case HirTypeKind.Isolated(inner): "iso({_jit_hir_type_sig(inner)})"
+        case HirTypeKind.Infer(id, level): "infer:{id}:{level}"
+        case HirTypeKind.Error: "err"
+        case HirTypeKind.Never: "never"
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Tensor(elem, dims, _): "tensor({dims.len()},{_jit_hir_type_sig(elem)})"
+        case HirTypeKind.Layer(inp, outp): "layer({inp.len()},{outp.len()})"
+        case HirTypeKind.Unique(inner): "uniq({_jit_hir_type_sig(inner)})"
+        case HirTypeKind.Shared(inner): "shared({_jit_hir_type_sig(inner)})"
+        case HirTypeKind.Weak(inner): "weak({_jit_hir_type_sig(inner)})"
+        case HirTypeKind.Nil: "nil"
+        case _: "unknown"
+
+fn _jit_enum_variant_sig(v: HirVariant) -> text:
+    val kind_sig = match v.kind:
+        case HirVariantKind.Unit: "unit"
+        case HirVariantKind.Tuple(tys): "tup({_jit_hir_type_list_sig(tys)})"
+        case HirVariantKind.Struct(flds): "st({_jit_fields_sig(flds)})"
+        case _: "other"
+    val disc_sig = if v.has_discriminant:
+        match v.discriminant.kind:
+            case HirExprKind.IntLit(val_, _): "={val_}"
+            case _: "={v.discriminant.span.start}:{v.discriminant.span.end}"
+    else:
+        ""
+    "{v.name}:{kind_sig}{disc_sig}"
 
 fn _jit_fn_sig_part(f: HirFunction) -> text:
     var p_sigs: [text] = []
@@ -181,10 +213,10 @@ fn _jit_module_cache_key(module: HirModule, backend: text) -> text:
     var en_parts: [text] = []
     for raw_en in module.enums.values():
         val e: HirEnum = raw_en
-        var v_names: [text] = []
+        var v_sigs: [text] = []
         for v in e.variants:
-            v_names.push(v.name)
-        en_parts.push("en:{e.symbol.id}:{e.name}:{e.runtime_name}:({v_names.join(\",\") }):{e.cfg_group}:{e.cfg_arm}:{e.cfg.join(\",\")}")
+            v_sigs.push(_jit_enum_variant_sig(v))
+        en_parts.push("en:{e.symbol.id}:{e.name}:{e.runtime_name}:({v_sigs.join(\",\") }):{e.cfg_group}:{e.cfg_arm}:{e.cfg.join(\",\")}")
     var tr_parts: [text] = []
     for raw_tr in module.traits.values():
         val t: HirTrait = raw_tr
