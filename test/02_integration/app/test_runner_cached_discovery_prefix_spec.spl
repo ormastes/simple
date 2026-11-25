@@ -10,6 +10,7 @@ use std.test_runner.test_runner_files.{discover_test_files_fast_with_manifest_pa
 use app.test_runner_new.test_runner_files.{discover_test_files_fast_with_manifest_path as app_discover_test_files_fast_with_manifest_path}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_manifest.{manifest_covers, manifest_load}
+use std.nogc_sync_mut.io.env_ops.{cwd}
 use std.package_sffi.{create_symlink, remove_dir_all}
 use std.io_runtime.{file_delete, file_write, getpid, mkdir_p, time_now_unix_micros}
 
@@ -54,6 +55,45 @@ describe "Cached test discovery directory boundaries":
         expect(app_count).to_equal(1)
         expect(app_has_inside).to_equal(true)
         expect(app_has_sibling).to_equal(false)
+        expect(cleanup_ok).to_equal(true)
+
+    it "walks instead of trusting a fresh manifest that never indexed the absolute spelling of the root":
+        # Bug: absolute_path_entry_asymmetry_native_build_and_test_2026-08-09 (Half 2).
+        # A manifest indexed from the RELATIVE root must not be prefix-filtered
+        # against an ABSOLUTE base path: the relative entries can never match
+        # the absolute spelling, so trusting the index would silently discover
+        # zero specs. Both twins must fall back to walking the directory.
+        val root = "test/01_unit/app/test_runner_new/discovery_fixtures"
+        val target = "{root}/target"
+        val slash_cwd = cwd().replace("\\", "/")
+        val abs_target = "{slash_cwd}/{target}"
+        val inside = "{target}/inside_spec.spl"
+        # One manifest per twin: a twin that falls back to walking SAVES the
+        # manifest with the absolute root merged in, which would hand the
+        # second twin a covering index and mask the pre-fix zero result.
+        val std_manifest_path = ".simple/test-runner-discovery-abs-std-{getpid()}.idx"
+        val app_manifest_path = ".simple/test-runner-discovery-abs-app-{getpid()}.idx"
+        val scan_timestamp = time_now_unix_micros()
+        val serialized = "# test-manifest v1\nscan_timestamp={scan_timestamp}\nroots={root}\nentry_count=1\nsdoctest_count=0\n\n# entries (path|size|mtime|level|slow|skip|pending|tags|platform|fuzz|chaos|deploy|security|bare|duration_ms)\n{inside}|1|1|1|0|0|0|||0|0|0|0|0|0\n\n# sdoctest (path|size|mtime|blocks)\n"
+        val setup_ok = mkdir_p(".simple") and file_write(std_manifest_path, serialized) and file_write(app_manifest_path, serialized)
+
+        val cached = manifest_load(std_manifest_path)
+        val abs_root_covered = manifest_covers(cached, abs_target)
+        val options = parse_test_args([])
+        val std_result = discover_test_files_fast_with_manifest_path(abs_target, options, true, std_manifest_path)
+        val std_count = std_result.len()
+        val std_has_inside = std_result.len() > 0 and std_result[0].ends_with("inside_spec.spl")
+        val app_result = app_discover_test_files_fast_with_manifest_path(abs_target, options, true, app_manifest_path)
+        val app_count = app_result.len()
+        val app_has_inside = app_result.len() > 0 and app_result[0].ends_with("inside_spec.spl")
+
+        val cleanup_ok = file_delete(std_manifest_path) and file_delete(app_manifest_path)
+        expect(setup_ok).to_equal(true)
+        expect(abs_root_covered).to_equal(false)
+        expect(std_count).to_equal(1)
+        expect(std_has_inside).to_equal(true)
+        expect(app_count).to_equal(1)
+        expect(app_has_inside).to_equal(true)
         expect(cleanup_ok).to_equal(true)
 
     it "uses filesystem walking when a parent segment crosses a relative symlink":

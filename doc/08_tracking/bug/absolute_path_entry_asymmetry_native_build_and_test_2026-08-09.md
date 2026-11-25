@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-## Status: PARTIALLY FIXED (Half 1 implemented 2026-08-16; admitted Stage 2/4 verification pending). Half 2 remains OPEN / fail-open.
+## Status: RESOLVED (Half 1 implemented 2026-08-16; admitted Stage 2/4 verification pending. Half 2 resolved 2026-11-25 — see "Half 2 resolution (2026-11-25)" below: fail-closed classification and absolute-path handling verified on Windows, app-twin manifest-coverage gap fixed, regression coverage added.)
 
 Two CLI entry points disagree about absolute paths, and they fail in *opposite*
 ways. Anyone who hits one will eventually hit the other, so both halves are
@@ -112,3 +112,91 @@ The `simple test` half is the dangerous one: it manufactures false GREENs.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Half 2 resolution (2026-11-25, worktree wt-p2-abspath, branch work/p2-abspath-20261125)
+
+Half 1 is unchanged by this pass; the 2026-08-16 containment above stands as-is.
+
+### Root cause
+
+Two independent mechanisms produced the silent exit-0:
+
+1. **Prefix filter that only matched relative spellings.** The cached-manifest
+   fast path in `discover_test_files_fast_with_manifest_path` filtered manifest
+   entries with `path_is_within_directory(entry.path, base_path)`. Manifest
+   entries are recorded in whatever spelling the indexing walk used (normally
+   repo-relative), so an ABSOLUTE `base_path` could never prefix-match them and
+   discovery returned zero files with no diagnostic.
+2. **Empty selection classified as success.** A run that discovered zero files
+   produced an empty `TestRunResult`, which the exit-code path treated as a
+   pass, so the zero-match run exited 0 with no `SPEC FILE VERDICT` line.
+
+### What was already fixed on release/1.0.0 before this pass
+
+Verified on Windows with the tracked `bin/simple.exe`
+(`SIMPLE_LIB=src bin/simple.exe test <path> --mode=interpreter`); the runner is
+interpreted from worktree sources, so these are source-level facts:
+
+- The fail-open half (mechanism 2) is closed at the classification layer:
+  `test_empty_selection_is_success` (`src/lib/nogc_sync_mut/test_runner/test_runner_types.spl:206`)
+  makes an explicit path that selects nothing an `EmptySelection`
+  (`test_run_outcome_exit_code` = 4), never a pass. `--list`/`--spl-doctest`
+  and non-explicit (default `test/`) runs keep their legitimate empty-is-ok
+  semantics — the smallest compatible behavior for existing callers.
+- The single-`.spl` client lane validates every requested path
+  (`src/app/test_runner_new/test_runner_client.spl:150-155,829-830`) and exits 1
+  naming the path.
+- The std discovery twin
+  (`src/lib/nogc_sync_mut/test_runner/test_runner_files.spl:485`) already gates
+  the manifest fast path with `manifest_is_fresh(...) or not manifest_covers(...)`
+  and falls back to walking, so absolute directory targets resolve correctly
+  (mechanism 1, std lane).
+
+### What this pass fixed
+
+The app twin `src/app/test_runner_new/test_runner_files.spl`
+(`discover_test_files_fast_with_manifest_path`, exercised via
+`app.test_runner_new` exports and pinned for parity by
+`test/02_integration/app/test_runner_cached_discovery_prefix_spec.spl`) still
+trusted any fresh manifest regardless of which roots it had walked. An
+absolute base path against a fresh relative-root manifest was prefix-filtered
+to zero files silently (mechanism 1, app lane). The twin now mirrors the std
+twin: `manifest_covers` gates the fast path, and a fallback scan that found
+nothing is no longer cached over the previous index.
+
+Regression coverage: a new scenario in
+`test/02_integration/app/test_runner_cached_discovery_prefix_spec.spl`
+("walks instead of trusting a fresh manifest that never indexed the absolute
+spelling of the root") pins both twins: an absolute base path against a fresh
+relative-root manifest must still discover the spec via the walk fallback.
+Pre-fix (app-twin change stashed): `executed=3 passed=2 failed=1`, exit 1.
+Post-fix: `executed=3 passed=3 failed=0`, exit 0.
+
+### Before/after evidence (2026-11-25, Windows, bin/simple.exe)
+
+The 2026-08-09 fail-open no longer reproduces at the CLI on this branch; the
+commands below pin the current fail-closed behavior.
+
+- `SIMPLE_LIB=src bin/simple.exe test D:/wt-p2-abspath/test/01_unit/app/argv_entry_script_suffix_heuristic_class_spec.spl --mode=interpreter`
+  → exit 0,
+  `SPEC FILE VERDICT: D:/wt-p2-abspath/.../argv_entry_script_suffix_heuristic_class_spec.spl outcome=OK declared>=6 executed=6 passed=6 failed=0 ...`
+  (identical `executed=6` to the relative spelling; MSYS `/d/...` and
+  backslash `D:\...` spellings behave the same).
+- `SIMPLE_LIB=src bin/simple.exe test test/01_unit/app/no_such_thing_spec.spl --mode=interpreter`
+  → exit 1, `ERROR: test file not found: test/01_unit/app/no_such_thing_spec.spl`
+  (same for the absolute spelling of a missing file).
+- `SIMPLE_LIB=src bin/simple.exe test test/00_unit --mode=interpreter`
+  (existing directory that matches zero spec files)
+  → exit 4, `No test files found in test/00_unit`.
+- `SIMPLE_LIB=src bin/simple.exe test D:/wt-p2-abspath/test/01_unit/app/no_such_dir --mode=interpreter`
+  → exit 4, `No test files found in D:/wt-p2-abspath/test/01_unit/app/no_such_dir`.
+- App-twin discovery gap (pre-fix, change stashed):
+  `SIMPLE_LIB=src bin/simple.exe test test/02_integration/app/test_runner_cached_discovery_prefix_spec.spl --mode=interpreter`
+  → exit 1, `executed=3 passed=2 failed=1` (absolute base path discovered zero
+  specs through the app twin). Post-fix: exit 0, `executed=3 passed=3 failed=0`.
+
+Covering specs run once each, all green:
+`test/01_unit/app/test_runner_new/discovery_path_boundary_spec.spl` (8/8),
+`test/01_unit/app/tooling/test_runner_outcome_classification_spec.spl` (3/3),
+`test/01_unit/app/test_runner_new/runner_files_filters_spec.spl` (65/65),
+`test/02_integration/app/test_runner_cached_discovery_prefix_spec.spl` (3/3).
