@@ -673,6 +673,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_to_lower", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_int_lenient", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_to_float", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_to_int_dynamic", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_any_to_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_any_cast_int", &[I64], &[I64]),

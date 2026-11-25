@@ -23,13 +23,16 @@ use compiler.mir.mir.*
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 
-fn callees_of(src: text) -> [text]:
+fn lower_mir_module(src: text) -> MirModule:
     val file = "testdata/fixture_erased_to_int.spl"
     val parsed = parse_full_frontend(src, file, "fixture_erased_to_int", Logger(level: 0))
     var hir_lowering = HirLowering.with_filename(file)
     val hir = hir_lowering.lower_module(parsed)
     var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
-    val mir = lowering.lower_module(hir)
+    lowering.lower_module(hir)
+
+fn callees_of(src: text) -> [text]:
+    val mir = lower_mir_module(src)
     var callees: [text] = []
     for function in mir.functions.values():
         for block in function.blocks:
@@ -42,6 +45,33 @@ fn callees_of(src: text) -> [text]:
                             case _: pass
                     case _: pass
     callees
+
+fn block_callees(mir: MirModule, label: text) -> [text]:
+    var callees: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            if (block.label ?? "") == label:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    callees = callees.push(name)
+                                case _: pass
+                        case _: pass
+    callees
+
+fn block_has_float_const(mir: MirModule, label: text, expected: f64) -> bool:
+    for function in mir.functions.values():
+        for block in function.blocks:
+            if (block.label ?? "") == label:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Const(_, MirConstValue.Float(v), _):
+                            if v == expected:
+                                return true
+                        case _: pass
+    false
 
 fn has_callee(callees: [text], name: text) -> bool:
     for c in callees:
@@ -101,14 +131,22 @@ describe "to_int / to_i64 near erased receivers":
         expect(has_callee(callees, "rt_any_to_int")).to_equal(false)
 
 describe "to_float / to_f64 / to_f32 / to_u8 on erased element reads":
-    it "erased index read xs[i].to_float() decodes tagged runtime values without ensure_tagged_str":
+    it "erased index read xs[i].to_float() decodes tagged runtime values without ensure_tagged_str or string-to-int fallback":
         step("lower `xs[i].to_float()` where `xs` is an untyped parameter")
+        val mir = lower_mir_module("fn f(xs, i: i64) -> f64:\n    xs[i].to_float()\n")
         val callees = callees_of("fn f(xs, i: i64) -> f64:\n    xs[i].to_float()\n")
         expect(has_callee(callees, "rt_value_is_float")).to_equal(true)
+        expect(has_callee(callees, "rt_value_is_nil")).to_equal(true)
+        expect(has_callee(callees, "rt_string_eq")).to_equal(true)
         expect(has_callee(callees, "rt_value_as_float")).to_equal(true)
         expect(has_callee(callees, "rt_string_to_float")).to_equal(true)
         expect(has_callee(callees, "rt_any_to_int")).to_equal(true)
         expect(has_callee(callees, "rt_interp_cstr")).to_equal(false)
+        # Unparsable text ("a", "42abc") and nil must return 0.0 directly, never rt_any_to_int.
+        expect(block_has_float_const(mir, "any_decode_text_invalid", 0.0)).to_equal(true)
+        expect(has_callee(block_callees(mir, "any_decode_text_invalid"), "rt_any_to_int")).to_equal(false)
+        expect(block_has_float_const(mir, "any_decode_nil", 0.0)).to_equal(true)
+        expect(has_callee(block_callees(mir, "any_decode_nil"), "rt_any_to_int")).to_equal(false)
 
     it "erased index reads xs[i].to_f64() and xs[i].to_f32() decode tagged runtime values":
         step("lower `xs[i].to_f64()` and `xs[i].to_f32()` on untyped `xs`")
@@ -145,3 +183,15 @@ describe "to_float / to_f64 / to_f32 / to_u8 on erased element reads":
         val text_u8_callees = callees_of("fn f(s: text) -> u8:\n    s.to_u8()\n")
         expect(has_callee(text_u8_callees, "__simple_rt_string_byte_at")).to_equal(true)
         expect(has_callee(text_u8_callees, "rt_any_to_int")).to_equal(false)
+
+    it "erased element conversions match interpreter runtime oracle":
+        val mixed = [42, "3.5", "a", "42abc", ""]
+        expect(mixed[0].to_float()).to_equal(42.0)
+        expect(mixed[1].to_f64()).to_equal(3.5)
+        expect(mixed[2].to_float()).to_equal(0.0)
+        expect(mixed[3].to_f64()).to_equal(0.0)
+        expect(mixed[4].to_float()).to_equal(0.0)
+        expect((mixed[1].to_f32()) > 3.0).to_equal(true)
+        val nums = [300, 42]
+        expect(nums[0].to_u8()).to_equal(44u8)
+        expect(nums[1].to_u8()).to_equal(42u8)

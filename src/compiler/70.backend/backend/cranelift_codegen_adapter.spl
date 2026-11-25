@@ -20,7 +20,7 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
 use compiler.backend.cranelift_global_address.*
-use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void, cl_declare_import_function, cl_import_ledger_begin, cl_import_ledger_end, cl_jit_refuse_call_abi, cl_jit_import_refused, cl_aot_call_abi_begin, cl_aot_call_abi_end, cl_aot_refuse_call_abi}
+use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_i8, translate_runtime_import_call_void, cl_declare_import_function, cl_import_ledger_begin, cl_import_ledger_end, cl_jit_refuse_call_abi, cl_jit_import_refused, cl_aot_call_abi_begin, cl_aot_call_abi_end, cl_aot_refuse_call_abi}
 use compiler.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
 use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
@@ -1870,9 +1870,12 @@ fn cl_translate_call(
                         return translate_runtime_import_call_f64_i64(ctx, cl_module, name, arg_vals[0])
                     if name == "rt_value_as_float" and arg_vals.len() == 1:
                         return translate_runtime_import_call_i64_f64(ctx, cl_module, name, arg_vals[0])
+                    if (name == "rt_value_is_float" or name == "rt_value_is_nil" or name == "rt_value_is_int" or name == "rt_value_is_bool") and arg_vals.len() == 1:
+                        val raw_i8 = translate_runtime_import_call_i8(ctx, cl_module, name, arg_vals)
+                        return cranelift_sextend(ctx, CL_TYPE_I64, raw_i8)
                     if (name == "cranelift_fconst" or name == "rt_cranelift_fconst") and arg_vals.len() == 3:
                         return translate_runtime_import_call_i64_i64_f64_i64(ctx, cl_module, name, arg_vals[0], arg_vals[1], arg_vals[2])
-                    if name == "rt_array_free" or name == "rt_print_str" or name == "rt_println_str" or name == "rt_eprintln_str":
+                    if name == "rt_array_free" or name == "rt_print_str" or name == "rt_println_str" or name == "rt_eprintln_str" or (name == "rt_panic" and arg_vals.len() == 2):
                         translate_runtime_import_call_void(ctx, cl_module, name, arg_vals)
                         return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                     # rt_string_free is i64 -> i64 (1 = reclaimed, 0 = refused),
@@ -1892,6 +1895,8 @@ fn cl_translate_call(
                         return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_spawn_guarded_value", arg_vals)
                     if name == "rt_env_get" and arg_vals.len() == 1:
                         return translate_runtime_import_call_i64(ctx, cl_module, "rt_env_get_value", arg_vals)
+                    if name == "__simple_rt_string_char_code_at" and arg_vals.len() == 2:
+                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_string_char_code_at", arg_vals)
                     # MIR currently represents compiler-generated collection
                     # helpers and source calls with the same string operand.
                     # Keep the lowering-owned primitives on the runtime ABI so
