@@ -1,5 +1,21 @@
 # stage4 deploy left no seed driver — `bin/simple test` blocked host-wide
 
+## Verification 2026-11-25 (release/1.0.0 @ 64dfa6d980f, Windows host)
+
+Closure reconfirmed by code inspection:
+
+- The deploy gate described in the 2026-06-12 resolution is present in
+  `scripts/bootstrap/bootstrap-from-scratch.sh:7497-7516` (`seed_probe`,
+  deploy refused when the seed driver fails its smoke test, transactional
+  `simple_seed` delegate install at line 7585).
+- The pinned seed (`bin/simple.exe`, Rust seed v1.0.0-rc.1) delegates and
+  runs: `bin/simple.exe run <repro>` executes and prints correctly, and
+  `bin/simple.exe test <spec>` reaches spec loading (it fails only on the
+  unrelated `@representation_boundary` decorator gap at HEAD, tracked
+  separately — not a seed-absence failure).
+
+No re-open warranted.
+
 ## Closed 2026-09-13 — resolved 2026-06-12 (seed rebuilt, deploy gate implemented)
 
 - **inferred** Entry status: resolved (2026-06-12 — seed rebuilt; deploy-gate implemented
