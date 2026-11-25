@@ -33,3 +33,27 @@ describe "bare unit alternatives in OR arms":
     it "still rejects alternatives that bind different names":
         val source = "enum Mode:\n    A(n: i64)\n    B(m: i64)\n\nfn pick(x: Mode) -> i64:\n    match x:\n        case A(n) | B(m):\n            1\n"
         expect(or_unit_lower_errors(source) > 0).to_equal(true)
+
+    it "resolves mixed payload and bare unit variants in one OR arm":
+        val source = "enum TyKind:\n    Named(id: i64, arity: i64)\n    Optional(inner: i64)\n    Any\n    Error\n\nstruct Ty:\n    kind: TyKind\n\nfn check_ty(t: Ty) -> i64:\n    match t.kind:\n        case Named(_, _) | Any | Error:\n            1\n        case Error | Optional(_):\n            2\n        case _:\n            0\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
+
+    it "resolves bare unit variants on an outer enum payload binder even when another enum shares the variant names":
+        val source = "enum HirOp:\n    Add\n    Sub\n    Eq\n    Ne\n\nenum MirOp:\n    Add\n    Sub\n    Eq\n    Ne\n\nenum InstKind:\n    BinOp(dest: i64, op: MirOp, l: i64, r: i64)\n    Nop\n\nstruct Inst:\n    kind: InstKind\n\nfn cost(inst: Inst) -> i64:\n    match inst.kind:\n        case BinOp(_, op, _, _):\n            match op:\n                case Add | Sub:\n                    1\n                case Eq | Ne:\n                    2\n        case _:\n            0\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
+
+    it "resolves bare unit variants on a chained field subject and mixed long OR arm":
+        val source = "enum MirTyKind:\n    I8\n    I16\n    I32\n    I64\n    Bool\n    Ptr(a: i64, b: i64)\n    FuncPtr(a: i64)\n\nstruct MirTy:\n    kind: MirTyKind\n\nstruct StaticItem:\n    type_: MirTy\n\nfn is_signed_small(st: StaticItem) -> bool:\n    match st.type_.kind:\n        case I8 | I16 | I32: true\n        case _: false\n\nfn is_supported(t: MirTy) -> bool:\n    match t.kind:\n        case I8 | I16 | I32 | I64 | Bool | Ptr(_, _) | FuncPtr(_): true\n        case _: false\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
+
+    it "resolves bare unit variants on an if-val unwrapped struct field subject":
+        val source = "enum SymKind:\n    Class\n    Struct\n    Enum\n    Import\n    Var\n\nenum OtherKind:\n    Class\n    Struct\n\nstruct Sym:\n    kind: SymKind\n\nfn lookup(flag: bool) -> Sym?:\n    if flag:\n        Some(Sym(kind: SymKind.Class))\n    else:\n        None\n\nfn is_type_sym(flag: bool) -> bool:\n    if val sym = lookup(flag):\n        match sym.kind:\n            case Class | Struct | Enum | Import: true\n            case _: false\n    else:\n        false\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
+
+    it "resolves bare unit variants on an if-val Some(sym) unwrapped struct field subject":
+        val source = "enum SymKind:\n    Class\n    Struct\n    Enum\n    Import\n    Var\n\nenum OtherKind:\n    Class\n    Struct\n\nstruct Sym:\n    kind: SymKind\n\nfn lookup(flag: bool) -> Sym?:\n    if flag:\n        Some(Sym(kind: SymKind.Class))\n    else:\n        None\n\nfn is_type_sym(flag: bool) -> bool:\n    val sym = lookup(flag)\n    if val Some(symbol) = sym:\n        match symbol.kind:\n            case Class | Struct | Enum | Import: true\n            case _: false\n    else:\n        false\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
+
+    it "resolves bare unit variants on a method-call-on-field local subject":
+        val source = "enum Timing:\n    CompileTime\n    Both\n    Runtime\n\nstruct Solver:\n    mode: i64\n\nimpl Solver:\n    fn classify(x: i64) -> Timing:\n        if x == 0: Timing.CompileTime else: Timing.Runtime\n\nstruct Ctx:\n    solver: Solver\n\nimpl Ctx:\n    fn run(x: i64) -> i64:\n        val timing = self.solver.classify(x)\n        match timing:\n            case CompileTime | Both: 1\n            case Runtime: 2\n"
+        expect(or_unit_lower_errors(source)).to_equal(0)
