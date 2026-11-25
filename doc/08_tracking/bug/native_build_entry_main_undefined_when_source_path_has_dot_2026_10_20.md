@@ -106,3 +106,8 @@ Seed: 9/9 passed. Neighbour specs `driver_source_loading_spec` (5 failures) and
 `entry_closure_authored_path_spec` (1 failure) fail identically with and without
 this change. `module_path_naming_scv_root_snapshot_spec` passed 7/7. The native-build
 repro under `<tmp>/dot.1/` still needs a rebuilt producer.
+
+## WA-W2-5 Audit (2026-11-26)
+
+- **Classification:** `KEPT-WITH-REASON`
+- **Disposition:** Kept `scripts/check/check-stage-binaries-runnable.shs:339,712` (`# @workaround bug=native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20`) and the underscore temp/probe paths (`${SELF_NAME}_XXXXXX`, `probe_$_n`) intact. While the source fix (`PR #4033` + 2026-11-13 Windows fix) is in `src/compiler/80.driver/driver_entry_closure_core.spl` and `src/compiler/00.common/module_path_naming.spl`, native Stage 3 verification under `<tmp>/dot.1/` remains pending (`bug_db.sdn` `fix-implemented-verification-pending`), and `check-stage-binaries-runnable.shs` also probes tracked/historical Stage 1/2 binaries (`bootstrap/**/simple`, `--rev`) predating PR #4033.

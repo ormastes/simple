@@ -118,3 +118,8 @@ workaround above remains valid until then.
 ## Status 2026-11-03: fix-implemented-verification-pending
 
 Fix landed in 728ddb0170f (#5791); spec `test/01_unit/compiler/driver/smf_staged_parts_spec.spl` 6/6 pass on origin/release/1.0.0 (bin/simple.exe). RSS verification needs a stage2 rebuilt with #5791 (not yet deployed). Repro: build stage2 from release/1.0.0 head, run stage3 native_compile with default `--mode=dynload` and watch peak RSS; expect no 35->66 GB growth (staged codegen + MIR sharding active for Both). The parser_preprocessor memory-blowup bug is a duplicate of this one.
+
+## WA-W2-5 Audit (2026-11-26)
+
+- **Classification:** `ROOT-FIXED+STAGE2-GATED`
+- **Disposition:** Kept `scripts/bootstrap/p3-entry-groups.shs:37` (`# @workaround bug=stage2_whole_program_mir_memory_growth_2026-11-01`). While the `OutputFormat.Both` staged codegen / MIR sharding fix (`728ddb0170f`, PR #5791, `src/compiler/80.driver/driver_aot_pipeline.spl` and `smf_staged_parts_v1.spl`) is present in `release/1.0.0` source, `p3-entry-groups.shs` still guards frozen Stage 2 (`ef0681fc0e1`) bootstrap builds and is covered by `scripts/check/check-bootstrap-unified-scripts-contract.shs` and `test/01_unit/scripts/p3_entry_groups_contract_spec.spl`.

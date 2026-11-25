@@ -75,3 +75,8 @@ define the symbols twice.
 
 Delete the script and this env once stage2 is rebuilt from a commit containing
 `e2e83308682`.
+
+## WA-W2-5 Audit (2026-11-26)
+
+- **Classification:** `ROOT-FIXED+STAGE2-GATED`
+- **Disposition:** Kept `scripts/bootstrap/p3-entry-groups.shs:223` (`# @workaround bug=stage2_runtime_list_missing_process_tree_2026_11_01`) and `scripts/bootstrap/workarounds/stage2-runtime-process-tree-shadow.shs:2,47`. The root cause is fixed in `release/1.0.0` source (`e2e83308682`, PR #5800: `src/compiler/70.backend/backend/runtime_compiler.spl` includes `runtime_process_tree` in both core and full runtime C lists), but frozen Stage 2 (`ef0681fc0e1`) still predates it, `scripts/bootstrap/p3-manual-link-stage3.shs:149` invokes `stage2-runtime-process-tree-shadow.shs`, and `test/01_unit/scripts/p3_manual_link_and_smoke_contract_spec.spl` asserts the shadow output.

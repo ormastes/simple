@@ -119,3 +119,8 @@ runners: run 42457312983.
   linux-x86_64 job — `simple_test_runner built by: stage1` verifies the Linux
   half; a `WORKAROUND release_stage1_native_build_worker_sigsegv_2026_10_20`
   warning means it is still failing and the gdb step above is next.
+
+## WA-W2-5 Audit (2026-11-26)
+
+- **Classification:** `KEPT-WITH-REASON`
+- **Disposition:** Kept `.github/workflows/release.yml:1006` (`# @workaround bug=release_stage1_native_build_worker_sigsegv_2026_10_20`) untouched. Run 42457312983 (2026-11-08) failed upstream at the Linux Rust seed link (`release_linux_seed_link_undefined_process_bridge_symbols_2026_11_08`, whose follow-up verification on `release.yml` `linux-x86_64` is still pending), so Stage 1 HIR-worker stability across Linux/macOS/Windows CI remains unverified.

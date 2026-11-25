@@ -7,7 +7,6 @@ use warnings;
 use POSIX qw(setsid setpgid WNOHANG);
 use Time::HiRes qw(sleep alarm clock_gettime CLOCK_MONOTONIC);
 
-# @workaround bug=bootstrap_watchdog_wall_clock_budget_2026_10_11 gh=#3136
 # Elapsed budgets must not follow civil-clock steps; require a monotonic host clock.
 sub monotonic_time { return clock_gettime(CLOCK_MONOTONIC); }
 # Only startup validation may die directly, before any helper/workload exists.

@@ -201,3 +201,8 @@ sh "$CONTROLLER/scripts/bootstrap/bootstrap-phase-verification.shs" \
 four `QUALIFICATION_DIR/ROLE.env` files before any green gate.)
 
 Disposition: BLOCKED. Header flipped OPEN → BLOCKED 2026-11-11 (lane p3-seedA).
+
+## WA-W2-5 Audit (2026-11-26)
+
+- **Classification:** `KEPT-WITH-REASON`
+- **Disposition:** Kept `scripts/bootstrap/run-retained-manual-command.shs:2` (`# @workaround bug=retained_manual_system_link_old_seed_abi_2026_10_25`) untouched. Native Stage4 retained-manual qualification (`simple-stage4-retained-manual-self-v1`) remains blocked/pending, and the script is actively invoked and SHA-256 bundle-verified by `scripts/bootstrap/bootstrap-phase-verification.shs:472,490` and `scripts/check/lib/stage4-retained-manual.py:543,680`.
