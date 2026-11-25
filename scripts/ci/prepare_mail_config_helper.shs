@@ -4,7 +4,7 @@
 # MAIL_CI_PHASE2_PRODUCERS_JSON maps host triples to immutable producer bundles.
 # No compiler is rebuilt and no seed/interpreter/parser substitute is admitted.
 # Port of the former prepare_mail_config_helper.py; --selftest replaces
-# test/scripts/test_prepare_mail_config_helper.py. Needs jq, curl, sha256sum
+# test/scripts/test_prepare_mail_config_helper.py. Needs jq, curl, sha256sum or shasum
 # (and unzip / tar for archive bundles).
 #
 # Usage: sh scripts/ci/prepare-mail-config-helper.shs | --selftest
@@ -12,7 +12,17 @@ set -u
 
 refuse() { echo "MAIL_CI_PHASE2_UNAVAILABLE: $1" >&2; exit 1; }
 
-sha_of() { sha256sum < "$1" | awk '{ print $1 }'; }
+# macOS runners ship shasum, not sha256sum / timeout (coreutils: gtimeout).
+sha_of() {
+    if command -v sha256sum > /dev/null 2>&1; then sha256sum < "$1"; else shasum -a 256 < "$1"; fi | awk '{ print $1 }'
+}
+
+bounded() { # bounded <seconds> <command...>
+    limit=$1; shift
+    if command -v timeout > /dev/null 2>&1; then timeout "$limit" "$@"
+    elif command -v gtimeout > /dev/null 2>&1; then gtimeout "$limit" "$@"
+    else "$@"; fi
+}
 
 fetch_https() { # fetch_https <url> <dest>
     curl -fsSL --max-time 120 -A simple-mail-ci -o "$2" "$1"
@@ -97,20 +107,20 @@ main() {
     set -- native-build src/app/mail_credentials/main.spl
     [ "$windows" = 1 ] && set -- "$@" --source src/providers/windows_native/lib
     for root in src/app src/lib src/os src/compiler; do set -- "$@" --source "$root"; done
-    timeout 1200 "$compiler" "$@" --backend=llvm -o "$helper" > "$destination/helper-build.log" 2>&1
+    bounded 1200 "$compiler" "$@" --backend=llvm -o "$helper" > "$destination/helper-build.log" 2>&1
     rc=$?
     [ "$rc" -eq 0 ] && [ -f "$helper" ] \
         || refuse "the existing producer could not build the real helper; see $destination/helper-build.log"
     # Exercise the compiled production parser before exporting it to fixtures.
     document=$destination/probe.sdn
     printf 'default_account: "ci"\naccounts:\n  ci:\n    protocol: pop3\n    provider: other\n    email: "ci@example.test"\n    pop3_server: "127.0.0.1"\n    tls: implicit\n' > "$document"
-    parsed=$(timeout 20 "$helper" config-json "$document" 2>/dev/null)
+    parsed=$(bounded 20 "$helper" config-json "$document" 2>/dev/null)
     rc=$?
     printf '%s' "$parsed" | jq -e . > /dev/null 2>&1 || refuse "the compiled helper returned invalid JSON for the SDN control"
     [ "$rc" -eq 0 ] && [ "$(printf '%s' "$parsed" | jq -r '.accounts.ci.protocol // empty')" = pop3 ] \
         || refuse "the compiled helper did not pass the actual SDN parser control"
     printf 'accounts: [\n' > "$document"
-    rejected=$(timeout 20 "$helper" config-json "$document" 2>/dev/null)
+    rejected=$(bounded 20 "$helper" config-json "$document" 2>/dev/null)
     rc=$?
     if [ "$rc" -eq 0 ] || [ -n "$(printf '%s' "$rejected" | tr -d ' \t\r\n')" ]; then
         refuse "the compiled helper accepted malformed SDN"
