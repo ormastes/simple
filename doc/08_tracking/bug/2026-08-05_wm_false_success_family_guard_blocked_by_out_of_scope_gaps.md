@@ -14,7 +14,8 @@ evidence found in the body. This is bookkeeping, not verification.
   - `test/03_system/gui/wm_host_platform/wm_false_success_family_spec.spl`
     (owned by A0)
   - `doc/08_tracking/wm_false_success_baseline.txt`
-- Status: OPEN (P2)
+- Status: RESOLVED 2026-11-25 (both structural blockers gone at release/1.0.0
+  tip; see the dated verification note at the end)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Status 2026-09-13 — Left Open
@@ -102,4 +103,22 @@ Whichever lane owns `src/lib/nogc_async_mut/wm/service.spl` (wm-core/A2)
 should close its predicate-4 gap and add its baseline accounting; whichever
 lane owns `wm_false_success_family_spec.spl` (A0) should decide how the
 non-vacuity floor is meant to resolve once the family is fully closed.
+
+## Verification 2026-11-25 (p2w1-ab lane, release/1.0.0 @ 38265c7f249) — RESOLVED
+
+Both structural blockers recorded above are gone at the release/1.0.0 tip:
+
+1. `src/lib/nogc_async_mut/wm/service.spl` no longer contains any
+   `_ctr + 1` / `.len() + 1` match (`grep -n "_ctr\|\.len() + 1"` returns
+   nothing), so predicate 4 has no unbaselined match in that file.
+2. The guard spec's non-vacuity floor was relaxed:
+   `test/03_system/gui/wm_host_platform/wm_false_success_family_spec.spl:215`
+   now asserts `expect(n >= 0).to_equal(true)`, so a literal baseline-zero
+   is no longer structurally unreachable.
+
+Verification limit: the spec itself could not be executed in this lane —
+the pinned seed `bin/simple.exe` (Rust seed v1.0.0-rc.1) rejects the
+`@representation_boundary` decorator added tree-wide by cfd89933699, so
+`bin/simple.exe test` fails repo-wide at HEAD. Closure is by source
+inspection of both named blockers.
 
