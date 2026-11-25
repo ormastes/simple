@@ -1,18 +1,19 @@
 use std.spec.{describe, it, expect}
 use compiler.linker._LinkerWrapper.native_all_support.{native_mingw_stack_reserve_args, NATIVE_MINGW_STACK_RESERVE_BYTES}
 
-# F3 test-runner build on Windows died with 0xC00000FD: the stage3 PE had the
-# 1 MiB default SizeOfStackReserve while Linux gives the main thread 8 MiB. A
-# 96-term `or` chain (test_runner_args.spl:251) recursed lower_binary_expr ->
-# lower_cond_expr at ~21 KiB per level and overflowed only on Windows.
+# F3 / W51 Windows builds died with 0xC00000FD: the PE default 1 MiB
+# SizeOfStackReserve (and even 8 MiB on deep MIR lowering chains like
+# lib/common/process/observation_v4.spl and test_runner_args.spl:251)
+# overflowed only on Windows. Match MSVC (`MSVC_DEFAULT_STACK_RESERVE`) and
+# internal COFF (`PeImagePolicy.default().stack_reserve`) at 64 MiB.
 describe "Windows GNU clang link main-thread stack reserve":
-    it "reserves the same 8 MiB main-thread stack Linux provides":
-        expect(NATIVE_MINGW_STACK_RESERVE_BYTES).to_equal(8388608)
-        expect(native_mingw_stack_reserve_args([])).to_equal(["-Wl,--stack,8388608"])
+    it "reserves 64 MiB main-thread stack matching MSVC and internal COFF parity":
+        expect(NATIVE_MINGW_STACK_RESERVE_BYTES).to_equal(67108864)
+        expect(native_mingw_stack_reserve_args([])).to_equal(["-Wl,--stack,67108864"])
 
     it "keeps an explicit caller stack reserve instead of adding a second one":
         expect(native_mingw_stack_reserve_args(["-Wl,--stack,33554432"])).to_equal([])
         expect(native_mingw_stack_reserve_args(["-Wl,--stack=33554432"])).to_equal([])
 
     it "ignores unrelated extra flags":
-        expect(native_mingw_stack_reserve_args(["-Wl,--gc-sections", "-municode"])).to_equal(["-Wl,--stack,8388608"])
+        expect(native_mingw_stack_reserve_args(["-Wl,--gc-sections", "-municode"])).to_equal(["-Wl,--stack,67108864"])
