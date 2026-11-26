@@ -417,26 +417,24 @@ fn compile_source_inventory_read_text_v1(path: text) -> text?:
         return nil
     rt_file_read_regular_no_follow_bounded(path, size)
 
-# OPEN: doc/08_tracking/bug/native_inventory_decimal_optional_2026_10_26.md
-# The retained native to_i64 provider returns a raw i64, while ?? tests Option
-# presence (including reserved small words). Parse the wire grammar directly;
-# an explicit validity bit keeps every nonnegative i64 distinct from failure.
-# @workaround bug=native_raw_integer_optional_presence_2026_10_26 reason=rt_string_to_int_returns_raw_i64_so_bad_to_i64_yields_0_and_strict_wire_grammar_needed
-fn compile_source_inventory_decimal_v1(value: text) -> (bool, i64):
+# Strict canonical unsigned wire decimal parser (`0|[1-9][0-9]*`, bounded by
+# INT64_MAX). Returns boxed `Option<i64>` (`Some(n)` / `None`), keeping every
+# nonnegative `i64` (including `0` and reserved tag `3`) distinct from `None`.
+fn compile_source_inventory_decimal_v1(value: text) -> i64?:
     if value == "" or (value.byte_len() > 1 and value.byte_at(0) == 48):
-        return (false, 0)
+        return None
     var result: i64 = 0
     var index = 0
     while index < value.byte_len():
         val code = value.byte_at(index)
-        if code < 48 or code > 57: return (false, 0)
+        if code < 48 or code > 57: return None
         val digit = code - 48
         if result > 922337203685477580 or
                 (result == 922337203685477580 and digit > 7):
-            return (false, 0)
+            return None
         result = result * 10 + digit
         index = index + 1
-    (true, result)
+    Some(result)
 
 fn compile_source_inventory_decode_v1(content: text) -> CompileSourceInventoryReadV1:
     compile_source_inventory_decode_content_v1(content, "")
@@ -452,9 +450,11 @@ fn compile_source_inventory_decode_content_v1(
             not lines[1].starts_with("generation=") or
             not lines[2].starts_with("count="):
         return CompileSourceInventoryReadV1(false, "inventory-header-invalid", "", nil)
-    val (generation_valid, generation) = compile_source_inventory_decimal_v1(lines[1].substring(11))
-    val (count_valid, count) = compile_source_inventory_decimal_v1(lines[2].substring(6))
-    if not generation_valid or not count_valid or count != lines.len() - 3:
+    val generation_opt = compile_source_inventory_decimal_v1(lines[1].substring(11))
+    val count_opt = compile_source_inventory_decimal_v1(lines[2].substring(6))
+    val generation = generation_opt ?? -1
+    val count = count_opt ?? -1
+    if generation_opt == None or count_opt == None or count != lines.len() - 3:
         return CompileSourceInventoryReadV1(false, "inventory-count-invalid", "", nil)
     var entries: [CompileSourceInventoryEntryV1] = []
     var previous = ""
@@ -464,9 +464,10 @@ fn compile_source_inventory_decode_content_v1(
         val fields = lines[index].split("|")
         if fields.len() != 7:
             return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
-        val (size_valid, size) = compile_source_inventory_decimal_v1(fields[6])
-        if not size_valid:
+        val size_opt = compile_source_inventory_decimal_v1(fields[6])
+        if size_opt == None:
             return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
+        val size = size_opt!
         val entry = CompileSourceInventoryEntryV1(
             fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], size)
         # The wire header and decimal parser already enforce their canonical
@@ -731,9 +732,8 @@ fn _compile_source_inventory_header_generation_v1(path: text) -> i64:
     val gen_line = content.substring(gen_start, second_nl)
     if not gen_line.starts_with("generation="):
         return -1
-    val (ok, generation) = compile_source_inventory_decimal_v1(
-        gen_line.substring(11, gen_line.byte_len()))
-    if ok: generation else: -1
+    compile_source_inventory_decimal_v1(
+        gen_line.substring(11, gen_line.byte_len())) ?? -1
 
 fn _compile_source_inventory_pointer_digest_v1(pointer_content: text) -> text:
     val separator = pointer_content.index_of("\n")
