@@ -13,7 +13,7 @@ with a 65,536-byte ceiling, rejects read errors and oversized records, and
 retains the existing parser and process identity/RSS field checks. An empty
 record continues to represent a process that disappeared during observation.
 
-`python3 scripts/test/test-rss-proc-stat-record.py` passed on Linux. The fixture
+`python3 scripts/test/test-rss-proc-stat-record.py [deleted 2026-11-26]` passed on Linux. The fixture
 sets its own kernel process name through `prctl` to ordinary text and then
 `rss\n) tricky`, reads the real `/proc` record using the production reader and
 parser extracted without modification, and checks parent/group/session IDs,

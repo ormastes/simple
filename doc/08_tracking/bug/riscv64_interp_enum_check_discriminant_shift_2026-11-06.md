@@ -13,7 +13,7 @@ With the in-guest interpreter running the hello world end to end
 interpreted `main` executes), both interpreted `print` statements rendered
 `<unknown>` instead of the marker text. The gate's nonce check cannot pass.
 
-## Measured facts (RSP, `scripts/debug/rsp_watch.py`, laneO kernel)
+## Measured facts (RSP, `scripts/debug/rsp_watch.py [deleted 2026-11-26]`, laneO kernel)
 
 1. `InterpreterBackendImpl.try_call_builtin`'s Print case reaches the
    `case _:` fallback every time: `value_to_string` was hit 25x with the

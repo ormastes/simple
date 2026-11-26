@@ -132,7 +132,7 @@ every one of these for admission/no-op evidence; only the module projection drop
   only seed `release100-7a0e6fe516f-20261031` and binaries up to v1.0.0-rc.1, which
   fail to parse/run this tree), so `bin/simple check` / interpreter specs could not run
   here. Verification was:
-- `scripts/bootstrap/cache-identity-model-check.py` — a faithful Python model of both fingerprint
+- `scripts/bootstrap/cache-identity-model-check.py [deleted 2026-11-26]` — a faithful Python model of both fingerprint
   functions, run against the pre-change and post-change exclusion sets: before, changing
   worker-KB budgets or watchdog coordinates moved the module digest; after, retuned
   resource runs share the baseline scope while a semantics flag and `--threads` still
