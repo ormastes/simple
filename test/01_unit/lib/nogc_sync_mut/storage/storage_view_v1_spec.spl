@@ -337,3 +337,70 @@ describe "storage_view_v1 exclusive create":
         expect(made.reason).to_equal("view-exists")
         expect(dir_list(base + "/views/v1").len()).to_equal(0)
         _cleanup(base)
+
+describe "storage_view_v1 review hardening":
+    only_on_windows "destroy refuses a junction view dir and deletes nothing outside it":
+        val base = _temp("destroy-junction")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(view, "f.txt", "keep".bytes()).status).to_equal("ok")
+        # Swap the view dir for a junction: upper/ is a real dir beneath it, so
+        # a final-component-only check would pass and remove_all would follow.
+        val real = base + "/real_v1"
+        val moved = process_run("cmd", ["/c", "move", (base + "/views/v1").replace("/", "\\"), real.replace("/", "\\")])
+        expect(moved.2).to_equal(0)
+        val made = process_run("cmd", ["/c", "mklink", "/J", (base + "/views/v1").replace("/", "\\"), real.replace("/", "\\")])
+        expect(made.2).to_equal(0)
+        val result = storage_view_v1_destroy(view)
+        expect(result.status).to_equal("rejected")
+        expect(result.reason).to_equal("view-dir-not-real-dir")
+        expect(file_exists(real + "/upper/f.txt")).to_equal(true)
+        process_run("cmd", ["/c", "rmdir", (base + "/views/v1").replace("/", "\\")])
+        _cleanup(base)
+
+    only_on_windows "upper scan fails closed on an unreadable subdirectory and a junction entry":
+        val base = _temp("scan-closed")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(view, "d/a.txt", "a".bytes()).status).to_equal("ok")
+        val upper = base + "/views/v1/upper"
+        val nat = (upper + "/d").replace("/", "\\")
+        # Deny directory listing; rt_dir_walk would report this upper as
+        # holding no files and save/clone would accept it.
+        val deny = process_run("icacls", [nat, "/deny", "*S-1-1-0:(RD)"])
+        expect(deny.2).to_equal(0)
+        val saved = storage_view_v1_save(view, "main", StoreGenerationV1(0))
+        process_run("icacls", [nat, "/remove:d", "*S-1-1-0"])
+        expect(saved.status).to_equal("rejected")
+        expect(saved.reason).to_equal("upper-unreadable")
+        # A junction entry inside upper is refused, not listed as a file.
+        val outside = base + "/outside"
+        expect(dir_create_all(outside)).to_equal(true)
+        val made = process_run("cmd", ["/c", "mklink", "/J", (upper + "/j").replace("/", "\\"), outside.replace("/", "\\")])
+        expect(made.2).to_equal(0)
+        val clone = storage_view_v1_clone(view, "v2")
+        expect(clone.status).to_equal("rejected")
+        process_run("cmd", ["/c", "rmdir", (upper + "/j").replace("/", "\\")])
+        expect(file_exists(upper + "/d/a.txt")).to_equal(true)
+        _cleanup(base)
+
+    it "a stale handle cannot reach volume dirs after destroy":
+        val base = _temp("stale")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vol_dir = base + "/vol"
+        expect(dir_create_all(vol_dir)).to_equal(true)
+        expect(file_write_bytes(vol_dir + "/seen.txt", "x".bytes())).to_equal(true)
+        val added = storage_view_v1_add_volume(view, "data", vol_dir, ViewFlagV1(true))
+        expect(added.status).to_equal("ok")
+        expect(storage_view_v1_write(added.view, "data/before.txt", "ok".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_destroy(added.view).status).to_equal("ok")
+        val wrote = storage_view_v1_write(added.view, "data/after.txt", "late".bytes())
+        expect(wrote.status).to_equal("rejected")
+        expect(wrote.reason).to_equal("view-destroyed")
+        expect(file_exists(vol_dir + "/after.txt")).to_equal(false)
+        val read = storage_view_v1_read(added.view, "data/seen.txt")
+        expect(read.status).to_equal("rejected")
+        expect(read.reason).to_equal("view-destroyed")
+        expect(storage_view_v1_add_volume(added.view, "more", vol_dir, ViewFlagV1(true)).status).to_equal("rejected")
+        _cleanup(base)
