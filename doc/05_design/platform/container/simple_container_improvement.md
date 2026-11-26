@@ -250,3 +250,18 @@ Manifest is an SDN object (`kind: container-view-manifest`, sorted unique `{path
 
 ### Blocked on this host (honest stopping line)
 Phase 2 native memory/confinement providers (Docker on Windows per owner engine mapping, Podman, Jail, Seatbelt), Phase 3 SimpleOS shared pages/PMM, Phase 4 non-Windows provider qualification, and Phase 5 benchmarks at scale produce no evidence on this host. Each needs its target host or the QEMU/board lanes (`.claude/rules/board-runnable.md`).
+
+## Increment 3 Lane E — Windows hard memory cap evidence
+
+Module `src/lib/nogc_sync_mut/io/windows_memory_cap_probe_v1.spl` (no new FFI; wraps `windows_process_owner` start-with-memory / poll / peak-before-collect / collect). Non-Windows hosts return `Err("unsupported-host")`.
+
+- Units: `WindowsJobMemoryBytesV1: i64`, `WindowsProbeExitCodeV1: i64`, `WindowsProbeFlagV1: bool`, `WindowsProbeTimeoutMsV1: i64`.
+- `windows_memory_cap_probe_run_v1(WindowsMemoryCapProbeRequestV1) -> Result<WindowsMemoryCapObservationV1, text>` (observation also carries `program`, `args` and `program_digest` for the evidence digest).
+- `windows_memory_cap_verdict_v1(under, over, baseline) -> WindowsMemoryCapVerdictV1` (Enforced also requires baseline.peak > cap and identical program/program_digest across all three runs, and baseline args equal to the over-cap args; `Enforced | NotEnforced(text) | Inconclusive(text)`).
+- `windows_container_capability_report_v1(under, over, baseline, provider_version) -> ContainerCapabilityReportV1`: `memory_hard_limit` + `job-commit` accounting and `evidence_revision = "job-commit:<sha256>"` (digest over length-prefixed program/digest/args/timed_out of all three observations plus caps, peaks, exit codes and over stdout) only when Enforced; otherwise accounting empty and `evidence_revision = "unaffirmed:<sha256>"`. limit_update/reclaim always false.
+
+Measured 2026-11-26 (Windows 11, child `simple-local-20261125.exe run test/fixtures/container/alloc_mb.spl <N MiB>`): idle peak 175067136; cap 276824064 (264 MiB, must be 4096-aligned or owner readback fails); under N=48 peak 208805888 exit 0; over N=256 peak 310333440 exit 3221226505 (0xC0000409), no marker; uncapped baseline N=256 peak 444280832 exit 0. Verdict Enforced.
+
+Finding: on denial `PeakJobMemoryUsed` overshoots the cap by ~33.5 MB (one allocator growth step), so the over-cap check allows cap + 64 MiB; the under-cap peak must be strictly <= cap. Spec: `test/01_unit/lib/nogc_sync_mut/io/windows_memory_cap_probe_v1_spec.spl`.
+
+Lane E review fixes (2026-11-26): `windows_container_capability_report_v1(under, over, baseline, provider_version)` now derives the verdict itself (no caller-supplied verdict); evidence digest binds program path, sha256 of the binary bytes, under/over/baseline peaks and exit codes, and over stdout. Enforced additionally requires `over.peak >= cap` and `over.peak > under.peak`. `readback_ok` is true only for a positive cap (cap 0 has no readback); `host_arch` comes from the host. Error paths after start cancel and collect the child. Near-cap measurement (cap 276824064): N=124 peak 276021248 ok; N=128 peak 310341632 completed in one run and died 0xC0000409 in another; N=160 peak 310374400 died. Outcome near the cap is nondeterministic and the peak overshoot is bounded at ~33.5 MB, so the 64 MiB tolerance is kept as measured.
