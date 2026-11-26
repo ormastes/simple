@@ -193,7 +193,59 @@ jobs:
           mkdir -p build/ladder/in build/ladder/out build/ladder/evidence
           case "${{ matrix.platform }}" in linux-*) ulimit -c unlimited || true ;; esac
           rc=0
-          sh scripts/bootstrap/phase-ladder-step.shs "${{ matrix.platform }}" build/ladder/in build/ladder/out "${{ steps.build_jobs.outputs.count }}" 2>&1 | tee build/ladder/evidence/step.log || rc=$?
+          case "${{ matrix.platform }}" in
+          linux-*)
+            # Diagnostics only: run the build in its own process group and
+            # sample memory every 10 s into evidence/mem.log. If MemAvailable +
+            # SwapFree drops below LADDER_MEM_FLOOR_KB, kill the build loudly
+            # so the artifact steps still run instead of the VM starving. A
+            # kill always fails the step; it can never make the gate pass.
+            mem_log=build/ladder/evidence/mem.log
+            floor_kb=${LADDER_MEM_FLOOR_KB:-1572864}
+            setsid sh -c 'sh scripts/bootstrap/phase-ladder-step.shs "$1" build/ladder/in build/ladder/out "$2" > build/ladder/evidence/step.log 2>&1' sh "${{ matrix.platform }}" "${{ steps.build_jobs.outputs.count }}" &
+            bpid=$!
+            tail -n +1 -F build/ladder/evidence/step.log 2>/dev/null &
+            tpid=$!
+            ( set +e
+              peak_rss=0; peak_swap=0; min_avail=999999999
+              while kill -0 "$bpid" 2>/dev/null; do
+                avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+                sfree=$(awk '/^SwapFree:/{print $2}' /proc/meminfo)
+                rss=0; swp=0; top=""
+                for p in $(ps -eo pid=,pgid= | awk -v g="$bpid" '$2==g{print $1}'); do
+                  r=$(awk '/^VmRSS:/{print $2}' /proc/$p/status 2>/dev/null); s=$(awk '/^VmSwap:/{print $2}' /proc/$p/status 2>/dev/null)
+                  rss=$((rss + ${r:-0})); swp=$((swp + ${s:-0}))
+                done
+                top=$(ps -eo pgid=,rss=,comm= --sort=-rss | awk -v g="$bpid" '$1==g{print $3":"$2; if(++n==3) exit}' | tr '\n' ' ')
+                [ "$rss" -gt "$peak_rss" ] && peak_rss=$rss
+                [ "$swp" -gt "$peak_swap" ] && peak_swap=$swp
+                head=$((avail + sfree)); [ "$head" -lt "$min_avail" ] && min_avail=$head
+                line="$(date -u +%H:%M:%S) avail_kb=$avail swapfree_kb=$sfree build_rss_kb=$rss build_swap_kb=$swp peak_rss_kb=$peak_rss peak_swap_kb=$peak_swap min_headroom_kb=$min_avail top=[$top] hir=$(grep -o 'done=[0-9]* total=[0-9]*' build/ladder/evidence/step.log 2>/dev/null | tail -1)"
+                echo "$line" >> "$mem_log"
+                { echo "=== $(date -u +%H:%M:%S)"; cat /proc/meminfo; } >> build/ladder/evidence/meminfo.log
+                echo "[mem] $line"
+                if [ "$head" -lt "$floor_kb" ]; then
+                  echo "LADDER-MEM-KILL: MemAvailable+SwapFree=${head} kB < floor ${floor_kb} kB; killing build group $bpid" | tee -a "$mem_log" build/ladder/evidence/mem-kill.txt
+                  ps -eo pid,pgid,rss,vsz,etimes,args --sort=-rss | head -40 >> build/ladder/evidence/mem-kill.txt
+                  kill -KILL -- "-$bpid" 2>/dev/null || true
+                  break
+                fi
+                sleep 10
+              done
+            ) &
+            spid=$!
+            wait "$bpid" || rc=$?
+            kill "$spid" "$tpid" 2>/dev/null || true
+            wait "$spid" 2>/dev/null || true
+            if [ -f build/ladder/evidence/mem-kill.txt ]; then
+              echo "phase-ladder: build killed by memory floor (see evidence/mem-kill.txt)"
+              [ "$rc" -ne 0 ] || rc=1
+            fi
+            ;;
+          *)
+            sh scripts/bootstrap/phase-ladder-step.shs "${{ matrix.platform }}" build/ladder/in build/ladder/out "${{ steps.build_jobs.outputs.count }}" 2>&1 | tee build/ladder/evidence/step.log || rc=$?
+            ;;
+          esac
           exit "$rc"
       - name: Retain tiny attempt receipts (no compiler or cache)
         if: always() && steps.sel.outputs.on == 'true'
