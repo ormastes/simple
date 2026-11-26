@@ -6,7 +6,12 @@ use compiler.driver.cache.lease.lease.{
     lease_is_reclaimable, lease_list_active, lease_reclaim_stale, lease_dir,
     lease_serialize
 }
-use compiler.driver.cache.gc.fast_gc.{move_to_trash, gc_expire_tmp, gc_expire_quarantine, gc_delete_trash}
+use compiler.driver.cache.gc.fast_gc.{
+    move_to_trash, gc_expire_tmp, gc_expire_quarantine, gc_delete_trash,
+    _gc_build_protected_paths, _gc_is_path_protected
+}
+use compiler.driver.cache.gc.mark_sweep.{list_action_paths, list_blob_paths}
+use compiler.driver.cache.cas_store.{cas_open, cas_put, ActionManifest, action_put, cas_action_path, cas_blob_path}
 use compiler.driver.cache.gc.admission.{admission_check}
 use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_source_record_v1}
 use compiler.driver.cache.metadata.cache_limits.{CacheLimits, CacheRetentionLimitsV1}
@@ -138,4 +143,35 @@ describe "cache_v2 lease and GC regressions":
         expect(file_exists("{root}/e2.hir")).to_equal(true)
         expect(file_exists("{root}/e3.hir")).to_equal(true)
         expect(file_exists("{root}/.by-source/mod-x.idx.lock")).to_equal(true)
+        val _rm = dir_remove_all(root)
+
+    it "normalizes backslash and forward-slash paths in fast_gc and mark_sweep protection":
+        val root = reg_root("win_norm")
+        cas_open(root)
+        val blob_digest = cas_put(root, "blob-bytes")
+        val manifest = ActionManifest(action_digest: "act_norm", artifact_digests: [blob_digest], schema_version: 1)
+        action_put(root, "act_norm", manifest)
+        val lease = lease_acquire(root, ["act_norm"], [blob_digest]).unwrap()
+        val _wpin = file_write("{root}/pins", "pinned_digest_1\n")
+
+        val protected = _gc_build_protected_paths(root, [lease])
+        val fwd_action = cas_action_path(root, "act_norm")
+        val back_action = fwd_action.replace("/", "\\")
+        val fwd_pinned_blob = cas_blob_path(root, "pinned_digest_1")
+        val back_pinned_blob = fwd_pinned_blob.replace("/", "\\")
+
+        expect(_gc_is_path_protected(protected, fwd_action)).to_equal(true)
+        expect(_gc_is_path_protected(protected, back_action)).to_equal(true)
+        expect(_gc_is_path_protected(protected, back_pinned_blob)).to_equal(true)
+        expect(_gc_is_path_protected(protected, "{root}\\actions\\unprotected_act")).to_equal(false)
+
+        val win_root = root.replace("/", "\\")
+        val action_paths = list_action_paths(win_root)
+        val blob_paths = list_blob_paths(win_root)
+        expect(action_paths.len()).to_equal(1)
+        expect(blob_paths.len()).to_equal(1)
+        expect(action_paths[0].contains("\\")).to_equal(false)
+        expect(blob_paths[0].contains("\\")).to_equal(false)
+
+        expect(lease_release(root, lease.lease_id)).to_equal(true)
         val _rm = dir_remove_all(root)
