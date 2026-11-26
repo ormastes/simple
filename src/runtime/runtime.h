@@ -1713,6 +1713,7 @@ int64_t  rt_time_now_unix_micros(void);
 
 int64_t  rt_signal_install(int64_t signal_num);
 int64_t  rt_signal_check(int64_t signal_num);
+int64_t  rt_install_crash_handler(void);
 int64_t  rt_atexit_install(void);
 int64_t  rt_atexit_check(void);
 

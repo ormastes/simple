@@ -2907,76 +2907,14 @@ static void _spl_atexit_handler(void) {
 
 /* ----------------------------------------------------------------
  * Crash Signal Handler (SIGSEGV / SIGBUS)
+ * Shared with runtime_native.c via runtime_crash_handler_impl.h
+ * (classifies siginfo_t.si_code via _spl_fault_class).
  * ---------------------------------------------------------------- */
-#ifndef _WIN32
-/* Classify a fault from siginfo_t.si_code.
- *
- * Phase 5 of doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md:
- * si_addr alone cannot tell a wild-pointer dereference apart from a fault the
- * process brought on itself by exhausting a resource, and the two need
- * different operator responses (fix the pointer bug vs. raise the limit).
- * Pure lookup, no allocation, no locking — safe to call from a signal handler. */
-static const char* _spl_fault_class(int signum, int sicode) {
-    if (sicode == SI_USER) return "delivered by kill() — not a genuine fault";
-#ifdef SI_KERNEL
-    if (sicode == SI_KERNEL) return "kernel-raised fault";
-#endif
-    if (signum == SIGSEGV) {
-        if (sicode == SEGV_MAPERR) return "address not mapped — wild/null pointer";
-        /* A guard page (stack overflow, or an mmap'd region past a limit) is
-         * mapped but not accessible, so a resource-limit violation lands here
-         * rather than on SEGV_MAPERR. */
-        if (sicode == SEGV_ACCERR) return "permission denied on a mapped page — guard page / memory-limit violation";
-#ifdef SEGV_BNDERR
-        if (sicode == SEGV_BNDERR) return "bounds-check violation";
-#endif
-        return "unclassified segmentation fault";
-    }
-    if (sicode == BUS_ADRALN) return "misaligned address";
-    if (sicode == BUS_ADRERR) return "nonexistent physical address";
-    if (sicode == BUS_OBJERR) return "object-specific hardware error";
-    return "unclassified bus error";
+#include "runtime_crash_handler_impl.h"
+
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_install_crash_handler(void) {
+    return rt_install_crash_handler_impl();
 }
-
-static void _spl_crash_handler(int signum, siginfo_t *info, void *ucontext) {
-    (void)ucontext;
-    const char *signame = (signum == SIGSEGV) ? "SIGSEGV" : "SIGBUS";
-    int sicode = info->si_code;
-
-    /* Use write() not fprintf — async-signal-safe */
-    char buf[256];
-    int len = snprintf(buf, sizeof(buf),
-        "\n[simple-runtime] Fatal: %s at address %p (si_code=%d: %s)\n",
-        signame, info->si_addr, sicode, _spl_fault_class(signum, sicode));
-    if (len > 0) write(STDERR_FILENO, buf, (size_t)len);
-
-    /* Backtrace */
-    void *frames[32];
-    int nframes = backtrace(frames, 32);
-    if (nframes > 0) {
-        write(STDERR_FILENO, "Backtrace:\n", 11);
-        backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
-    }
-
-    /* Exit with signal-appropriate code */
-    _exit(128 + signum);
-}
-
-int64_t rt_install_crash_handler(void) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = _spl_crash_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
-
-    int ok = 1;
-    if (sigaction(SIGSEGV, &sa, NULL) == -1) ok = 0;
-    if (sigaction(SIGBUS, &sa, NULL) == -1) ok = 0;
-    return ok;
-}
-#else
-int64_t rt_install_crash_handler(void) { return 0; }
-#endif
 
 #ifndef _WIN32
 int64_t rt_signal_install(int64_t signal_num) {

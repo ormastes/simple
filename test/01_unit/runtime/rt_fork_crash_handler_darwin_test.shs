@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+rt="$root/src/runtime"
+test_c="$root/test/01_unit/runtime/rt_fork_crash_handler_darwin_test.c"
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        echo "SKIP: rt_fork_crash_handler_darwin_test is POSIX/Darwin-only"
+        exit 0
+        ;;
+esac
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/rt-fork-crash-darwin.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+CC_BIN=${CC:-clang}
+command -v "$CC_BIN" >/dev/null 2>&1 || CC_BIN=cc
+
+# 1. Core-C provider (runtime_native.c + runtime_fork.c, WITHOUT runtime.c):
+#    strict link with no undefined symbols allowed.
+"$CC_BIN" -std=gnu11 -O0 -g \
+    -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 \
+    -I"$rt" -I"$rt/platform" \
+    "$test_c" \
+    "$rt/runtime_native.c" \
+    "$rt/runtime_fork.c" \
+    "$rt/runtime_memtrack.c" \
+    "$rt/runtime_memory.c" \
+    "$rt/runtime_alloc_observer.c" \
+    "$rt/runtime_process.c" \
+    "$rt/runtime_process_tree.c" \
+    "$rt/runtime_process_owned.c" \
+    "$rt/runtime_legacy_core.c" \
+    "$rt/runtime_core_host_services.c" \
+    "$rt/runtime_simd_utf8.c" \
+    "$rt/runtime_simd_dispatch.c" \
+    -lpthread -lm \
+    -o "$tmp/darwin_corec"
+
+"$tmp/darwin_corec"
+
+# 2. Legacy runtime.c + runtime_fork.c provider.
+if [ "$(uname -s)" = "Darwin" ]; then
+    undef_flag="-Wl,-undefined,dynamic_lookup"
+else
+    undef_flag="-Wl,--unresolved-symbols=ignore-all"
+fi
+"$CC_BIN" -std=gnu11 -O0 -g \
+    -I"$rt" -I"$rt/platform" \
+    "$test_c" \
+    "$rt/runtime.c" \
+    "$rt/runtime_fork.c" \
+    "$rt/runtime_memtrack.c" \
+    "$rt/runtime_simd_utf8.c" \
+    "$undef_flag" \
+    -lpthread -lm \
+    -o "$tmp/darwin_legacy"
+
+"$tmp/darwin_legacy"
+
+# 3. Verify Darwin twin linkage: runtime_native.o exports strong
+#    rt_install_crash_handler, runtime.o exports weak twin on Apple, and
+#    linking both objects on Darwin does not fail with duplicate symbols.
+"$CC_BIN" -std=gnu11 -O2 -c -I"$rt" -I"$rt/platform" "$rt/runtime_native.c" -o "$tmp/runtime_native.o"
+"$CC_BIN" -std=gnu11 -O2 -c -I"$rt" -I"$rt/platform" "$rt/runtime.c" -o "$tmp/runtime.o"
+
+nm -g --defined-only "$tmp/runtime_native.o" | grep -Eq '[[:space:]]_?rt_install_crash_handler$' || {
+    echo "FAIL: runtime_native.o missing rt_install_crash_handler" >&2
+    exit 1
+}
+nm -g --defined-only "$tmp/runtime.o" | grep -Eq '[[:space:]]_?rt_install_crash_handler$' || {
+    echo "FAIL: runtime.o missing rt_install_crash_handler" >&2
+    exit 1
+}
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    nm -m "$tmp/runtime.o" | grep -q 'weak external _rt_install_crash_handler$' || {
+        echo "FAIL: runtime.o _rt_install_crash_handler is not weak external on Darwin" >&2
+        exit 1
+    }
+    if nm -m "$tmp/runtime_native.o" | grep -q 'weak external _rt_install_crash_handler$'; then
+        echo "FAIL: runtime_native.o _rt_install_crash_handler must be strong external" >&2
+        exit 1
+    fi
+fi
+
+# 4. Syntax-check both providers across build configurations.
+for defs in "" "-DSIMPLE_RUNTIME_TESTING" "-DSIMPLE_RUNTIME_MEMORY_OWNER=1" "-DSIMPLE_CORE_C_STANDALONE=1"; do
+    # shellcheck disable=SC2086
+    "$CC_BIN" -fsyntax-only -std=gnu11 $defs -I"$rt" -I"$rt/platform" "$rt/runtime.c"
+    # shellcheck disable=SC2086
+    "$CC_BIN" -fsyntax-only -std=gnu11 $defs -I"$rt" -I"$rt/platform" "$rt/runtime_native.c"
+done
+
+echo "PASS: rt_fork_crash_handler_darwin_test passed across core-c, legacy, twin-link, and syntax checks"

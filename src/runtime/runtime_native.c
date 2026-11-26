@@ -1155,6 +1155,14 @@ SPL_CORE_C_WEAK int64_t rt_atexit_check(void) {
 
 #undef SPL_CORE_C_WEAK
 
+/* Crash signal handler (SIGSEGV / SIGBUS): one body shared with runtime.c
+ * so core-C binaries export rt_install_crash_handler and install it at startup. */
+#include "runtime_crash_handler_impl.h"
+
+int64_t rt_install_crash_handler(void) {
+    return rt_install_crash_handler_impl();
+}
+
 static int64_t rt_host_gpu_queue_now_us(void) {
 #if defined(_WIN32)
     LARGE_INTEGER counter;
@@ -8296,6 +8304,7 @@ static char** rt_core_filtered_argv = NULL;
 SPL_WEAK void spl_init_args(int argc, char** argv) {
     rt_core_argc = simple_runtime_filter_startup_args(
         argc, argv, &rt_core_filtered_argv, &rt_core_argv);
+    rt_install_crash_handler();
 }
 
 SPL_WEAK int64_t spl_arg_count(void) {
