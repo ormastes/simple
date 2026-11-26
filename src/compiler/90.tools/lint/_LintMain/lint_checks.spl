@@ -93,6 +93,7 @@ use compiler.tools.fix.rules.registry.{registry_fix_producers, run_admitted_regi
 use compiler.tools.fix.producer.{fix_unit_from_source}
 use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings, primitive_api_fix_hint, TextFindingKind}
 use compiler.tools.fix.rules.impl_.lint_option_pattern.{non_option_pattern_lines}
+use compiler.tools.fix.rules.impl_.lint_match_exhaustive.{match_exhaustiveness_findings}
 use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
 use lazy nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
@@ -432,6 +433,9 @@ impl Linter:
         self.check_perf_analysis_rules(file_config, path, content)
 
         # Gate EasyFix registry producers BEFORE building FixUnit or invoking rules
+        # Catch-all fixes from `L:non_exhaustive_match`, keyed by the match
+        # block's last line; attached to the SPL-MATCH-001 finding below.
+        var catch_all_fixes: Dict<i64, EasyFix> = {}
         var any_registry_admitted = false
         for p in registry_fix_producers():
             if lint_rule_admitted_for_config(file_config, p.code):
@@ -445,6 +449,9 @@ impl Linter:
             lint_clear_active_config_v1()
             for fix in shared_fixes:
                 val rule_id = lint_rule_code_from_easyfix_id(easyfix_id(fix))
+                if rule_id == "non_exhaustive_match":
+                    catch_all_fixes[lint_line_from_easyfix_id(easyfix_id(fix))] = fix
+                    continue
                 val lint = LintDiag.new(rule_id, LintLevel.Warn, LintCategory.Warning, easyfix_description(fix))
                     .with_easy_fix(fix)
                 # Line from the first replacement; diagnostic-only fixes carry it in the id.
@@ -507,6 +514,19 @@ impl Linter:
         for pat_line in non_option_pattern_lines(lines):
             val lint = LintDiag.new("non_option_pattern_match", LintLevel.Deny, LintCategory.Warning, "Some/None pattern matched against a non-Option subject")
             self.results.push(LintRunResult.new(path, pat_line, 1, lint))
+
+        # SPL-MATCH-001: match over a locally declared enum missing variants and
+        # without `_`. Shared detector with the LSP pass (RB-DIAG-01); only
+        # MEXH001 is reported here, level then follows diagnostic_policy.sdn.
+        # The text-only catch-all rule cannot tell an exhaustive match from a
+        # missing variant, so its fix rides on this finding instead of
+        # standing alone.
+        for mexh in match_exhaustiveness_findings(lines):
+            if mexh.code == "MEXH001":
+                var lint = LintDiag.new("MEXH001", LintLevel.Warn, LintCategory.Warning, mexh.message)
+                if catch_all_fixes.contains_key(mexh.end_line):
+                    lint = lint.with_easy_fix(catch_all_fixes[mexh.end_line])
+                self.results.push(LintRunResult.new(path, mexh.line, mexh.span.start_col, lint))
 
         # Filter and adjust results based on config
         var filtered_results: [LintRunResult] = []
