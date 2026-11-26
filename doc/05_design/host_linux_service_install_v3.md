@@ -60,3 +60,20 @@ bindings keep the original seven child records and reject additional input.
 The test suite checks the real dispatcher for help and invalid arguments. Live
 publication and reopening require a dedicated provisioned Linux fixture and
 native qualification.
+
+## Native acceptance fixture
+
+Use a dedicated Linux host or guest with a root-owned
+`/etc/simple/container/machine-policy.sdn` and the configured systemd supervisor
+and Podman provider socket units. The installed machine policy supplies both the
+fresh epoch and supervisor profiles. The native opener verifies the calling
+process on its main thread, the provider and cgroup topology, and access to the
+retained epoch lock under `/var/lib/simple/container`. A rootless Podman version
+or capability probe alone cannot satisfy these checks.
+
+Prepare the protected enrollment parent and its `authority-policy.sdn` on that
+fixture. Supply fresh controller output storage, authorized issuer and approver
+keys, and an enrollment binding for the fixture's actual native identity and
+provider. Run the scenario in the installed Host profile using a qualified
+self-hosted Simple runner. The fixture inputs and expected receipts are in the
+[signed provisioning SSpec manual](../06_spec/03_system/app/orchestrator/feature/host_linux_provision_startup_v3_spec.md).
