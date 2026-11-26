@@ -523,12 +523,27 @@ pub struct SpabImportRefV1:
     module_path: text
     name: text
 
+# Static-literal refusal reason for the last `flat_packed_encode_refs_v1` call
+# ("" when the encode succeeded). Static literals are process-lifetime
+# interned, so they never dangle across transient scopes.
+var _spab_last_encode_refusal: text = ""
+
+pub fn flat_packed_last_encode_refusal_v1() -> text:
+    _spab_last_encode_refusal
+
+fn _encode_refuse(reason: text) -> [u8]:
+    _spab_last_encode_refusal = reason
+    []
+
 pub fn flat_packed_encode_refs_v1(lines_blob: text, trace: [i64], refs: [SpabImportRefV1],
         digests: [SpabDigestV1], module_key_hex: text) -> [u8]:
     """As flat_packed_encode_v1, plus the 0x0104 reference table and 0x0900 map."""
+    _spab_last_encode_refusal = ""
     val module_key = _hex_bytes(module_key_hex)
-    if module_key.len() != 16 or not _identity_ok(digests):
-        return []
+    if module_key.len() != 16:
+        return _encode_refuse("bad-module-key")
+    if not _identity_ok(digests):
+        return _encode_refuse("bad-identity-digests")
     var walk = _Walk(lines: lines_blob.split("\n"), pos: 0, ok: true)
     val schema = walk.line()
     var pools: [_Pool] = []
@@ -544,11 +559,11 @@ pub fn flat_packed_encode_refs_v1(lines_blob: text, trace: [i64], refs: [SpabImp
         val family = code / 16
         val shape = code % 16
         if _family_base(family) < 0 or _elem_kind(shape) < 0:
-            return []
+            return _encode_refuse("bad-trace-code")
         val id = _family_base(family) + family_counts[family]
         family_counts[family] = family_counts[family] + 1
         if id > _family_limit(family):
-            return []
+            return _encode_refuse("family-limit-exceeded")
         if clear:
             val start = walk.pos
             val _skipped = walk.pool(family, shape)
@@ -563,7 +578,7 @@ pub fn flat_packed_encode_refs_v1(lines_blob: text, trace: [i64], refs: [SpabImp
             pools.push(walk.pool(family, shape))
             ids.push(id)
     if not walk.ok or walk.pos != walk.lines.len() - 1 or walk.lines[walk.pos] != "":
-        return []
+        return _encode_refuse("walk-mismatch")
     var all_texts: [text] = []
     for p in pools:
         for t in p.texts:
@@ -605,7 +620,7 @@ pub fn flat_packed_encode_refs_v1(lines_blob: text, trace: [i64], refs: [SpabImp
         val key = xxh3_128_text(r.module_path)
         match _xref_row_v1(key):
             case Some(_): module_keys.push(key)
-            case None: return []
+            case None: return _encode_refuse("bad-xref-module-key")
     var xref: [u8] = []
     var ref_idx = 0
     for r in refs:
@@ -710,7 +725,7 @@ pub fn flat_packed_encode_refs_v1(lines_blob: text, trace: [i64], refs: [SpabImp
         out[SPAB_HEADER_BYTES + 24 + c] = table_sum[c]
         c = c + 1
     if flat_packed_decode_lines_v1(out, cleared_lines) != lines_blob:
-        return []
+        return _encode_refuse("roundtrip-decode-mismatch")
     out
 
 # ---- byte source: mmap view (native) or an in-memory copy ----------------------
@@ -1459,7 +1474,7 @@ export SPAB_SUBJECT_SOURCE, SPAB_SUBJECT_COMPILER, SPAB_SUBJECT_BODY
 export SPAB_SECTION_DIGESTS, SPAB_SECTION_STRING_OFFSETS, SPAB_SECTION_STRING_BYTES
 export SPAB_SECTION_SCHEMA, SPAB_SECTION_I64_CHILDREN, SPAB_SECTION_STR_CHILDREN
 export SPAB_SECTION_PAIR_CHILDREN, SPAB_SECTION_CLEARED, SPAB_ENCODING_REQUIRED
-export SPAB_SECTION_XREF, SPAB_SECTION_SET_ONCE, SpabImportRefV1, flat_packed_encode_refs_v1
+export SPAB_SECTION_XREF, SPAB_SECTION_SET_ONCE, SpabImportRefV1, flat_packed_encode_refs_v1, flat_packed_last_encode_refusal_v1
 export SpabDigestV1, SpabSectionV1, SpabViewV1
 export flat_packed_encode_v1, flat_packed_view_v1, flat_packed_admit_v1, flat_packed_decode_lines_v1
 export SpabSourceV1, SpabTokensV1, flat_packed_view_src_v1, flat_packed_open_v1, flat_packed_close_v1

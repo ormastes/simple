@@ -17,7 +17,7 @@ use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_load_v
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_note_hit, frontend_parse_cache_note_miss}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_store_unit_conflicts, frontend_parse_cache_load_unit_conflicts}
 use compiler.frontend.frontend_spab_cache_v1.{frontend_spab_enabled_v1, frontend_spab_load_v1, frontend_spab_store_v1,
-    frontend_spab_last_verify_us_v1, frontend_spab_last_build_us_v1}
+    frontend_spab_last_verify_us_v1, frontend_spab_last_build_us_v1, frontend_spab_last_store_refusal_reason_v1}
 use compiler.frontend.flat_ast_bridge.{flat_pool_capture_take_trace, flat_pool_capture_take_refs}
 use compiler.frontend.core.collection_feedback.{parser_collection_feedback_active}
 use compiler.frontend.desugar.desugar_async.{desugar_module}
@@ -213,7 +213,11 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
         val store_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
         # Packed .spab is the default store; the text .fpc entry is written only
         # under SIMPLE_FRONTEND_SPAB=0 or when the packed store was refused.
-        val spab_stored = if frontend_spab_enabled_v1() and captured_blob != "":
+        # Under streaming_scope=true, module_assembly.spl promotes only
+        # _fab_captured_blob before ending its transient scope, leaving
+        # _fab_captured_trace/_refs reclaimed; skip .spab store there.
+        val spab_enabled = frontend_spab_enabled_v1()
+        val spab_stored = if spab_enabled and not streaming_scope and captured_blob != "":
             frontend_spab_store_v1(key, file_path, captured_blob, flat_pool_capture_take_trace(),
                 flat_pool_capture_take_refs(), parse_source_sha)
         else:
@@ -223,7 +227,11 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
             parse_source, shared_target_identity, file_path, captured_blob)
         if frontend_cache_boundary_profile_enabled():
             val store_t1 = frontend_cache_boundary_profile_now()
-            print("PARSECACHE\tstore_ms={(store_t1 - store_t0) / 1000}\tbytes={captured_blob.len()}\tstored={stored}\tpath={file_path}")
+            val spab_refusal = if not spab_enabled or spab_stored: ""
+                elif streaming_scope: "streaming-scope-unpromoted"
+                elif captured_blob == "": "empty-captured-blob"
+                else: frontend_spab_last_store_refusal_reason_v1()
+            print("PARSECACHE\tstore_ms={(store_t1 - store_t0) / 1000}\tbytes={captured_blob.len()}\tstored={stored}\tspab={spab_stored}\tspab_refusal={spab_refusal}\tpath={file_path}")
         return fresh
     val uncached = if borrowed_scope:
         parse_and_build_module_in_borrowed_scope(parse_source, file_path)

@@ -1,6 +1,6 @@
 # Frontend cache: `.spab` store refused for non-entry modules; HIR workers miss on skeleton keys (2026-11-22)
 
-Status: Finding 1 FIXED in source (unverified at runtime, see "Fix"); Finding 2 and HIR adopt OPEN
+Status: Finding 1 FIXED in source (unverified at runtime, see "Fix"); Finding 2 FIXED in source (2026-11-26, verified on 2-file repro + transient-scope probe); HIR adopt OPEN
 Binary measured: integ25 Stage 2 (`pinned-c1a10190b978/build/bootstrap-s2probe-integ25`)
 Context: MIR fork route (`SIMPLE_MIR_FORK_WORKERS=N`). The root and the 8 HIR shard
 workers each spend ~15 min in "parse" (f25: load_sources ends at 0.8 min, parse ends
@@ -101,6 +101,18 @@ on the same entry. Fix the refusal only if `.spab` is at least 2x faster.
 
 ## Not fixed
 
-`.spab` refusal and HIR adopt: no code change. Both touch the shared parse path, and neither is
-measured on a binary that runs the modified source: the stage2 binary only runs
-prebuilt code, and the seeds cannot interpret the current tree.
+HIR adopt: no code change (touches shared parse/adopt path).
+
+## Finding 2 Fix (2026-11-26)
+
+Root cause identified on a 2-file `native-build` repro (`test/fixtures/bootstrap_nonentry_module_global/main.spl` + `provider.spl`):
+
+- `frontend_spab_cache_v1.spl`'s `_scope_digest()` memoized `_spab_scope_digest_memo = sha256_text_native_or_empty(scope)` and `_spab_scope_digest_for = scope` without checking transient-scope ownership.
+- `driver_source_parse_streaming.spl` warms `frontend_parse_cache_scope()` before the per-file loop (process heap), so `_fe_cache_scope_memo` is persistent, while `_spab_scope_digest_memo` was first computed inside the first file's borrowed transient scope (`driver_parse_transient_scope_begin_v1`).
+- At the end of file 1, `driver_end_transient_parse_scope()` reclaimed `_spab_scope_digest_memo`. On every subsequent file (and even re-parses of file 1), `scope == _spab_scope_digest_for` remained true (both pointed to persistent `_fe_cache_scope_memo`), so `_scope_digest()` returned the freed string handle (`rt_string_len` != 64), causing `flat_packed_encode_refs_v1` (`_identity_ok`) to return `[]` and `frontend_spab_load_v1` to miss.
+
+Fix:
+
+1. `src/compiler/10.frontend/frontend_spab_cache_v1.spl`: track `_spab_scope_digest_scope_id` via `rt_transient_array_scope_identity_v1()`, reusing `_spab_scope_digest_memo` only when `scope_id == 0` (process heap) or `scope_id == _spab_scope_digest_scope_id` (same still-live transient scope).
+2. `src/compiler/10.frontend/frontend.spl`: guard `frontend_spab_store_v1` with `not streaming_scope` (since `module_assembly.spl` promotes only `_fab_captured_blob` and reclaims `_fab_captured_trace`/`_fab_captured_refs` under `streaming_scope=true`) and surface `spab` / `spab_refusal` fields in opt-in `PARSECACHE` store logs.
+3. `src/compiler/10.frontend/core/flat_pool_packed_v1.spl` & `frontend_spab_cache_v1.spl`: record static-literal refusal reasons (`flat_packed_last_encode_refusal_v1()`, `frontend_spab_last_store_refusal_reason_v1()`) for diagnostics and unit specs (`test/01_unit/compiler/frontend/packed_ast/spab_transient_scope_store_spec.spl`).

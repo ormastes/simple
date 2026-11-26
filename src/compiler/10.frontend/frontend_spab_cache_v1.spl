@@ -31,13 +31,21 @@ use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
 use compiler.frontend.flat_ast_bridge.{build_module_from_packed_view_v1}
 use compiler.frontend.core.flat_pool_packed_v1.{SpabDigestV1, SpabImportRefV1, flat_packed_encode_refs_v1, flat_packed_open_v1,
     flat_packed_close_v1, flat_packed_admit_view_strict_v1, flat_packed_store_v1, module_artifact_path_v1,
-    SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1}
+    flat_packed_last_encode_refusal_v1, SPAB_MISS_NATIVE_DIGEST_UNAVAILABLE_V1}
 use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_SHA256_V1, HASH_ALGO_XXH3_128_V1}
 use std.common.crypto.sha256.{sha256_text_native_or_empty}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
 use std.io_runtime.{env_get_opt}
 
 extern fn rt_time_now_unix_micros() -> i64
+
+@unsafe(reason: "side-effect-free observation of current thread transient scope identity", capabilities: [ffi])
+extern fn rt_transient_array_scope_identity_v1() -> i64
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _spab_scope_identity_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _spab_scope_identity_v1() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_identity_v1()
 
 # Default ON (2026-10-25): the packed entry is the store and hit format.
 # SIMPLE_FRONTEND_SPAB=0 opts back into the text `.fpc` line cache.
@@ -51,14 +59,22 @@ pub fn frontend_spab_default_decision_v1(env_value: text) -> bool:
 # Compiler-identity digest of the cache scope, memoised: the scope is fixed for
 # the process, so the hit path does not re-hash it per module. "" when the
 # native SHA-256 is unavailable -- the caller then misses (never falls back).
+# A digest allocated inside a transient parse scope (+id) is reclaimed when
+# that scope ends, so only a process-lifetime memo (scope_id == 0) or one
+# born in the still-live scope may be reused without reading a freed handle.
 var _spab_scope_digest_memo: text = ""
-var _spab_scope_digest_for: text = "@@unset@@"
+var _spab_scope_digest_for: text = ""
+var _spab_scope_digest_scope_id: i64 = -1
 
 fn _scope_digest() -> text:
     val scope = frontend_parse_cache_scope()
-    if scope != _spab_scope_digest_for:
+    val scope_id = _spab_scope_identity_v1()
+    val scope_live = _spab_scope_digest_scope_id == 0 or
+        (_spab_scope_digest_scope_id > 0 and _spab_scope_digest_scope_id == scope_id)
+    if not scope_live or scope != _spab_scope_digest_for:
         _spab_scope_digest_memo = sha256_text_native_or_empty(scope)
         _spab_scope_digest_for = scope
+        _spab_scope_digest_scope_id = scope_id
     _spab_scope_digest_memo
 
 # The xxh3 key is only an index; the sha256 of the exact source bytes is the
@@ -78,19 +94,40 @@ pub fn frontend_spab_path_v1(key: text) -> text:
     module_artifact_path_v1(frontend_parse_cache_dir(), ids[0], ids[2])
 
 var _spab_stores_v1: i64 = 0
+# Static-literal refusal reason for the last `frontend_spab_store_v1` call
+# ("" when the store succeeded). Static literals never dangle across scopes.
+var _spab_last_store_refusal_reason: text = ""
+
+pub fn frontend_spab_last_store_refusal_reason_v1() -> text:
+    _spab_last_store_refusal_reason
 
 pub fn frontend_spab_store_v1(key: text, file_path: text, blob: text, trace: [i64],
         refs: [SpabImportRefV1], source_sha: text) -> bool:
+    _spab_last_store_refusal_reason = ""
     val path = frontend_spab_path_v1(key)
-    if path == "" or blob == "" or trace.len() == 0 or source_sha == "":
+    if path == "":
+        _spab_last_store_refusal_reason = "bad-key-or-scope"
+        return false
+    if blob == "":
+        _spab_last_store_refusal_reason = "empty-blob"
+        return false
+    if trace.len() == 0:
+        _spab_last_store_refusal_reason = "empty-trace"
+        return false
+    if source_sha == "":
+        _spab_last_store_refusal_reason = "native-digest-unavailable"
         return false
     val packed = flat_packed_encode_refs_v1(blob, trace, refs, _identity(key, _scope_digest(), source_sha), xxh3_128_text(file_path))
     if packed.len() == 0:
+        val encode_reason = flat_packed_last_encode_refusal_v1()
+        _spab_last_store_refusal_reason = if encode_reason != "": encode_reason else: "encode-refused"
         return false
     val dir = frontend_parse_cache_dir()
     if not disk_publish_admitted(dir, packed.len()):
+        _spab_last_store_refusal_reason = "disk-admission-refused"
         return false
     if not flat_packed_store_v1(path, packed):
+        _spab_last_store_refusal_reason = "store-write-failed"
         return false
     _spab_stores_v1 = _spab_stores_v1 + 1
     if cache_dir_evict_due(_spab_stores_v1):
@@ -145,4 +182,5 @@ pub fn frontend_spab_load_v1(key: text, source: text, source_sha: text, file_pat
     built
 
 export frontend_spab_enabled_v1, frontend_spab_default_decision_v1, frontend_spab_path_v1, frontend_spab_store_v1,
-    frontend_spab_load_v1, frontend_spab_last_verify_us_v1, frontend_spab_last_build_us_v1
+    frontend_spab_load_v1, frontend_spab_last_verify_us_v1, frontend_spab_last_build_us_v1,
+    frontend_spab_last_store_refusal_reason_v1
