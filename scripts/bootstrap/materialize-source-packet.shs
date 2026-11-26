@@ -1,0 +1,257 @@
+#!/bin/sh
+# Port of the former materialize-source-packet.py.
+#
+# Materialize an exclusively owned candidate using a pinned reusable archive.
+# Usage: materialize-source-packet.shs --config <file> --config-sha256 <hex>
+# This is source readiness only, never native qualification. Configuration and
+# helper bytes are checked before use. Requires jq, git, tar, sha256sum.
+set -eu
+set -C   # noclobber: every plain redirect is an exclusive create, like open(..., 'xb')
+
+fail() { echo "materialize-source-packet: $*" >&2; exit 1; }
+
+config_arg=; config_sha=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --config) [ $# -ge 2 ] || fail 'missing --config value'; config_arg=$2; shift 2 ;;
+        --config-sha256) [ $# -ge 2 ] || fail 'missing --config-sha256 value'; config_sha=$2; shift 2 ;;
+        *) fail "unknown argument $1" ;;
+    esac
+done
+[ -n "$config_arg" ] && [ -n "$config_sha" ] || fail 'usage: --config <file> --config-sha256 <hex>'
+command -v jq >/dev/null 2>&1 || fail 'jq is required'
+
+sha256() { sha256sum -- "$1" | cut -d' ' -f1; }
+cfg() { jq -r --arg k "$1" '.[$k]' "$config_path"; }
+TAB=$(printf '\t')
+
+config_path=$(realpath -e -- "$config_arg") || fail 'config not found'
+[ "$(sha256 "$config_path")" = "$config_sha" ] || fail 'materialization config hash mismatch'
+[ "$(cfg schema)" = 'bootstrap-materialization-request-v1' ] || fail 'unsupported materialization request'
+packet=$(dirname -- "$config_path")
+root=$(cfg source_root)
+repo=$(cfg repository)
+revision=$(cfg source_head)
+archive_base=$(cfg archive_source_head)
+archive_path=$(cfg archive_path)
+archive_sha=$(cfg archive_sha256)
+helper_sha=$(cfg boundary_helper_sha256)
+here=$(cd -- "$(dirname -- "$0")" && pwd)
+self="$here/$(basename -- "$0")"
+
+# Execute exactly the verified bytes: hash a private copy, then source that copy.
+helper_copy="$packet/.boundary-helper.$$.shs"
+cp -- "$here/lib/materialization-path-boundary.shs" "$helper_copy"
+[ "$(sha256 "$helper_copy")" = "$helper_sha" ] || { rm -f -- "$helper_copy"; fail 'boundary helper hash mismatch'; }
+. "$helper_copy"
+rm -f -- "$helper_copy"
+
+SECONDS=0
+rgit() { git -C "$repo" "$@"; }
+rootgit() { git -C "$root" "$@"; }
+
+record() { # record <name>; JSON on stdin; atomic replace
+    jq . > "$packet/$1.tmp.$$" || fail "cannot encode $1"
+    mv -f -- "$packet/$1.tmp.$$" "$packet/$1"
+}
+progress() { # progress <phase> [count]
+    jq -n --argjson pid "$$" --arg phase "$1" --argjson count "${2:-0}" \
+        --argjson elapsed "$SECONDS" --arg head "$revision" \
+        '{pid:$pid,phase:$phase,count:$count,elapsed_seconds:$elapsed,source_head:$head}' | record progress.json
+}
+blob_oid() { git hash-object --no-filters -t blob -- "$1"; }
+git_blob_of_text() { printf '%s' "$1" | git hash-object -t blob --stdin; }
+
+[ -e "$root" ] && [ "$(rootgit rev-parse HEAD)" = "$revision" ] || fail 'approved isolated candidate differs'
+[ "$(rgit rev-parse "$revision")" = "$revision" ] || fail 'revision does not resolve to itself'
+[ "$(rgit rev-parse --show-object-format)" = sha1 ] || fail 'object format is not sha1'
+mpb_init "$root" || fail 'materialization root rejected'
+progress create-worktree
+[ -z "$(rootgit diff --cached --name-only)" ] || fail 'candidate index differs'
+rootgit read-tree HEAD
+[ -f "$archive_path" ] || fail 'archive missing'
+[ "$(sha256 "$archive_path")" = "$archive_sha" ] || fail 'archive hash mismatch'
+[ -z "$(rgit diff --name-only --diff-filter=D "$archive_base" "$revision")" ] || fail 'archive base deletes tracked paths'
+progress reuse-full-base-archive
+
+work="$packet/.materialize.$$"
+mkdir -- "$work"
+entries="$work/entries.tsv"      # mode<TAB>oid<TAB>name
+rgit ls-tree -r -z "$revision" | tr '\0' '\n' | sed -e 's/^\([0-9]*\) [a-z]* \([0-9a-f]*\)\t/\1\t\2\t/' > "$entries"
+
+progress extract
+tar --force-local -tf "$archive_path" > "$work/names.txt"
+tar --force-local -tvf "$archive_path" > "$work/verbose.txt"
+[ "$(wc -l < "$work/names.txt")" = "$(wc -l < "$work/verbose.txt")" ] || fail 'archive listing is ambiguous'
+cut -c1 "$work/verbose.txt" | paste - "$work/names.txt" > "$work/members.tsv"   # type<TAB>name
+: > "$work/dirs.txt"; : > "$work/regular.txt"; : > "$work/archive-aliases.txt"
+# One pass over every member: nothing under .git, no absolute, `..`, drive or
+# backslash path, regular files must be tracked non-alias blobs, aliases must be
+# tracked as aliases, nothing else (no hard links, devices, ...) is accepted.
+awk -F'\t' -v out="$work" '
+    FILENAME==ARGV[1] { mode[$3]=$1; next }
+    {
+        kind=$1; name=$2; clean=name; sub(/\/$/, "", clean)
+        if (("/" clean "/") ~ /\/\.git\//) { print "archive member under .git: " name; bad=1; exit }
+        if (clean ~ /^\// || clean ~ /\\/ || clean ~ /:/ || ("/" clean "/") ~ /\/\.\.\//) { print "archive member escapes root: " name; bad=1; exit }
+        if (kind=="d") print name >> (out "/dirs.txt")
+        else if (kind=="-") {
+            if (!(clean in mode)) { print "archive member not tracked: " name; bad=1; exit }
+            if (mode[clean]==120000) { print "archive regular file is tracked as alias: " name; bad=1; exit }
+            print name >> (out "/regular.txt")
+        } else if (kind=="l") {
+            if (mode[clean]!=120000) { print "archive alias is not tracked as alias: " name; bad=1; exit }
+            print name >> (out "/archive-aliases.txt")
+        } else { print "unsupported archive member: " name; bad=1; exit }
+    }
+    END { exit bad }' "$entries" "$work/members.tsv" >&2 || fail 'archive member rejected'
+# Canonical containment for every directory member; files inherit it from their parent.
+while IFS= read -r name; do
+    mpb_contains "$root/${name%/}" || fail "archive member escapes root: $name"
+done < "$work/dirs.txt"
+# Each archive alias must carry the tracked blob (target text), checked by git itself.
+while IFS= read -r name; do
+    target=$(grep -F -- "$name -> " "$work/verbose.txt" | head -n 1 | sed -e 's/^.* -> //')
+    want=$(awk -F'\t' -v n="${name%/}" '$3==n{print $2}' "$entries")
+    [ "$(git_blob_of_text "$target")" = "$want" ] || fail "alias blob mismatch: $name"
+done < "$work/archive-aliases.txt"
+cat "$work/dirs.txt" "$work/regular.txt" | awk '!seen[$0]++' > "$work/extract.txt"
+# --no-recursion + -k: exactly the listed members; an existing file is an error.
+tar --force-local --no-recursion -xkf "$archive_path" -C "$root" -T "$work/extract.txt"
+
+LC_ALL=C; export LC_ALL
+awk -F'\t' '$1!=120000 && $1!=160000 {print $3}' "$entries" | sort -u > "$work/expected.txt"
+sort -u "$work/regular.txt" > "$work/regular.sorted"
+[ -z "$(comm -23 "$work/regular.sorted" "$work/expected.txt")" ] || fail 'unlisted archive regular file'
+comm -13 "$work/regular.sorted" "$work/expected.txt" > "$work/missing.txt"
+jq -Rn '[inputs]' < "$work/missing.txt" > "$work/missing.json"
+jq -n --slurpfile m "$work/missing.json" '{missing_regular:$m[0],extra_regular:[]}' | record archive-exact-inventory.json
+
+progress restore-omitted-git-blobs
+: > "$work/restored.tsv"
+while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    path="$root/$name"
+    [ ! -e "$path" ] || fail "omitted path already exists: $name"
+    mpb_contains "$path" || fail "path escapes root: $name"
+    oid=$(awk -F'\t' -v n="$name" '$3==n{print $2}' "$entries")
+    mkdir -p -- "$(dirname -- "$path")"
+    rootgit cat-file blob "$oid" > "$path"
+    [ "$(blob_oid "$path")" = "$oid" ] || fail "restored blob mismatch: $name"
+    printf '%s\t%s\t%s\n' "$name" "$oid" "$(wc -c < "$path" | tr -d ' ')" >> "$work/restored.tsv"
+done < "$work/missing.txt"
+jq -Rn '[inputs|split("\t")|{path:.[0],git_blob:.[1],bytes:(.[2]|tonumber)}]' < "$work/restored.tsv" > "$work/restored.json"
+record restored-archive-omissions.json < "$work/restored.json"
+
+# Windows case-folding must not merge two different blobs.
+awk -F'\t' '$1!=120000 && $1!=160000 {k=tolower($3); if ((k in seen) && seen[k]!=$2) {print "unrepresentable Windows case collision: " $3; bad=1; exit} seen[k]=$2} END{exit bad}' "$entries" >&2 \
+    || fail 'case collision'
+
+progress authenticate-physical-blobs
+manifest="$packet/physical-git-blobs-final.tsv"
+regular_n=$(wc -l < "$work/expected.txt" | tr -d ' ')
+(cd "$root" && git hash-object --no-filters --stdin-paths) < "$work/expected.txt" > "$work/actual-oids.txt"
+[ "$(wc -l < "$work/actual-oids.txt" | tr -d ' ')" = "$regular_n" ] || fail 'blob authentication count mismatch'
+: > "$manifest"; : > "$work/mismatch.tsv"
+# expected.txt is sorted; entry lookup and comparison in one awk pass.
+awk -F'\t' -v manifest="$manifest" -v mism="$work/mismatch.tsv" '
+    FILENAME==ARGV[1] { oid[$3]=$2; next }
+    FILENAME==ARGV[2] { actual[FNR]=$0; next }
+    { e=oid[$0]; print e "\t" $0 >> manifest
+      if (actual[FNR]!=e) print $0 "\t" actual[FNR] "\t" e >> mism }' \
+    "$entries" "$work/actual-oids.txt" "$work/expected.txt"
+jq -Rn '[inputs|split("\t")|{path:.[0],actual_git_blob:.[1],expected_git_blob:.[2]}]' < "$work/mismatch.tsv" > "$work/mismatch.json"
+record physical-blob-mismatches.json < "$work/mismatch.json"
+
+progress repair-archive-transforms "$(jq length "$work/mismatch.json")"
+: > "$work/repairs.tsv"
+while IFS="$TAB" read -r name actual expected; do
+    [ -n "$name" ] || continue
+    path="$root/$name"
+    mpb_contains "$path" || fail "path escapes root: $name"
+    preserved="$packet/archive-transformed-originals/$name"
+    mkdir -p -- "$(dirname -- "$preserved")"
+    cp -- "$path" "$preserved"
+    rootgit cat-file blob "$expected" > "$work/payload"
+    if [ "$(sed -e 's/\r$//' "$path" | git hash-object --stdin)" = "$(sed -e 's/\r$//' "$work/payload" | git hash-object --stdin)" ]; then crlf=true; else crlf=false; fi
+    cat "$work/payload" >| "$path"
+    rm -f -- "$work/payload"
+    [ "$(blob_oid "$path")" = "$expected" ] || fail "repair did not restore blob: $name"
+    printf '%s\t%s\t%s\t%s\n' "$name" "$actual" "$expected" "$crlf" >> "$work/repairs.tsv"
+done < "$work/mismatch.tsv"
+jq -Rn '[inputs|split("\t")|{path:.[0],actual_git_blob:.[1],expected_git_blob:.[2],crlf_only:(.[3]=="true")}]' < "$work/repairs.tsv" > "$work/repairs.json"
+record physical-blob-transform-repairs.json < "$work/repairs.json"
+
+progress aliases
+: > "$work/aliases.tsv"
+awk -F'\t' '$1==120000 {print $3 "\t" $2}' "$entries" > "$work/alias-entries.tsv"
+while IFS="$TAB" read -r name oid; do
+    [ -n "$name" ] || continue
+    target=$(rootgit cat-file blob "$oid")
+    [ "$(git_blob_of_text "$target")" = "$oid" ] || fail "alias blob mismatch: $name"
+    link="$root/$name"
+    destination=$(realpath -m -- "$(dirname -- "$link")/$target")
+    mpb_contains "$destination" || fail "external alias: $name"
+    { [ ! -e "$link" ] && [ ! -L "$link" ]; } || fail "alias path exists: $name"
+    mkdir -p -- "$(dirname -- "$link")"
+    if [ -d "$destination" ]; then
+        case "$link$destination" in *[\&\|\<\>\^%\!\"]*) fail "unsafe junction path: $name" ;; esac
+        cmd.exe /d /c mklink /J "$(cygpath -w "$link")" "$(cygpath -w "$destination")" > /dev/null
+        [ "$(realpath -e -- "$link")" = "$destination" ] || fail "junction does not resolve: $name"
+        rep=directory-junction; digest=
+    elif [ -f "$destination" ]; then
+        cp -- "$destination" "$link"
+        digest=$(sha256 "$link")
+        [ "$digest" = "$(sha256 "$destination")" ] || fail "alias copy mismatch: $name"
+        rep=file-copy
+    else
+        case $name in src/*|test/*) fail "unresolved build alias: $name" ;; esac
+        printf '%s' "$target" > "$link"
+        rep=unresolved-nonbuild-link-text; digest=$(sha256 "$link")
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$name" "$target" "$rep" "$digest" >> "$work/aliases.tsv"
+done < "$work/alias-entries.tsv"
+jq -Rn '[inputs|split("\t")|{path:.[0],target:.[1],representation:.[2],content_sha256:(if .[3]=="" then null else .[3] end)}]' < "$work/aliases.tsv" > "$work/aliases.json"
+
+cat > "$work/required.txt" <<'REQUIRED'
+src/compiler/70.backend/backend_plugin/abi/simple_backend_plugin_v1.h
+tools/counterpart/sdk/c/simple_counterpart_abi.h
+src/app/t32_cli/mod.spl
+src/runtime/runtime_native.c
+src/runtime/runtime.h
+src/app/cli/interpreter_main.spl
+src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+scripts/bootstrap/bootstrap-logged-process.shs
+config/var.sdn
+REQUIRED
+while IFS= read -r name; do
+    [ -f "$root/$name" ] || fail "missing required physical input: $name"
+done < "$work/required.txt"
+[ -d "$root/scripts/resource" ] || fail 'missing resource helper closure'
+[ "$(rootgit rev-parse HEAD)" = "$revision" ] || fail 'candidate HEAD moved'
+[ -z "$(rootgit diff --cached --name-only)" ] || fail 'unexpected index changes'
+
+alias_n=$(jq length "$work/aliases.json")
+jq -n --arg root "$root" --arg head "$revision" --arg base "$archive_base" --arg archive "$archive_path" \
+    --arg archive_sha "$(sha256 "$archive_path")" --argjson regular "$regular_n" \
+    --arg manifest "$manifest" --arg manifest_sha "$(sha256 "$manifest")" \
+    --arg req_sha "$config_sha" --arg helper_sha "$helper_sha" --arg self_sha "$(sha256 "$self")" \
+    --argjson elapsed "$SECONDS" \
+    --slurpfile restored "$work/restored.json" --slurpfile repairs "$work/repairs.json" \
+    --slurpfile aliases "$work/aliases.json" --rawfile required "$work/required.txt" \
+    '{schema:"bootstrap-source-materialization-v2",source_root:$root,source_head:$head,
+      archive_source_head:$base,archive_path:$archive,archive_sha256:$archive_sha,
+      archive_omissions_restored:$restored[0],archive_transform_repairs:$repairs[0],
+      tracked_regular_blob_count:$regular,physical_git_blob_manifest:$manifest,
+      physical_git_blob_manifest_sha256:$manifest_sha,authenticated_regular_blobs:$regular,
+      aliases:$aliases[0],required_physical_inputs:($required|split("\n")|map(select(length>0))),
+      physical_build_inputs_ready:true,diagnostic_source_ready:true,frozen:true,
+      native_verified:false,production_qualified:false,admitted:false,elapsed_seconds:$elapsed,
+      materialization_request_sha256:$req_sha,boundary_helper_sha256:$helper_sha,
+      materializer_sha256:$self_sha}' > "$work/receipt.json"
+mpb_verify_root || fail 'materialization root changed before publication'
+record source-ready.json < "$work/receipt.json"
+progress complete "$regular_n"
+rm -rf -- "$work"
+jq -cn --arg root "$root" --arg head "$revision" --argjson n "$regular_n" --argjson a "$alias_n" \
+    '{source_root:$root,source_head:$head,regular_files:$n,aliases:$a,ready:true}'

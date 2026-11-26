@@ -74,7 +74,7 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/bootstrap/bounded-stream-live-adapter.py` | 119 | 1 |
 | `scripts/check/lib/test-runner-source-routes.py` | 135 | 1 |
 | `scripts/bootstrap/tests/phase-ladder-hello-test.py` | 148 | 1 |
-| `scripts/check/check-windows-gnu-runtime-authority-test.py` | 28 | 1 |
+| `scripts/check/check-windows-gnu-runtime-authority-test.py` | 28 | already ported (`check-windows-gnu-runtime-authority.shs --selftest`, 2026-11-26); row was stale, file no longer exists |
 | `test/fixtures/devhub/native_minio_binary_put/verify_health_cli.py` | 50 | 1 |
 | `test/04_smoke/native_parent_parse_closure_scope_test.py` | 57 | 1 |
 | `scripts/bootstrap/collect-diagnostic-continuation.py` | 58 | 1 |
@@ -87,12 +87,12 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/check/check-seed-startup.py` | 56 | 2 |
 | `scripts/bootstrap/hello-sanity-matrix-windows.py` | 60 | 2 |
 | `scripts/bootstrap/capture-ladder-scv-evidence.py` | 68 | 2 |
-| `scripts/check/check-windows-gnu-runtime-authority.py` | 71 | 2 |
+| `scripts/check/check-windows-gnu-runtime-authority.py` | 71 | already ported (`check-windows-gnu-runtime-authority.shs`, 2026-11-26); row was stale, file no longer exists |
 | `scripts/bootstrap/hello-sanity-matrix-darwin.py` | 128 | 3 |
 | `scripts/ci/prepare_mail_config_helper.py` | 134 | 3 |
 | `scripts/bootstrap/phase1-terminal-gate.py` | 56 | 3 |
 | `scripts/bootstrap/tool-code-authority.py` | 99 | 4 |
-| `scripts/bootstrap/materialization-path-boundary.py` | 27 | 5 |
+| `scripts/bootstrap/materialization-path-boundary.py` | 27 | ported 2026-11-26 to `scripts/bootstrap/lib/materialization-path-boundary.shs`; `.py` deleted |
 
 ### (c) Referenced Python tools, 150 lines or more (listed, not ported)
 
@@ -102,7 +102,7 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/check/replay-windows-ladder-providers.py` | 153 | 1 |
 | `scripts/test/test-darwin-footprint-guard.py` | 172 | 1 |
 | `test/fixtures/database/sqlcipher4/devhub1_crypto_oracle.py` | 178 | 1 |
-| `scripts/bootstrap/materialize-source-packet.py` | 199 | 1 |
+| `scripts/bootstrap/materialize-source-packet.py` | 199 | ported 2026-11-26 to `scripts/bootstrap/materialize-source-packet.shs` (receipt key set and values diffed against the Python on a shared fixture); spec `test/01_unit/scripts/materialize_source_packet_spec.spl`; `.py` deleted. Requires jq. |
 | `scripts/bootstrap/run-bootstrap-test-wave.py` | 203 | 1 |
 | `test/fixtures/database/sqlite/gen_fixtures.py` | 214 | 1 |
 | `scripts/bootstrap/tests/sanity-base-controls-test.py` | 234 | 1 |

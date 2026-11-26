@@ -1,0 +1,34 @@
+#!/bin/sh
+# Source only. Port of the former materialization-path-boundary.py.
+#
+# Resolve an immutable materialization root once; still resolve every child.
+# Only for an exclusively owned root. Call mpb_verify_root before publishing its
+# receipt. This does not authenticate file contents or authorize alias creation.
+
+# mpb_init <root>: fails unless root resolves to a directory.
+mpb_init() {
+    MPB_ROOT=$1
+    MPB_RESOLVED=$(realpath -e -- "$MPB_ROOT") || return 1
+    [ -d "$MPB_RESOLVED" ] || { echo 'materialization root is not a directory' >&2; return 1; }
+    MPB_IDENTITY=$(stat -c '%d:%i' -- "$MPB_RESOLVED") || return 1
+}
+
+# mpb_contains <path>: per-child canonical resolution. Lexical prefix
+# comparisons would accept junction/symlink escapes and are deliberately not used.
+mpb_contains() {
+    _mpb_child=$(realpath -m -- "$1") || return 1
+    case "$_mpb_child" in
+        "$MPB_RESOLVED"|"$MPB_RESOLVED"/*) return 0 ;;
+    esac
+    return 1
+}
+
+# mpb_verify_root: fails when the root moved or was replaced.
+mpb_verify_root() {
+    _mpb_current=$(realpath -e -- "$MPB_ROOT") || return 1
+    _mpb_id=$(stat -c '%d:%i' -- "$_mpb_current") || return 1
+    if [ "$_mpb_current" != "$MPB_RESOLVED" ] || [ "$_mpb_id" != "$MPB_IDENTITY" ]; then
+        echo 'materialization root changed before publication' >&2
+        return 1
+    fi
+}

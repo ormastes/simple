@@ -1,0 +1,86 @@
+# @cover scripts/bootstrap/materialize-source-packet.shs 80%
+# @cover scripts/bootstrap/lib/materialization-path-boundary.shs 80%
+"""
+## Purpose and audience
+Purpose: pin the behaviour of the `.shs` port of the former
+`materialize-source-packet.py` and `materialization-path-boundary.py`:
+fail-closed config and helper pinning, archive omission restore, CRLF-transform
+repair, file-alias copy, and the receipt key set.
+Audience: maintainers of `scripts/bootstrap/materialize-source-packet.shs`.
+Needs POSIX sh, git, tar, jq and sha256sum; otherwise the cases are pending.
+"""
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
+
+fn has_posix_shell() -> bool:
+    val (sh_bin, _args) = resolve_shell_argv("true")
+    is_posix_shell_argv(sh_bin)
+
+fn run_sh(cmd: text) -> (text, text, i64):
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    process_run(sh_bin, sh_args)
+
+fn has_tools() -> bool:
+    val (_o, _e, code) = run_sh("command -v jq && command -v git && command -v tar && command -v sha256sum")
+    code == 0
+
+# Builds a fixture under a fresh temp dir; prints "<dir> <config> <config-sha256>".
+val BUILD = "set -- $(d=$(mktemp -d); command -v cygpath >/dev/null && d=$(cygpath -m \"$d\"); sh test/01_unit/scripts/materialize_source_packet_fixture.shs \"$d\" | sed -e \"s#^#$d #\"); d=$1; cfg=$2; sha=$3; "
+val TOOL = "scripts/bootstrap/materialize-source-packet.shs"
+
+describe "materialize-source-packet.shs":
+
+    it "materializes, restores omissions, repairs CRLF transforms and copies file aliases":
+        if not (has_posix_shell() and has_tools()):
+            pending("BLOCKED: POSIX sh with git/tar/jq/sha256sum not available")
+        else:
+            step("Build fixture and run the materializer")
+            val script = "set -e; {BUILD}sh {TOOL} --config \"$cfg\" --config-sha256 \"$sha\" > \"$d/stdout.json\"; cat \"$d/stdout.json\"; jq -c '[.schema,.tracked_regular_blob_count,(.archive_omissions_restored|map(.path)),(.archive_transform_repairs|map([.path,.crlf_only])),(.aliases|map([.path,.representation])),.physical_build_inputs_ready,.admitted,.native_verified]' \"$d/packet/source-ready.json\"; test -f \"$d/packet/physical-git-blobs-final.tsv\"; test -f \"$d/packet/archive-transformed-originals/scripts/resource/helper.sh\"; rm -rf \"$d\""
+            val (out, err, code) = run_sh(script)
+            expect(code).to_equal(0)
+            expect(out).to_contain("\"ready\":true")
+            expect(out).to_contain("\"regular_files\":10")
+            expect(out).to_contain("bootstrap-source-materialization-v2")
+            expect(out).to_contain("[\"config/var.sdn\"]")
+            expect(out).to_contain("[[\"scripts/resource/helper.sh\",true]]")
+            expect(out).to_contain("[[\"src/runtime/alias.h\",\"file-copy\"]]")
+            expect(out).to_contain("true,false,false")
+
+    it "rejects a config whose sha256 does not match":
+        if not (has_posix_shell() and has_tools()):
+            pending("BLOCKED: POSIX sh with git/tar/jq/sha256sum not available")
+        else:
+            step("Run with a wrong --config-sha256")
+            val script = "{BUILD}sh {TOOL} --config \"$cfg\" --config-sha256 0000; rc=$?; test -e \"$d/packet/source-ready.json\" && echo RECEIPT_LEAKED; rm -rf \"$d\"; exit $rc"
+            val (out, err, code) = run_sh(script)
+            expect(code).to_equal(1)
+            expect(err).to_contain("materialization config hash mismatch")
+            expect(out).not_to_contain("RECEIPT_LEAKED")
+
+    it "rejects a boundary helper whose pinned sha256 differs":
+        if not (has_posix_shell() and has_tools()):
+            pending("BLOCKED: POSIX sh with git/tar/jq/sha256sum not available")
+        else:
+            step("Pin a wrong helper hash in the request")
+            val script = "{BUILD}jq '.boundary_helper_sha256=\"00\"' \"$cfg\" > \"$cfg.n\" && mv -f \"$cfg.n\" \"$cfg\"; sha=$(sha256sum \"$cfg\" | cut -d' ' -f1); sh {TOOL} --config \"$cfg\" --config-sha256 \"$sha\"; rc=$?; test -e \"$d/packet/progress.json\" && echo STARTED; rm -rf \"$d\"; exit $rc"
+            val (out, err, code) = run_sh(script)
+            expect(code).to_equal(1)
+            expect(err).to_contain("boundary helper hash mismatch")
+            expect(out).not_to_contain("STARTED")
+
+    it "rejects unsupported schema and unknown flags":
+        if not (has_posix_shell() and has_tools()):
+            pending("BLOCKED: POSIX sh with git/tar/jq/sha256sum not available")
+        else:
+            step("Unknown flag exits 1 before touching anything")
+            val (_o1, err1, code1) = run_sh("sh {TOOL} --no-such-flag")
+            expect(code1).to_equal(1)
+            expect(err1).to_contain("unknown argument")
+            step("Wrong request schema is refused")
+            val script = "{BUILD}jq '.schema=\"other\"' \"$cfg\" > \"$cfg.n\" && mv -f \"$cfg.n\" \"$cfg\"; sha=$(sha256sum \"$cfg\" | cut -d' ' -f1); sh {TOOL} --config \"$cfg\" --config-sha256 \"$sha\"; rc=$?; rm -rf \"$d\"; exit $rc"
+            val (_o2, err2, code2) = run_sh(script)
+            expect(code2).to_equal(1)
+            expect(err2).to_contain("unsupported materialization request")
