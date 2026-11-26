@@ -7595,6 +7595,17 @@ impl MirLowering:
                     if item.has_target:
                         with_bound = lambda_match_bound_union_v1(with_bound, [mir_expr_symbol_id_value(item.target)])
                 self.lambda_block_free_syms(with_body, with_bound, with_acc)
+            case Comprehension(_, comp_expr, comp_clauses):
+                var comp_acc = acc
+                var comp_bound = param_syms
+                for comp_clause in comp_clauses:
+                    match comp_clause.kind:
+                        case HirCompClauseKind.For(comp_var, comp_iter):
+                            comp_acc = self.collect_free_var_syms(comp_iter, comp_bound, comp_acc)
+                            comp_bound = lambda_match_bound_union_v1(comp_bound, [mir_expr_symbol_id_value(comp_var)])
+                        case HirCompClauseKind.If(comp_cond):
+                            comp_acc = self.collect_free_var_syms(comp_cond, comp_bound, comp_acc)
+                self.collect_free_var_syms(comp_expr, comp_bound, comp_acc)
             case StringLit(_, interps):
                 if val its = interps:
                     self.string_interps_free_syms(its, param_syms, acc)
@@ -7999,6 +8010,16 @@ impl MirLowering:
                     if item.has_target:
                         with_bound = lambda_match_bound_union_v1(with_bound, [mir_expr_symbol_id_value(item.target)])
                 self.lambda_block_captures(with_body, with_bound)
+            case Comprehension(_, comp_expr, comp_clauses):
+                var comp_bound = param_syms
+                for comp_clause in comp_clauses:
+                    match comp_clause.kind:
+                        case HirCompClauseKind.For(comp_var, comp_iter):
+                            if self.lambda_body_captures(comp_iter, comp_bound): return true
+                            comp_bound = lambda_match_bound_union_v1(comp_bound, [mir_expr_symbol_id_value(comp_var)])
+                        case HirCompClauseKind.If(comp_cond):
+                            if self.lambda_body_captures(comp_cond, comp_bound): return true
+                self.lambda_body_captures(comp_expr, comp_bound)
             case Lambda(nested_params, nested_body, _):
                 # A lambda literal nested inside another lambda's body (e.g. an
                 # inline lambda arg passed to a call made from within the outer
@@ -8187,6 +8208,14 @@ impl MirLowering:
                 for item in items:
                     if not self.lambda_capture_scan_supported(item.context_expr): return false
                 self.lambda_block_scan_supported(with_body)
+            case Comprehension(_, comp_expr, comp_clauses):
+                for comp_clause in comp_clauses:
+                    match comp_clause.kind:
+                        case HirCompClauseKind.For(_, comp_iter):
+                            if not self.lambda_capture_scan_supported(comp_iter): return false
+                        case HirCompClauseKind.If(comp_cond):
+                            if not self.lambda_capture_scan_supported(comp_cond): return false
+                self.lambda_capture_scan_supported(comp_expr)
             case Lambda(_, nested_body, _):
                 # A nested lambda lifts separately: its loops are its own.
                 val saved_loop_depth = self.lambda_scan_loop_depth
