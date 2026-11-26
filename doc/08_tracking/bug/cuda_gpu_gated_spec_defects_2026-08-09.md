@@ -187,3 +187,21 @@ Also spotted while reading (not the cause of any failure, but a real overflow):
 `_audio_write_u32s` writes in i64 pairs, so for an ODD element count it writes
 one 8-byte word past the end of a `count*4` allocation — e.g. 16 bytes into the
 12-byte `host_input` for a 3-sample input.
+
+## Enumeration 2026-11-26 (NVIDIA GB10, aarch64): fixed or split
+
+Run with `SIMPLE_CUDA_TEST=1` on the GB10 (cc 12.1, driver 580.173.02).
+
+| item | state 2026-11-26 | evidence / owner |
+|---|---|---|
+| 0 harness trap | no longer reproduces: one example reports every failing assertion | GPU spec logs in this lane |
+| 1-2 PTX spec | `gpu_ptx_gen_spec` 81/81 after the header expectation followed `PTX_ISA_VERSION` 8.0 | `test/03_system/feature/usage/gpu_ptx_gen_spec.spl` |
+| 3 interpreter shims | `ctx_destroy`, `memcpy_dtod`, `module_load` and `get_error_string` now dispatch through `CudaFns`; compute capability was already done | `test/02_integration/gpu/cuda_interpreter_driver_shims_live_spec.spl`: 4/4 red on the old seed (48 contexts created, 0 destroyed), 5/5 green on the rebuilt seed |
+| 3 f64 compute ops | split: their kernels exist only in the cuda-feature runtime | `cuda_interpreter_f64_compute_ops_sentinel_2026_11_26` |
+| 3 runtime stubs | split: 41 not-cuda `rt_cuda_*` exports in `cuda_runtime.rs` still return constants (owned by the forwarder lane) | `cuda_runtime_not_cuda_stubs_no_dlopen_2026_11_26` |
+| 4.1 sm_52 | fixed earlier | - |
+| 4.2 build rule | exists; it now defaults `CC` to clang, since plain `cc` is gcc here | `scripts/build/build_simple_audio_cuda_sffi.shs` |
+| 4.3 readback | intermittent: 4 of 7 runs pass with exact samples | `simple_audio_cuda_q15_intermittent_device_failure_2026_11_26` |
+| 4.4 overflow | fixed earlier by the shim rewrite | - |
+| new | `CudaSession.init` kept a negative `cuCtxCreate` status (-2) as a valid context; it now returns that status | same live spec, red `status_ok=true ctx=-2 valid=true` |
+| new | `test/feature/usage/gpu_ptx_gen_spec.spl` is a stale duplicate still failing the 12 corrected expectations | `test_feature_gpu_ptx_gen_spec_stale_duplicate_2026_11_26` |
