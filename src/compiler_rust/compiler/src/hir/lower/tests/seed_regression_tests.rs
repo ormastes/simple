@@ -1086,3 +1086,55 @@ fn flattened_generic_identity_return_isolates_colliding_symbols_and_infers_struc
     let done_local = walk_expr.locals.iter().find(|l| l.name == "done").unwrap();
     assert_eq!(hir.types.get_type_name(done_local.ty), Some("MatchSiteScan"));
 }
+
+/// Bug `seed_jit_extern_return_type_last_wins_2026-11-27`: two co-compiled
+/// modules declare the same runtime extern with different return types. Each
+/// call must be typed by its own module's declaration; before the fix the LAST
+/// registered declaration typed every call, so the frontend's `text` payload
+/// read was typed `i64`, int-boxed, and crashed `rt_text_eq_any`.
+#[test]
+fn flattened_extern_return_type_follows_calling_module_declaration() {
+    use simple_parser::ast::{Attribute, Node};
+    use simple_parser::Parser;
+    let tag_items = |source: &str, owner: &str| -> Vec<Node> {
+        let parsed = Parser::new(source).parse().expect("parse");
+        parsed
+            .items
+            .into_iter()
+            .map(|mut item| {
+                let make_attr = |span| Attribute {
+                    span,
+                    name: format!("{}{owner}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX),
+                    value: None,
+                    args: None,
+                    named_args: None,
+                };
+                match &mut item {
+                    Node::Function(f) => crate::interpreter::tag_function_module_owner(f, owner),
+                    Node::Extern(e) => e.attributes.push(make_attr(e.span)),
+                    _ => {}
+                }
+                item
+            })
+            .collect()
+    };
+
+    let mut entry = Parser::new("fn main() -> i64:\n    0\n").parse().expect("parse entry");
+    entry.items.extend(tag_items(
+        "extern fn rt_word_get(t: i64, i: i64) -> text\n\nfn text_reader(t: i64) -> text:\n    val s = rt_word_get(t, 0)\n    s\n",
+        "frontend_mod.spl",
+    ));
+    // Loaded LAST: under last-wins it would type the frontend's call too.
+    entry.items.extend(tag_items(
+        "extern fn rt_word_get(t: i64, i: i64) -> i64\n\nfn word_reader(t: i64) -> i64:\n    val w = rt_word_get(t, 0)\n    w\n",
+        "enum_wire_mod.spl",
+    ));
+
+    let hir = crate::hir::lower(&entry).expect("flattened conflicting extern declarations");
+    let local_ty = |func: &str, local: &str| {
+        let f = hir.functions.iter().find(|f| f.name == func).unwrap();
+        f.locals.iter().find(|l| l.name == local).unwrap().ty
+    };
+    assert_eq!(local_ty("text_reader", "s"), TypeId::STRING);
+    assert_eq!(local_ty("word_reader", "w"), TypeId::I64);
+}

@@ -684,6 +684,11 @@ impl Lowerer {
                 // Register extern function in globals so it can be called
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                let owner = Self::flatten_owner_of(e.attributes.iter().map(|a| a.name.as_str()));
+                self.flatten_extern_owner_returns
+                    .entry(e.name.clone())
+                    .or_default()
+                    .push((owner, ret_ty));
                 // Calls consult the callable return-type table before falling
                 // back to the ABI-sized value type. Preserve the declaration's
                 // semantic return type just as imported externs do.

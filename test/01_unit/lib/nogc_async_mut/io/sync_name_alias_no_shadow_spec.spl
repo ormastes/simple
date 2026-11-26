@@ -1,0 +1,74 @@
+"""
+# Async io modules must not alias async types under sync class names
+
+Regression guard for
+doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md.
+
+`src/lib/nogc_async_mut/io/file.spl` declared `type File = AsyncFile` and
+`type FileHandle = AsyncFile`, and the `std.nogc_async_mut.io` facade imported
+them under "Sync implementations". That shadowed the sync
+`std.nogc_sync_mut.io.file.FileHandle` (fields `fd`, `mode`, ...) with
+`AsyncFile` (field `fd` only), so the seed could not JIT any module that
+imports the pure-Simple frontend (`Cannot infer field type: struct
+'FileHandle' field 'mode'`) and ran it interpreted at ~0.2 s per source line.
+`buffer.spl` had the same shape for `BufferedReader` / `BufferedWriter`.
+
+The facade now re-exports the sync classes; async types keep `Async*` names.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read, file_exists, dir_walk}
+use std.nogc_async_mut.io.{File, FileHandle, BufferedReader, BufferedWriter, AsyncFile, AsyncFileHandle}
+
+val ASYNC_IO_ROOTS = ["src/lib/nogc_async_mut", "src/lib/gc_async_mut"]
+
+fn alias_target_is_async(line: text) -> bool:
+    # `type Name = Target` where Target starts with `Async`.
+    val trimmed = line.trim()
+    if not trimmed.starts_with("type "):
+        return false
+    val eq = trimmed.index_of(" = ") ?? -1
+    if eq < 0:
+        return false
+    trimmed.substring(eq + 3).trim().starts_with("Async")
+
+fn alias_name(line: text) -> text:
+    val trimmed = line.trim()
+    val eq = trimmed.index_of(" = ") ?? -1
+    trimmed.substring(5, eq).trim()
+
+fn async_aliases_with_sync_names() -> [text]:
+    var bad: [text] = []
+    for root in ASYNC_IO_ROOTS:
+        for path in dir_walk(root):
+            if not path.ends_with(".spl"):
+                continue
+            val content = file_read(path)
+            for line in content.split("\n"):
+                if alias_target_is_async(line) and not alias_name(line).starts_with("Async"):
+                    bad.push("{path}: {line.trim()}")
+    bad
+
+describe "async io sync-name aliases":
+    it "file.spl declares no File/FileHandle alias of AsyncFile":
+        val content = file_read("src/lib/nogc_async_mut/io/file.spl")
+        assert_false(content.contains("type File = AsyncFile"))
+        assert_false(content.contains("type FileHandle = AsyncFile"))
+        assert_true(content.contains("type AsyncFileHandle = AsyncFile"))
+
+    it "buffer.spl declares no BufferedReader/BufferedWriter alias of the async types":
+        val content = file_read("src/lib/nogc_async_mut/io/buffer.spl")
+        assert_false(content.contains("type BufferedReader = AsyncBufferedReader"))
+        assert_false(content.contains("type BufferedWriter = AsyncBufferedWriter"))
+
+    it "no alias of an Async* type in the async/gc io trees uses a non-Async name":
+        assert_equal(async_aliases_with_sync_names(), [])
+
+    it "the facade File is the sync class (static write/read without a driver)":
+        val path = "build/sync_name_alias_facade_file.txt"
+        val wrote = File.write(path, "facade sync file")
+        assert_true(wrote.is_ok())
+        assert_true(file_exists(path))
+        val back = File.read(path)
+        assert_true(back.is_ok())
+        assert_equal(back.unwrap(), "facade sync file")

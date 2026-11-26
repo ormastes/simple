@@ -274,6 +274,10 @@ impl Lowerer {
             (HirExprKind::Global(symbol), _) => Some(symbol.as_str()),
             _ => None,
         };
+        let ret_ty = match callee {
+            Expr::Identifier(name) => self.owner_scoped_extern_return(name).unwrap_or(ret_ty),
+            _ => ret_ty,
+        };
         let ret_ty = self.refine_generic_identity_return(orig_callee, resolved_callee_symbol, args, ret_ty, ctx);
         // Check the RESOLVED symbol, not the bare callee name: in a flattened
         // unit with a cross-module same-named collision, `func_hir.kind` may

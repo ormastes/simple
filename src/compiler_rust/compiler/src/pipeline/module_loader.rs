@@ -644,6 +644,10 @@ fn tag_node_function_owners(node: &mut Node, owner: &str) {
         Node::Class(definition) => Some((&mut definition.attributes, definition.span)),
         Node::Enum(definition) => Some((&mut definition.attributes, definition.span)),
         Node::Impl(definition) => Some((&mut definition.attributes, definition.span)),
+        // Externs too: co-compiled modules may declare one runtime symbol with
+        // different return types, and HIR types each call by its own module's
+        // declaration (`Lowerer::flatten_extern_owner_returns`).
+        Node::Extern(definition) => Some((&mut definition.attributes, definition.span)),
         _ => None,
     };
     if let Some((attributes, span)) = declaration {

@@ -1,0 +1,36 @@
+"""
+# The JIT types an extern call by its own module's declaration
+
+Regression guard for
+doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md.
+
+`rt_tuple_get` is declared `-> i64` in `src/lib/nogc_sync_mut/sffi/enum_wire.spl`
+and `<T> -> T?` in the frontend (`parser_types_expr.spl`). In a co-compiled
+(flattened) JIT unit the seed typed every call by the LAST registered
+declaration, so the frontend's `text` payload read came back as an int-boxed
+raw word (`word << 3`) and `rt_text_eq_any` dereferenced it as a C string:
+rc=139 as soon as the frontend was JIT-admitted. The probe imports both
+declarers and must JIT (strict: no interpreter fallback) and read the name.
+
+194 extern names in `src/**` are declared with more than one return shape, so
+the seed owner-scopes the return type instead of relying on every declaration
+agreeing.
+
+@manual_section cli/run_exit_codes
+"""
+
+use std.spec.*
+use std.io_runtime.{shell}
+
+val PROBE = "test/01_unit/app/cli/fixtures/jit_extern_owner_return_probe.spl"
+
+fn run_probe() -> (text, i64):
+    val r = shell("env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 timeout 600 bin/simple run {PROBE} 2>&1")
+    (r.stdout + r.stderr, r.exit_code)
+
+describe "JIT extern return type follows the calling module":
+    it "frontend payload read stays text when enum_wire's i64 rt_tuple_get is co-compiled":
+        val (out, rc) = run_probe()
+        assert_equal(rc, 0)
+        assert_contains(out, "PROBE nm=i64")
+        assert_false(out.contains("[jit-fallback]"))

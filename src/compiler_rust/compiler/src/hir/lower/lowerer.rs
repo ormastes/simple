@@ -247,6 +247,13 @@ pub struct Lowerer {
     /// override the importer's own (or vice versa). See
     /// `doc/08_tracking/bug/selective_use_leaks_same_named_fn_2026-09-13.md`.
     pub(super) flatten_fn_owners: HashMap<String, Vec<Option<String>>>,
+    /// Flattened unit only: extern name -> (declaring owner, resolved return
+    /// type) for every `extern fn` declaration of that name. Co-compiled modules
+    /// may declare one runtime symbol with different return types (e.g.
+    /// `rt_tuple_get(..) -> i64` vs `rt_tuple_get<T>(..) -> T?`); a call is typed
+    /// by its own module's declaration, not the last one registered. See
+    /// `doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md`.
+    pub(super) flatten_extern_owner_returns: HashMap<String, Vec<(Option<String>, TypeId)>>,
     /// Flattened unit only: importer owner -> local name -> (source owner,
     /// source name), decoded from every `__simple_flatten_import_binding__`
     /// marker. Keyed by importer, unlike `import_alias_bindings`.
@@ -473,6 +480,7 @@ impl Lowerer {
             fn_param_default_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
+            flatten_extern_owner_returns: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
             flatten_owner_glob_sources: HashMap::new(),
             flatten_owner_module_namespaces: HashMap::new(),
@@ -579,6 +587,7 @@ impl Lowerer {
             fn_param_default_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
+            flatten_extern_owner_returns: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
             flatten_owner_glob_sources: HashMap::new(),
             flatten_owner_module_namespaces: HashMap::new(),
@@ -708,6 +717,7 @@ impl Lowerer {
             fn_param_default_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
+            flatten_extern_owner_returns: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
             flatten_owner_glob_sources: HashMap::new(),
             flatten_owner_module_namespaces: HashMap::new(),
@@ -1155,6 +1165,7 @@ impl Lowerer {
         // compared to silently binding the wrong function. See
         // `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
         self.flatten_fn_owners.clear();
+        self.flatten_extern_owner_returns.clear();
         self.flatten_owner_import_bindings.clear();
         self.flatten_owner_glob_sources.clear();
         self.flatten_owner_module_namespaces.clear();
@@ -1296,6 +1307,28 @@ impl Lowerer {
             .into_iter()
             .find_map(|name| name.strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX))
             .map(str::to_string)
+    }
+
+    /// Return type of a call to extern `name` as declared by the CALLING
+    /// module, when co-compiled modules declare `name` with different return
+    /// types. `None` (keep the bare-name type) when every declaration agrees or
+    /// the caller's module declares none of its own.
+    ///
+    /// Without this the last registered declaration typed every call: with
+    /// `enum_wire.spl`'s `rt_tuple_get(..) -> i64` loaded after the frontend's
+    /// `rt_tuple_get<T>(..) -> T?`, a `text` payload read came back as a raw
+    /// word typed `i64` and was int-boxed (`word << 3`); `rt_text_eq_any` then
+    /// dereferenced it as a C string (SIGSEGV).
+    pub(super) fn owner_scoped_extern_return(&self, name: &str) -> Option<TypeId> {
+        let decls = self.flatten_extern_owner_returns.get(name)?;
+        let first = decls.first()?.1;
+        if decls.iter().all(|(_, ty)| *ty == first) {
+            return None;
+        }
+        decls
+            .iter()
+            .find(|(owner, _)| *owner == self.current_function_owner)
+            .map(|(_, ty)| *ty)
     }
 
     fn flatten_is_collision(&self, name: &str) -> bool {
