@@ -66,6 +66,7 @@ pub fn load_export_source(
             Ok((dict, owner))
         }
         Ok(_) => Ok((Arc::new(DictMap::new()), None)),
+        Err(e) if super::module_loader::is_unprovided_use_error(&e) => Err(e),
         Err(e) => {
             warn!(error = %e, "Failed to load export source");
             Ok((Arc::new(DictMap::new()), None))

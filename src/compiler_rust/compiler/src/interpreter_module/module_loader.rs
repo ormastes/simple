@@ -353,6 +353,23 @@ fn locally_defined_names(items: &[Node]) -> Vec<String> {
             // above, which likewise does not contribute its method names.
             Node::Extern(e) => names.push(e.name.clone()),
             Node::ExternClass(c) => names.push(c.name.clone()),
+            // Every other named declaration is importable surface too. Since an
+            // unprovided braced use name is a hard error, missing one here
+            // rejects a valid import (`pub unit SosixWindowsTokenV1: i64`).
+            Node::Unit(u) => names.push(u.name.clone()),
+            Node::UnitFamily(u) => names.push(u.name.clone()),
+            Node::CompoundUnit(u) => names.push(u.name.clone()),
+            Node::Trait(t) => names.push(t.name.clone()),
+            Node::Mixin(m) => names.push(m.name.clone()),
+            Node::Actor(a) => names.push(a.name.clone()),
+            Node::TypeAlias(t) => names.push(t.name.clone()),
+            Node::ClassAlias(c) => names.push(c.name.clone()),
+            Node::FunctionAlias(f) => names.push(f.name.clone()),
+            Node::Bitfield(b) => names.push(b.name.clone()),
+            Node::Macro(m) => names.push(m.name.clone()),
+            Node::Newtype(n) => names.push(n.name.clone()),
+            Node::Const(c) => names.push(c.name.clone()),
+            Node::Static(s) => names.push(s.name.clone()),
 
             Node::Let(stmt) => {
                 if let simple_parser::ast::Pattern::Identifier(name) = &stmt.pattern {
@@ -398,6 +415,17 @@ fn group_import_names(target: &ImportTarget) -> Option<Vec<String>> {
     match target {
         ImportTarget::Group(items) => Some(items.iter().flat_map(export_target_names).collect()),
         _ => None,
+    }
+}
+
+/// Names an export list makes visible to importers: an `a as b` entry publishes
+/// only `b`; the source name `a` stays the source module's own symbol.
+fn published_target_names(target: &ImportTarget) -> Vec<String> {
+    match target {
+        ImportTarget::Single(name) => vec![name.clone()],
+        ImportTarget::Aliased { alias, .. } => vec![alias.clone()],
+        ImportTarget::Group(items) => items.iter().flat_map(published_target_names).collect(),
+        ImportTarget::Glob => Vec::new(),
     }
 }
 
@@ -478,6 +506,9 @@ struct ProvidedSet {
     extra: std::collections::HashSet<String>,
     /// Top-level `fn`s declared without `pub` and not re-exported.
     private_fns: std::collections::HashSet<String>,
+    /// Surface is incomplete: host-gated text (`@when(`/`@cfg(`, other-host items
+    /// stripped) or a plain glob `use x.*`. Unprovided check skipped; private rule runs.
+    surface_incomplete: bool,
 }
 
 impl ProvidedSet {
@@ -884,14 +915,8 @@ fn use_warning_seen(key: String) -> bool {
     }
 }
 
-fn use_list_warnings_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none())
-}
-
 /// A module whose surface cannot be enumerated statically: it re-exports via a
 /// glob (`export use x.*`) or a bare `export use {..}` that pulls from siblings.
-/// Checking such a module would produce false positives, so we skip it.
 fn module_surface_is_opaque(items: &[Node]) -> bool {
     items.iter().any(|item| match item {
         Node::ExportUseStmt(export_stmt) => {
@@ -908,10 +933,17 @@ fn collect_provided_names(
     module_functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     module_classes: &HashMap<String, Arc<ClassDef>>,
     module_enums: &Enums,
+    host_gated: bool,
 ) -> ProvidedNames {
     if module_surface_is_opaque(items) {
         return None;
     }
+    // A plain glob `use x.*` publishes what it pulls in transitively
+    // (driver_source_pipeline_impl), so only the private rule is checkable.
+    let surface_incomplete = host_gated
+        || items
+            .iter()
+            .any(|item| matches!(item, Node::UseStmt(u) if matches!(u.target, ImportTarget::Glob)));
     // Export names are answered by the shared table itself; collecting them
     // here made this set as wide as the module's transitive import closure.
     let mut provided: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -934,7 +966,7 @@ fn collect_provided_names(
     for item in items {
         match item {
             Node::ExportUseStmt(export_stmt) => {
-                for name in export_target_names(&export_stmt.target) {
+                for name in published_target_names(&export_stmt.target) {
                     provided.insert(name);
                 }
             }
@@ -951,6 +983,7 @@ fn collect_provided_names(
         exports: Arc::clone(exports),
         extra: provided,
         private_fns: private_top_level_fn_names(items),
+        surface_incomplete,
     }))
 }
 
@@ -1112,24 +1145,66 @@ fn private_import_is_baselined(module_path: &Path, name: &str) -> bool {
     }
 }
 
-/// Report braced `use` names the resolved module does not provide.
-///
-/// Reports only; the loader still registers the module's whole surface.
-fn warn_unprovided_use_names(
+/// Message tail of every unprovided-use rejection; nested-load error arms key on it
+/// so the rejection propagates instead of degrading to an empty module dict.
+pub(crate) const UNPROVIDED_USE_MARKER: &str = "does not provide it (imported from";
+
+pub(crate) fn is_unprovided_use_error(e: &CompileError) -> bool {
+    e.to_string().contains(UNPROVIDED_USE_MARKER)
+}
+
+/// True when the module text carries a top-level host gate, so its parsed
+/// surface depends on the host and is not a complete provided set.
+fn source_is_host_gated(src: &str) -> bool {
+    src.lines().any(|l| l.starts_with("@when(") || l.starts_with("@cfg("))
+}
+
+fn use_list_warnings_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none())
+}
+
+/// `SIMPLE_STRICT_USE=1` turns an unprovided braced use name into a hard error.
+fn strict_use_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SIMPLE_STRICT_USE").is_ok_and(|v| v == "1"))
+}
+
+/// Default (non-strict) lane: an unprovided-use rejection is reported once as a
+/// `[use-warning]` and loading continues. ponytail: warn-only until the
+/// tree-wide census of modules that re-expose braced imports is empty.
+fn unprovided_use_outcome(r: Result<(), CompileError>) -> Result<(), CompileError> {
+    match r {
+        Err(e) if !strict_use_enabled() => {
+            let msg = e.to_string();
+            if use_list_warnings_enabled() && !use_warning_seen(msg.clone()) {
+                eprintln!("[use-warning] {msg}");
+            }
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Reject braced `use` names the resolved module does not provide. The loader
+/// registers the module's whole surface, so an unprovided name would otherwise
+/// resolve to whatever OTHER co-compiled module defines it (wrong owner,
+/// seed_export_use_as_alias_binds_wrong_owner_2026-11-26).
+fn check_unprovided_use_names(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
     module_path: &Path,
     module_label: &str,
     provided: &ProvidedNames,
-) {
-    if !use_list_warnings_enabled() {
-        return;
-    }
+) -> Result<(), CompileError> {
     let Some(provided) = provided.as_ref() else {
-        return; // opaque surface — not checkable
+        return Ok(()); // opaque surface - not checkable
     };
+    if provided.surface_incomplete {
+        return Ok(()); // host-gated or glob-use surface: not checkable
+    }
     let Some(requested) = requested_group_import_names(use_stmt) else {
-        return; // not a `{...}` group import
+        return Ok(()); // not a `{...}` group import
     };
     for name in requested {
         if provided.contains(&name) {
@@ -1138,14 +1213,12 @@ fn warn_unprovided_use_names(
         let importer = current_file
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
-        if use_warning_seen(format!("{}\u{1}{}\u{1}{}", module_path.display(), name, importer)) {
-            continue;
-        }
-        eprintln!(
-            "[use-warning] '{name}' is named in `use {module_label}.{{...}}` but module '{}' does not provide it (imported from {importer})",
+        return Err(CompileError::semantic(format!(
+            "`{name}` is named in `use {module_label}.{{...}}` but module `{module_label}` ({}) does not provide it (imported from {importer}); import it from the module that defines it",
             module_path.display()
-        );
+        )));
     }
+    Ok(())
 }
 
 /// Validate that imported function effects are compatible with importer's capabilities.
@@ -1404,7 +1477,12 @@ pub fn load_and_merge_module(
                 decrement_load_depth();
                 return Err(e);
             }
-            warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
+            if let Err(e) = unprovided_use_outcome(check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided)) {
+                clear_partial_module_exports(&module_path);
+                unmark_module_loading(&module_path);
+                decrement_load_depth();
+                return Err(e);
+            }
         }
 
         // Merge cached definitions (classes, functions, enums) into caller's HashMaps.
@@ -1803,14 +1881,18 @@ pub fn load_and_merge_module(
     // Use-list check: the braced names in `use mod.{a, b}` are otherwise never
     // compared against what `mod` actually provides. Record the surface so
     // later cache hits can run the same check, then report any name the module
-    // does not provide. Reporting only — registration below is unchanged.
+    // does not provide as a hard error.
     register_module_private_fns(&module_path, &filtered_items);
+    // A host-gated module (`@when(os=...)` / `@cfg(...)`) has its other-host
+    // items stripped before this point, so its surface here is only THIS
+    // host's; checking against it would reject valid cross-host imports.
     let provided_names = collect_provided_names(
         &filtered_items,
         &exports,
         &module_functions,
         &module_classes,
         &module_enums,
+        source_is_host_gated(&raw),
     );
     record_provided_names(&module_path, provided_names.clone());
     if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names) {
@@ -1824,7 +1906,12 @@ pub fn load_and_merge_module(
         decrement_load_depth();
         return Err(e);
     }
-    warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names);
+    if let Err(e) = unprovided_use_outcome(check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names)) {
+        clear_partial_module_exports(&module_path);
+        unmark_module_loading(&module_path);
+        decrement_load_depth();
+        return Err(e);
+    }
 
     // Cache the full module exports for future use
     cache_module_export_table(&module_path, Arc::clone(&exports));
@@ -3036,6 +3123,7 @@ mod private_fn_visibility_tests {
             exports: std::sync::Arc::new(crate::value::ModuleTable::leaf(Default::default())),
             extra: Default::default(),
             private_fns: names.iter().map(|s| s.to_string()).collect(),
+            surface_incomplete: false,
         }))
     }
 
@@ -3505,5 +3593,71 @@ mod private_call_visibility_tests {
         for no in ["src/app/contest/a.spl", "tests/a.spl", "src/test_runner/a.spl", "atest/a.spl", "test", "/r/test"] {
             assert!(!is_test_caller(no), "{no}");
         }
+    }
+
+    fn use_of(src: &str) -> simple_parser::ast::UseStmt {
+        let parsed = simple_parser::Parser::new(src).parse().expect("fixture");
+        parsed
+            .items
+            .into_iter()
+            .find_map(|n| match n {
+                simple_parser::ast::Node::UseStmt(u) => Some(u),
+                _ => None,
+            })
+            .expect("use stmt")
+    }
+
+    fn facade_provided(src: &str) -> super::ProvidedNames {
+        let parsed = simple_parser::Parser::new(src).parse().expect("fixture");
+        super::collect_provided_names(
+            &parsed.items,
+            &std::sync::Arc::new(crate::value::ModuleTable::leaf(Default::default())),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            false,
+        )
+    }
+
+    #[test]
+    fn aliased_reexport_does_not_provide_the_source_name() {
+        let provided = facade_provided("export use owner_a.{is_dir as fa_is_dir}\n");
+        let u = use_of("use facade.{is_dir}\n");
+        let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("facade.spl"), "facade", &provided);
+        let e = r.expect_err("unprovided name must be rejected");
+        let msg = format!("{:?}", e);
+        assert!(msg.contains("is_dir") && msg.contains("facade"), "{msg}");
+        let ok = use_of("use facade.{fa_is_dir}\n");
+        assert!(super::check_unprovided_use_names(&ok, None, std::path::Path::new("facade.spl"), "facade", &provided).is_ok());
+        assert!(super::is_unprovided_use_error(&e));
+    }
+
+    #[test]
+    fn every_named_declaration_kind_is_provided() {
+        let provided = facade_provided(
+            "pub unit TokV1: i64\ntrait Tr:\n    fn t() -> i64\ntype Al = i64\nconst K = 1\nstatic S = 2\n",
+        );
+        for name in ["TokV1", "Tr", "Al", "K", "S"] {
+            let u = use_of(&format!("use m.{{{name}}}\n"));
+            let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided);
+            assert!(r.is_ok(), "{name}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn glob_use_module_keeps_private_rule_and_skips_unprovided() {
+        let provided = facade_provided("use other.*\nfn priv_fn() -> i64:\n    1\n");
+        let set = provided.as_ref().expect("glob use is not opaque");
+        assert!(set.surface_incomplete);
+        assert!(set.private_fns.contains("priv_fn"));
+        let u = use_of("use m.{zzz_from_glob}\n");
+        assert!(super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided).is_ok());
+    }
+
+    #[test]
+    fn host_gated_source_is_detected() {
+        assert!(super::source_is_host_gated("# c\n@when(os=\"linux\"):\npub fn f():\n    pass\n"));
+        assert!(super::source_is_host_gated("@cfg(arch=\"x86_64\")\nfn g():\n    pass\n"));
+        assert!(!super::source_is_host_gated("fn h():\n    @when(x)\n"));
     }
 }
