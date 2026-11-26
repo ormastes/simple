@@ -42,8 +42,7 @@ Remaining:
   `SMF-E-HOTSWAP-ALREADY-PINNED`, and a batch load of a pinned path is refused. There is still no CLI
   reload command (`simple tooling watch --hot-reload` only prints); the covered caller is
   `grouped_native_worker` (batch load).
-- OPEN: `moduleloader_unload` does not retire a path's slot, so a pinned path cannot be batch-loaded again
-  after unload (fails closed).
+- DONE 2026-11-26 hs7 (FIXED-VERIFICATION-PENDING): `moduleloader_unload` releases the path slot (lockless `hot_swap_slot_release`); a pinned path can be loaded and pinned again after unload.
 - State migration across an ABI change (currently refused).
 - Land the OS-thread pin/reclaim stress spec once the seed shared-object crash is fixed (or on a native binary).
 - Bug (FIXED-VERIFICATION-PENDING 2026-11-23, work/at1-20261123): `atomic_i64_new` resolved to an
