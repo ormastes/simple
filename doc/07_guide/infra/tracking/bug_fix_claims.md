@@ -18,7 +18,8 @@ Concurrent agents must not fix the same bug. A bug being fixed is marked
 4. While working call `heartbeat <bug_id> <session>` at least every 2 h. A claim
    with no heartbeat for more than 24 h is STALE and may be taken over or reaped.
 5. When finished: `done <bug_id> <session> [--pr <n> | <n>]` (PR optional) once the PR is merged (status
-   becomes `fixed`, note records the PR), or `release <bug_id> <session>` if you
+   becomes `fix-implemented-verification-pending`, note records the PR; a
+   verifier moves it to `fixed`), or `release <bug_id> <session>` if you
    stop (status returns to the previous value).
    If implementation exists but a required verification remains, use
    `wait-verify <bug_id> <session> "<concrete required check>"` instead. This

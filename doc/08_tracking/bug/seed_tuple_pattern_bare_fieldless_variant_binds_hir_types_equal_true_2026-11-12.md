@@ -166,3 +166,21 @@ there.
   - `test/01_unit/compiler/hir/hir_type_structural_equality_spec.spl` (`8/8` passed, `0` failed).
   - `test/01_unit/compiler/hir/hir_types_equal_int_width_spec.spl` (`4/4` passed, `0` failed).
 - Prior Rust seed fix (`#8497`, `type_equality.spl` untouched) and Stage 2 runs recorded above are already present; updated bug shard status from `open` to `fixed` with `bug_investigation_logs` evidence.
+
+## Re-verification (2026-11-27)
+
+The bug no longer reproduces on `origin/release/1.0.0` `25308aa2aed`. On seed
+`c6f98def228712ea` (aarch64), the repro above prints
+`arr_str=false int12=false red_green=false str_str=true gg=true` on both the
+JIT and the interpreter. Both fixtures exit 0 on the JIT with 0 fallbacks. The
+shard row was out of date: it still said `open`. At that point `native-build` had
+not been rerun.
+
+Native-build, same day, on a seed built from `25308aa2aed` (sha256
+`5347b0437924bb29`), under `MemoryMax=8G`:
+`SIMPLE_BOOTSTRAP=1 <seed> native-build --target aarch64-unknown-linux-gnu
+--backend cranelift --runtime-bundle core-c-bootstrap --source src/lib
+--entry-closure --mode one-binary --entry <fixture> -o <bin>`. Both
+`tuple_pattern_bare_unit_variant_native` (2.2 s, 176 MB RSS) and
+`tuple_pattern_bare_payload_variant_binds_native` build, and both binaries print
+`ok` with rc=0. No verification check remains.
