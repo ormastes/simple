@@ -58,6 +58,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_stat_impl.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_fsync_impl.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_slurp_impl.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_crash_handler_impl.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_backend_stubs_impl.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_dynload_snapshot_private.h");
     println!("cargo:rerun-if-changed=../../runtime/scilib/scilib_bits_common.h");
