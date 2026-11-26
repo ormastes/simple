@@ -11,7 +11,47 @@ use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{macos_seatbel
 use app.orchestrator.caret_session_protocol_v1.{orchestrator_caret_server_info_load_v1,
     orchestrator_caret_client_call_v1, orchestrator_caret_parse_dict_v1,
     orchestrator_caret_bool_v1, orchestrator_caret_str_v1}
+use app.orchestrator.server_command_v1.{server_selection_v1, ServerSshRequestProgressV1,
+    orchestrator_server_ssh_begin_file_v1, orchestrator_server_ssh_begin_v1, orchestrator_server_ssh_step_v1}
+use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.llm_caret.workbench.remote_pane_control_v1.{CaretRemotePaneRouteV1, CaretRemotePaneTargetRequestV1,
+    CaretRemotePaneTargetV1, caret_remote_pane_target_request_v1, caret_remote_pane_target_complete_v1, caret_remote_pane_from_attach_v1}
+use app.llm_caret.workbench.remote_pane_view_v1.{CaretRemotePaneViewV1, CaretRemotePanePhaseV1, CaretRemotePaneScopeV1,
+    caret_remote_pane_begin_v1, caret_remote_pane_retry_v1, caret_remote_pane_complete_v1, caret_remote_pane_server_matches_v1}
+use std.common.config_core.server_context_types_v1.ResolvedServerV1
+use std.nogc_sync_mut.sosix.host.file_read_regular_no_follow_bounded
 
+enum CsOrchestratorRemotePurposeV1:
+    Standard
+    PaneTarget(request: CaretRemotePaneTargetRequestV1)
+    PaneStream(scope: CaretRemotePaneScopeV1, source: text)
+
+struct CsOrchestratorRemoteV1:
+    session: text
+    exchange: ServerSshRequestProgressV1
+    purpose: CsOrchestratorRemotePurposeV1
+
+struct CsOrchestratorRemoteCleanupV1:
+    session: text
+    reply: OrchestratorValidationReplyV1
+    purpose: CsOrchestratorRemotePurposeV1
+
+struct CsOrchestratorPaneTargetV1:
+    session: text
+    target: CaretRemotePaneTargetV1
+
+struct CsOrchestratorPaneViewV1:
+    session: text
+    route: CaretRemotePaneRouteV1
+    view: CaretRemotePaneViewV1
+    visible: bool = true
+
+# The dashboard thread owns the active exchange and its native cleanup.
+var _cs_orch_remote_exchange_v1: Option<CsOrchestratorRemoteV1> = None
+var _cs_orch_remote_cleanup_v1: Option<CsOrchestratorRemoteCleanupV1> = None
+var _cs_orch_pane_target_v1: Option<CsOrchestratorPaneTargetV1> = None
+var _cs_orch_pane_view_v1: Option<CsOrchestratorPaneViewV1> = None
 var _cs_orch_runtime_dirs: Dict<text, text> = {}
 var _cs_orch_config_args: Dict<text, text> = {}
 
@@ -154,10 +194,243 @@ pub fn cs_orchestrator_start_v1(session: text, words: [text]) -> text:
         waited_ms = waited_ms + 250
     "orchestrator start timed out waiting for server readiness in " + runtime_dir
 
+fn cs_orchestrator_remote_cleanup_v1(session: text, reply: OrchestratorValidationReplyV1,
+        purpose: CsOrchestratorRemotePurposeV1) -> OrchestratorValidationReplyV1:
+    val cleaned = orchestrator_reply_cleanup_v2(reply)
+    if (cleaned.transport_cleanup.is_some() or cleaned.transport_store_cleanup.is_some() or cleaned.transport_exit_unconfirmed):
+        val custody = OrchestratorValidationReplyV1(exit_code: 2, output: "",
+            transport_cleanup: cleaned.transport_cleanup, transport_store_cleanup: cleaned.transport_store_cleanup,
+            transport_exit_unconfirmed: cleaned.transport_exit_unconfirmed)
+        _cs_orch_remote_cleanup_v1 = Some(CsOrchestratorRemoteCleanupV1(session, custody, purpose))
+    else:
+        _cs_orch_remote_cleanup_v1 = None
+    cleaned
+
+fn cs_orchestrator_pane_finish_v1(session: text, scope: CaretRemotePaneScopeV1, source: text,
+        reply: OrchestratorValidationReplyV1) -> text:
+    if val active = _cs_orch_pane_view_v1:
+        if active.session != session: return "remote pane view owner differs"
+        val updated = caret_remote_pane_complete_v1(active.view, scope, source, reply)
+        if updated.is_err(): return "remote pane reply refused: " + updated.unwrap_err()
+        val view = updated.unwrap()
+        _cs_orch_pane_view_v1 = Some(CsOrchestratorPaneViewV1(session, active.route, view, active.visible))
+        return match view.phase:
+            case CaretRemotePanePhaseV1.Unconfirmed: "remote pane outcome unconfirmed; use /orchestrator pane-retry"
+            case CaretRemotePanePhaseV1.Refused: "remote pane refused: " + view.problem
+            case CaretRemotePanePhaseV1.Eof: "remote pane reached EOF"
+            case _: if view.last_read_id == 0: "remote pane read-only view opened" else: "remote pane read completed"
+    "remote pane view is unavailable"
+
+fn cs_orchestrator_remote_finished_v1(session: text, purpose: CsOrchestratorRemotePurposeV1,
+        reply: OrchestratorValidationReplyV1) -> text:
+    match purpose:
+        case CsOrchestratorRemotePurposeV1.Standard: reply.output.trim()
+        case CsOrchestratorRemotePurposeV1.PaneTarget(request):
+            if _cs_orch_remote_cleanup_v1.is_some(): return "remote pane target transport cleanup is pending"
+            if reply.exit_code != 0: return "remote pane target unconfirmed"
+            val target = caret_remote_pane_target_complete_v1(request, reply.output)
+            if target.is_err(): return "remote pane target receipt refused: " + target.unwrap_err()
+            _cs_orch_pane_target_v1 = Some(CsOrchestratorPaneTargetV1(session, target.unwrap()))
+            target.unwrap().receipt
+        case CsOrchestratorRemotePurposeV1.PaneStream(scope, source):
+            if _cs_orch_remote_cleanup_v1.is_some(): return "remote pane transport cleanup is pending"
+            cs_orchestrator_pane_finish_v1(session, scope, source, reply)
+
+fn cs_orchestrator_accept_remote_v1(session: text, progress: ServerSshRequestProgressV1,
+        purpose: CsOrchestratorRemotePurposeV1 = CsOrchestratorRemotePurposeV1.Standard) -> text:
+    if val completed = progress.reply:
+        _cs_orch_remote_exchange_v1 = None
+        val cleaned = cs_orchestrator_remote_cleanup_v1(session, completed, purpose)
+        return cs_orchestrator_remote_finished_v1(session, purpose, cleaned)
+    _cs_orch_remote_exchange_v1 = Some(CsOrchestratorRemoteV1(session, progress, purpose))
+    ""
+
+# reason: cancel is cs_main's one-shot request to cancel the in-flight remote exchange; there is no richer cancel state to carry
+@allow(primitive_api)
+pub fn cs_orchestrator_remote_poll_v1(session: text, cancel: bool = false) -> text:
+    if val active = _cs_orch_remote_exchange_v1:
+        if active.session != session: return ""
+        return cs_orchestrator_accept_remote_v1(session, orchestrator_server_ssh_step_v1(active.exchange, cancel), active.purpose)
+    if val pending = _cs_orch_remote_cleanup_v1:
+        if pending.session == session and not pending.reply.transport_exit_unconfirmed:
+            val cleaned = cs_orchestrator_remote_cleanup_v1(session, pending.reply, pending.purpose)
+            if _cs_orch_remote_cleanup_v1.is_none():
+                match pending.purpose:
+                    case CsOrchestratorRemotePurposeV1.Standard: ()
+                    case _: return cs_orchestrator_remote_finished_v1(session, pending.purpose, cleaned)
+    ""
+
+pub fn cs_orchestrator_remote_close_v1(session: text) -> text:
+    var attempts = 0
+    while attempts < 101:
+        val active = _cs_orch_remote_exchange_v1
+        val cleanup = _cs_orch_remote_cleanup_v1
+        if active.is_none() and cleanup.is_none():
+            cs_orchestrator_pane_clear_v1(session)
+            return ""
+        if active.is_some() and active.unwrap().session != session: return ""
+        if cleanup.is_some():
+            if cleanup.unwrap().session != session: return ""
+            if cleanup.unwrap().reply.transport_exit_unconfirmed: break
+        val _result = cs_orchestrator_remote_poll_v1(session, true)
+        attempts = attempts + 1
+    if _cs_orch_remote_exchange_v1.is_none() and _cs_orch_remote_cleanup_v1.is_none():
+        cs_orchestrator_pane_clear_v1(session)
+        return ""
+    "orchestrator remote cleanup remains unconfirmed"
+
+fn cs_orchestrator_remote_v1(session: text, args: [text]) -> text:
+    if args.len() != 5 or args.contains(""):
+        return "usage: /orchestrator remote <config|-> <context|-> <server|-> <profile> <request.sdn>"
+    if _cs_orch_remote_exchange_v1.is_some(): return "orchestrator remote request is already pending"
+    if _cs_orch_remote_cleanup_v1.is_some(): return "orchestrator remote transport cleanup is pending"
+    val config = if args[0] == "-": _cs_orch_config_v1(session) else: args[0]
+    val selected = server_selection_v1(["server-resolve", config, "caret", args[1], args[2], "host"])
+    if selected.is_err(): return "orchestrator remote selection failed: " + selected.unwrap_err()
+    val server = selected.unwrap()
+    if server.record.transport != "ssh": return "orchestrator remote requires an SSH server"
+    val turn = orchestrator_server_ssh_begin_file_v1(server, args[3], args[4])
+    val result = cs_orchestrator_accept_remote_v1(session, turn)
+    if result == "" and _cs_orch_remote_exchange_v1.is_some(): return "orchestrator remote request is pending"
+    result
+
+fn cs_orchestrator_pane_clear_v1(session: text):
+    if val active = _cs_orch_pane_view_v1:
+        if active.session == session: _cs_orch_pane_view_v1 = None
+    if val target = _cs_orch_pane_target_v1:
+        if target.session == session: _cs_orch_pane_target_v1 = None
+
+fn cs_orchestrator_pane_selection_v1(route: CaretRemotePaneRouteV1) -> Result<ResolvedServerV1, text>:
+    server_selection_v1(["server-resolve", route.config, "caret", route.context, route.server_name, "host"])
+
+fn cs_orchestrator_pane_target_v1(session: text, args: [text]) -> text:
+    if args.len() != 5 or args.contains(""):
+        return "usage: /orchestrator pane-target <config|-> <context|-> <server|-> <profile> <request.sdn>"
+    if val active = _cs_orch_pane_view_v1:
+        if active.session != session or active.visible:
+            return "close the remote pane view before selecting another target"
+    val config = if args[0] == "-": _cs_orch_config_v1(session) else: args[0]
+    val route = CaretRemotePaneRouteV1(config, args[1], args[2], args[3])
+    val selected = cs_orchestrator_pane_selection_v1(route)
+    if selected.is_err(): return "remote pane selection refused: " + selected.unwrap_err()
+    val source = file_read_regular_no_follow_bounded(args[4], 2097152)
+    if source.is_err(): return "remote pane target request unavailable"
+    val request = caret_remote_pane_target_request_v1(route, selected.unwrap(), source.unwrap())
+    if request.is_err(): return "remote pane target request refused: " + request.unwrap_err()
+    if val hidden = _cs_orch_pane_view_v1:
+        if hidden.view.scope.controller_id == request.unwrap().controller_id and
+                hidden.view.scope.operation_id == request.unwrap().operation_id:
+            return "use pane-view to reopen the retained cursor for this run"
+        _cs_orch_pane_view_v1 = None
+    _cs_orch_pane_target_v1 = None
+    val result = cs_orchestrator_accept_remote_v1(session, orchestrator_server_ssh_begin_v1(selected.unwrap(),
+        route.profile_path, request.unwrap().source), CsOrchestratorRemotePurposeV1.PaneTarget(request.unwrap()))
+    if result == "": "remote pane target request is pending" else: result
+
+fn cs_orchestrator_pane_send_v1(session: text, route: CaretRemotePaneRouteV1, selected: ResolvedServerV1,
+        pending: CaretRemotePaneViewV1) -> text:
+    val source = pending.outstanding.unwrap().source
+    _cs_orch_pane_view_v1 = Some(CsOrchestratorPaneViewV1(session, route, pending))
+    var observed = pending.scope
+    observed.server = selected
+    val result = cs_orchestrator_accept_remote_v1(session,
+        orchestrator_server_ssh_begin_v1(selected, route.profile_path, source),
+        CsOrchestratorRemotePurposeV1.PaneStream(observed, source))
+    if result == "": "remote pane request is pending" else: result
+
+fn cs_orchestrator_pane_open_v1(session: text, args: [text]) -> text:
+    if args.len() != 1: return "usage: /orchestrator pane-view <signed-attach-frame.sdn>"
+    if val active = _cs_orch_pane_view_v1:
+        if active.session != session or active.visible: return "close the current remote pane view first"
+    if val kept = _cs_orch_pane_target_v1:
+        if kept.session != session: return "select a remote pane target in this session first"
+        val route = kept.target.request.route
+        val selected = cs_orchestrator_pane_selection_v1(route)
+        if selected.is_err(): return "remote pane selection refused: " + selected.unwrap_err()
+        val attach = file_read_regular_no_follow_bounded(args[0], 1048576)
+        if attach.is_err(): return "signed remote pane attach frame unavailable"
+        val view = caret_remote_pane_from_attach_v1(kept.target, selected.unwrap(), attach.unwrap())
+        if view.is_err(): return "remote pane view refused: " + view.unwrap_err()
+        if val hidden = _cs_orch_pane_view_v1:
+            if hidden.view.scope.attach_digest != view.unwrap().scope.attach_digest:
+                return "remote pane attach frame changed"
+            _cs_orch_pane_view_v1 = Some(CsOrchestratorPaneViewV1(session, hidden.route, hidden.view, true))
+            return "remote pane read-only view reopened"
+        val pending = caret_remote_pane_begin_v1(view.unwrap())
+        if pending.is_err(): return "remote pane claim refused: " + pending.unwrap_err()
+        return cs_orchestrator_pane_send_v1(session, route, selected.unwrap(), pending.unwrap())
+    "select a remote pane target in this session first"
+
+fn cs_orchestrator_pane_command_v1(session: text, action: text, args: [text]) -> text:
+    if _cs_orch_remote_exchange_v1.is_some(): return "orchestrator remote request is already pending"
+    if _cs_orch_remote_cleanup_v1.is_some(): return "orchestrator remote transport cleanup is pending"
+    if action == "pane-target": return cs_orchestrator_pane_target_v1(session, args)
+    if action == "pane-view": return cs_orchestrator_pane_open_v1(session, args)
+    if args.len() != 0: return "usage: /orchestrator " + action
+    if action == "pane-close":
+        if val active = _cs_orch_pane_view_v1:
+            if active.session == session and active.visible:
+                if active.view.stream_epoch < 0 and active.view.phase == CaretRemotePanePhaseV1.Refused:
+                    # A closed pre-claim refusal issued no stream cursor.
+                    _cs_orch_pane_view_v1 = None
+                else:
+                    _cs_orch_pane_view_v1 = Some(CsOrchestratorPaneViewV1(session, active.route, active.view, false))
+                return "remote pane view closed"
+        return "no remote pane view is open"
+    if val active = _cs_orch_pane_view_v1:
+        if active.session != session or not active.visible: return "open a remote pane view in this session first"
+        val selected = cs_orchestrator_pane_selection_v1(active.route)
+        if selected.is_err(): return "remote pane selection refused: " + selected.unwrap_err()
+        if not caret_remote_pane_server_matches_v1(active.view.scope.server, selected.unwrap()):
+            return "remote pane endpoint changed"
+        val pending = if action == "pane-retry": caret_remote_pane_retry_v1(active.view)
+            else: caret_remote_pane_begin_v1(active.view)
+        if pending.is_err(): return "remote pane request refused: " + pending.unwrap_err()
+        return cs_orchestrator_pane_send_v1(session, active.route, selected.unwrap(), pending.unwrap())
+    "open a remote pane view in this session first"
+
+# reason: visibility predicate read directly by cs_main's focus and redraw branches
+@allow(primitive_api)
+pub fn cs_orchestrator_pane_visible_v1(session: text) -> bool:
+    if val active = _cs_orch_pane_view_v1: return active.session == session and active.visible
+    false
+
+pub fn cs_orchestrator_pane_surface_v1(session: text) -> Option<[text]>:
+    if val active = _cs_orch_pane_view_v1:
+        if active.session != session or not active.visible: return None
+        val view = active.view
+        val status = match view.phase:
+            case CaretRemotePanePhaseV1.Pending: "waiting for reply"
+            case CaretRemotePanePhaseV1.Unconfirmed: "unconfirmed; pane-retry reuses the same request"
+            case CaretRemotePanePhaseV1.Refused: view.problem
+            case CaretRemotePanePhaseV1.Eof: "EOF"
+            case _: "pane-read requests the next output"
+        val heading = "REMOTE PANE (read-only) " + view.scope.operation_id
+        val output = view.transcript.join("")
+        if output == "": return Some([heading, status])
+        val lines = output.split("\n")
+        val start = if lines.len() > 200: lines.len() - 200 else: 0
+        return Some([heading, status] + lines.slice(start, lines.len()))
+    None
+
+fn cs_orchestrator_remote_control_v1(session: text, action: text, args: [text]) -> text:
+    if args.len() != 0: return "usage: /orchestrator " + action
+    val result = cs_orchestrator_remote_poll_v1(session, action == "remote-cancel")
+    if result != "": return result
+    if val pending = _cs_orch_remote_exchange_v1:
+        if pending.session == session: return "orchestrator remote request is pending"
+    if val cleanup = _cs_orch_remote_cleanup_v1:
+        if cleanup.session == session: return "orchestrator remote transport cleanup is pending"
+    "no pending orchestrator remote request"
+
 pub fn cs_orchestrator_dispatch_v1(session: text, sub_words: [text]) -> text:
     if sub_words.len() == 0 or sub_words[0] == "help":
         return ("/orchestrator start [--runtime-dir <dir>] [--config <file|->]\n" +
             "/orchestrator status | crashed | stop\n" +
+            "/orchestrator remote <config|-> <context|-> <server|-> <profile> <request.sdn>\n" +
+            "/orchestrator remote-progress | remote-cancel\n" +
+            "/orchestrator pane-target <config|-> <context|-> <server|-> <profile> <request.sdn>\n" +
+            "/orchestrator pane-view <signed-attach-frame.sdn> | pane-read | pane-retry | pane-close\n" +
             "/orchestrator launch <spec> [--container <img|macos-seatbelt>] [--worktree] [args...]\n" +
             "/orchestrator inspect [id] | send <id> <msg> | relaunch <id> [args...] | close <id>\n" +
             "/orchestrator cleanup <id>  Remove one crashed agent's worktree and artifacts\n" +
@@ -170,6 +443,12 @@ pub fn cs_orchestrator_dispatch_v1(session: text, sub_words: [text]) -> text:
         i = i + 1
     if sub == "start":
         return cs_orchestrator_start_v1(session, tail)
+    if sub == "remote":
+        return cs_orchestrator_remote_v1(session, tail)
+    if sub == "remote-progress" or sub == "remote-cancel":
+        return cs_orchestrator_remote_control_v1(session, sub, tail)
+    if ["pane-target", "pane-view", "pane-read", "pane-retry", "pane-close"].contains(sub):
+        return cs_orchestrator_pane_command_v1(session, sub, tail)
     val runtime_dir = cs_orchestrator_runtime_dir_v1(session)
     val config_arg = _cs_orch_config_v1(session)
     val action = if sub == "stop": "shutdown" else: sub
@@ -206,3 +485,5 @@ pub fn cs_orchestrator_dispatch_v1(session: text, sub_words: [text]) -> text:
 
 export cs_orchestrator_default_runtime_dir_v1, cs_orchestrator_runtime_dir_v1
 export cs_orchestrator_start_v1, cs_orchestrator_dispatch_v1
+export cs_orchestrator_remote_poll_v1, cs_orchestrator_remote_close_v1
+export cs_orchestrator_pane_visible_v1, cs_orchestrator_pane_surface_v1

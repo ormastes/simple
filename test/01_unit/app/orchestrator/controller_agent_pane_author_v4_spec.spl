@@ -1,0 +1,42 @@
+# @cover src/app/orchestrator/controller_agent_pane_author_v4.spl
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.primary_attach_v1.host_agent_pane_binding_decode_v4
+use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneTargetReceiptV6,
+    host_agent_pane_target_receipt_encode_v6}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostAgentInvokeRequestV4, host_agent_invoke_request_encode_v4}
+use app.orchestrator.controller_agent_pane_author_v4.controller_agent_pane_bind_target_v4
+use app.orchestrator.controller_authority_issue_v1.controller_agent_pane_author_command_v4
+
+describe "Controller Linux agent pane binding authoring":
+    it "derives the binding from the exact target and original canonical invocation":
+        val invoke = host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4("held-run", "manifest: original\n")).unwrap()
+        val target = HostAgentPaneTargetReceiptV6("held-run", sha256_text(invoke), "a".repeat(32), 9,
+            "retained-session", "retained-window", "retained-pane")
+        val source = controller_agent_pane_bind_target_v4(host_agent_pane_target_receipt_encode_v6(target), invoke, "pane-binding").unwrap()
+        val binding = host_agent_pane_binding_decode_v4(source).unwrap()
+        expect(binding.binding_uid).to_equal("pane-binding")
+        expect(binding.service_incarnation).to_equal(target.service_incarnation)
+        expect(binding.service_epoch).to_equal(target.service_epoch)
+        expect(binding.session_id).to_equal(target.session_id)
+        expect(binding.window_id).to_equal(target.window_id)
+        expect(binding.pane_id).to_equal(target.pane_id)
+
+    it "refuses changed invocation bytes and a target for a different operation":
+        val invoke = host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4("held-run", "manifest: original\n")).unwrap()
+        val changed = host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4("held-run", "manifest: changed\n")).unwrap()
+        val target = HostAgentPaneTargetReceiptV6("held-run", sha256_text(invoke), "a".repeat(32), 9,
+            "retained-session", "retained-window", "retained-pane")
+        val other = HostAgentPaneTargetReceiptV6("other-run", sha256_text(invoke), "a".repeat(32), 9,
+            "retained-session", "retained-window", "retained-pane")
+        val expected = "controller-agent-pane-target-invoke-mismatch"
+        expect(controller_agent_pane_bind_target_v4(host_agent_pane_target_receipt_encode_v6(target), changed, "pane-binding").unwrap_err()).to_equal(expected)
+        expect(controller_agent_pane_bind_target_v4(host_agent_pane_target_receipt_encode_v6(other), invoke, "pane-binding").unwrap_err()).to_equal(expected)
+
+    it "refuses duplicate grant IDs before reading the input or opening a Controller":
+        val reply = controller_agent_pane_author_command_v4(["controller-agent-pane-author", "/missing-controller",
+            "a".repeat(64), "/missing-keys", "approver", "same-grant", "same-grant", "60000", "/missing-input"])
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output).to_contain("controller-agent-pane-author-argument")
+        expect(reply.controller_root_cleanup.is_none()).to_equal(true)
+        expect(reply.controller_dispatch_cleanup.is_none()).to_equal(true)

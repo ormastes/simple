@@ -18,11 +18,13 @@ pub struct HostControllerStatusV3:
     available_memory_bytes: i64
     retained_reservations: i64
     ready: bool
+    backend: text = "windows-docker-process"
 
 pub fn host_controller_status_encode_v3(status: HostControllerStatusV3) -> Result<text, text>:
     val scope = status.scope
     val fence = container_scope_fence_id_v2(scope)?
-    if (scope.continuity_mode != "service-incarnation-v1" or scope.boot_id != "" or
+    if (not ["linux-service", "windows-docker-process"].contains(status.backend) or
+            scope.continuity_mode != "service-incarnation-v1" or scope.boot_id != "" or
             not builder_digest_valid_v1(status.enrollment_digest) or not builder_digest_valid_v1(status.provider_identity_digest) or
             status.authority_id != "host-" + status.enrollment_digest or status.revision <= 0 or
             status.cpu_millis <= 0 or status.memory_bytes <= 0 or status.available_cpu_millis < 0 or
@@ -30,7 +32,7 @@ pub fn host_controller_status_encode_v3(status: HostControllerStatusV3) -> Resul
             status.available_memory_bytes > status.memory_bytes or status.retained_reservations < 0):
         return Err("controller-host-status-fields")
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("controller-host-status"),
-        "backend": SdnValue.String("windows-docker-process"), "physicalHostId": SdnValue.String(scope.physical_host_id),
+        "backend": SdnValue.String(status.backend), "physicalHostId": SdnValue.String(scope.physical_host_id),
         "serviceScopeId": SdnValue.String(scope.service_scope_id), "bootId": SdnValue.String(scope.boot_id),
         "nativeMachineId": SdnValue.String(scope.native_machine_id), "continuityMode": SdnValue.String(scope.continuity_mode),
         "continuityId": SdnValue.String(scope.continuity_id), "providerGeneration": SdnValue.Int(scope.provider_generation),
@@ -69,8 +71,8 @@ pub fn host_controller_status_decode_v3(source: text) -> Result<HostControllerSt
         if not allowed.contains(name): return Err("controller-host-status-unknown:" + name)
     for name in allowed:
         if not fields.contains_key(name): return Err("controller-host-status-missing:" + name)
-    if (status_int_v3(fields, "version")? != 3 or status_text_v3(fields, "kind")? != "controller-host-status" or
-            status_text_v3(fields, "backend")? != "windows-docker-process"): return Err("controller-host-status-version")
+    if (status_int_v3(fields, "version")? != 3 or status_text_v3(fields, "kind")? != "controller-host-status"): return Err("controller-host-status-version")
+    val backend = status_text_v3(fields, "backend")?
     val scope = ContainerHostScopeV2(physical_host_id: status_text_v3(fields, "physicalHostId")?,
         service_scope_id: status_text_v3(fields, "serviceScopeId")?, boot_id: status_text_v3(fields, "bootId")?,
         provider_generation: status_int_v3(fields, "providerGeneration")?, native_machine_id: status_text_v3(fields, "nativeMachineId")?,
@@ -83,7 +85,7 @@ pub fn host_controller_status_decode_v3(source: text) -> Result<HostControllerSt
         status_text_v3(fields, "enrollmentBindingDigest")?, status_text_v3(fields, "providerIdentityDigest")?,
         status_int_v3(fields, "revision")?, status_int_v3(fields, "cpuMillis")?, status_int_v3(fields, "memoryBytes")?,
         status_int_v3(fields, "availableCpuMillis")?, status_int_v3(fields, "availableMemoryBytes")?,
-        status_int_v3(fields, "retainedReservations")?, ready)
+        status_int_v3(fields, "retainedReservations")?, ready, backend)
     if host_controller_status_encode_v3(status)? != source: return Err("controller-host-status-noncanonical")
     Ok(status)
 

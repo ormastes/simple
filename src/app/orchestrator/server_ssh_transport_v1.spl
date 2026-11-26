@@ -78,12 +78,15 @@ pub fn server_ssh_start_v1(record: ServerRecordV1, profile: ServerSshProfileV1,
     if now < 0:
         turn.error = "server-ssh-clock-unavailable"
         return Ok(turn)
-    val timeout_ms = if ["dispatch", "resume-execution"].contains(header.action): 120000 else: 30000
+    val timeout_ms = if ["dispatch", "resume-execution", "agent-attachment", "agent-invoke"].contains(header.action): 120000 else: 30000
     val started = stdin_command_begin_v1(StdinCommandRequestV1(program: profile.ssh_executable,
         expected_digest: profile.ssh_digest, args: args, environment: [], directory: "", input: bytes,
         timeout_ms: timeout_ms, max_stdout_bytes: SERVER_SSH_STDOUT_LIMIT_V1,
         max_stderr_bytes: SERVER_SSH_STDERR_LIMIT_V1, expires_at_unix_ms: now / 1000 + timeout_ms))
     turn.lease = started.owner
+    if started.owner.is_none():
+        if val result = started.result:
+            turn.exit_unconfirmed = result.effect_attempted and (not result.reaped or not result.cleanup_confirmed)
     if started.error != "": turn.error = "server-ssh-start-failed"
     if started.owner.is_none() and turn.error == "": turn.error = "server-ssh-start-owner-missing"
     Ok(turn)
@@ -108,7 +111,12 @@ fn server_ssh_advance_v1(turn: ServerSshTurnV1, cancel: bool) -> ServerSshTurnV1
                 current.error = "server-ssh-process-receipt-rejected"
         elif stepped.owner.is_none() and current.error == "":
             current.error = "server-ssh-process-result-missing"
-    if current.lease.is_some(): return current
+        if stepped.owner.is_none():
+            if val result = stepped.result:
+                current.exit_unconfirmed = not result.reaped or not result.cleanup_confirmed
+            else:
+                current.exit_unconfirmed = true
+    if current.lease.is_some() or current.exit_unconfirmed: return current
     # The protected store closes only after the child owner confirms release.
     if val store = current.store_cleanup:
         val closed = host_identity_store_close_v1(store)

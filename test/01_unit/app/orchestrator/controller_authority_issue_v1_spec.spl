@@ -1,18 +1,23 @@
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.{
+    LinuxServiceVerifierFixtureV1, linux_service_verifier_fixture_v1, linux_service_verifier_fixture_ops_v1}
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_digest_v3
+use std.nogc_sync_mut.io.host_linux_service_records_v4.linux_service_enrollment_verify_v1
 # milestone_0030 D1/D2: controller issue-then-verify of one signed grant and a policy-driven approval.
 # AUTHORED_NOT_RUN. Seeds are deterministic, published test material (never real keys); key files are read through
 # an injected reader so the spec needs no prepared OS store (the store-backed reader is a system concern).
-use std.spec.{describe, it, expect, fail}
+use std.spec.{describe, it, expect, fail, step}
 use std.io.file_read_text
+use app.orchestrator.command.orchestrator_command_v1
 use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
 use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
 use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{distributed_authority_snapshot_create_v2,
     distributed_verify_grant_approval_from_snapshot_v2}
-use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.io.local_authority_policy_v1.{LocalAuthorityPolicyV1, local_authority_policy_decode_v1, host_local_context_v1}
 use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, ControllerDispatchContextV1}
 use std.common.crypto.ed25519.pure_ed25519_keypair_from_seed
 use app.orchestrator.host_identity_key_v1.host_identity_private_encode_v1
-use app.orchestrator.controller_authority_issue_v1.{controller_authority_issue_v1, controller_authority_key_leaf_v1}
+use app.orchestrator.controller_authority_issue_v1.{controller_authority_issue_v1, controller_authority_key_leaf_v1, controller_linux_enrollment_issue_v3}
 
 var ISSUE_FIXTURE_READS_V1: i64 = 0
 
@@ -171,3 +176,76 @@ describe "Controller authority issuance V1 (milestone_0030 D1/D2)":
 
 fn ca_count(source: text, needle: text) -> i64:
     source.split(needle).len() - 1
+
+
+fn issue_linux_context_v3(fixture: LinuxServiceVerifierFixtureV1) -> ControllerDispatchContextV1:
+    var context = issue_context_v1()
+    context.config.controller_id = "issuer_1"
+    context.config.authority_policy_digest = fixture.binding.policy_digest
+    context.config.provider_identity_digest = fixture.binding.provider_identity_digest
+    context.policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+    context
+
+describe "Controller issuance for a signed Linux Host enrollment":
+    it "should issue the exact credential that the installed Host verifier accepts":
+        # @req HOST-01
+        step("Derive the enrollment operation and sign it through the existing issuer and approver roles")
+        val fixture = linux_service_verifier_fixture_v1()
+        val context = issue_linux_context_v3(fixture)
+        val now = host_local_context_v1(context.policy).grant_clock
+        ISSUE_FIXTURE_READS_V1 = 0
+        val credential = controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            fixture.binding, "enroll_1", "grant_1", 60000, now).unwrap()
+        expect(ISSUE_FIXTURE_READS_V1).to_equal(2)
+        expect(credential.operation.operation).to_equal("host_enroll_v1")
+        expect(credential.operation.payload_digest).to_equal(host_linux_service_enrollment_digest_v3(fixture.binding).unwrap())
+        expect(credential.operation.environment_digest).to_equal(fixture.binding.provider_identity_digest)
+        expect(credential.operation.memory_bytes).to_equal(fixture.binding.physical_memory_bytes)
+        expect(credential.signed.grant.operations).to_equal(["host_enroll_v1"])
+        expect(credential.approval.expires_at).to_equal(now + 60000)
+        step("Use the actual Host proof verifier with the exact signed bytes and protected-parent policy fixture")
+        val verified = linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, credential,
+            fixture.configuration, fixture.engine_policy, fixture.broker_policy, fixture.agent_helper_template).unwrap()
+        expect(verified.binding_digest().unwrap()).to_equal(credential.operation.payload_digest)
+
+    it "should reject changed policy or provider pins before reading either private key":
+        # @req HOST-01
+        step("Pass a canonical binding whose policy or provider no longer matches the installed controller context")
+        val fixture = linux_service_verifier_fixture_v1()
+        val context = issue_linux_context_v3(fixture)
+        var wrong_policy = fixture.binding
+        wrong_policy.policy_digest = "0".repeat(64)
+        var wrong_provider = fixture.binding
+        wrong_provider.provider_identity_digest = "0".repeat(64)
+        ISSUE_FIXTURE_READS_V1 = 0
+        expect(controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            wrong_policy, "enroll_1", "grant_1", 60000, 1000).unwrap_err()).to_equal("controller-linux-enrollment-policy-mismatch")
+        expect(controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            wrong_provider, "enroll_1", "grant_1", 60000, 1000).unwrap_err()).to_equal("controller-linux-enrollment-provider-mismatch")
+        expect(ISSUE_FIXTURE_READS_V1).to_equal(0)
+
+    it "should require operation-scoped keys and reject expiry arithmetic overflow":
+        # @req HOST-01
+        step("Reuse a valid policy snapshot whose role keys allow build but cannot issue enrollment")
+        val fixture = linux_service_verifier_fixture_ops_v1(1, 65, 4102444800000, "/var/lib/simple/hosts", ["build"])
+        val context = issue_linux_context_v3(fixture)
+        ISSUE_FIXTURE_READS_V1 = 0
+        expect(controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            fixture.binding, "enroll_1", "grant_1", 60000, 1000).unwrap_err()).to_equal("AUTHORITY_OPERATION_DENIED")
+        expect(controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            fixture.binding, "enroll_1", "grant_1", 10, 9223372036854775800).unwrap_err()).to_equal("controller-linux-enrollment-ttl")
+        expect(ISSUE_FIXTURE_READS_V1).to_equal(0)
+
+
+    it "should route the local issuer command and reject invalid inputs before opening a store":
+        step("Read public help and call the production dispatcher with invalid enrollment issue arguments")
+        val help = orchestrator_command_v1(["--help"])
+        expect(help.output).to_contain("host-linux-enrollment-issue")
+        val missing = orchestrator_command_v1(["host-linux-enrollment-issue"])
+        expect(missing.exit_code).to_equal(2)
+        expect(missing.output).to_contain("host-linux-enrollment-issue-usage")
+        val invalid = orchestrator_command_v1(["host-linux-enrollment-issue", "dispatch", "issuer",
+            "keys", "output", "approver", "binding.sdn", "operation", "grant", "86400001"])
+        expect(invalid.exit_code).to_equal(2)
+        expect(invalid.output).to_contain("controller-linux-enrollment-ttl")
+        expect(invalid.host_identity_cleanup.is_none()).to_equal(true)

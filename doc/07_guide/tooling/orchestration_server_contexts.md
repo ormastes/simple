@@ -79,8 +79,50 @@ simple-orchestrator server-request <config-file|-> <consumer> <context|-> <serve
 
 The `simple orchestrator` command uses the same resolver and request dispatcher
 as the standalone `simple-orchestrator` executable. The `llm_caret orchestrator`
-route requires the `caret` consumer. An agent selects the `agent` consumer with
-`container` address selection when it runs inside the workload.
+route requires the `caret` consumer. Caret Suite also sends the same typed
+gateway requests from its interactive command.
+
+```text
+/orchestrator remote <config|-> <context|-> <server|-> <ssh-profile.sdn> <request.sdn>
+```
+
+A `-` config uses the session's config selection, then normal discovery.
+The remote action requires an SSH server and uses its selected address,
+port and protected identity and trust references. The live dashboard polls
+the exchange as it refreshes. In line mode use `/orchestrator remote-progress`.
+`/orchestrator remote-cancel` cancels the local SSH exchange. Use the original
+request UID to inspect an uncertain controller operation. Existing local
+session controls use the local session listener.
+
+### View an attached remote pane in Caret
+
+From the same Caret process, submit an exact `agent-pane-target` request:
+
+```text
+/orchestrator pane-target <config|-> <context|-> <server|-> <ssh-profile.sdn> <request.sdn>
+```
+
+Submit the corresponding signed attach and invoke frames through the
+configured controller. When inspection reports verified terminal authority,
+open the read-only view with the same canonical signed attach frame:
+
+```text
+/orchestrator pane-view <signed-attach-frame.sdn>
+/orchestrator pane-read
+/orchestrator pane-retry
+/orchestrator pane-close
+```
+
+`pane-read` requests one bounded native read. If its result is uncertain,
+`pane-retry` explicitly resends the outstanding request with the same ID.
+Caret polls only the active exchange and appends a validated receipt once.
+Line mode uses `/orchestrator remote-progress` for each active exchange.
+Closing the view hides its transcript and keeps its cursor in the running
+Caret process. The remote surface is read-only. Interactive input and
+geometry require a separately authorized CoreMux attachment.
+
+An agent selects the `agent` consumer with `container` address selection when
+it runs inside the workload.
 
 For the config argument, `-` requests default configuration discovery. For
 context and server arguments, `-` selects the normal defaults. These are
@@ -206,6 +248,95 @@ This is trusted installation policy on the peer. A request cannot choose the
 peer's state root or broaden `allowedActions`. A remote client supplies its
 SSH profile, while the remote account supplies its own gateway profile.
 
+To authorize Linux agent attachment actions, add `agent-attachment` to
+`allowedActions` and pin the installed controller dispatch configuration
+with `dispatchRoot` and `dispatchConfigDigest`. The dispatch root must
+belong to the same controller as `controllerId`. These fields belong to the
+private gateway profile.
+
+Allow `agent-invoke` separately to advance a signed agent run using its
+original invocation frame and those same dispatch pins. Each request runs
+one Host progression step and returns the typed V4 agent observation.
+
+Add `agent-pane` to `allowedActions` to permit the separate
+`agent-pane-claim` and `agent-pane-read` requests through those dispatch pins.
+The Host verifies the current signed attach, exact run, and registered smux pane
+on every request, including a retry. Use this permission only for a controller
+account authorized to read agent terminal output.
+
+### Author a Linux agent run
+
+`simple orchestrator agent-run-plan TEMPLATE MANIFEST PROFILE PROBES` reads
+four absolute paths to bounded SDN inputs. Use the canonical retained Linux
+OCI request as the template. Its command must select the installed profile's
+bootstrap program, its argument list must be empty, and its image must be
+digest-pinned. Supply the full native V2 invocation manifest, the approved V2
+workspace profile, and an SDN array of expected Codex probe transcript SHA-256
+digests in probe index order.
+
+The command emits the canonical V3 draft and V4 invocation frame as SDN text
+values. It binds the invocation hash into the bootstrap argument and records
+the ordered probe list digest in the draft. Treat the output as private task
+data. The command leaves reservation, signing, admission and live probe
+verification to the existing authorities. This authoring path supports the
+Codex adapter and refuses credential references while their native projection
+is unavailable.
+
+### Provision a target and read an attached agent pane
+
+Add the separate `agent-pane-target` grant to a controller account allowed
+to provision an agent pane. Once the signed Linux agent is running, submit
+`agent-pane-target` through the same controller with a canonical
+`host-control-sub` and the original invocation frame. Set `requestUid` to
+the exact held run. The authenticated Host allocates one vacant pane in its
+own smux process and returns the logical session, window and pane IDs
+together with the Host continuity ID and native service epoch.
+
+Repeat the identical target request to resolve a lost receipt. Do not choose
+another name or run ID to recover an unconfirmed allocation. Use the
+returned Host identity, epoch and registry IDs to construct and sign the
+separate V4 attach packet. The V6 wire request still uses the independent
+ready-reader listener incarnation.
+
+For a held run with an archived signed execute and already-authorized attach
+helper, the local Controller can author both signed frames in one operation.
+
+```text
+simple orchestrator controller-agent-pane-author CONTROLLER_ROOT CONFIG_DIGEST KEY_STORE APPROVER_ID ATTACH_GRANT_ID DETACH_GRANT_ID TTL_MS AUTHOR_INPUT.sdn
+```
+
+The input is a canonical SDN object with `kind: "controller-agent-pane-author-input"`,
+`version: 1` and seven text fields. `bindingUid` names the binding. `invoke`,
+`plan`, `helperRequest`, `helperExecuteProof`, `streamPolicy` and
+`installedHelperTemplate` hold their exact canonical source bytes. Obtain the
+plan and helper proofs for the actual retained runtime and signed parent budget.
+The command obtains both the pane target and current runtime observation through
+the retained authenticated Controller exchange. It reads the original V3 execute
+from the protected Controller journal under the operation ID.
+
+The issuer and approver policy keys must authorize `host_agent_attach_v4` and
+`host_agent_detach_v4` for that run's scope and budget. Use distinct grant IDs.
+The Controller returns the relative `bundleKey` and the bundle, attach and detach
+digests after publishing one immutable record and verifying its readback. Read
+the protected bundle and use its `attach` and `detach` strings verbatim as the
+V4 frames. An existing bundle requires explicit reconciliation before reuse.
+This command requires an already held interactive agent and pre-authorized
+helper prepare and execution proofs.
+
+Send `agent-pane-claim` with `epoch: 0` and `readId: 0` after
+`agent-inspect` reports verified terminal authority. The binding UID comes
+from the signed attach frame. `attachDigest` is the SHA-256 digest of that
+exact frame. The pane must already exist in the Host's smux registry.
+
+Use the receipt's exact epoch, including zero, for reads. Start at
+`readId: 1` and advance only after accepting the previous receipt. Each
+receipt holds one bounded native read, which can contain no bytes or report
+EOF. Retry an uncertain read with identical input and the same ID. The
+running owner retains its latest read only. An older ID produces a replay
+gap, and an owner restart can lose read receipts. Terminal output is transient
+in the controller. This route provides explicit read requests. The interactive
+Caret terminal, input, and resize use separate control paths.
+
 ## Request document and ownership
 
 Every request contains all eight fields, including empty unused fields:
@@ -231,6 +362,10 @@ must appear in `allowedActions`.
 | `cancel` | Expected source digest in `sourceDigest`; other operation data empty. |
 | `dispatch` | Signed dispatch packet text in `source`; other operation data empty. |
 | `resume-execution` | Signed execution packet text in `source`; other operation data empty. |
+| `agent-attachment` | Canonical `host-control-sub` in `source` for `agent-inspect`, `agent-attach`, or `agent-detach`. The inspect frame is the exact Host operation ID. Attach and detach carry their respective signed V4 frames. `requestUid` equals that same Host operation ID and other operation data is empty. |
+| `agent-invoke` | Canonical `host-control-sub` in `source` for `agent-invoke`, carrying the original canonical V4 invocation frame for the exact `requestUid`. Other operation data is empty. |
+| `agent-pane-target` | Canonical `host-control-sub` in `source` with the original V4 invocation frame and exact held run as `requestUid`. Requires its own installed grant. Other operation data is empty. |
+| `agent-pane-claim` and `agent-pane-read` | Canonical `host-control-sub` in `source`, with the same action as the sub and a canonical `host-agent-pane-stream-request` as its frame. `requestUid` is the exact Host run. The frame contains `bindingUid`, `attachDigest`, `epoch` and `readId`. Other operation data is empty. |
 | `inspect-execution` | Empty operation data. |
 
 Submit, inspect and cancel reuse the controller journal owners. Submission
@@ -315,3 +450,18 @@ The [test plan](../../03_plan/sys_test/server_contexts.md) lists the outstanding
 runtime gates. The [contract manual](../../06_spec/01_unit/lib/common/config_core/server_context_v1_spec.md)
 is manually authored and records **NOT_RUN**. No warm-start latency, request
 latency, RSS, remote mutation, or LinuxPodman/WindowsDocker receipt is claimed.
+
+
+### Linux retained Host enrollment in the controller
+
+Use the exact signed Linux V3 binding as the `linuxHostEnrollment` string in
+the installed Controller dispatch document. That document also pins the
+existing setup credential and Host deployment root. A Windows controller
+document uses the existing `hostEnrollment` field and canonical V2 bytes.
+Provide exactly one binding for a retained Host. The installed binding
+determines the ready-selector authority and the authenticated status check.
+
+An accepted attach can remain in the opening stage. A separately authorized
+`agent-invoke` request drives the same held run using its original frame.
+Inspect the attachment to check current terminal authority. The terminal data
+path still requires a separate smux attachment.

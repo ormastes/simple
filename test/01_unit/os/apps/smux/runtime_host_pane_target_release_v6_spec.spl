@@ -1,0 +1,25 @@
+use std.spec.{describe, it, expect}
+use std.common.contracts.orchestration.host_agent_pane_stream_v6.HostAgentPaneTargetReceiptV6
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use os.apps.smux.runtime_host_continuation_v6.{smux_host_continuation_new_v6, retain_agent_attach_state_v6}
+
+fn held_target_v6(operation: text):
+    var state = smux_host_continuation_new_v6()
+    state.agent_pane_target_intent = "agent-pane-x"
+    state.agent_pane_target_operation_id = operation
+    state.agent_pane_target = Some(HostAgentPaneTargetReceiptV6(operation, "d", "inc", 1, "s", "w", "p"))
+    state
+
+describe "Agent pane target release":
+    it "releases the target when its own run detaches or cancels":
+        for action in ["host-agent-detach", "host-agent-cancel"]:
+            val after = retain_agent_attach_state_v6(held_target_v6("run-a"), HostServiceRequestV2(action, "run-a", ""), 0)
+            expect(after.agent_pane_target_intent).to_equal("")
+            expect(after.agent_pane_target_operation_id).to_equal("")
+            expect(after.agent_pane_target.is_none()).to_equal(true)
+
+    it "keeps the target on a failed detach or another run's detach":
+        val failed = retain_agent_attach_state_v6(held_target_v6("run-a"), HostServiceRequestV2("host-agent-detach", "run-a", ""), 2)
+        expect(failed.agent_pane_target_intent).to_equal("agent-pane-x")
+        val other = retain_agent_attach_state_v6(held_target_v6("run-a"), HostServiceRequestV2("host-agent-detach", "run-b", ""), 0)
+        expect(other.agent_pane_target.is_some()).to_equal(true)

@@ -42,6 +42,26 @@ still absent, but it blocks only ORCH-015 (bounded no-GC async hot paths). A
 synchronous Job/CI runner needs none of it, and one was built and run. Do not
 repeat that inference.
 
+## Configured remote agent panes
+
+Use the [orchestration server context guide](../../../07_guide/tooling/orchestration_server_contexts.md)
+for named server profiles, independent service endpoints and the configured SSH gateway.
+Keep Host continuity and native epoch in the signed pane binding. Use the
+ready-reader listener incarnation only in the authenticated V6 envelope.
+
+The Linux flow uses the existing Simple Container Podman service and same-process
+smux owner. After the held agent reaches running, the separately authorized
+`agent-pane-target` request resolves the exact vacant logical pane for signing.
+Use the signed V4 attach and its exact digest for `agent-pane-claim` and
+`agent-pane-read`. Retry an uncertain read under its original read ID. The
+latest read survives only in the live owner and older IDs report a gap. The
+controller keeps terminal output out of its journal.
+
+The [Linux attachment acceptance manual](../../../06_spec/03_system/app/orchestrator/feature/linux_agent_attachment_v6_spec.md)
+lists the enrolled fixture and evidence required. The fixture still needs a native
+run. The interactive CoreMux/Caret path and Windows Docker qualification have
+separate acceptance gates.
+
 ## Verification commands
 
 ```bash
@@ -135,6 +155,11 @@ Use `simple orchestrator server-resolve - simple - - host` and
 `simple-orchestrator server-resolve - orchestrator - - host` to inspect the
 same discovery chain through both entrypoints. Use
 `llm_caret orchestrator server-resolve - caret - - host` for the Caret route.
+In Caret Suite, use `/orchestrator remote <config|-> <context|-> <server|->
+<profile> <request.sdn>` for the typed SSH controller route. The live
+dashboard progresses the one active exchange. The line client exposes
+`remote-progress` and `remote-cancel`; cancellation addresses the local SSH
+owner. Retained requests and signed execution continue to use gateway policy.
 Choose `agent` and `container` for a container-scoped resolution. When Simple
 and Orchestrator share a server, reuse the same `authRef` and trust reference
 through the protected identity store.

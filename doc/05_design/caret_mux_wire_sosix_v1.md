@@ -595,3 +595,21 @@ receipt: MuxRequestReceiptV1, already_disconnected: bool, released_clients: [Mux
 ### MuxErrorV1
 
 kind: MuxErrorKindV1, detail: text, request_id: u64, commit_state: MuxCommitStateV1, observed_revision: u64?, affected: [MuxObjectRefV1], cleanup_pending: bool
+
+
+## Authenticated Linux agent control
+
+The retained V6 Host owner accepts `agent-invoke`, `agent-cancel`,
+`agent-attach`, `agent-detach` and `agent-inspect` through the closed
+`host-control` envelope. The original scoped operation and exact V4 frame
+reach the Linux Service owner. Attach and detach retain their original
+archives and grant/approval verification. Invoke advances the existing
+owned state one turn. Its immutable source must remain the same. Inspect
+reads the held attachment and current terminal authority.
+
+An attach reply can report an opening stage. The terminal authority becomes
+verified only when the original held attachment qualifies. The trusted
+and authenticated routes use the same smux lease supersession, and an exact
+attach replay for the same run leaves the held lease intact. Pane data and
+input are governed by the typed smux attachment authority. This control
+route exposes no bearer token or raw engine access.

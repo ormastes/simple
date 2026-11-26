@@ -3,6 +3,8 @@ use std.nogc_sync_mut.io.host_service_auth_setup_v1.host_service_auth_setup_clos
 # cleanup owners beyond their wire reply and refuse further mutation until the
 # canonical owner confirms release. No native token is serialized here.
 use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.nogc_sync_mut.io.stdin_command_v1.stdin_command_step_v1
+use std.nogc_sync_mut.io.host_identity_store_v1.host_identity_store_close_v1
 use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_open_cleanup_v2
 use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.host_service_cleanup_v3
@@ -15,6 +17,24 @@ use std.common.sdn.encode.sdn_encode_canonical
 pub fn orchestrator_reply_cleanup_v2(reply: OrchestratorValidationReplyV1) -> OrchestratorValidationReplyV1:
     var current = reply
     var errors: [text] = []
+    if val cleanup = current.transport_cleanup:
+        val turn = stdin_command_step_v1(cleanup, true)
+        current.transport_cleanup = turn.owner
+        if turn.owner.is_none():
+            if val result = turn.result:
+                current.transport_exit_unconfirmed = not result.reaped or not result.cleanup_confirmed
+            else:
+                current.transport_exit_unconfirmed = true
+        else:
+            errors.push("server-ssh-cleanup-pending")
+    if current.transport_exit_unconfirmed:
+        errors.push("server-ssh-cleanup-unconfirmed")
+    elif current.transport_cleanup.is_none():
+        if val store = current.transport_store_cleanup:
+            val closed = host_identity_store_close_v1(store)
+            current.transport_store_cleanup = closed.owner
+            if not closed.completed or closed.error != "":
+                errors.push("server-ssh-store-cleanup-unconfirmed")
     if val cleanup = current.host_auth_setup_cleanup:
         val turn = host_service_auth_setup_close_v1(cleanup)
         current.host_auth_setup_cleanup = turn.owner

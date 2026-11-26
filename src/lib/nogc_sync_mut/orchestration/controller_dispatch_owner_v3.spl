@@ -10,7 +10,6 @@ use std.nogc_sync_mut.orchestration.workload_store_v1.*
 use std.nogc_sync_mut.orchestration.assignment_commit_v1.ControllerAssignmentContextV1
 use std.nogc_sync_mut.orchestration.desired_input_objects_v1.controller_desired_operation_id_v1
 use std.nogc_sync_mut.orchestration.agent_preflight_objects_v1.agent_preflight_for_workload_v1
-use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.host_service_enrollment_payload_digest_v2
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.nogc_sync_mut.io.host_service_ready_reader_v1.*
 use std.nogc_sync_mut.io.host_service_auth_exchange_v6.*
@@ -19,7 +18,8 @@ use std.common.contracts.orchestration.controller_dispatch_request_v2.*
 use std.common.contracts.orchestration.host_controller_status_v3.*
 use std.common.contracts.orchestration.host_service_operation_v6.*
 use std.common.contracts.orchestration.host_service_operation_reply_v6.*
-use std.common.contracts.orchestration.host_control_operation_v6.host_control_sub_decode_v6
+use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_PANE_SUBS_V6, HOST_AGENT_PANE_TARGET_SUB_V6,
+    host_control_sub_decode_v6}
 use std.common.contracts.orchestration.host_prepare_request_v1.*
 use std.common.contracts.orchestration.host_prepare_response_v1.host_prepare_response_decode_v1
 use std.common.contracts.orchestration.host_execute_request_v2.*
@@ -78,6 +78,9 @@ class ControllerDispatchStateV3:
     var outcome: text = "not-sent"
     var error: text = ""
     var remote_started: bool = false
+    # The live pane carrier retains only its in-memory request and reply.
+    var live_pane_exchange: bool = false
+    var pane_target_exchange: bool = false
     # milestone_0030 C3: the Host operation id of a REMOTE-mode run (no packet is bound in that mode).
     var remote_op: text = ""
 
@@ -125,7 +128,8 @@ pub fn controller_dispatch_host_status_match_v3(context: ControllerDispatchConte
     val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, native_machine_id: plan.native_machine_id,
         service_scope_id: plan.service_scope_id, boot_id: plan.boot_id, provider_generation: plan.provider_generation,
         continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
-    if (plan.backend != "windows-docker-process" or not status.ready or status.scope != scope or status.authority_id != context.config.host_authority_id or
+    if (plan.backend != "windows-docker-process" or status.backend != "windows-docker-process" or
+            not status.ready or status.scope != scope or status.authority_id != context.config.host_authority_id or
             status.authority_id != packet.binding.host_intent.fence.authority_id or
             status.provider_identity_digest != context.config.provider_identity_digest or
             container_scope_fence_id_v2(status.scope)? != packet.binding.host_intent.fence.boot_id):
@@ -138,8 +142,9 @@ pub fn controller_dispatch_host_status_match_v3(context: ControllerDispatchConte
 fn dispatch_service_status_v3(config: ControllerDispatchConfigV3, status: HostControllerStatusV3, require_ready: bool) -> Result<bool, text>:
     val canonical = host_controller_status_encode_v3(status)?
     val binding = config.host_binding
-    val digest = host_service_enrollment_payload_digest_v2(binding)?
-    if ((require_ready and not status.ready) or status.enrollment_digest != digest or status.authority_id != "host-" + digest or
+    val digest = controller_dispatch_host_enrollment_digest_v3(config)?
+    if ((require_ready and not status.ready) or status.backend != binding.backend or
+            status.enrollment_digest != digest or status.authority_id != "host-" + digest or
             status.provider_identity_digest != binding.provider_identity_digest or
             status.scope.physical_host_id != binding.physical_host_id or
             status.scope.native_machine_id != binding.native_machine_id or
@@ -203,8 +208,9 @@ fn dispatch_send_v3(original: ControllerDispatchStateV3, action: text, payload: 
     if request.is_err(): return dispatch_fail_v3(owner, request.unwrap_err())
     val source = host_service_operation_encode_v6(request.unwrap())
     if source.is_err(): return dispatch_fail_v3(owner, source.unwrap_err())
-    val archived = dispatch_archive_v3(owner, source.unwrap())
-    if archived.is_err(): return dispatch_fail_v3(owner, archived.unwrap_err())
+    if not owner.live_pane_exchange:
+        val archived = dispatch_archive_v3(owner, source.unwrap())
+        if archived.is_err(): return dispatch_fail_v3(owner, archived.unwrap_err())
     val turn = host_service_auth_exchange_begin_v6(owner.reader.unwrap(), request.unwrap())
     owner.exchange = turn.owner
     owner.request = Some(request.unwrap())
@@ -218,14 +224,10 @@ fn dispatch_reader_v3(original: ControllerDispatchStateV3) -> ControllerDispatch
     val config = owner.root.unwrap().config_v3()
     if config.is_err(): return dispatch_fail_v3(owner, config.unwrap_err())
     val installed = config.unwrap()
-    val enrollment = host_service_enrollment_payload_digest_v2(installed.host_binding)
-    if enrollment.is_err(): return dispatch_fail_v3(owner, enrollment.unwrap_err())
-    # Shared DATA formula dependency: host_capacity_owner_v1:37-40. The reader
-    # independently proves protected selector/publication; it does NOT replay WAL.
-    val authority = sha256_text("HOST-CAPACITY-AUTHORITY-V1\n" + installed.host_binding.physical_host_id +
-        "\n" + "host-" + enrollment.unwrap() + "\n")
+    val authority = controller_dispatch_host_ready_authority_v3(installed)
+    if authority.is_err(): return dispatch_fail_v3(owner, authority.unwrap_err())
     val opened = host_service_ready_reader_open_v1(installed.setup_credential_path, installed.setup_credential_digest,
-        installed.host_deployment_root, authority)
+        installed.host_deployment_root, authority.unwrap())
     owner.reader = opened.owner
     if opened.error != "" or not opened.ready or opened.owner.is_none():
         return dispatch_fail_v3(owner, if opened.error != "": opened.error else: "dispatch-reader-not-ready")
@@ -375,6 +377,15 @@ fn dispatch_state_host_action_begin_v3(root: ControllerLocalRootV3, operation_id
 pub fn controller_dispatch_host_action_key_v3(operation_id: text) -> text:
     "controller-host-action-v1/" + sha256_text(operation_id) + ".sdn"
 
+pub fn controller_dispatch_host_effect_key_v3(operation_id: text, sub: text) -> text:
+    if ["agent-attach", "agent-detach"].contains(sub):
+        return "controller-agent-attachment-v1/" + sha256_text(sub + "\n" + operation_id) + ".sdn"
+    if sub == "agent-invoke":
+        return "controller-agent-invoke-v1/" + sha256_text(operation_id) + ".sdn"
+    if sub == HOST_AGENT_PANE_TARGET_SUB_V6:
+        return "controller-agent-pane-target-v1/" + sha256_text(operation_id) + ".sdn"
+    controller_dispatch_host_action_key_v3(operation_id)
+
 fn dispatch_state_host_action_send_v3(original: ControllerDispatchStateV3, payload: text) -> ControllerDispatchStateTurnV3:
     var owner = original
     if owner.mode != "host-action" or owner.phase != "ready" or owner.exchange.is_some() or owner.root.is_none():
@@ -382,10 +393,17 @@ fn dispatch_state_host_action_send_v3(original: ControllerDispatchStateV3, paylo
     val sub = host_control_sub_decode_v6(payload)
     if sub.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, sub.unwrap_err()))
     owner.response = ""
-    if not sub.unwrap().sub.ends_with("-inspect"):
+    owner.live_pane_exchange = HOST_AGENT_PANE_SUBS_V6.contains(sub.unwrap().sub)
+    owner.pane_target_exchange = sub.unwrap().sub == HOST_AGENT_PANE_TARGET_SUB_V6
+    if owner.live_pane_exchange:
+        # A claim can be consumed, and a read can drain bytes before its reply.
+        # Keep this exchange transient and send it once.
+        owner.remote_started = true
+        owner.outcome = "unknown"
+    elif not sub.unwrap().sub.ends_with("-inspect"):
         val store = owner.root.unwrap().workload_v3()
         if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
-        val key = controller_dispatch_host_action_key_v3(owner.remote_op)
+        val key = controller_dispatch_host_effect_key_v3(owner.remote_op, sub.unwrap().sub)
         val published = distributed_operation_journal_publish_v3(store.unwrap().journal, key, payload)
         if published.is_err():
             owner.remote_started = true
@@ -607,13 +625,20 @@ fn dispatch_execute_v3(original: ControllerDispatchStateV3, payload: text) -> Co
 
 fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOperationReplyV6) -> ControllerDispatchStateV3:
     var owner = original
+    if owner.pane_target_exchange and reply.pending:
+        return dispatch_fail_v3(owner, "dispatch-pane-target-reply-pending")
     val encoded = host_service_operation_reply_encode_v6(reply)
     if encoded.is_err(): return dispatch_fail_v3(owner, encoded.unwrap_err())
-    val saved = dispatch_archive_v3(owner, encoded.unwrap())
-    if saved.is_err(): return dispatch_fail_v3(owner, saved.unwrap_err())
-    if reply.payload != "":
-        val inner = dispatch_archive_v3(owner, reply.payload)
-        if inner.is_err(): return dispatch_fail_v3(owner, inner.unwrap_err())
+    if owner.live_pane_exchange:
+        # The pane operation is one bounded turn. No progress polling or
+        # implicit resubmission can recover bytes consumed by a lost read.
+        if reply.pending: return dispatch_fail_v3(owner, "dispatch-pane-reply-pending")
+    else:
+        val saved = dispatch_archive_v3(owner, encoded.unwrap())
+        if saved.is_err(): return dispatch_fail_v3(owner, saved.unwrap_err())
+        if reply.payload != "":
+            val inner = dispatch_archive_v3(owner, reply.payload)
+            if inner.is_err(): return dispatch_fail_v3(owner, inner.unwrap_err())
     # Preserve exact authenticated pending DATA independently of local cleanup.
     if reply.pending:
         owner.response = encoded.unwrap()
@@ -991,5 +1016,6 @@ export CONTROLLER_DISPATCH_EDIT_OK_V3, CONTROLLER_DISPATCH_EDIT_REFUSED_V3
 export controller_dispatch_remote_begin_v3, controller_dispatch_remote_send_v3, controller_dispatch_remote_admit_v3, controller_dispatch_remote_edit_v3
 export controller_dispatch_remote_settle_v3, controller_dispatch_remote_execute_key_v3
 export controller_dispatch_host_action_begin_v3, controller_dispatch_host_action_send_v3, controller_dispatch_host_action_key_v3
+export controller_dispatch_host_effect_key_v3
 export controller_dispatch_service_begin_v3, controller_dispatch_step_v3, controller_dispatch_close_v3
 export controller_dispatch_host_status_match_v3, controller_dispatch_execute_archive_key_v3, controller_dispatch_original_execute_match_v3

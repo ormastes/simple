@@ -1,3 +1,4 @@
+use std.nogc_sync_mut.orchestration.host_linux_service_install_v3.host_linux_service_enrollment_epoch_check_v3
 # Service 40 host-side composition over landed modules only: Linux service V4
 # startup, structural current-before-status ordering, and associated
 # prepare/execute dispatch on the sole Host capacity journal.
@@ -30,6 +31,8 @@ use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperatio
     distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3,
     distributed_operation_journal_read_required_v3, distributed_operation_journal_lookup_v2}
 use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.{HostExecutionObservationV2,
+    host_execution_observation_load_owned_v3}
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperCancelTurnV1,
     host_helper_cancel_unconsumed_v1}
 use std.nogc_sync_mut.orchestration.host_helper_abandon_record_v1.host_helper_abandoned_pending_v1
@@ -76,7 +79,7 @@ use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServic
     HostAgentActionAuthorityV4, host_agent_detach_apply_v4, host_linux_service_agent_attachment_inspect_v4,
     HostAgentAttachServiceV4, host_agent_attach_apply_v4, HostAgentTerminalAuthorityV4, host_agent_terminal_authority_v4,
     host_linux_service_agent_attachment_authority_inspect_v4,
-    host_linux_service_agent_attachment_lease_v4, host_linux_service_agent_pane_io_v4}
+    host_linux_service_agent_attachment_lease_v4, host_linux_service_agent_pane_io_v4, host_agent_transfer_holder_v4}
 use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
 use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneIoResultV4,
     host_agent_pane_io_refused_v4}
@@ -561,10 +564,10 @@ pub fn host_linux_service_anchor_parent_v4(anchor: text) -> Result<text, text>:
 # the two protected readers whose actual canonical roots are first pinned to
 # the anchor and its parent. The decoded binding must reproduce both paths
 # before any of its fields is used. Policy is the parent's (the installer's
-# verify input); the root's six fixed files must then equal, byte for byte,
+# verify input); the root's fixed files must then equal, byte for byte,
 # what this proof would publish.
 fn linux_service_installed_proof_v4(anchor: text, parent: text, root_reader: LinuxProtectedRootReaderV1,
-        parent_reader: LinuxProtectedRootReaderV1) -> Result<LinuxServiceVerifiedEnrollmentV1, text>:
+        parent_reader: LinuxProtectedRootReaderV1) -> Result<(LinuxServiceVerifiedEnrollmentV1, HostLinuxServiceEnrollmentBindingV3), text>:
     linux_protected_root_reader_require_root_v1(root_reader, anchor)?
     linux_protected_root_reader_require_root_v1(parent_reader, parent)?
     val binding = host_linux_service_enrollment_decode_v3(host_linux_service_read_v4(root_reader, "linux-service-enrollment-v3.sdn")?)?
@@ -572,10 +575,12 @@ fn linux_service_installed_proof_v4(anchor: text, parent: text, root_reader: Lin
         return Err("linux-host-service-anchor-binding-mismatch")
     val credential = host_enrollment_credential_decode_v1(
         host_linux_service_read_v4(root_reader, "linux-service-enrollment-credential-v3.sdn")?)?
+    val remote_template = if binding.remote_build_template_digest == "": "" else:
+        host_linux_service_read_v4(root_reader, "remote-build-helper-template.sdn")?
     val proof = linux_service_enrollment_verify_v1(host_linux_service_read_v4(parent_reader, "authority-policy.sdn")?,
         binding, credential, host_linux_service_read_v4(root_reader, "host-config.sdn")?,
         host_linux_service_read_v4(root_reader, "engine-policy.sdn")?, host_linux_service_read_v4(root_reader, "broker-policy.sdn")?,
-        host_linux_service_read_v4(root_reader, "agent-helper-template.sdn")?)?
+        host_linux_service_read_v4(root_reader, "agent-helper-template.sdn")?, remote_template)?
     val prefix = proof.child()? + "/"
     for item in linux_service_enrollment_fixed_files_v1(proof)?:
         if not item.0.starts_with(prefix): return Err("linux-host-service-installed-file-path")
@@ -583,7 +588,7 @@ fn linux_service_installed_proof_v4(anchor: text, parent: text, root_reader: Lin
         if host_linux_service_read_v4(root_reader, leaf)? != item.1: return Err("linux-host-service-installed-file-mismatch:" + leaf)
     linux_protected_root_reader_require_root_v1(root_reader, anchor)?
     linux_protected_root_reader_require_root_v1(parent_reader, parent)?
-    Ok(proof)
+    Ok((proof, binding))
 
 fn linux_service_readers_pinned_v4(anchor: text, parent: text, root_reader: LinuxProtectedRootReaderV1,
         parent_reader: LinuxProtectedRootReaderV1) -> Result<(), text>:
@@ -620,6 +625,11 @@ pub fn host_linux_service_open_installed_v4(anchor: text) -> HostLinuxServiceSta
     shell.admission = Some(admission)
     if admission.error != "" or admission.owner.is_none():
         return linux_service_open_error_v4(shell, admission.error, "linux-host-service-admission-missing")
+    val (sealed, binding) = proof.unwrap()
+    val epoch = admission.owner.unwrap().current_v1()
+    if epoch.is_err(): return linux_service_start_error_v4(shell, epoch.unwrap_err())
+    val compatible = host_linux_service_enrollment_epoch_check_v3(binding, epoch.unwrap())
+    if compatible.is_err(): return linux_service_start_error_v4(shell, compatible.unwrap_err())
     val lent = admission.owner.unwrap().lend_service_identity_v1()
     admission.owner = Some(lent.owner)
     shell.admission = Some(admission)
@@ -638,7 +648,7 @@ pub fn host_linux_service_open_installed_v4(anchor: text) -> HostLinuxServiceSta
     # pinned to the anchor and its parent before start re-reads through them.
     val repinned = linux_service_readers_pinned_v4(anchor, parent.unwrap(), opened.owner.unwrap(), opened_parent.owner.unwrap())
     if repinned.is_err(): return linux_service_start_error_v4(shell, repinned.unwrap_err())
-    val started = host_linux_service_start_v4(anchor, opened.owner.unwrap(), opened_parent.owner.unwrap(), proof.unwrap(),
+    val started = host_linux_service_start_v4(anchor, opened.owner.unwrap(), opened_parent.owner.unwrap(), sealed,
         lent.native.unwrap(), lent.epoch_digest, stored.inventory.unwrap())
     var owner = started.owner
     owner.admission = shell.admission
@@ -1462,6 +1472,67 @@ fn linux_service_live_epoch_v4(owner: HostLinuxServiceCurrentV4) -> Result<i64, 
     if record.epoch_generation <= 0: return Err("linux-host-service-epoch-generation")
     Ok(record.epoch_generation)
 
+# reason: service_epoch is the native i64 epoch_generation, copied into the V6 target receipt's serviceEpoch wire field
+@allow(primitive_api)
+pub struct HostAgentPaneTargetAuthorityV4:
+    service_incarnation: text
+    service_epoch: i64
+
+# An invoke frame carries no signature. Verify the held bytes against the archived signed execute
+# before exposing the Host identity for signing a pane binding. No agent turn runs here.
+pub fn host_linux_service_agent_pane_target_authority_v4(owner: HostLinuxServiceCurrentV4,
+        operation_id: text, invoke_source: text) -> Result<HostAgentPaneTargetAuthorityV4, text>:
+    val metadata = owner.current_v4()?
+    val capacity = owner.capacity.unwrap()
+    if not capacity.ledger.continuity_proven: return Err("linux-host-service-startup-quarantine")
+    if owner.reconcile_error != "" or not owner.inventory_returned: return Err("linux-host-agent-before-reconcile")
+    if owner.agent.is_none(): return Err("linux-host-agent-pane-target-unstarted")
+    val agent = owner.agent.unwrap()
+    val invoke = host_agent_invoke_request_decode_v4(invoke_source)?
+    if invoke.operation_id != operation_id or agent.operation_id != operation_id:
+        return Err("linux-host-agent-pane-target-operation-mismatch")
+    if agent.payload_digest != sha256_text(invoke_source): return Err("linux-host-agent-invoke-conflict")
+    if agent.stage != "running" or agent.pending or agent.stop_requested or host_agent_transfer_holder_v4(agent) != "container":
+        return Err("linux-host-agent-pane-target-not-running")
+
+    val scope = owner.scope.unwrap()
+    val archived = distributed_operation_journal_read_v3(capacity.journal,
+        linux_service_execute_relative_v4(scope, operation_id)?, 2097152)?
+    val execute = host_linux_service_agent_execute_v4(archived, operation_id)?
+    val stored = distributed_operation_journal_read_v3(capacity.journal,
+        linux_service_association_relative_v4(scope, operation_id)?, 2097152)?
+    if host_execution_association_digest_v3(execute.association)? != agent.association_digest:
+        return Err("linux-host-agent-pane-target-association-mismatch")
+    val policy = metadata.policy
+    val context = host_local_context_v1(policy)
+    if context.grant_clock <= 0 or context.grant_clock < agent.clock_ms:
+        return Err("linux-host-agent-pane-target-clock")
+    val _grant = linux_service_execute_authorize_core_v4(scope, policy, metadata.configuration.controller_ref,
+        execute, stored, context)?
+    val manifest = host_linux_service_agent_admit_v4(capacity, scope, execute, stored, invoke, false)?
+    if agent.not_after != manifest.base.not_after or context.grant_clock >= manifest.base.not_after:
+        return Err("linux-host-agent-pane-target-window")
+    Ok(HostAgentPaneTargetAuthorityV4(service_incarnation: scope.continuity_id,
+        service_epoch: linux_service_live_epoch_v4(owner)?))
+
+# The first native running observation archived by this exact V4 agent.
+# The live owner still has to hold that same run and runtime. The returned
+# timestamp describes the archived sample, independent of this read.
+pub fn host_linux_service_agent_runtime_inspect_v4(owner: HostLinuxServiceCurrentV4,
+        operation_id: text, invoke_source: text) -> Result<HostExecutionObservationV2, text>:
+    val _authority = host_linux_service_agent_pane_target_authority_v4(owner, operation_id, invoke_source)?
+    val agent = owner.agent.unwrap()
+    if not agent.observed or agent.created.is_none(): return Err("linux-host-agent-runtime-unobserved")
+    val journal = owner.capacity.unwrap().journal
+    val observation = host_execution_observation_load_owned_v3(journal, operation_id)?
+    val native_scope = linux_service_native_scope_v4(owner)?
+    if (container_host_scope_bytes_v2(observation.scope)? != container_host_scope_bytes_v2(native_scope)? or
+            observation.runtime != agent.created.unwrap() or
+            observation.phase != "running" or observation.inspect_status != "ok" or
+            observation.provider_identity_digest != owner.records.unwrap().binding.provider_identity_digest):
+        return Err("linux-host-agent-runtime-observation-mismatch")
+    Ok(observation)
+
 # The held-run inputs every controller-signed attachment action re-derives (attach, the terminal authority): the
 # archived signed execute of the held agent and its association digest, as HostAgentActionAuthorityV4 under the
 # installed policy and a fresh clock.
@@ -2071,6 +2142,7 @@ export host_linux_service_start_v4, host_linux_service_prepare_v4, host_linux_se
 export host_linux_service_open_installed_v4, host_linux_service_anchor_parent_v4
 export host_linux_service_dispatch_v4, host_linux_service_execute_v4, host_linux_service_dispatch_installed_v4
 export host_linux_service_agent_invoke_v4, host_linux_service_agent_cancel_v4
+export HostAgentPaneTargetAuthorityV4, host_linux_service_agent_pane_target_authority_v4
 export host_linux_service_agent_attach_v4, host_linux_service_agent_terminal_authority_v4, host_linux_service_agent_pane_control_target_v4
 export HostLinuxServiceLeaseTurnV4, HostLinuxServicePaneIoTurnV4, host_linux_service_attachment_lease_v4, host_linux_service_pane_io_v4
 export host_linux_service_remote_build_open_v4, host_linux_service_remote_build_input_v4, host_linux_service_remote_build_start_v4

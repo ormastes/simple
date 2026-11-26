@@ -1,0 +1,64 @@
+use app.llm_caret.workbench.remote_pane_view_v1.{CaretRemotePaneScopeV1, CaretRemotePaneViewV1,
+    caret_remote_pane_open_v1, caret_remote_pane_server_matches_v1}
+use app.orchestrator.controller_gateway_v1.{controller_gateway_request_decode_v1, controller_gateway_response_v1}
+use std.common.config_core.server_context_types_v1.ResolvedServerV1
+use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_PANE_TARGET_SUB_V6, host_control_sub_decode_v6}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attach_request_decode_v4,
+    host_agent_attach_request_parts_v4, host_agent_attach_binding_plan_check_v4}
+
+pub struct CaretRemotePaneRouteV1:
+    config: text
+    context: text
+    server_name: text
+    profile_path: text
+
+pub struct CaretRemotePaneTargetRequestV1:
+    route: CaretRemotePaneRouteV1
+    server: ResolvedServerV1
+    controller_id: text
+    operation_id: text
+    invoke_digest: text
+    source: text
+
+pub struct CaretRemotePaneTargetV1:
+    request: CaretRemotePaneTargetRequestV1
+    receipt: text
+
+pub fn caret_remote_pane_target_request_v1(route: CaretRemotePaneRouteV1, selected: ResolvedServerV1,
+        source: text) -> Result<CaretRemotePaneTargetRequestV1, text>:
+    if selected.consumer != "caret" or selected.record.transport != "ssh":
+        return Err("caret-remote-pane-ssh-required")
+    val request = controller_gateway_request_decode_v1(source)?
+    if request.action != HOST_AGENT_PANE_TARGET_SUB_V6: return Err("caret-remote-pane-target-action")
+    val sub = host_control_sub_decode_v6(request.source)?
+    Ok(CaretRemotePaneTargetRequestV1(route: route, server: selected, controller_id: request.controller_id,
+        operation_id: request.request_uid, invoke_digest: sha256_text(sub.frame), source: source))
+
+# Called at the retired SSH owner boundary with the exact request it sent.
+pub fn caret_remote_pane_target_complete_v1(request: CaretRemotePaneTargetRequestV1,
+        response: text) -> Result<CaretRemotePaneTargetV1, text>:
+    val receipt = controller_gateway_response_v1(request.source, response)?
+    Ok(CaretRemotePaneTargetV1(request: request, receipt: receipt))
+
+pub fn caret_remote_pane_from_attach_v1(target: CaretRemotePaneTargetV1, selected: ResolvedServerV1,
+        attach_source: text) -> Result<CaretRemotePaneViewV1, text>:
+    val request = target.request
+    if not caret_remote_pane_server_matches_v1(request.server, selected):
+        return Err("caret-remote-pane-endpoint-changed")
+    val attach = host_agent_attach_request_decode_v4(attach_source)?
+    val parts = host_agent_attach_request_parts_v4(attach)?
+    host_agent_attach_binding_plan_check_v4(attach, parts)?
+    if attach.operation_id != request.operation_id or parts.plan.identity.parent_operation_id != request.operation_id or
+            parts.binding.service_incarnation != parts.plan.workload.continuity_id:
+        return Err("caret-remote-pane-attach-scope")
+    # The canonical plan decoder binds node_boot_id to the workload Host
+    # scope fence. Stream claims still require the live Host's signed attach.
+    val scope = CaretRemotePaneScopeV1(server: selected, profile_path: request.route.profile_path,
+        controller_id: request.controller_id, scope_digest: parts.plan.runtime.node_boot_id,
+        operation_id: request.operation_id, invoke_digest: request.invoke_digest, binding_uid: parts.binding.binding_uid,
+        attach_digest: sha256_text(attach_source))
+    caret_remote_pane_open_v1(scope, parts.binding, target.receipt)
+
+export CaretRemotePaneRouteV1, CaretRemotePaneTargetRequestV1, CaretRemotePaneTargetV1
+export caret_remote_pane_target_request_v1, caret_remote_pane_target_complete_v1, caret_remote_pane_from_attach_v1

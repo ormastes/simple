@@ -1,6 +1,12 @@
 # Metadata-only production codec cases. No native owner or Host grant is minted.
 use std.spec.{describe, it, expect}
 use std.nogc_sync_mut.orchestration.controller_dispatch_config_v3.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.dispatch_service_status_v3
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{HostLinuxServiceEnrollmentBindingV3,
+    host_linux_service_enrollment_digest_v3}
+use std.common.contracts.orchestration.host_controller_status_v3.*
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, controller_dispatch_config_encode_v1}
 use test.fixtures.orchestration.host_windows_deployment_v2.windows_deployment_binding_data_v2
 
@@ -8,6 +14,16 @@ fn route_config_v3() -> ControllerDispatchConfigV3:
     ControllerDispatchConfigV3("controller_1", 3, "a".repeat(64), windows_deployment_binding_data_v2(),
         "\\GLOBAL??\\C:\\controller-private\\host-auth-v6.sdn", "b".repeat(64),
         "\\GLOBAL??\\C:\\host-private\\deployment")
+
+fn linux_route_config_v3() -> ControllerDispatchConfigV3:
+    val binding = HostLinuxServiceEnrollmentBindingV3(physical_host_id: "linux_node", service_scope_id: "agent_scope",
+        config_digest: "a".repeat(64), policy_digest: "b".repeat(64), policy_revision: 1,
+        native_machine_id: "a".repeat(32), provider_identity_digest: "c".repeat(64), engine_policy_digest: "d".repeat(64),
+        machine_parent: "/srv/simple/hosts", broker_policy_digest: "e".repeat(64), physical_cpu_millis: 2000,
+        physical_memory_bytes: 1048576000, reserved_cpu_millis: 100, reserved_memory_bytes: 1048576,
+        agent_helper_template_digest: "f".repeat(64))
+    ControllerDispatchConfigV3("controller_1", 3, "a".repeat(64), controller_dispatch_linux_host_view_v3(binding),
+        "/srv/simple/private/setup.sdn", "b".repeat(64), "/srv/simple/hosts/deployment", Some(binding))
 
 describe "Explicit retained Host route metadata":
     it "round trips the native locator and public credential pin without admitting native authority":
@@ -50,3 +66,41 @@ describe "Explicit retained Host route metadata":
         expect(controller_dispatch_config_encode_v3(config).is_err()).to_equal(true)
         val wire = controller_dispatch_config_encode_v3(route_config_v3()).unwrap()
         expect(controller_dispatch_config_decode_v3(wire + "\n").is_err()).to_equal(true)
+
+
+    it "binds Linux controller ready state to the same canonical enrollment as the Linux Host":
+        val original = linux_route_config_v3()
+        val bytes = controller_dispatch_config_encode_v3(original).unwrap()
+        expect(bytes).to_contain("linuxHostEnrollment")
+        val config = controller_dispatch_config_decode_v3(bytes).unwrap()
+        val raw_linux = original.linux_host_binding.unwrap()
+        val digest = host_linux_service_enrollment_digest_v3(raw_linux).unwrap()
+        expect(config.linux_host_binding.unwrap()).to_equal(raw_linux)
+        expect(controller_dispatch_host_enrollment_digest_v3(config).unwrap()).to_equal(digest)
+        expect(controller_dispatch_host_ready_authority_v3(config).unwrap()).to_equal(
+            sha256_text("HOST-CAPACITY-AUTHORITY-V1\nlinux_node\nhost-" + digest + "\n"))
+        val scope = ContainerHostScopeV2(physical_host_id: "linux_node", service_scope_id: "agent_scope", boot_id: "",
+            provider_generation: 8, native_machine_id: raw_linux.native_machine_id, continuity_mode: "service-incarnation-v1",
+            continuity_id: "1".repeat(32))
+        var status = HostControllerStatusV3(scope, "host-" + digest, digest, raw_linux.provider_identity_digest,
+            1, 1900, 1047527424, 1900, 1047527424, 0, true, "linux-service")
+        val encoded = host_controller_status_encode_v3(status).unwrap()
+        expect(host_controller_status_decode_v3(encoded).unwrap()).to_equal(status)
+        expect(dispatch_service_status_v3(config, status, true).is_ok()).to_equal(true)
+        status.backend = "windows-docker-process"
+        expect(dispatch_service_status_v3(config, status, true).is_err()).to_equal(true)
+        status.backend = "linux-service"
+        status.enrollment_digest = "0".repeat(64)
+        status.authority_id = "host-" + status.enrollment_digest
+        expect(dispatch_service_status_v3(config, status, true).is_err()).to_equal(true)
+
+    it "refuses inconsistent Linux metadata and a second configured Host enrollment":
+        var config = linux_route_config_v3()
+        val wire = controller_dispatch_config_encode_v3(config).unwrap()
+        expect(controller_dispatch_config_decode_v3(wire.replace("linuxHostEnrollment", "hostEnrollment")).is_err()).to_equal(true)
+        val conflicting = "{hostEnrollment: \"x\", " + wire.substring(1, wire.byte_len())
+        expect(controller_dispatch_config_decode_v3(conflicting).is_err()).to_equal(true)
+        var view = config.host_binding
+        view.backend = "windows-docker-process"
+        config.host_binding = view
+        expect(controller_dispatch_config_encode_v3(config).unwrap_err()).to_equal("controller-local-config-linux-host-view-mismatch")
