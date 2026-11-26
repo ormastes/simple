@@ -844,6 +844,10 @@ fn text_control_auto_outer_w(node: HNode, st: Style) -> i32:
 fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
     var inline_run = 0
     var widest = 0
+    # A row flex container lays its items side by side: its max-content is
+    # their sum (outer widths plus column gaps), not the widest one.
+    val row_flex = (styles[i].display == "flex" or styles[i].display == "inline-flex") and styles[i].flex_direction != "column" and styles[i].flex_direction != "column-reverse"
+    var row_items = 0
     # A collapsible space ended the previous inline piece: it is part of the
     # line when another piece follows (`ab <span>cd</span> ef` is three pieces
     # and two spaces), as in `intrinsic_text_width`.
@@ -893,12 +897,22 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
                 child_w = control_w
             # Atomic inline boxes carry their horizontal margins on the line
             # (the run loop's `inline_takes_margin`): a checkbox's 3 + 4 px.
-            if child_w > 0 and (cst.display == "inline-block" or ctag == "input" or ctag == "select" or ctag == "textarea"):
+            val atomic_margins = child_w > 0 and (cst.display == "inline-block" or ctag == "input" or ctag == "select" or ctag == "textarea")
+            if atomic_margins:
                 if cst.margin_l > 0 and not cst.margin_l_pct:
                     child_w = child_w + cst.margin_l
                 if cst.margin_r > 0 and not cst.margin_r_pct:
                     child_w = child_w + cst.margin_r
-            if cst.display == "inline" or cst.display == "inline-block":
+            if row_flex:
+                if row_items > 0:
+                    inline_run = inline_run + styles[i].column_gap_px
+                if cst.margin_l > 0 and not cst.margin_l_pct and not atomic_margins:
+                    child_w = child_w + cst.margin_l
+                if cst.margin_r > 0 and not cst.margin_r_pct and not atomic_margins:
+                    child_w = child_w + cst.margin_r
+                inline_run = inline_run + child_w
+                row_items = row_items + 1
+            elif cst.display == "inline" or cst.display == "inline-block":
                 if child_w > 0:
                     # A space may also sit INSIDE the neighbour: `<span>ab
                     # </span>cd` ends with one, `ab<span> cd</span>` starts
