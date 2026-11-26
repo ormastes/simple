@@ -2261,6 +2261,33 @@ impl MirLowering:
                         return mir_operand_copy(any_local)
                     return mir_operand_copy(local)
                 case _: ()
+        # Arrays and dicts: the raw handle used to fall through unchanged, and
+        # rt_strcat_tagged's text view of a non-string word is empty, so
+        # `"xs={xs}"` printed `xs=` natively
+        # (native_interpolation_array_renders_empty_2026-11-26). Render them
+        # through rt_to_string exactly like lower_bootstrap_print_call
+        # (switch_operators_calls.spl) does for `print xs`. runtime_array_locals
+        # is checked first because an array handle may carry an integer ABI
+        # type, which the scalar dispatch below would render as a number.
+        var is_aggregate = self.runtime_array_locals.contains(local.id)
+        if not is_aggregate:
+            if val agg_ty = self.local_mir_type_of(local):
+                match agg_ty.kind:
+                    case MirTypeKind.Array(_, _) | MirTypeKind.Dict(_, _):
+                        is_aggregate = true
+                    case _: ()
+        if is_aggregate:
+            val agg_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_to_string"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ), call_origin: MirCallOrigin.Runtime)
+            var b_agg = self.builder
+            val agg_res = b_agg.emit_call(agg_op, [mir_operand_copy(local)], MirType.i64())
+            self.builder = b_agg
+            if val agg_local = agg_res:
+                self.mark_tagged_text_local(agg_local.id)
+                return mir_operand_copy(agg_local)
+            return mir_operand_copy(local)
         var is_bool = false
         var is_f32 = false
         var is_float = false
