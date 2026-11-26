@@ -352,8 +352,7 @@ document uses the existing `hostEnrollment` field and canonical V2 bytes.
 Provide exactly one binding for a retained Host. The installed binding
 determines the ready-selector authority and the authenticated status check.
 
-The SSH controller gateway may opt in to `agent-attachment` with an installed
-`dispatchRoot` and `dispatchConfigDigest`. The request names the held run and
-carries a closed attachment action. Attach and detach require their original
-signed V4 frames. Inspect reports the retained attachment and current
-terminal authority. These actions use the same installed Host and smux owner.
+An accepted attach can remain in the opening stage. A separately authorized
+`agent-invoke` request drives the same held run using its original frame.
+Inspect the attachment to check current terminal authority. The terminal data
+path still requires a separate smux attachment.

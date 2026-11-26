@@ -49,3 +49,11 @@ The cooperative SSH coverage refuses a non-SSH selection and validates
 terminal results across extra progress or cancellation calls. These
 admission and state checks require no SSH connection. The live Caret gateway
 scenario covers the actual configured server separately.
+
+
+The attachment gateway scenarios require installed dispatch pins, correlate a
+closed attachment request to its exact Host run, and validate the typed V4
+attachment report. The separately authorized invoke cases validate the exact
+retained run and progress reply. Attach, detach and invoke use distinct
+immutable archive keys. These source scenarios do not exercise a native Host
+or SSH exchange.
