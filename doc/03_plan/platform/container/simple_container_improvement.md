@@ -1,6 +1,5 @@
 # Agent task plan — Simple Container Improvement, increment 1
 
-- Atomic pin creation residual (Fable review, 2026-11-27): `_isv1_pin_add_in_place` opens with `dir_create_all(pin_dir + "/refs")`. If a release renames the pin away after the `is_dir(target)` check, that recreates an ownerless `pins/<id>`. Fix: on the existing-target path, never recreate `pin_dir`; if it vanished, retry the staged create. The losing-rename path has no spec.
 - Store sweeper and cross-owner follow-ups (Fable review, 2026-11-27):
   - An unrestorable foreign pin now stays in a tomb marked `keep`, and the call returns `pin-owner-changed-unrestored`. Nothing yet surfaces or reclaims these tombs.
   - A pin restored as `<id>.r<n>` is not discoverable by its owner, so its refs are retained indefinitely.
@@ -77,6 +76,7 @@ Open (P2, next increment):
 - Storage view: a junction swapped in between the parent walk and the open still redirects (closing it needs handle-relative opens; out of path-policy scope). An upper file or directory shadows base paths beneath it and returns `rejected` instead of falling through. The save entry-cap spec tests the helper, not its wiring into save.
 - DONE (work/scv-adapter-legacy-pin-20261127): SCV adapter keeps the pin for a digest-mismatched legacy blob whose key the store still opens `ok` (verified via `immutable_store_v1_open`, never the blob); a mismatched blob with no stored copy stays skipped. Specs in `scv_adapter_v1_spec.spl` (9/9).
 - Atomic pin creation (done 2026-11-27): a new pin is built in `staging/pincreate-*/pin` (owner + refs, synced) and renamed into `pins/<id>`, so GC and release never see a half-created ownerless pin. An existing `pins/<id>` keeps the in-place merge semantics (same owner merges refs, other owner = `pin-owner-mismatch`). POSIX rename(2) replaces an EMPTY destination dir, so the destination is checked first; staged pins are never empty (owner file), so racing creators cannot replace each other. Residual: an empty `pins/<id>` appearing between the check and the rename. The sweeper also removes stale `pincreate-*`. Release of a legacy ownerless dir stays allowed.
+- Atomic pin creation residual (Fable review, 2026-11-27): `_isv1_pin_add_in_place` opens with `dir_create_all(pin_dir + "/refs")`. If a release renames the pin away after the `is_dir(target)` check, that recreates an ownerless `pins/<id>`. Fix: on the existing-target path, never recreate `pin_dir`; if it vanished, retry the staged create. The losing-rename path has no spec.
 - View create crash follow-ups (Fable review, 2026-11-27):
   - A crash mid journal/meta write leaves a `.simple-atomic-bytes-*/` staging dir that destroy refuses as unknown. This is fail-closed, but the id stays stuck. Fix: accept an empty or payload-only atomic staging dir.
   - Recovery now reaches a same-id create caught between its claim and its journal write. This is acceptable only because destroying an id you do not own is a caller error.
