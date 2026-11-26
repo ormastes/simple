@@ -1,0 +1,43 @@
+# Contained-launch fixture: starts N sleeping children and reports each spawn.
+# Usage: simple run contain_spawn_n.spl args: <N> <command> <hold_ms>
+# Prints "SPAWN <i> allow|deny" per child (deny = the process was not created or
+# did not stay alive, e.g. a job process limit refused it), then holds for
+# <hold_ms> so a caller can observe the live tree, then kills its children.
+use std.nogc_sync_mut.io_runtime.{get_args, process_spawn_async, process_is_running, process_kill, thread_sleep}
+
+fn spawn_n_parse(value: text) -> i64:
+    var total = 0
+    var index = 0
+    while index < value.byte_len():
+        val digit = value.char_code_at(index) - 48
+        if digit < 0 or digit > 9: return -1
+        total = total * 10 + digit
+        index = index + 1
+    total
+
+fn main():
+    val args = get_args()
+    var start = -1
+    var index = 0
+    while index < args.len():
+        if args[index] == "args:": start = index + 1
+        index = index + 1
+    if start < 0 or start + 2 >= args.len():
+        print("SPAWN-ERROR usage")
+        return
+    val count = spawn_n_parse(args[start])
+    val hold = spawn_n_parse(args[start + 2])
+    var pids: [i64] = []
+    var made = 0
+    while made < count:
+        val pid = process_spawn_async(args[start + 1], ["-n", "60", "127.0.0.1"])
+        thread_sleep(400)
+        val alive = pid > 0 and process_is_running(pid)
+        if alive: pids = pids.push(pid)
+        print("SPAWN " + (made + 1).to_string() + " " + (if alive: "allow" else: "deny"))
+        made = made + 1
+    thread_sleep(hold)
+    for pid in pids:
+        val _killed = process_kill(pid)
+
+main()

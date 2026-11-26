@@ -1,0 +1,286 @@
+# Windows qualify op (architecture pure_simple_container 4.3): runs the nine canaries
+# of the restricted-token mechanism on THIS host, each deny canary beside a positive
+# control from the same probe run, and folds them into one evidence digest. It sets up
+# its own directories under work_dir, launches only the pinned probe through the
+# variant launch core, and removes what it created. A canary that could not be
+# observed is "not-run", which never passes.
+use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainAdmissionV1, SosixContainLimitsV1, SosixContainBytesV1, SosixContainCountV1, SosixContainCpuRateV1, SosixContainMillisV1, SosixContainFlagV1, SosixContainCanaryV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1, sosix_contain_qualify_request_reason_v1, SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1, SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1, SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_hardlink}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1, windows_process_poll_v1, windows_process_cancel_v1}
+use std.nogc_sync_mut.io_runtime.{env_get, file_read, file_exists, file_copy, process_run, time_now_monotonic_ms, thread_sleep}
+use std.nogc_sync_mut.sosix.containment_types_v1.{SOSIX_CONTAIN_CANARY_PROBE_SHA256_V1}
+use std.nogc_sync_mut.sosix.contained_write_v1.{sosix_fs_grant_contained_write_v1, sosix_fs_grant_contained_read_v1}
+use std.nogc_sync_mut.sosix.windows.containment_launch_v1.{_admit_v1, _lease_of_v1, _reap_v1, _run_to_end_v1, _volume_serial_v1}
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_wide_v1, sec_read_ptr_v1, sec_open_process_token_v1, sec_close_handle_v1, sec_token_info_v1, sec_sid_from_text_v1, sec_set_entries_v1, sec_access_entry_v1}
+
+@abi("system")
+@unsafe(reason: "owned protected DACL written on a path this op created", capabilities: [ffi, raw_ptr])
+extern fn SetNamedSecurityInfoW(name: i64, kind: i32, info: u32, owner: i64, group: i64, dacl: i64, sacl: i64) -> u32
+
+const _EXIT_CODE = 37
+const _GENERIC_ALL = 0x10000000
+# DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
+const _DACL_PROTECTED = 0x80000004
+const _TOKEN_USER = 1
+const _PING_ARGS = ["-n", "60", "127.0.0.1"]
+
+struct QualifyRunV1:
+    out: text
+    exit_code: i64
+
+struct QualifySiteV1:
+    work: text
+    scope: text
+    other_scope: text
+    program: text
+    program_digest: text
+    script: text
+    wall: i64
+    own: text
+    other: text
+    lower_file: text
+    out_dir: text
+    private_dir: text
+    ping: text
+    environment: [text]
+
+fn _canary_v1(id: text, expected: text, observed: text, control: text) -> SosixContainCanaryV1:
+    SosixContainCanaryV1(id: id, expected: expected, observed: observed, control: control)
+
+fn _refused_v1(reason: text) -> SosixContainQualifyResultV1:
+    SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: reason)
+
+fn _request_v1(site: QualifySiteV1, tag: text, program: text, digest: text, args: [text], scope: text, processes: i64, wall: i64) -> SosixContainRequestV1:
+    SosixContainRequestV1(program: program, program_digest: digest, args: args, environment: site.environment,
+        directory: site.work, stdout_path: site.out_dir + "/" + tag + ".out", stderr_path: site.out_dir + "/" + tag + ".err",
+        limits: SosixContainLimitsV1(memory: SosixContainBytesV1(0), processes: SosixContainCountV1(processes),
+            cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(wall)),
+        identity: "restricted", scope: scope, network: "host", readonly_dirs: [], writable_dirs: [site.own],
+        private_pids: SosixContainFlagV1(false), root_dir: "")
+
+fn _probe_args_v1(site: QualifySiteV1, mode_args: [text]) -> [text]:
+    var args = ["run", site.script, "canary-probe"]
+    for item in mode_args: args = args.push(item)
+    args
+
+# One probe run to completion: its stdout and the leader exit code.
+fn _run_probe_v1(site: QualifySiteV1, tag: text, mode_args: [text], processes: i64) -> Result<QualifyRunV1, text>:
+    val request = _request_v1(site, tag, site.program, site.program_digest, _probe_args_v1(site, mode_args), site.scope, processes, site.wall)
+    match _admit_v1(request):
+        SosixContainAdmissionV1.Started(lease):
+            val receipt = _run_to_end_v1(_lease_of_v1(lease), site.wall)?
+            Ok(QualifyRunV1(out: file_read(request.stdout_path), exit_code: receipt.exit_code))
+        SosixContainAdmissionV1.RejectedBeforeStart(reason): Err(reason)
+        SosixContainAdmissionV1.FailedAfterCleanup(reason): Err(reason)
+        SosixContainAdmissionV1.Unknown(reason): Err(reason)
+
+# Value of the first "<key> <value>" line of probe output; "" when absent.
+fn _line_value_v1(out: text, key: text) -> text:
+    for line in out.replace("\r", "").split("\n"):
+        if line.starts_with(key + " "): return line[key.len() + 1:].trim()
+    ""
+
+fn _verdict_v1(value: text) -> text:
+    if value == "allow" or value == "deny": return value
+    "not-run"
+
+# Deny canary: the probe says deny AND the op sees no effect on the target; any
+# visible effect is an allow, whatever the probe printed.
+fn _deny_observed_v1(probe_says: text, effect_present: bool) -> text:
+    if probe_says == "not-run": return "not-run"
+    if effect_present: return "allow"
+    probe_says
+
+# Control: the probe says allow AND the op sees the control file.
+fn _control_observed_v1(probe_says: text, control_present: bool) -> text:
+    if probe_says == "not-run": return "not-run"
+    if probe_says == "allow" and not control_present: return "deny"
+    probe_says
+
+fn _write_canary_v1(site: QualifySiteV1, id: text, tag: text, target: text, control_name: text, base_digest: text) -> SosixContainCanaryV1:
+    val control = site.own + "/" + control_name
+    val ran = _run_probe_v1(site, tag, ["write", target, control], 0)
+    if ran.is_err(): return _canary_v1(id, "deny", "not-run", "not-run")
+    val out = ran.unwrap().out
+    val says = _verdict_v1(_line_value_v1(out, "TARGET"))
+    val ctl = _control_observed_v1(_verdict_v1(_line_value_v1(out, "CONTROL")), file_exists(control))
+    var effect = file_exists(target)
+    if base_digest != "":
+        effect = windows_process_file_digest_v1(target) != base_digest
+    _canary_v1(id, "deny", _deny_observed_v1(says, effect), ctl)
+
+fn _launch_exit_v1(site: QualifySiteV1) -> SosixContainCanaryV1:
+    val ran = _run_probe_v1(site, "exit", ["exit", _EXIT_CODE.to_string()], 0)
+    if ran.is_err(): return _canary_v1(SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, "allow", "not-run", "none")
+    val observed = if ran.unwrap().exit_code == _EXIT_CODE: "allow" else: "deny"
+    _canary_v1(SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, "allow", observed, "none")
+
+fn _own_write_v1(site: QualifySiteV1) -> SosixContainCanaryV1:
+    val target = site.own + "/own.txt"
+    val ran = _run_probe_v1(site, "own", ["write", target, "-"], 0)
+    if ran.is_err(): return _canary_v1(SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, "allow", "not-run", "none")
+    val says = _verdict_v1(_line_value_v1(ran.unwrap().out, "TARGET"))
+    val observed = if says == "allow" and not file_exists(target): "deny" else: says
+    _canary_v1(SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, "allow", observed, "none")
+
+fn _read_exec_v1(site: QualifySiteV1) -> SosixContainCanaryV1:
+    val ran = _run_probe_v1(site, "readexec", ["readexec", site.lower_file], 0)
+    if ran.is_err(): return _canary_v1(SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1, "allow", "not-run", "none")
+    _canary_v1(SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1, "allow", _verdict_v1(_line_value_v1(ran.unwrap().out, "TARGET")), "none")
+
+# Cancel while the probe holds live children; the job must report an empty tree.
+fn _tree_empty_v1(site: QualifySiteV1) -> SosixContainCanaryV1:
+    val request = _request_v1(site, "tree", site.program, site.program_digest, _probe_args_v1(site, ["sleepspawn", site.ping]), site.scope, 0, 0)
+    match _admit_v1(request):
+        SosixContainAdmissionV1.Started(lease):
+            val native = _lease_of_v1(lease)
+            var children_live = false
+            val deadline = time_now_monotonic_ms() + site.wall
+            while not children_live and time_now_monotonic_ms() < deadline:
+                match windows_process_poll_v1(native):
+                    Ok(observed):
+                        if observed.active_processes >= 3: children_live = true
+                    Err(_reason): break
+                if not children_live: thread_sleep(100)
+            val _cancelled = windows_process_cancel_v1(native)
+            val receipt = _run_to_end_v1(native, 15000)
+            if receipt.is_err(): return _canary_v1(SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, "allow", "not-run", "none")
+            val observed = if children_live and receipt.unwrap().tree_empty: "allow" else: "deny"
+            _canary_v1(SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, "allow", observed, "none")
+        _: _canary_v1(SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, "allow", "not-run", "none")
+
+# A live process of the second scope, opened by the first scope's probe.
+fn _other_process_v1(site: QualifySiteV1) -> SosixContainCanaryV1:
+    val id = SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1
+    val ping_digest = windows_process_file_digest_v1(site.ping)
+    if ping_digest == "": return _canary_v1(id, "deny", "not-run", "not-run")
+    val victim = _request_v1(site, "victim", site.ping, ping_digest, _PING_ARGS, site.other_scope, 0, 0)
+    match _admit_v1(victim):
+        SosixContainAdmissionV1.Started(lease):
+            val native = _lease_of_v1(lease)
+            var canary = _canary_v1(id, "deny", "not-run", "not-run")
+            match windows_process_poll_v1(native):
+                Ok(observed):
+                    val ran = _run_probe_v1(site, "procopen", ["procopen", observed.pid.to_string(), site.ping], 0)
+                    if ran.is_ok():
+                        val out = ran.unwrap().out
+                        canary = _canary_v1(id, "deny", _verdict_v1(_line_value_v1(out, "TARGET")), _verdict_v1(_line_value_v1(out, "CONTROL")))
+                Err(_reason): pass
+            val _reaped = _reap_v1(native)
+            canary
+        _: _canary_v1(id, "deny", "not-run", "not-run")
+
+# Limit 3 = leader + two children: the first two spawns are the control, the third is denied.
+fn _process_limit_v1(site: QualifySiteV1) -> SosixContainCanaryV1:
+    val id = SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1
+    val ran = _run_probe_v1(site, "limit", ["spawn", "3", site.ping], 3)
+    if ran.is_err(): return _canary_v1(id, "deny", "not-run", "not-run")
+    val out = ran.unwrap().out
+    _canary_v1(id, "deny", _verdict_v1(_line_value_v1(out, "TARGET")), _verdict_v1(_line_value_v1(out, "CONTROL")))
+
+# Protected DACL {caller user, SYSTEM} so lower-read-exec is not satisfied by an inherited Users ACE.
+fn _force_user_only_v1(path: text) -> text:
+    val token = sec_open_process_token_v1()
+    if token == 0: return "qualify-token-open-failed"
+    val user = sec_token_info_v1(token, _TOKEN_USER)
+    val system = sec_sid_from_text_v1("S-1-5-18")
+    val entries = sec_alloc_v1(2 * 48)
+    val wide = sec_wide_v1(path.replace("/", "\\"))
+    var reason = ""
+    if user == 0 or system == 0 or entries == 0 or wide == 0:
+        reason = "qualify-alloc-failed"
+    else:
+        sec_access_entry_v1(entries, 0, _GENERIC_ALL, 0, sec_read_ptr_v1(user))
+        sec_access_entry_v1(entries, 1, _GENERIC_ALL, 0, system)
+        val acl = sec_set_entries_v1(2, entries, 0)
+        if acl == 0:
+            reason = "qualify-dacl-build-failed"
+        elif SetNamedSecurityInfoW(wide, 1, _DACL_PROTECTED as u32, 0, 0, acl, 0) != 0u32:
+            reason = "qualify-dacl-set-failed"
+        sec_local_free_v1(acl)
+    sec_free_v1(wide)
+    sec_free_v1(entries)
+    sec_local_free_v1(system)
+    sec_free_v1(user)
+    val _closed = sec_close_handle_v1(token)
+    reason
+
+fn _other_scope_v1(scope: text) -> text:
+    if scope.len() > 62: return scope[0:62] + "-b"
+    scope + "-b"
+
+# Creates the directories and the linked base file; "" or a refusal reason.
+fn _setup_v1(site: QualifySiteV1, system32: text) -> text:
+    for dir in [site.own, site.other, site.out_dir, site.work + "/store", site.work + "/lower", site.private_dir]:
+        if not dir_create_all(dir): return "containment-qualify-setup-dir"
+    if not file_copy(system32 + "/cmd.exe", site.work + "/store/base.exe"): return "containment-qualify-setup-base"
+    if not file_hardlink(site.work + "/store/base.exe", site.lower_file): return "containment-qualify-setup-link"
+    val forced = _force_user_only_v1(site.lower_file)
+    if forced != "": return "containment-qualify-setup-" + forced
+    val own = sosix_fs_grant_contained_write_v1(site.own, site.scope)
+    if own != "": return "containment-qualify-setup-" + own
+    val other = sosix_fs_grant_contained_write_v1(site.other, site.other_scope)
+    if other != "": return "containment-qualify-setup-" + other
+    val read = sosix_fs_grant_contained_read_v1(site.work + "/lower")
+    if read != "": return "containment-qualify-setup-" + read
+    ""
+
+fn _teardown_v1(site: QualifySiteV1):
+    for dir in [site.own, site.other, site.out_dir, site.work + "/store", site.work + "/lower", site.private_dir]:
+        val _removed = dir_remove_all(dir)
+
+fn _evidence_v1(site: QualifySiteV1, canaries: [SosixContainCanaryV1], script_digest: text) -> text:
+    var lines = ["sosix-contain-qualify-v1", "windows-job+restricted-token"]
+    val (version, _err, _code) = process_run(env_get("SystemRoot") + "/System32/cmd.exe", ["/c", "ver"])
+    lines = lines.push(version.trim())
+    val volume = _volume_serial_v1(site.work)
+    lines = lines.push(if volume.is_ok(): volume.unwrap() else: "volume-unknown")
+    lines = lines.push(site.scope)
+    lines = lines.push(site.program_digest)
+    lines = lines.push(script_digest)
+    for canary in canaries:
+        if canary.observed == "not-run" or canary.control == "not-run": return ""
+        lines = lines.push(canary.id + ":" + canary.expected + ":" + canary.observed + ":" + canary.control)
+    sha256_text(lines.join("\n"))
+
+fn _qualify_v1(request: SosixContainQualifyRequestV1) -> SosixContainQualifyResultV1:
+    val invalid = sosix_contain_qualify_request_reason_v1(request)
+    if invalid != "": return _refused_v1(invalid)
+    val script_digest = windows_process_file_digest_v1(request.probe_script)
+    if script_digest == "" or script_digest != SOSIX_CONTAIN_CANARY_PROBE_SHA256_V1:
+        return _refused_v1("containment-qualify-probe-digest-mismatch")
+    if windows_process_file_digest_v1(request.probe_program) != request.probe_digest:
+        return _refused_v1("containment-qualify-program-digest-mismatch")
+    val root = env_get("SystemRoot").replace("\\", "/")
+    val profile = env_get("USERPROFILE").replace("\\", "/")
+    if root == "" or profile == "": return _refused_v1("containment-qualify-environment-missing")
+    val work = request.work_dir.replace("\\", "/")
+    val temp = work + "/own"
+    val site = QualifySiteV1(work: work, scope: request.scope, other_scope: _other_scope_v1(request.scope),
+        program: request.probe_program, program_digest: request.probe_digest, script: request.probe_script.replace("\\", "/"),
+        wall: if request.wall.value > 0: request.wall.value else: 120000,
+        own: work + "/own", other: work + "/other", lower_file: work + "/lower/base.exe", out_dir: work + "/out",
+        private_dir: profile + "/AppData/LocalLow/sosix-qualify-" + request.scope, ping: root + "/System32/ping.exe",
+        environment: ["SystemRoot=" + root.replace("/", "\\"), "PATH=" + root.replace("/", "\\") + "\\System32", "TEMP=" + temp, "TMP=" + temp])
+    val setup = _setup_v1(site, root + "/System32")
+    if setup != "":
+        _teardown_v1(site)
+        return _refused_v1(setup)
+    val base_digest = windows_process_file_digest_v1(site.lower_file)
+    var canaries: [SosixContainCanaryV1] = []
+    canaries = canaries.push(_launch_exit_v1(site))
+    canaries = canaries.push(_own_write_v1(site))
+    canaries = canaries.push(_read_exec_v1(site))
+    canaries = canaries.push(_tree_empty_v1(site))
+    canaries = canaries.push(_write_canary_v1(site, SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, "lower", site.lower_file, "ctl_lower.txt", base_digest))
+    canaries = canaries.push(_write_canary_v1(site, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1, "private", site.private_dir + "/probe.txt", "ctl_private.txt", ""))
+    canaries = canaries.push(_write_canary_v1(site, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, "other", site.other + "/probe.txt", "ctl_other.txt", ""))
+    canaries = canaries.push(_other_process_v1(site))
+    canaries = canaries.push(_process_limit_v1(site))
+    val digest = _evidence_v1(site, canaries, script_digest)
+    _teardown_v1(site)
+    SosixContainQualifyResultV1(canaries: canaries, evidence_digest: digest, reason: "")
+
+export _qualify_v1

@@ -1,0 +1,326 @@
+# SOSIX containment facade (lane P2, contained launch). Every Windows example returns
+# early unless is_windows(); a skipped example is not evidence, so the measured values
+# are recorded here. Run with a seed that carries the advapi32 externs:
+#   C:/dev/keep/seeds/simple-local-20261126.exe test <this spec>
+#
+# Measured 2026-11-26 on the Windows 11 evidence host with simple-local-20261126.exe:
+#   cap 276824064 (264 MiB), children = alloc_mb.spl under the contained job
+#     under  N=48   exit 0           peak 208642048  ALLOC_OK 48
+#     over   N=256  exit 3221226505  peak 310362112  no marker (0xC0000409, killed at the cap)
+#   process limit 2 (leader + one child): SPAWN 1 allow, SPAWN 2 deny, SPAWN 3 deny
+#   trivial child exit 7 / restricted child exit 5, stdout files read back
+#   cancel with two live children: active >= 3 before, tree_empty and active 0 after
+#   qualify: nine of nine canaries pass, each deny canary with control "allow"
+#   (lower-overwrite, user-private-write, other-scope-write, other-scope-process-open,
+#   process-limit-spawn); an altered probe script gives
+#   containment-qualify-probe-digest-mismatch and no canary.
+use std.spec.{describe, it, expect}
+use std.platform.{is_windows, get_current_dir, get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{file_read, file_exists, file_copy, file_write, file_delete, getpid, time_now_monotonic_ms, thread_sleep, env_get}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainLimitsV1, SosixContainBytesV1, SosixContainCountV1, SosixContainCpuRateV1, SosixContainMillisV1, SosixContainFlagV1, SosixContainAdmissionV1, SosixContainLeaseV1, SosixContainPollV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1, SosixContainSupportV1, SosixContainSlotV1, sosix_contain_canaries_pass_v1, sosix_contain_canary_pass_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
+use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1, sosix_contain_start_v1, sosix_contain_poll_v1, sosix_contain_cancel_v1, sosix_contain_collect_v1, sosix_contain_qualify_v1, sosix_contain_memory_cap_evidence_v1, SOSIX_CONTAIN_CANARY_PROBE_SHA256_V1, SosixContainMemoryProbeV1}
+use std.nogc_sync_mut.sosix.linux.containment_v1.{sosix_contain_support_v1 as linux_support, sosix_contain_start_v1 as linux_start, sosix_contain_poll_v1 as linux_poll, sosix_contain_cancel_v1 as linux_cancel, sosix_contain_collect_v1 as linux_collect, sosix_contain_qualify_v1 as linux_qualify, sosix_contain_memory_cap_evidence_v1 as linux_memory}
+use std.nogc_sync_mut.sosix.freebsd.containment_v1.{sosix_contain_support_v1 as freebsd_support, sosix_contain_start_v1 as freebsd_start, sosix_contain_poll_v1 as freebsd_poll, sosix_contain_cancel_v1 as freebsd_cancel, sosix_contain_collect_v1 as freebsd_collect, sosix_contain_qualify_v1 as freebsd_qualify, sosix_contain_memory_cap_evidence_v1 as freebsd_memory}
+use std.nogc_sync_mut.sosix.macos.containment_v1.{sosix_contain_support_v1 as macos_support, sosix_contain_start_v1 as macos_start, sosix_contain_poll_v1 as macos_poll, sosix_contain_cancel_v1 as macos_cancel, sosix_contain_collect_v1 as macos_collect, sosix_contain_qualify_v1 as macos_qualify, sosix_contain_memory_cap_evidence_v1 as macos_memory}
+use std.nogc_sync_mut.sosix.simpleos.containment_v1.{sosix_contain_support_v1 as simpleos_support, sosix_contain_start_v1 as simpleos_start, sosix_contain_poll_v1 as simpleos_poll, sosix_contain_cancel_v1 as simpleos_cancel, sosix_contain_collect_v1 as simpleos_collect, sosix_contain_qualify_v1 as simpleos_qualify, sosix_contain_memory_cap_evidence_v1 as simpleos_memory}
+
+val SEED = "C:/dev/keep/seeds/simple-local-20261126.exe"
+val PING = "C:/Windows/System32/ping.exe"
+val CAP_BYTES = 276824064
+val RUN_TAG = getpid().to_string() + "_" + time_now_monotonic_ms().to_string()
+
+fn ready() -> bool:
+    is_windows() and file_exists(SEED)
+
+fn root() -> text:
+    get_current_dir().replace("\\", "/")
+
+fn temp() -> text:
+    get_temp_dir().replace("\\", "/")
+
+fn script() -> text:
+    root() + "/src/lib/nogc_sync_mut/sosix/contain_canary_probe.spl"
+
+fn fixture(name: text) -> text:
+    root() + "/test/fixtures/container/" + name
+
+fn child_env() -> [text]:
+    ["SystemRoot=C:\\Windows", "PATH=C:\\Windows\\System32", "TEMP=" + temp(), "TMP=" + temp()]
+
+fn limits(memory: i64, processes: i64, cpu: i64) -> SosixContainLimitsV1:
+    SosixContainLimitsV1(memory: SosixContainBytesV1(memory), processes: SosixContainCountV1(processes),
+        cpu_rate: SosixContainCpuRateV1(cpu), wall: SosixContainMillisV1(120000))
+
+fn request(program: text, args: [text], tag: text, identity: text, scope: text, lim: SosixContainLimitsV1) -> SosixContainRequestV1:
+    SosixContainRequestV1(program: program, program_digest: windows_process_file_digest_v1(program), args: args,
+        environment: child_env(), directory: root(),
+        stdout_path: temp() + "/contain_spec_" + RUN_TAG + "_" + tag + ".out", stderr_path: temp() + "/contain_spec_" + RUN_TAG + "_" + tag + ".err",
+        limits: lim, identity: identity, scope: scope, network: "host", readonly_dirs: [], writable_dirs: [],
+        private_pids: SosixContainFlagV1(false), root_dir: "")
+
+fn seed_request(args: [text], tag: text, identity: text, lim: SosixContainLimitsV1) -> SosixContainRequestV1:
+    request(SEED, args, tag, identity, "contain-spec", lim)
+
+fn out_of(req: SosixContainRequestV1) -> text:
+    file_read(req.stdout_path)
+
+fn lease_of(admission: SosixContainAdmissionV1) -> Result<SosixContainLeaseV1, text>:
+    match admission:
+        SosixContainAdmissionV1.Started(lease): Ok(lease)
+        SosixContainAdmissionV1.RejectedBeforeStart(reason): Err("rejected: " + reason)
+        SosixContainAdmissionV1.FailedAfterCleanup(reason): Err("failed: " + reason)
+        SosixContainAdmissionV1.Unknown(reason): Err("unknown: " + reason)
+
+fn refusal_of(admission: SosixContainAdmissionV1) -> text:
+    match admission:
+        SosixContainAdmissionV1.RejectedBeforeStart(reason): reason
+        _: "not-rejected"
+
+# Poll to terminal, then collect; Err on a failed start or a budget overrun (the tree is cancelled first).
+fn run_to_end(req: SosixContainRequestV1) -> Result<SosixContainPollV1, text>:
+    val lease = lease_of(sosix_contain_start_v1(req))?
+    val deadline = time_now_monotonic_ms() + 180000
+    while time_now_monotonic_ms() < deadline:
+        val observed = sosix_contain_poll_v1(lease)?
+        if observed.terminal.value: return sosix_contain_collect_v1(lease)
+        thread_sleep(50)
+    val _cancelled = sosix_contain_cancel_v1(lease)
+    Err("run budget exceeded")
+
+val trivial_target = temp() + "/contain_trivial_" + RUN_TAG + ".txt"
+val trivial_req = seed_request(["run", fixture("contain_write_probe.spl"), "args:", trivial_target, "7"], "trivial", "inherit", limits(0, 0, 0))
+val trivial_run = if ready(): run_to_end(trivial_req) else: Err("skipped")
+val trivialr_req = request(SEED, ["run", fixture("contain_write_probe.spl"), "args:", trivial_target, "5"], "trivialr", "restricted", "contain-spec", limits(0, 0, 0))
+val trivial_restricted = if ready(): run_to_end(trivialr_req) else: Err("skipped")
+val cpu_req = seed_request(["run", fixture("contain_write_probe.spl"), "args:", trivial_target, "0"], "cpu", "inherit", limits(0, 0, 5000))
+val cpu_run = if ready(): run_to_end(cpu_req) else: Err("skipped")
+val under_req = seed_request(["run", fixture("alloc_mb.spl"), "48"], "under", "inherit", limits(CAP_BYTES, 0, 0))
+val over_req = seed_request(["run", fixture("alloc_mb.spl"), "256"], "over", "inherit", limits(CAP_BYTES, 0, 0))
+val under_run = if ready(): run_to_end(under_req) else: Err("skipped")
+val over_run = if ready(): run_to_end(over_req) else: Err("skipped")
+val limit_req = seed_request(["run", fixture("contain_spawn_n.spl"), "args:", "3", PING, "0"], "limit", "inherit", limits(0, 2, 0))
+val limit_run = if ready(): run_to_end(limit_req) else: Err("skipped")
+
+fn qualify_request(work: text, program_script: text) -> SosixContainQualifyRequestV1:
+    SosixContainQualifyRequestV1(probe_program: SEED, probe_digest: windows_process_file_digest_v1(SEED),
+        probe_script: program_script, work_dir: work, scope: "contain-spec", wall: SosixContainMillisV1(120000))
+
+fn fresh_work(tag: text) -> text:
+    val work = temp() + "/contain_qualify_" + RUN_TAG + "_" + tag
+    val _made = dir_create_all(work)
+    work
+
+val qualified = if ready(): sosix_contain_qualify_v1(qualify_request(fresh_work("main"), script())) else: SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "skipped")
+
+fn canary_control(result: SosixContainQualifyResultV1, id: text) -> text:
+    for canary in result.canaries:
+        if canary.id == id: return canary.control
+    "missing"
+
+describe "sosix containment support":
+    it "reports the Windows column of the mechanism table":
+        if not is_windows(): return
+        val support = sosix_contain_support_v1()
+        expect(support.mechanism).to_equal("windows-job+restricted-token")
+        expect(support.memory_accounting).to_equal("job-commit")
+        expect(support.memory_hard_limit.value).to_equal(true)
+        expect(support.process_limit.value).to_equal(true)
+        expect(support.cpu_rate_limit.value).to_equal(true)
+        expect(support.kill_all_descendants.value).to_equal(true)
+        expect(support.write_confinement.value).to_equal(true)
+        expect(support.read_confinement.value).to_equal(false)
+        expect(support.network_isolation.value).to_equal(false)
+        expect(support.pid_isolation.value).to_equal(false)
+        expect(support.root_remap.value).to_equal(false)
+        expect(support.unprivileged.value).to_equal(true)
+
+    it "refuses every axis on the other hosts with a typed refusal":
+        val linux = linux_support()
+        expect(linux.mechanism).to_equal("linux-unimplemented")
+        expect(linux.write_confinement.value).to_equal(false)
+        expect(freebsd_support().kill_all_descendants.value).to_equal(false)
+        expect(macos_support().memory_hard_limit.value).to_equal(false)
+        expect(simpleos_support().unprivileged.value).to_equal(false)
+
+    it "returns RejectedBeforeStart, errors and no canaries from the other hosts":
+        val req = SosixContainRequestV1(program: "/bin/true", program_digest: "", args: [], environment: [], directory: "/", stdout_path: "/o", stderr_path: "/e",
+            limits: limits(0, 0, 0), identity: "inherit", scope: "", network: "host", readonly_dirs: [], writable_dirs: [], private_pids: SosixContainFlagV1(false), root_dir: "")
+        expect(refusal_of(linux_start(req))).to_equal("containment-unimplemented-linux")
+        expect(refusal_of(freebsd_start(req))).to_equal("containment-unimplemented-freebsd")
+        expect(refusal_of(macos_start(req))).to_equal("containment-unimplemented-macos")
+        expect(refusal_of(simpleos_start(req))).to_equal("containment-unimplemented-simpleos")
+        val lease = SosixContainLeaseV1(slot: SosixContainSlotV1(0))
+        expect(linux_poll(lease).is_err()).to_equal(true)
+        expect(macos_cancel(lease).is_err()).to_equal(true)
+        expect(freebsd_collect(lease).is_err()).to_equal(true)
+        val qualify = linux_qualify(qualify_request("/tmp/q", "/tmp/s"))
+        expect(qualify.reason).to_equal("containment-qualify-unimplemented-linux")
+        expect(qualify.canaries.len()).to_equal(0)
+        expect(simpleos_qualify(qualify_request("/tmp/q", "/tmp/s")).reason).to_equal("containment-qualify-unimplemented-simpleos")
+        val memory = SosixContainMemoryProbeV1(program: "p", program_digest: "d", under_args: [], over_args: [], cap: SosixContainBytesV1(1), work_dir: "w", wall: SosixContainMillisV1(1))
+        val evidence = macos_memory(memory)
+        expect(evidence.enforced.value).to_equal(false)
+        expect(evidence.reason).to_equal("memory-cap-probe-unimplemented-macos")
+
+describe "sosix containment launch":
+    it "returns the exit code and the stdout file of a trivial child":
+        if not ready(): return
+        val receipt = trivial_run.unwrap()
+        expect(receipt.exit_code.value).to_equal(7)
+        expect(receipt.terminal.value).to_equal(true)
+        expect(receipt.tree_empty.value).to_equal(true)
+        expect(out_of(trivial_req).contains("WRITE allow")).to_equal(true)
+        val _cleared = file_delete(trivial_target)
+
+    it "launches a restricted-token child and returns its exit code":
+        if not ready(): return
+        val receipt = trivial_restricted.unwrap()
+        expect(receipt.exit_code.value).to_equal(5)
+        expect(receipt.tree_empty.value).to_equal(true)
+        expect(out_of(trivialr_req).contains("WRITE deny")).to_equal(true)
+
+    it "refuses network none before any child exists":
+        if not ready(): return
+        var req = request(SEED, ["run", fixture("contain_write_probe.spl"), "args:", trivial_target], "net", "inherit", "", limits(0, 0, 0))
+        req.network = "none"
+        expect(refusal_of(sosix_contain_start_v1(req))).to_equal("containment-network-isolation-unsupported")
+        expect(file_exists(req.stdout_path)).to_equal(false)
+
+    it "refuses a restricted request without a scope, a missing directory and a writable directory that was never granted":
+        if not ready(): return
+        val unscoped = request(SEED, ["run", fixture("contain_write_probe.spl"), "args:", trivial_target], "scope", "restricted", "", limits(0, 0, 0))
+        expect(refusal_of(sosix_contain_start_v1(unscoped))).to_equal("containment-request-invalid")
+        var missing = request(SEED, ["run", fixture("contain_write_probe.spl"), "args:", trivial_target], "acl", "restricted", "contain-spec", limits(0, 0, 0))
+        missing.writable_dirs = [temp() + "/contain_no_such_dir_" + RUN_TAG]
+        expect(refusal_of(sosix_contain_start_v1(missing))).to_equal("containment-request-invalid")
+        var ungranted = request(SEED, ["run", fixture("contain_write_probe.spl"), "args:", trivial_target], "grant", "restricted", "contain-spec", limits(0, 0, 0))
+        ungranted.writable_dirs = [temp()]
+        expect(refusal_of(sosix_contain_start_v1(ungranted))).to_equal("containment-writable-dir-not-granted")
+        expect(file_exists(ungranted.stdout_path)).to_equal(false)
+        expect(file_exists(missing.stdout_path)).to_equal(false)
+
+    it "sets the CPU rate cap and reads it back before the child runs":
+        if not ready(): return
+        val receipt = cpu_run.unwrap()
+        expect(receipt.exit_code.value).to_equal(0)
+        expect(receipt.tree_empty.value).to_equal(true)
+
+    it "lets an under-cap child finish and kills an over-cap child":
+        if not ready(): return
+        val under = under_run.unwrap()
+        expect(under.exit_code.value).to_equal(0)
+        expect(out_of(under_req).contains("ALLOC_OK")).to_equal(true)
+        expect(under.peak_memory.value > 0).to_equal(true)
+        expect(under.peak_memory.value <= CAP_BYTES).to_equal(true)
+        val over = over_run.unwrap()
+        expect(over.exit_code.value != 0).to_equal(true)
+        expect(out_of(over_req).contains("ALLOC_OK")).to_equal(false)
+        expect(over.peak_memory.value >= CAP_BYTES).to_equal(true)
+        expect(over.peak_memory.value <= CAP_BYTES + 67108864).to_equal(true)
+
+    it "enforces the process limit: a limit of 2 refuses the child beyond leader plus one":
+        if not ready(): return
+        val receipt = limit_run.unwrap()
+        expect(receipt.tree_empty.value).to_equal(true)
+        val out = out_of(limit_req)
+        expect(out.contains("SPAWN 1 allow")).to_equal(true)
+        expect(out.contains("SPAWN 2 deny")).to_equal(true)
+        expect(out.contains("SPAWN 3 allow")).to_equal(false)
+
+    it "cancel leaves the tree empty while children were running":
+        if not ready(): return
+        val req = seed_request(["run", fixture("contain_spawn_n.spl"), "args:", "2", PING, "60000"], "cancel", "inherit", limits(0, 0, 0))
+        val lease = lease_of(sosix_contain_start_v1(req)).unwrap()
+        var live = false
+        val deadline = time_now_monotonic_ms() + 120000
+        while not live and time_now_monotonic_ms() < deadline:
+            live = sosix_contain_poll_v1(lease).unwrap().active_processes.value >= 3
+            if not live: thread_sleep(100)
+        expect(live).to_equal(true)
+        expect(sosix_contain_cancel_v1(lease).unwrap().value).to_equal(true)
+        var done = false
+        while not done and time_now_monotonic_ms() < deadline:
+            done = sosix_contain_poll_v1(lease).unwrap().terminal.value
+            if not done: thread_sleep(50)
+        val receipt = sosix_contain_collect_v1(lease).unwrap()
+        expect(receipt.tree_empty.value).to_equal(true)
+        expect(receipt.cancelled.value).to_equal(true)
+        expect(receipt.active_processes.value).to_equal(0)
+
+    it "confines a restricted child where an inherit child writes freely":
+        if not ready(): return
+        val profile = env_get("USERPROFILE").replace("\\", "/")
+        val private_dir = profile + "/AppData/LocalLow/sosix-contain-spec-" + RUN_TAG
+        val _made = dir_create_all(private_dir)
+        val target = private_dir + "/probe.txt"
+        val inherit_req = seed_request(["run", fixture("contain_write_probe.spl"), "args:", target], "winherit", "inherit", limits(0, 0, 0))
+        val inherit_run = run_to_end(inherit_req)
+        val inherit_out = out_of(inherit_req)
+        val _cleared = file_delete(target)
+        val restricted_req = seed_request(["run", fixture("contain_write_probe.spl"), "args:", target], "wrestricted", "restricted", limits(0, 0, 0))
+        val restricted_run = run_to_end(restricted_req)
+        val restricted_out = out_of(restricted_req)
+        val landed = file_exists(target)
+        val _removed = dir_remove_all(private_dir)
+        expect(inherit_run.is_ok()).to_equal(true)
+        expect(inherit_out.contains("WRITE allow")).to_equal(true)
+        expect(restricted_run.is_ok()).to_equal(true)
+        expect(restricted_out.contains("WRITE deny")).to_equal(true)
+        expect(landed).to_equal(false)
+
+describe "sosix containment memory evidence":
+    it "routes lane E's Enforced verdict through SOSIX":
+        if not ready(): return
+        val probe = SosixContainMemoryProbeV1(program: SEED, program_digest: windows_process_file_digest_v1(SEED),
+            under_args: ["run", fixture("alloc_mb.spl"), "48"], over_args: ["run", fixture("alloc_mb.spl"), "256"],
+            cap: SosixContainBytesV1(CAP_BYTES), work_dir: root(), wall: SosixContainMillisV1(180000))
+        val evidence = sosix_contain_memory_cap_evidence_v1(probe)
+        expect(evidence.reason).to_equal("")
+        expect(evidence.enforced.value).to_equal(true)
+        expect(evidence.evidence_digest.len()).to_equal(64)
+
+    it "refuses a probe whose program digest does not match":
+        if not ready(): return
+        val probe = SosixContainMemoryProbeV1(program: SEED, program_digest: "00",
+            under_args: ["run", fixture("alloc_mb.spl"), "48"], over_args: ["run", fixture("alloc_mb.spl"), "256"],
+            cap: SosixContainBytesV1(CAP_BYTES), work_dir: root(), wall: SosixContainMillisV1(180000))
+        val evidence = sosix_contain_memory_cap_evidence_v1(probe)
+        expect(evidence.enforced.value).to_equal(false)
+        expect(evidence.reason).to_equal("memory-probe-digest-mismatch")
+        expect(evidence.evidence_digest).to_equal("")
+
+describe "sosix containment qualify":
+    it "pins the probe script by sha256":
+        if not is_windows(): return
+        expect(windows_process_file_digest_v1(script())).to_equal(SOSIX_CONTAIN_CANARY_PROBE_SHA256_V1)
+
+    it "runs to completion and returns all nine canaries passing":
+        if not ready(): return
+        expect(qualified.reason).to_equal("")
+        expect(qualified.canaries.len()).to_equal(9)
+        expect(sosix_contain_canaries_pass_v1(qualified).value).to_equal(true)
+        expect(qualified.evidence_digest.len()).to_equal(64)
+
+    it "gives every deny canary a positive control that really allowed":
+        if not ready(): return
+        for id in ["lower-overwrite", "user-private-write", "other-scope-write", "other-scope-process-open", "process-limit-spawn"]:
+            expect(sosix_contain_canary_pass_v1(qualified, id).value).to_equal(true)
+            expect(canary_control(qualified, id)).to_equal("allow")
+        for id in ["launch-exit-code", "own-dir-write", "lower-read-exec", "tree-empty-after-cancel"]:
+            expect(canary_control(qualified, id)).to_equal("none")
+
+    it "runs no canary and says why when the probe script was altered":
+        if not ready(): return
+        val altered = temp() + "/contain_probe_altered_" + RUN_TAG + ".spl"
+        val _copied = file_copy(script(), altered)
+        val _written = file_write(altered, file_read(altered) + "\n# altered\n")
+        val work = fresh_work("altered")
+        val result = sosix_contain_qualify_v1(qualify_request(work, altered))
+        val _deleted = file_delete(altered)
+        val _removed = dir_remove_all(work)
+        expect(result.reason).to_equal("containment-qualify-probe-digest-mismatch")
+        expect(result.canaries.len()).to_equal(0)
+        expect(result.evidence_digest).to_equal("")
+        expect(sosix_contain_canaries_pass_v1(result).value).to_equal(false)

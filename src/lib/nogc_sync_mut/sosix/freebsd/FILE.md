@@ -9,6 +9,7 @@ TODO(platform-variant-migration): move here — nothing yet; new freebsd-specifi
 
 - **FILE.md** — this manifest.
 - **contained_write_v1.spl** — typed refusal for contained write/read grants (`contained-write-unimplemented-freebsd`).
+- **containment_v1.spl** — typed refusal for SOSIX containment (`containment-unimplemented-freebsd`).
 
 ## Child Manifests
 
