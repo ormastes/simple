@@ -73,3 +73,17 @@ have `RDOC` magic.
   canonical RenderDoc wrapper and require both resulting capture files to have
   `RDOC` magic. This is broader platform completion evidence, not a prerequisite
   for closing the focused daemon-timeout verdict.
+
+## Verification note (2026-11-26, Linux x86_64 lane 3)
+
+Verified on `origin/release/1.0.0` (Linux x86_64):
+
+- `sh test/01_unit/scripts/linux_vulkan_renderdoc_reason_precedence_contract_test.shs`:
+  `PASS: Linux Vulkan RenderDoc reason precedence`.
+- `test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl`: 1/1
+  PASS via `bootstrap/simple --mode=interpreter --clean --fail-fast`.
+- Pure-Simple Stage 3 test daemon verification (`--timeout` +
+  `SIMPLE_TIMEOUT_SECONDS`) and live Vulkan/RenderDoc GUI `.rdc` capture remain
+  pending (the available `stage2` binary is `simple-bootstrap` without `test`,
+  and full bootstrap / Stage 3 CLI + Vulkan GUI capture are unavailable here).
+  Status remains `fix-implemented-verification-pending`.

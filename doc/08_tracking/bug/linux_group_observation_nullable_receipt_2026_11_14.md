@@ -111,3 +111,14 @@ to the reviewer, avoiding a self-referential document hash.
   (allocation failure in `owned_adapter_values`) arriving as `None`. That needs
   allocation-failure injection into `rt_array_new`/`rt_array_push`, which this
   runtime authority has no hook for. Broker recovery integration is also not run.
+
+## Runtime check 2026-11-26 (Linux x86_64 lane 3) — still verification-pending
+
+- `test/01_unit/lib/nogc_sync_mut/io/linux_process_collection_nullable_v2_spec.spl`:
+  7/7 PASS via `bootstrap/simple --mode=interpreter`.
+- Native `[i64]?` `NULL -> None` allocation-failure ABI leg and broker recovery
+  integration remain NOT_RUN (`stage2 native-build` refused MIR shard admission
+  due to concurrent P3a bootstrap memory pressure: `13027180 kB` free <
+  `26424115 kB` worker estimate, and `stage2-runtime-authority` lacks an
+  `rt_array_new` OOM-injection hook). Status remains
+  `fix-implemented-verification-pending`.

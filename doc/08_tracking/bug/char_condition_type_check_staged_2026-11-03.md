@@ -60,3 +60,12 @@ compiles compiler sources that may still contain char conditions.
 - Evidence: `char_condition_spec.spl` -> `outcome=OK executed=16 passed=16
   failed=0` (warn and error modes for if/elif/while/not/and/or, default-mode
   gate, message/hint) on `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple` at release/1.0.0 base `5cc998f2043`.
+
+## Verification note (2026-11-26, Linux x86_64 lane 3)
+
+- `bug_fix_claims`: no active claim for this bug.
+- `test/03_system/app/compiler/feature/char_condition_spec.spl`: 16/16 PASS via
+  `bootstrap/simple --mode=interpreter`.
+- Stage 2 default flip (`cc_default_mode()` `"warn"` -> `"error"`) remains
+  blocked by the ADR-005 gate requiring admitted self-hosted Simple binaries
+  across Windows, macOS, and Linux. Status left unchanged.

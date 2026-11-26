@@ -262,3 +262,17 @@ audit at this lane's base (origin/release/1.0.0 tip, commit 93490a99c5d8):
   by the `stage4_full_cli_*` family, not this row.
 
 No code change; no re-run of native bootstrap (out of lane grant).
+
+---
+
+## Verification note (2026-11-26, Linux x86_64 lane 3)
+
+- Confirmed on `origin/release/1.0.0`: `src/compiler_rust/compiler/src/elf_utils.rs:877,918`
+  maps `rt_cranelift_new_aot_module` and `rt_cranelift_aot_define_function`, and
+  `src/runtime/runtime_cranelift_bridge_stub.c:68,483` provides the core-C-bootstrap
+  named-trap stubs.
+- Observed the concurrent P3a candidate `stage2-command.transcript` on this host
+  successfully built Stage 2 using `--backend cranelift`.
+- Full bootstrap replay (`bootstrap-from-scratch.sh` / `cargo build`) is
+  prohibited in this lane during the concurrent P3a bootstrap; status remains
+  `fix-implemented-verification-pending`.

@@ -29,3 +29,19 @@ Additional qualification: the changed runtime translation unit also compiles wit
 ## Landed-fix evidence (2026-11-03)
 
 The early return for empty transient scopes is present on `release/1.0.0` in `rt_core_reclaim_transient_raw` (`src/runtime/runtime_native.c`, landed by `d47c62df389`): zero live entries return immediately, clearing tombstones first when any remain. Status moved to fix-implemented-verification-pending: the code is landed, but the native owner1 probe and negative-contract fixture have not been re-run on a deployed stage3 on Windows. Repro: run the owner1 empty-scope probe from the receipt above against a `release/1.0.0` runtime build and confirm per-scope p95 stays at timer floor after a 750,000-object cohort.
+
+## Verification note (2026-11-26, Linux x86_64 lane 3)
+
+Verified on `origin/release/1.0.0` (Linux x86_64):
+
+- Added `test/01_unit/runtime/run_transient_empty_scope_test.shs` and
+  `test/01_unit/runtime/transient_empty_scope_perf_test.c` driving the real
+  `src/runtime/runtime_native.c` + `src/runtime/runtime_memory.c` with
+  `SIMPLE_RUNTIME_MEMORY_OWNER=1`.
+- `sh test/01_unit/runtime/run_transient_empty_scope_test.shs`:
+  - `transient_empty_scope_guard_test`: `PASS guarded owned reclaim, tombstone clear, promotion, paused borrowed, explicit free` (including 4 `mem_guard` SIGSEGV traps).
+  - `transient_empty_scope_perf_test`: `empty transient scope after 750000-object cohort: p50=0.044us p95=0.045us` (< `50.0us` threshold) — `PASS empty transient scopes skip the high-water scan`.
+- `stage2 native-build` of `transient_empty_scope_ownership_fixture.spl` was
+  refused by MIR shard admission due to concurrent P3a bootstrap memory
+  pressure (`13027180 kB` free < `26424115 kB` worker estimate).
+- Status updated to `fixed`.
