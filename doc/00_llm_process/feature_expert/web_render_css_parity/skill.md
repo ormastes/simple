@@ -5551,3 +5551,132 @@ so it applies to EVERY caller: floats, table cells
 a checkbox WITHOUT `box-sizing:border-box; padding:0; border:0` is predicted
 4px wider than Chrome's 13px (UA border counted into its max-content); AC-6
 pins the border-box form, the default-UA gap is unfiled.
+## 2026-11-27 — `auto` tracks in grid-template-columns (grid-auto-track lane)
+
+- **Bug:** `web_grid_auto_track_takes_full_width_with_flex_item_2026-11-27`.
+  `auto 1fr` / `1fr auto` / `auto auto` / `100px auto` grids painted their
+  items full width and stacked.
+- **Root cause:** not the flex item. `normalized_grid_track_list`
+  (`..._declarations.spl`) rejected the whole list on any `auto` token, so the
+  template reached layout as `""` and the grid fell back to block layout. Any
+  grid with an `auto` column was affected, flex child or not. Trap: patching
+  the column-size code alone has no effect, because the template is already
+  empty by the time layout runs.
+- **Fix:** the normalizer keeps `auto`. `grid_track_sizes` still reads a list
+  holding `auto` as no tracks (`[]`), so rows and every other reader see what
+  they saw before. `grid_template_auto_track_count` admits a template with
+  `auto` beside other readable tokens. Once the items are placed,
+  `grid_explicit_auto_column_sizes` makes each auto track as wide as the
+  widest margin box of a span-1 item in it. `fr` tracks then share the free
+  space; with no `fr`, the auto tracks share it equally (justify-content:
+  normal), accumulated so the rounding sums exactly.
+- **Spec:** `test/01_unit/browser_engine/grid_auto_track_template_chrome159_spec.spl`,
+  8 cases, 5 ACs, Chrome 159 at k=1 and k=4 (for example `auto 1fr` holding a
+  40px flex item is 40..79 / 160..319). Red on base 0/5, green 5/5.
+  `layout_renderer_background_and_grid_decls_spec.spl` pinned
+  `"auto 10px" -> ""` as its example of an unsupported track. It now pins
+  `auto` as kept and uses `min-content 10px` for the rejection case, which is
+  still unsupported.
+- **ponytail limits** (in the comment at the wiring site): a lone `auto`
+  template, grids that need implicit columns (`grid-auto-flow: column`,
+  `grid-auto-columns`, or items placed past the explicit lines) keep the old
+  block path. `repeat()` expands before tokenizing, so `repeat(3, auto)` takes
+  the new path as `auto auto auto`, as the CSS spec says it should. `minmax(<length>, auto)`
+  would reduce to a bare `auto` and lose its floor, so `grid_expand_track_functions`
+  leaves it unreduced and the list is rejected (block path; upgrade: carry it
+  as `<N>auto`, as `normalized_grid_auto_track` already does for auto rows).
+  A spanning item does not widen an auto track. Upgrade path: size explicit
+  and implicit tracks in one pass and distribute spanning items (CSS Grid
+  12.5.2).
+- **Gates:** matrix ratchet PASS (77). Catalogs 1x 0.44 / 4x 0.27,
+  byte-identical to base. primitive-api PASS.
+- **Perf** (css-layout, cpu_simd, seed sha256 fb80903917d6d5f5, size
+  68229376, base `3543da84e51`, alternated rounds after warmup, medians
+  base -> head, ms):
+
+  | run | rounds | k=1 | k=4 |
+  |---|---|---|---|
+  | 1 (load spikes, one 5762 ms head outlier) | 4 | 3144 -> 3122 | 3380 -> 3533 |
+  | 2 | 4 | 2935 -> 2976 | 3116 -> 3222 |
+  | 3 (load < 8, final head) | 7 | 3069 -> 3031 | 3262 -> 3185 |
+
+  In run 3, 4 of 7 k=4 pairs had head faster; in runs 1-2, 3 of 8 did. Head
+  is not consistently slower; the spreads overlap. k=4 RSS medians were -0.8%,
+  -2.0% and +4.4% across the three runs, with spreads overlapping (base
+  2.27-2.49 GB, head 2.35-2.61 GB in run 3), so that is noise too. On this
+  page the added work is one template token count per grid. Output PPM is
+  identical at k=1 and k=4.
+- **Product CSS survey:** `src/app/ui.web/html_css.spl` and
+  `src/os/compositor/wm_scene.spl` carry about 30 column templates with `auto`
+  (`minmax(0, 1fr) auto`, `32px 1fr auto`, `34px 1fr auto auto`,
+  `1fr 1fr 1fr auto`, ...). All of them fell back to block layout before. A
+  6-case probe page (Chrome 159, k=1 and k=4) matched Chrome exactly on 5 of 6
+  at head; base was wrong on all 6. The sixth,
+  `auto auto minmax(96px, 0.7fr) minmax(140px, 1fr) auto` (WM titlebar),
+  stays on the block path on both sides because a fractional `0.7fr` rejects
+  the whole list (`normalized_grid_positive_int`). That gap is separate and
+  unfiled. `simple_web_window_renderer_spec` (28) and
+  `web_wm_modern_shell_spec` (5) pass on head and base, and the
+  `layout_stress.html` render is byte-identical.
+- **Review follow-ups (2026-11-27, coordinator + Fable on `b364ddde305`):**
+  - *Rows:* `normalized_grid_track_list` is shared, so keeping `auto` also
+    stored `grid-template-rows: auto 20px` where base left it unset.
+    `apply_grid_decls` now leaves a row list holding `auto` unset; columns are
+    unchanged. Spec: `grid_auto_rows_gpu_admission_spec.spl`. Trap: the
+    review read this as a GPU-admission regression, but on this seed **no
+    grid is ever GPU-admitted**. `_web_layout_append_tracks` reads
+    `"40px".to_i64()` as 0, so every px/fr template is UNSUPPORTED_TRACK on
+    base too. The spec therefore pins the stored value and parity with a
+    px-rows grid, not admission (filed
+    `web_gpu_layout_grid_px_tracks_never_admitted_2026-11-27`).
+  - *Deficit (CSS Grid 12.4-12.7):* an auto track's base is now its widest
+    min-content margin box (`flex_item_min_content_w`). It grows toward
+    max-content (`row_flex_item_auto_intrinsic_w`) in equal increments while
+    free space lasts, freezing at the limit. A bare `Nfr` is floored at
+    min-content; `minmax(0, Nfr)` at 0. fr expansion freezes a track whose
+    floor beats its share. Chrome distinguishes the two fr forms (case 1 vs 2
+    of `grid_auto_track_deficit_chrome159_spec.spl`: fr at 120 vs 0), so
+    `grid_expand_track_functions` emits `0+Nfr` for `minmax(0|0px, Nfr)`.
+    `normalized_grid_track_list` keeps the mark only in a list holding
+    `auto` and strips it otherwise, so `repeat(3, minmax(0, 1fr))` is still
+    `1fr 1fr 1fr`. `parse_int("0+1fr")` and `to_i64` read it as 0, so every
+    other reader still rejects such a list as it rejected the `auto` token.
+    Trap: `parse_int` skips leading non-digits (`"z1fr"` reads as 1), so the
+    mark must start with a digit.
+  - *Stretch:* the auto stretch uses the `stretch_auto` condition of
+    `grid_column_sizes_with_implicit` (`flex-start | normal | stretch`);
+    `justify-content: start` leaves the tracks at their content.
+  - *Probe trap:* at `font-size:0` the engine still advances a space by 4px
+    where Chrome advances 0, so wrapping probes use inline-blocks with no
+    white space between them. Both break between adjacent inline-blocks.
+  - *Filed, not fixed:* `web_grid_area_item_bypasses_auto_track_implicit_gate_2026-11-27`
+    (`grid_item_line_extents` skips `grid-area` items) and
+    `web_grid_fractional_fr_track_rejects_template_2026-11-27` (`0.7fr`,
+    which hits the WM titlebar template). Not reproduced: a percent-padding
+    basis issue. `auto 1fr` and `1fr auto` deficit items with `padding-left`
+    10% / 20% match Chrome exactly at head.
+  - *Gates at the follow-up head:* 17 specs pass (including the deficit,
+    rows, decls, WM window renderer and modern shell specs). Matrix ratchet
+    PASS (77). Catalogs 1x 0.44 / 4x 0.27, byte-identical to base.
+    primitive-api PASS.
+  - *Perf* (seed sha256 fb80903917d6d5f5, size 68229376, 5 alternated rounds
+    after warmup, medians base -> head). `css-layout.html` has no auto column
+    template, so it does not reach the new pass; the A/B there is against
+    `3543da84e51`. The product-template page `wm/p.html` does reach it, and
+    its A/B is against `b364ddde305`.
+
+    | page | k=1 ms | k=4 ms | k=1 RSS GB | k=4 RSS GB |
+    |---|---|---|---|---|
+    | css-layout | 3244 -> 3051 | 3135 -> 3158 | 2.49 -> 2.41 | 2.45 -> 2.49 |
+    | p.html | 2841 -> 2789 | 2872 -> 2827 | 2.44 -> 2.41 | 2.42 -> 2.38 |
+
+    Output PPMs are identical on both pages at both scales.
+  - *Content floor = automatic minimum (`a9ac5ee056e`):* the floor of an auto
+    or bare-fr track is `flex_zero_basis_floor_w` (CSS Grid 6.6), not raw
+    min-content. Chrome gives `1fr auto` with a 120px box in a `min-width:0`
+    or `overflow:hidden` fr item fr = 0 / auto = 200, and with
+    `min-width:50px` fr = 50 (deficit spec AC-7/AC-8, red first). Raw
+    min-content would overflow there, which is the class of the deficit
+    review item. The product page `p.html` stays byte-identical. A recursive
+    reader survey of `src/` found no other stored-template parser besides
+    `gpu_web/layout/adapter.spl`.

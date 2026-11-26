@@ -1116,9 +1116,19 @@ fn grid_expand_track_functions(raw: text) -> text:
         if mm_comma < 0:
             return out
         val growth_limit = out.substring(mm_comma + 1, mm_close).trim()
-        if growth_limit == "":
+        # ponytail: `minmax(<length>, auto)` would reduce to a bare `auto` and
+        # lose its floor, so it stays unreduced and the list is rejected (block
+        # path). Upgrade: carry the floor as `<N>auto` like
+        # `normalized_grid_auto_track` and read it in the column sizing.
+        if growth_limit == "" or growth_limit.lower() == "auto":
             return out
-        out = out.substring(0, mm) + growth_limit + out.substring(mm_close + 1, out.byte_len() as i32)
+        # `minmax(0, Nfr)` keeps its 0 floor as `0+Nfr` (a bare `Nfr` is
+        # floored at its items' min-content); `normalized_grid_track_list`
+        # keeps the mark only beside `auto`, the one sizing that reads it.
+        val min_size = out.substring(mm_open + 1, mm_comma).trim().lower()
+        val zero_floor = (min_size == "0" or min_size == "0px") and growth_limit.lower().ends_with("fr")
+        val reduced = if zero_floor: "0+" + growth_limit else: growth_limit
+        out = out.substring(0, mm) + reduced + out.substring(mm_close + 1, out.byte_len() as i32)
         guard = guard + 1
     out
 
@@ -1126,6 +1136,7 @@ fn normalized_grid_track_list(raw_declaration: text) -> text:
     val raw = grid_expand_track_functions(raw_declaration)
     val parts = raw.trim().split(" ")
     var normalized = ""
+    var has_auto = false
     for part in parts:
         val token = part.trim().lower()
         if token == "":
@@ -1136,14 +1147,24 @@ fn normalized_grid_track_list(raw_declaration: text) -> text:
         # time in grid_track_sizes (simple_web_html_layout_renderer_layout.spl),
         # once the container's available width is known.
         if token.ends_with("fr") and token.byte_len() > 2:
+            val zero_floor = token.starts_with("0+")
             val fr_size = normalized_grid_positive_int(
-                token.substring(0, token.byte_len() - 2)
+                token.substring(if zero_floor: 2 else: 0, token.byte_len() - 2)
             )
             if fr_size <= 0:
                 return ""
             if normalized != "":
                 normalized = normalized + " "
-            normalized = normalized + fr_size.to_string() + "fr"
+            normalized = normalized + (if zero_floor: "0+" else: "") + fr_size.to_string() + "fr"
+            continue
+        # `auto` is kept for the column layout to size from its items
+        # (`grid_explicit_auto_column_sizes`); `grid_track_sizes` still reads a
+        # list holding it as no tracks, as it read the old empty list.
+        if token == "auto":
+            has_auto = true
+            if normalized != "":
+                normalized = normalized + " "
+            normalized = normalized + "auto"
             continue
         if not token.ends_with("px") or token.byte_len() <= 2:
             return ""
@@ -1155,7 +1176,7 @@ fn normalized_grid_track_list(raw_declaration: text) -> text:
         if normalized != "":
             normalized = normalized + " "
         normalized = normalized + size.to_string() + "px"
-    normalized
+    if has_auto: normalized else: normalized.replace("0+", "")
 
 # One `grid-auto-rows` / `grid-auto-columns` track -> `<N>px` (fixed), `auto`
 # (content sized),
@@ -1343,7 +1364,9 @@ fn apply_grid_decls(mut st: Style, table: [text]):
     val rows = normalized_grid_track_list(
         decl_tbl_get(table, "grid-template-rows")
     )
-    if rows != "":
+    # Rows have no `auto` sizing: a row list holding it stays unset, as before
+    # `auto` was kept for columns (the GPU adapter reads `auto` as unsupported).
+    if rows != "" and not (" " + rows + " ").contains(" auto "):
         st.grid_template_rows = rows
     val column = normalized_grid_placement(
         decl_tbl_get(table, "grid-column")
