@@ -16,7 +16,7 @@ use std.common.storage.object_record_v1.{OBJECT_RECORD_V1_VERSION, DigestAliasV1
 use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_publish_noreplace_raw,
     file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes,
     file_write_bytes, secure_temp_dir_raw, dir_create_all, dir_list, dir_remove_all, is_dir,
-    file_delete, dir_list_optional}
+    file_delete, dir_list_optional, rename_path}
 use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 use std.nogc_sync_mut.sosix.time.{time_sample_unix_micros_or_failure}
 use std.common.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day}
@@ -582,7 +582,13 @@ pub fn immutable_store_v1_ingest_pinned(root: text, bytes: [u8], policy: text,
     val args_reason = _isv1_pin_args_error(root, pin_id, owner)
     if args_reason != "":
         return _isv1_ingest_rejected(args_reason)
-    _isv1_ingest(root, bytes, policy, pin_id, owner)
+    val result = _isv1_ingest(root, bytes, policy, pin_id, owner)
+    if result.status != "ok":
+        return result
+    val live_reason = _isv1_pin_live_error(root, pin_id, result.object_key)
+    if live_reason != "":
+        return _isv1_ingest_rejected(live_reason)
+    result
 
 fn _isv1_ingest(root: text, bytes: [u8], policy: text, pin_id: text, owner: text) -> StoreIngestV1:
     if root == "":
@@ -837,9 +843,13 @@ pub fn immutable_store_v1_pin(root: text, pin_id: text, owner: text, refs: [text
             return "pin-ref-invalid: {_isv1_bound_reason(ref_key)}"
     _isv1_pin_add(root, pin_id, owner, refs)
 
-# Removes the whole pin directory for its owner. A concurrent adder whose ref
-# lands after the removal loses that ref; that is the owner's own decision to
-# release while still adding.
+# Releases the whole pin for its owner. The pin directory is renamed
+# to a fresh unique path under staging/ first (nothing is replaced), so ownership of the release is
+# decided among concurrent releasers by that one rename (the owner check before it is still raceable across owners): a concurrent releaser sees `pin-missing`, and
+# GC/readers never see a half-deleted pin (the tombstone is outside pins/, which
+# GC scans, and is deleted afterwards). Usage contract: a lane must not release
+# a pin it still ingests into; `ingest_pinned` re-checks its ref after the write
+# and returns `pin-released` if the pin went away meanwhile.
 pub fn immutable_store_v1_release_pin(root: text, pin_id: text, owner: text) -> text:
     val args_reason = _isv1_pin_args_error(root, pin_id, owner)
     if args_reason != "":
@@ -856,9 +866,28 @@ pub fn immutable_store_v1_release_pin(root: text, pin_id: text, owner: text) -> 
             case Err(_): return "pin-unreadable"
         if existing != owner:
             return "pin-owner-mismatch"
-    if not dir_remove_all(pin_dir):
+    val staging_root = _isv1_join(root, "staging")
+    if not dir_create_all(staging_root) and not is_dir(staging_root):
+        return "staging-dir-failed"
+    val tomb = secure_temp_dir_raw(staging_root, "pinrel-")
+    if tomb.len() <= 0:
+        return "staging-create-failed"
+    if not rename_path(pin_dir, tomb + "/pin"):
+        dir_remove_all(tomb)
+        if not is_dir(pin_dir):
+            return "pin-missing"
         return "pin-remove-failed"
+    # Released: the tombstone is private staging garbage, never read by GC.
+    dir_remove_all(tomb)
     ""
+
+# After a pinned ingest wrote its ref, confirm the pin still holds it.
+fn _isv1_pin_live_error(root: text, pin_id: text, key: text) -> text:
+    if pin_id == "":
+        return ""
+    if file_exists(_isv1_pin_path(root, pin_id) + "/refs/" + key):
+        return ""
+    "pin-released"
 
 fn _isv1_list_fail_closed(dir: text) -> Result<[text], text>:
     # Fail closed: init creates these dirs, so a missing or unlistable one
