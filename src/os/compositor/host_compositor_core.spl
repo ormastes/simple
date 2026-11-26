@@ -12,7 +12,7 @@ use common.ui.window_scene.{
     shared_wm_scene_register_motion_background_source,
     shared_wm_scene_resolve_background
 }
-use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_origin_valid, wm_content_frame_web_provenance_valid}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WM_CONTENT_ORIGIN_GUI, WM_CONTENT_ORIGIN_PIXEL_SURFACE, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_origin_valid, wm_content_frame_web_provenance_valid}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DrawIrComposition}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
@@ -49,6 +49,8 @@ use os.compositor.host_frame_ack.{
 use os.compositor.dirty_rect.{DirtyRegion, DirtyRegionCheckpoint, IRect, irect_intersection, irect_is_empty, irect_union}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached_at_time, simple_web_content_revision_with_theme, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
+use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
+use common.ui.wm_gui_content_frame.{wm_gui_content_frame_from_pixels}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage, engine2d_resolved_draw_ir_image}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
@@ -68,7 +70,7 @@ use common.ui.wm_chrome_theme.{
 }
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use common.color.convert.{int_to_hex}
-use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_GUI, HOST_CONTENT_OWNER_LOCAL_WEB, WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, host_content_owner_default, host_content_owner_for_frame, host_content_owner_requires_browser_renderer, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
+use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_GUI, HOST_CONTENT_OWNER_LOCAL_WEB, HOST_CONTENT_OWNER_PIXEL, WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, host_content_owner_default, host_content_owner_for_frame, host_content_owner_requires_browser_renderer, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_action.{WmAction}
 use common.window_protocol.compositor_methods.{COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 use common.ui.native_scalar_text.{ui_native_i64_text}
@@ -991,6 +993,12 @@ class HostCompositor:
         val expected_width = window.w - 8
         val expected_height = window.h - 36 -
             shared_wm_browser_content_extra_height(window.app_id)
+        val theme_mismatch = if frame.origin_kind == WM_CONTENT_ORIGIN_SIMPLE_WEB:
+            frame.theme_id != _host_active_content_theme_id()
+        elif frame.origin_kind == WM_CONTENT_ORIGIN_GUI and frame.theme_id != "":
+            frame.theme_id != _host_active_content_theme_id()
+        else:
+            false
         if (frame.width != expected_width or
             frame.height != expected_height or
             frame.window_id != ui_native_i64_text(window_id) or
@@ -1008,7 +1016,7 @@ class HostCompositor:
             frame.offset_x != 0 or frame.offset_y != 0 or
             frame.base_content_revision != 0 or
             frame.damage_rects.len() != 0 or frame.damage_pixels.len() != 0 or
-            frame.theme_id != _host_active_content_theme_id() or
+            theme_mismatch or
             not wm_content_frame_web_provenance_valid(frame)):
             return false
         var aggregate_pixels = frame.pixels.len()
@@ -1456,6 +1464,7 @@ class HostCompositor:
         val window_index = self._find_window_index(window_id)
         if window_index < 0:
             return false
+        self._drop_external_web_frame(window_id)
         val registry_index = self._gui_content_index(window_id)
         if registry_index >= 0:
             self.gui_content_trees[registry_index] = tree
@@ -1656,6 +1665,130 @@ class HostCompositor:
         self.gui_content_focused_ids[registry_index] = session.focused_widget()
         action
 
+    fn content_owner_for(window_id: i64) -> i32:
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return -1
+        self.windows[window_index].content_owner
+
+    fn external_present_slot_owner(window_id: i64) -> text:
+        val ext_idx = self._external_web_frame_index(window_id)
+        if ext_idx < 0:
+            return ""
+        self.external_web_frames[ext_idx].origin_kind
+
+    fn external_present_slot_revision(window_id: i64) -> i64:
+        val ext_idx = self._external_web_frame_index(window_id)
+        if ext_idx < 0:
+            return 0
+        self.external_web_frames[ext_idx].content_revision
+
+    me detach_window_gui_tree(window_id: i64) -> bool:
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return false
+        self._release_gui_content(window_id)
+        var window = self.windows[window_index]
+        window.content_owner = host_content_owner_default(
+            window.owner_port, window.app_id, ""
+        )
+        self.windows[window_index] = window
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    me _submit_host_bridge_present_frame(
+        window_id: i64,
+        origin_kind: text,
+        content_revision: i64,
+        width: i32,
+        height: i32,
+        pixels: [u32],
+        checksum: u64
+    ) -> bool:
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0 or content_revision <= 0 or width <= 0 or height <= 0:
+            return false
+        if width > 8192 or height > 8192:
+            return false
+        if width.to_i64() > HOST_EXTERNAL_WEB_FRAME_MAX_PIXELS / height.to_i64():
+            return false
+        val window = self.windows[window_index]
+        val expected_w = window.w - 8
+        val expected_h = window.h - 36 -
+            shared_wm_browser_content_extra_height(window.app_id)
+        if width != expected_w or height != expected_h:
+            return false
+        if pixels.len().to_i64() != width.to_i64() * height.to_i64():
+            return false
+        if checksum == 0u64 or checksum != wm_content_frame_checksum(pixels):
+            return false
+        val ext_idx = self._external_web_frame_index(window_id)
+        if ext_idx >= 0 and self.external_web_frames[ext_idx].content_revision >= content_revision:
+            return false
+        var aggregate_pixels = pixels.len().to_i64()
+        var agg_idx = 0
+        while agg_idx < self.external_web_frames.len():
+            if agg_idx != ext_idx:
+                aggregate_pixels = aggregate_pixels + self.external_web_frames[agg_idx].pixels.len().to_i64()
+            agg_idx = agg_idx + 1
+        if aggregate_pixels > HOST_EXTERNAL_WEB_FRAME_MAX_PIXELS:
+            return false
+        val had_external_slot = ext_idx >= 0
+        if not self.require_external_content_frame(window_id):
+            return false
+        val frame = if origin_kind == WM_CONTENT_ORIGIN_GUI:
+            wm_gui_content_frame_from_pixels(
+                ui_native_i64_text(window_id), "", 0, 0, width, height,
+                pixels, self.render_revision + 1, content_revision,
+                _host_active_content_theme_id()
+            )
+        else:
+            WmContentFrame(
+                window_id: ui_native_i64_text(window_id),
+                scene_revision: self.render_revision + 1,
+                content_revision: content_revision,
+                origin_kind: WM_CONTENT_ORIGIN_PIXEL_SURFACE,
+                width: width,
+                height: height,
+                pixels: pixels,
+                checksum: checksum,
+                parent_window_id: "",
+                offset_x: 0,
+                offset_y: 0
+            )
+        if not self.set_external_content_frame(window_id, frame):
+            if not had_external_slot:
+                val _ = self._drop_external_web_frame(window_id)
+            return false
+        self._release_gui_content(window_id)
+        true
+
+    me submit_host_bridge_pixel_present(
+        window_id: i64,
+        content_revision: i64,
+        width: i32,
+        height: i32,
+        pixels: [u32],
+        checksum: u64
+    ) -> bool:
+        self._submit_host_bridge_present_frame(
+            window_id, WM_CONTENT_ORIGIN_PIXEL_SURFACE,
+            content_revision, width, height, pixels, checksum
+        )
+
+    me submit_host_bridge_gui_present(
+        window_id: i64,
+        content_revision: i64,
+        width: i32,
+        height: i32,
+        pixels: [u32],
+        checksum: u64
+    ) -> bool:
+        self._submit_host_bridge_present_frame(
+            window_id, WM_CONTENT_ORIGIN_GUI,
+            content_revision, width, height, pixels, checksum
+        )
+
     me update_window_content(window_id: i64, body_html: text) -> bool:
         var i = 0
         while i < self.windows.len():
@@ -1854,9 +1987,30 @@ class HostCompositor:
                         external.checksum = 0u64
                         self.external_web_frames[external_index] = external
                     content_frames.push(external)
-                elif self.requires_external_web_frame(win.id):
-                    # Positive-owner and browser content is renderer-owned.
-                    # Missing admission or a crashed child stays blank.
+                elif self.is_gui_content_window(win.id):
+                    val gui_index = self._gui_content_index(win.id)
+                    if gui_index >= 0 and cw > 0 and ch > 0:
+                        var gui_session = UISession.new(
+                            self.gui_content_trees[gui_index]
+                        )
+                        val focused_id = self.gui_content_focused_ids[gui_index]
+                        if focused_id != "":
+                            gui_session.dispatch(
+                                UIEvent.FocusEvent(focused_id, "focus")
+                            )
+                        gui_session.dispatch(UIEvent.Resize(cw, ch))
+                        content_frames.push(gui_session_content_frame(
+                            gui_session, ui_native_i64_text(win.id), "", 0, 0,
+                            cw, ch, self.render_revision, self.render_revision,
+                            []
+                        ))
+                    else:
+                        # A GUI-owned window without a live tree fails closed;
+                        # never fall back into Simple Web HTML rendering.
+                        content_frames.push(_host_empty_external_web_frame())
+                elif win.content_owner == HOST_CONTENT_OWNER_PIXEL or self.requires_external_web_frame(win.id):
+                    # Positive-owner, pixel-surface, and browser content is
+                    # externally owned. Missing admission stays blank.
                     content_frames.push(_host_empty_external_web_frame())
                 else:
                     val content_revision = simple_web_content_revision_with_theme(content_theme_id, win.title, win.content, cw, ch, scroll)
@@ -2508,6 +2662,7 @@ class HostCompositor:
         if not cache_hit:
             if self.native_pixel_lane:
                 shared_wm_scene_render_taskbar_context_to_pixel_buffer(self.pixel_backend, taskbar_input)
+                self.pixel_backend.present()
                 if cache_key != "" and cache_pixel_count > 0:
                     val cached = shared_wm_pixel_buffer_pixels(self.pixel_backend)
                     if cached.len() == cache_pixel_count:

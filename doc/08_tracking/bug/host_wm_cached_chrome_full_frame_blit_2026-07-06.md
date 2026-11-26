@@ -1,7 +1,7 @@
 # Host WM Cached Chrome Full-Frame Blit Perf Gap
 
 Date: 2026-07-06
-Status: open
+Status: fix-implemented-verification-pending
 
 ## Summary
 
@@ -29,3 +29,12 @@ desktop.
 The 2026-07-06 sidecar audit found the full-frame cached chrome blit in
 `src/os/compositor/host_compositor_entry.spl` as the highest-risk host WM
 render cost after the shared QEMU renderer fix.
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:** Verified `_host_chrome_cache_key` + `_composite_cached_chrome_dirty_rects` subrect blit/present path in `src/os/compositor/host_compositor_core.spl` and fixed missing `self.pixel_backend.present()` on cache-miss in `HostCompositor.render_frame()` (`native_pixel_lane` branch) so both cache-miss full renders and cache-hit dirty-rect subrect blits increment presentation counts consistently.
+- **Host specs verified (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/wm_bf10/bf10_host_chrome_blit_present_spec.spl`: `1 passed, 0 failed` (`outcome=OK`)
+  - `test/01_unit/os/compositor/host_chrome_dirty_rect_repro_spec.spl`: `1 passed, 0 failed` (`outcome=OK`)
+- **Pending verification:** Native/self-hosted host WM desktop run at 4K/8K verifying frame time & RSS on cached chrome dirty-rect updates.

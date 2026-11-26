@@ -335,3 +335,13 @@ the 2026-11-11 FIXED closure stands.
   3/3, 3/3, 5/5 PASS evidence in the 2026-11-11 triage section stands.
 
 No code change needed; doc header "Closed 2026-11-11 — FIXED" is accurate.
+
+
+## BF-10 Re-Verification & Boundary Hardening (2026-11-26)
+
+- **Code hardening:** Replaced unguarded `shell(...)` in `src/os/drivers/gpu/board_vulkan/boundary_enumeration_provider.spl` (`lavapipe_reference_enumeration`) with `process_run_bounded("/usr/bin/env", ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json", "vulkaninfo"], LAVAPIPE_ENUMERATION_TIMEOUT_MS, LAVAPIPE_ENUMERATION_MAX_OUTPUT_BYTES)` (`15000ms`, `1048576` bytes), matching `boundary_readback_lavapipe_provider.spl`.
+- **Host specs re-verified (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/vulkan/provider_inventory_spec.spl`: `10 passed, 0 failed` (`outcome=OK`)
+  - `test/01_unit/os/vulkan/independence_group_key_regression_spec.spl`: `3 passed, 0 failed` (`outcome=OK`)
+  - `test/01_unit/os/vulkan/readback_boundary_gate_spec.spl`: `14 passed, 0 failed` (`outcome=OK`)
+- Status remains `FIXED`.

@@ -1,0 +1,259 @@
+# BF-10: VirtIO-serial framed host-GPU transport & multi-queue handshake gates
+# Covers Bug #4 (simpleos_qemu_virtio_serial_host_gpu_transport_2026-07-30)
+
+use std.spec
+use os.drivers.virtio.virtio_console.{
+    SIMPLEOS_HOST_GPU_PORT_NAME,
+    VIRTIO_CONSOLE_DEVICE_ADD,
+    VIRTIO_CONSOLE_DEVICE_READY,
+    VIRTIO_CONSOLE_DEVICE_REMOVE,
+    VIRTIO_CONSOLE_PORT_NAME,
+    VIRTIO_CONSOLE_PORT_OPEN,
+    VIRTIO_CONSOLE_PORT_READY,
+    VirtioSerialHostGpuPort,
+    virtio_console_control_decode,
+    virtio_console_control_encode,
+    virtio_console_stream_checksum
+}
+use common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+    SIMPLEOS_HOST_GPU_ISA_X86_64,
+    SIMPLEOS_HOST_GPU_KIND_DRAW_IR,
+    SIMPLEOS_HOST_GPU_KIND_HELLO,
+    SIMPLEOS_HOST_GPU_REASON_TIMEOUT,
+    SIMPLEOS_HOST_GPU_STATUS_IDLE
+}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use common.ui.taskbar_model.{empty_taskbar_model}
+use common.ui.window_scene.{SharedWmScene, shared_wm_background_color}
+use common.gpu.simpleos_host_gpu_stream_protocol.{
+    SIMPLEOS_HOST_GPU_STREAM_ERROR_RESPONSE,
+    SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST,
+    SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE,
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST,
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE,
+    SimpleOsHostGpuStreamHeader,
+    simpleos_host_gpu_stream_header_decode,
+    simpleos_host_gpu_stream_header_encode
+}
+
+fn _ascii_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < s.byte_len():
+        out.push((s.byte_at(i) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _slice_bytes(bytes: [u8], start: i64, end_excl: i64) -> [u8]:
+    var out: [u8] = []
+    var i = start
+    while i < end_excl and i < bytes.len().to_i64():
+        out.push(bytes[i])
+        i = i + 1
+    out
+
+fn _append_bytes(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i: i64 = 0
+    while i < src.len().to_i64():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn _bring_port_open(port: VirtioSerialHostGpuPort, port_id: u32) -> VirtioSerialHostGpuPort:
+    var p = port
+    expect(p.begin_control_handshake().is_ok()).to_equal(true)
+    val add_ev = virtio_console_control_encode(port_id, VIRTIO_CONSOLE_DEVICE_ADD, 1u16, [])
+    expect(p.handle_control_bytes(add_ev).is_ok()).to_equal(true)
+    val name_ev = virtio_console_control_encode(port_id, VIRTIO_CONSOLE_PORT_NAME, 1u16, _ascii_bytes(SIMPLEOS_HOST_GPU_PORT_NAME))
+    expect(p.handle_control_bytes(name_ev).is_ok()).to_equal(true)
+    expect(p.emit_port_ready().is_ok()).to_equal(true)
+    val open_ev = virtio_console_control_encode(port_id, VIRTIO_CONSOLE_PORT_OPEN, 1u16, [])
+    expect(p.handle_control_bytes(open_ev).is_ok()).to_equal(true)
+    p
+
+describe "BF-10 VirtIO console control and queue binding":
+    it "binds distinct queue pairs for x86_64 PCI port 1 and RISC-V MMIO port 0":
+        var x86 = VirtioSerialHostGpuPort.create_x86_pci(10u64, 16, 1u32, 33u32)
+        expect(x86.is_configured()).to_equal(true)
+        expect(x86.control_rx_queue_id()).to_equal(2u16)
+        expect(x86.control_tx_queue_id()).to_equal(3u16)
+        expect(x86.data_rx_queue_id()).to_equal(4u16)
+        expect(x86.data_tx_queue_id()).to_equal(5u16)
+
+        var rv = VirtioSerialHostGpuPort.create_riscv_mmio(11u64, 16, 0u32, 7u32)
+        expect(rv.is_configured()).to_equal(true)
+        expect(rv.data_rx_queue_id()).to_equal(0u16)
+        expect(rv.data_tx_queue_id()).to_equal(1u16)
+
+        val lease = rv.acquire_data_tx(0, 128)
+        expect(lease.admitted).to_equal(true)
+        val irq = rv.record_irq(1u32, 8u32)
+        expect(irq.accepted).to_equal(true)
+        val ready = rv.take_ready()
+        expect(ready.ready).to_equal(true)
+        expect(ready.queue_id).to_equal(1u16)
+        expect(rv.complete_lease(lease)).to_equal("completed")
+
+    it "rejects premature PORT_OPEN before PORT_NAME and PORT_READY":
+        var port = VirtioSerialHostGpuPort.create_x86_pci(12u64, 8, 1u32, 34u32)
+        expect(port.transport_classifier()).to_equal("virtio-serial-unimplemented")
+        val premature = virtio_console_control_encode(1u32, VIRTIO_CONSOLE_PORT_OPEN, 1u16, [])
+        expect(port.handle_control_bytes(premature).is_err()).to_equal(true)
+        expect(port.is_open()).to_equal(false)
+
+        val opened = _bring_port_open(port, 1u32)
+        expect(opened.is_open()).to_equal(true)
+        expect(opened.transport_classifier()).to_equal("virtio-serial-framed")
+
+    it "handles split-descriptor and coalesced SHGF responses with incremental checksum":
+        var port = _bring_port_open(VirtioSerialHostGpuPort.create_x86_pci(13u64, 8, 1u32, 35u32), 1u32)
+        val req_body: [u8] = [1u8, 2u8, 3u8, 4u8]
+        val req_sum = virtio_console_stream_checksum(req_body)
+        val req_hdr = SimpleOsHostGpuStreamHeader(
+            message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST,
+            body_bytes: 4,
+            body_checksum: req_sum,
+            generation: 2,
+            run_id_hash: 9001,
+            frame_id: 7,
+            backend_code: SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            kind_or_status: SIMPLEOS_HOST_GPU_KIND_DRAW_IR
+        )
+        val tx_res = port.build_stream_request_frame(req_hdr, req_body, 1000, 6000)
+        expect(tx_res.is_ok()).to_equal(true)
+
+        val resp_body: [u8] = [10u8, 20u8, 30u8, 40u8, 50u8]
+        val resp_sum = virtio_console_stream_checksum(resp_body)
+        val resp_hdr = SimpleOsHostGpuStreamHeader(
+            message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE,
+            body_bytes: 5,
+            body_checksum: resp_sum,
+            generation: 2,
+            run_id_hash: 9001,
+            frame_id: 7,
+            backend_code: SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            kind_or_status: SIMPLEOS_HOST_GPU_STATUS_IDLE
+        )
+        val wire1 = _append_bytes(simpleos_host_gpu_stream_header_encode(resp_hdr), resp_body)
+        val next_hdr = SimpleOsHostGpuStreamHeader(
+            message_type: SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST,
+            body_bytes: 0,
+            body_checksum: 0,
+            generation: 3,
+            run_id_hash: 0,
+            frame_id: 0,
+            backend_code: SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            kind_or_status: SIMPLEOS_HOST_GPU_KIND_HELLO
+        )
+        val extra_bytes = _slice_bytes(simpleos_host_gpu_stream_header_encode(next_hdr), 0, 8)
+        val wire1_plus_coalesced = _append_bytes(wire1, extra_bytes)
+
+        val c1 = _slice_bytes(wire1_plus_coalesced, 0, 20)
+        val c2 = _slice_bytes(wire1_plus_coalesced, 20, 66)
+        val c3 = _slice_bytes(wire1_plus_coalesced, 66, wire1_plus_coalesced.len().to_i64())
+
+        val r1 = port.push_rx_bytes(c1, 2000)
+        expect(r1.complete).to_equal(false)
+        expect(r1.rejected).to_equal(false)
+        val r2 = port.push_rx_bytes(c2, 2100)
+        expect(r2.complete).to_equal(false)
+        expect(r2.rejected).to_equal(false)
+        val r3 = port.push_rx_bytes(c3, 2200)
+        expect(r3.complete).to_equal(true)
+        expect(r3.rejected).to_equal(false)
+        expect(r3.body.len()).to_equal(5)
+        expect(r3.body_checksum).to_equal(resp_sum)
+        expect(port.rx_carry.len()).to_equal(8)
+
+    it "fails closed on mismatched correlation, bad checksum, deadline expiry, and close":
+        var port = _bring_port_open(VirtioSerialHostGpuPort.create_riscv_mmio(14u64, 8, 1u32, 9u32), 1u32)
+        val hello_req = SimpleOsHostGpuStreamHeader(
+            message_type: SIMPLEOS_HOST_GPU_STREAM_HELLO_REQUEST,
+            body_bytes: 0,
+            body_checksum: 0,
+            generation: 1,
+            run_id_hash: 0,
+            frame_id: 0,
+            backend_code: SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            kind_or_status: SIMPLEOS_HOST_GPU_KIND_HELLO
+        )
+        expect(port.build_stream_request_frame(hello_req, [], 100, 500).is_ok()).to_equal(true)
+        val wrong_gen_resp = SimpleOsHostGpuStreamHeader(
+            message_type: SIMPLEOS_HOST_GPU_STREAM_HELLO_RESPONSE,
+            body_bytes: 0,
+            body_checksum: 0,
+            generation: 99,
+            run_id_hash: 0,
+            frame_id: 0,
+            backend_code: SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            kind_or_status: SIMPLEOS_HOST_GPU_STATUS_IDLE
+        )
+        val bad = port.push_rx_bytes(simpleos_host_gpu_stream_header_encode(wrong_gen_resp), 200)
+        expect(bad.rejected).to_equal(true)
+        expect(bad.reason).to_equal("correlation-mismatch")
+        expect(port.is_open()).to_equal(false)
+
+        var port2 = _bring_port_open(VirtioSerialHostGpuPort.create_x86_pci(15u64, 8, 1u32, 36u32), 1u32)
+        expect(port2.build_stream_request_frame(hello_req, [], 100, 500).is_ok()).to_equal(true)
+        expect(port2.expire_pending_if_past(501)).to_equal(true)
+        expect(port2.is_open()).to_equal(false)
+
+    it "selects virtio-serial-framed in Engine2dWmFrameExecutor only when port is open and fails closed otherwise":
+        val engine = Engine2D.create_with_backend(128, 96, "cpu")
+        val fb = FramebufferDriver.from_buffer(128, 96)
+        val unready_port = VirtioSerialHostGpuPort.create_x86_pci(16u64, 8, 1u32, 37u32)
+        val closed_exec = Engine2dWmFrameExecutor.create_host_gpu_with_transport(
+            engine, fb, "virtio-serial-framed", 0u64, Some(unready_port),
+            SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            128, 96, 1000, false, true
+        )
+        expect(closed_exec.host_gpu_transport_active()).to_equal("none")
+
+        val open_port = _bring_port_open(VirtioSerialHostGpuPort.create_x86_pci(17u64, 8, 1u32, 38u32), 1u32)
+        var open_exec = Engine2dWmFrameExecutor.create_host_gpu_with_transport(
+            Engine2D.create_with_backend(128, 96, "cpu"), FramebufferDriver.from_buffer(128, 96),
+            "virtio-serial-framed", 0u64, Some(open_port),
+            SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            128, 96, 1000, false, true
+        )
+        expect(open_exec.host_gpu_transport_active()).to_equal("virtio-serial-framed")
+        expect(open_exec.host_gpu_backend).to_equal("vulkan")
+
+        val scene = SharedWmScene(
+            width: 128, height: 96, backend: "cpu", windows: [],
+            background: shared_wm_background_color(0xFF102030u32)
+        )
+        expect(closed_exec.render(scene, empty_taskbar_model(), [], 1, 1, "12:00")).to_equal(0)
+
+        expect(open_exec.render(scene, empty_taskbar_model(), [], 1, 1, "12:00")).to_equal(1)
+        expect(open_exec.virtio_serial_has_pending_request()).to_equal(true)
+        val tx_bytes = open_exec.virtio_serial_last_tx_bytes()
+        expect(tx_bytes.len()).to_be_greater_than(64)
+        val hdr_decode = simpleos_host_gpu_stream_header_decode(_slice_bytes(tx_bytes, 0, 64))
+        expect(hdr_decode.ok).to_equal(true)
+        expect(hdr_decode.header.message_type).to_equal(SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST)
+        expect(hdr_decode.header.frame_id).to_equal(1)
+        expect(hdr_decode.header.generation).to_equal(1)
+
+        # Fail closed while prior frame request awaits host response
+        expect(open_exec.render(scene, empty_taskbar_model(), [], 2, 1, "12:00")).to_equal(0)
+
+        val ack = SimpleOsHostGpuStreamHeader(
+            message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_RESPONSE,
+            body_bytes: 0,
+            body_checksum: 0,
+            generation: hdr_decode.header.generation,
+            run_id_hash: hdr_decode.header.run_id_hash,
+            frame_id: hdr_decode.header.frame_id,
+            backend_code: hdr_decode.header.backend_code,
+            kind_or_status: SIMPLEOS_HOST_GPU_STATUS_IDLE
+        )
+        val rx_done = open_exec.push_virtio_serial_rx(simpleos_host_gpu_stream_header_encode(ack), 2000)
+        expect(rx_done.complete).to_equal(true)
+        expect(rx_done.rejected).to_equal(false)
+        expect(open_exec.virtio_serial_has_pending_request()).to_equal(false)
+        expect(open_exec.render(scene, empty_taskbar_model(), [], 2, 1, "12:00")).to_equal(2)

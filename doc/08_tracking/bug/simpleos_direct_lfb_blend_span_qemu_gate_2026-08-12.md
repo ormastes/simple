@@ -1,6 +1,6 @@
 # SimpleOS direct-LFB blend-span QEMU gate — 2026-08-12
 
-Status: **IMPLEMENTED / BOOT EVIDENCE BLOCKED**.
+Status: fix-implemented-verification-pending (was: IMPLEMENTED / BOOT EVIDENCE BLOCKED)
 
 The x86_64 freestanding runtime now owns `rt_gui_blend_span8`, validates the
 tagged source array and row bounds, and performs exact straight-alpha src-over
@@ -101,3 +101,9 @@ TODO(deferred-qemu): after a fresh SimpleOS image is available, run the direct
 route in QEMU with correlated serial and framebuffer readback, then measure an
 8K-width row workload. This host contract test proves bounded arithmetic and
 access behavior only; it is not guest, presentation, or 8K performance proof.
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Status update:** Source repairs (`rt_gui_blend_span8`, `FramebufferDriver` fallback) are present in tree; QEMU harness gates and host evidence contracts were checked on host (`bf10_wm_pin_and_evidence_gates_spec.spl`: `3 passed, 0 failed`). Kernel runtime C translation units (`src/runtime/`, `scripts/check/`) sit outside BF-10 file ownership.
+- **Pending QEMU / hardware verification:** Build clean `SIMPLEOS_KERNEL_ELF`, run `sh scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs` and `sh scripts/check/check-simpleos-x86-64-wm-qemu-readiness.shs`, capture QEMU BGA/scanout framebuffer checksum, and benchmark 8K blend workload on real guest.

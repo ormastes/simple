@@ -1,9 +1,17 @@
 # Canonical Shared WM -> Draw IR -> Engine2D production frame executor.
 
-use common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, SimpleOsHostGpuImageResourceRevision, simpleos_host_gpu_image_resource}
+use common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource,
+    SimpleOsHostGpuImageResourceRevision,
+    simpleos_host_gpu_draw_ir_encode,
+    simpleos_host_gpu_image_resource
+}
 use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_PROTOCOL_VERSION,
+    SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS,
+    SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES,
     SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US,
+    SIMPLEOS_HOST_GPU_KIND_DRAW_IR,
     SIMPLEOS_HOST_GPU_STATUS_PASS,
     SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED,
     SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST,
@@ -19,7 +27,12 @@ use common.gpu.simpleos_host_gpu_protocol.{
     simpleos_host_gpu_guest_isa_name,
     simpleos_host_gpu_max_readback_bytes
 }
-use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DrawIrComposition}
+use common.gpu.simpleos_host_gpu_stream_protocol.{
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST,
+    SimpleOsHostGpuStreamHeader,
+    simpleos_host_gpu_stream_checksum_step
+}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DrawIrBatch, DrawIrComposition, draw_ir_batch_with_source, draw_ir_composition}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, wm_content_frame_web_provenance_valid}
 use common.ui.window_scene_draw_ir.{
@@ -50,6 +63,10 @@ use os.lib.gpu_bridge.host_gpu_ivshmem.{
     host_gpu_ivshmem_next_generation,
     host_gpu_ivshmem_submit_draw_ir,
     host_gpu_ivshmem_submit_draw_ir_retained
+}
+use os.drivers.virtio.virtio_console.{
+    VirtioConsoleRxResult,
+    VirtioSerialHostGpuPort
 }
 
 @unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
@@ -107,6 +124,11 @@ class Engine2dWmFrameExecutor:
     host_gpu_backend: text
     host_gpu_backend_code: i64
     host_gpu_required: bool
+    host_gpu_transport_kind: text = "none"
+    virtio_serial_port: VirtioSerialHostGpuPort? = None
+    virtio_serial_generation: i64 = 0
+    virtio_serial_last_tx_frame: [u8] = []
+    virtio_serial_last_clock_us: i64 = 0
     draw_ir_backend_target: text
     # Immutable local material target. Host negotiation may change only the
     # host target above; this keeps the CPU/CPU-SIMD fallback contract intact.
@@ -224,6 +246,7 @@ class Engine2dWmFrameExecutor:
                 executor.host_gpu_run_id_hash = generation
                 executor.host_gpu_backend = candidate
                 executor.host_gpu_backend_code = candidate_code
+                executor.host_gpu_transport_kind = "ivshmem"
                 executor.draw_ir_backend_target = engine2d_wm_draw_ir_backend_target(true, candidate, cpu_simd_enabled)
                 final_reason = 0
                 decision_elapsed = total_elapsed
@@ -238,6 +261,75 @@ class Engine2dWmFrameExecutor:
         _engine2d_wm_log("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={result} backend={selected_backend} attempts={attempts} first_generation={first_generation} final_generation={final_generation} elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
         if executor.host_gpu_base != 0u64:
             _engine2d_wm_log("[wm-frame] host-gpu-ready backend={executor.host_gpu_backend} generation={executor.host_gpu_run_id_hash}")
+        executor
+
+    fn host_gpu_transport_active() -> text:
+        if self.host_gpu_transport_kind == "":
+            return "none"
+        self.host_gpu_transport_kind
+
+    static fn create_host_gpu_with_transport(
+        engine: Engine2D,
+        framebuffer: FramebufferDriver,
+        transport_kind: text,
+        base: u64,
+        virtio_port: VirtioSerialHostGpuPort?,
+        guest_isa_code: i64,
+        backend_code: i64,
+        fb_width: i64,
+        fb_height: i64,
+        negotiation_started_us: i64,
+        cpu_simd_enabled: bool = false,
+        backend_required: bool = false
+    ) -> Engine2dWmFrameExecutor:
+        if transport_kind == "ivshmem":
+            return Engine2dWmFrameExecutor.create_host_gpu(
+                engine, framebuffer, base, guest_isa_code, backend_code,
+                fb_width, fb_height, negotiation_started_us,
+                cpu_simd_enabled, backend_required
+            )
+        var executor = Engine2dWmFrameExecutor.create(
+            engine, framebuffer, fb_width, fb_height, cpu_simd_enabled
+        )
+        executor.host_gpu_required = backend_required
+        val unavailable_marker = if backend_required:
+            "host-gpu-required-rejected"
+        else:
+            "host-gpu-fallback"
+        if transport_kind != "virtio-serial-framed":
+            executor.host_gpu_transport_kind = "none"
+            _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=unsupported-transport transport={transport_kind}")
+            return executor
+        if val Some(port) = virtio_port:
+            val guest_isa = simpleos_host_gpu_guest_isa_name(guest_isa_code)
+            val width = if fb_width > 0: fb_width else: framebuffer.width.to_i64()
+            val height = if fb_height > 0: fb_height else: framebuffer.height.to_i64()
+            val max_pixels = simpleos_host_gpu_max_readback_bytes() / 4
+            val valid_geometry = (
+                width > 0 and height > 0 and height <= max_pixels and
+                width <= max_pixels / height
+            )
+            if (port.is_open() and valid_geometry and
+                guest_isa != "unsupported" and backend_code != 0 and
+                simpleos_host_gpu_backend_mask(backend_code) != 0):
+                val selected = simpleos_host_gpu_backend_name(backend_code)
+                if selected != "" and selected != "unknown":
+                    executor.host_gpu_transport_kind = "virtio-serial-framed"
+                    executor.virtio_serial_port = Some(port)
+                    executor.host_gpu_run_id_hash = if negotiation_started_us > 0: negotiation_started_us else: 1
+                    executor.virtio_serial_last_clock_us = executor.host_gpu_run_id_hash
+                    executor.host_gpu_backend = selected
+                    executor.host_gpu_backend_code = backend_code
+                    executor.draw_ir_backend_target = engine2d_wm_draw_ir_backend_target(
+                        true, selected, cpu_simd_enabled
+                    )
+                    _engine2d_wm_log("[wm-frame] host-gpu-ready transport=virtio-serial-framed backend={selected} port={port.port_name}")
+                    return executor
+            executor.host_gpu_transport_kind = "none"
+            _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=virtio-serial-not-ready open={port.is_open()}")
+            return executor
+        executor.host_gpu_transport_kind = "none"
+        _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=virtio-serial-unimplemented")
         executor
 
     me _render_host_gpu(composition: DrawIrComposition, resources: [SimpleOsHostGpuImageResource], scene_revision: i64) -> bool:
@@ -267,6 +359,121 @@ class Engine2dWmFrameExecutor:
         _engine2d_wm_log("[wm-frame] host-gpu-presented backend={self.host_gpu_backend} generation={generation} run={self.host_gpu_run_id_hash} frame={generation} submit_id={receipt.submit_id} fence_id={receipt.fence_id} fence_completed={receipt.fence_signaled} device_frame_id={receipt.device_frame_id} checksum={receipt.output_checksum}")
         _engine2d_wm_log("[wm-frame] host-gpu-device-evidence backend={self.host_gpu_backend} generation={generation} run={receipt.run_id_hash} frame={receipt.frame_id} submit_id={receipt.submit_id} fence_id={receipt.fence_id} fence_completed={receipt.fence_signaled} device_frame_id={receipt.device_frame_id} scene_revision={scene_revision} handle={receipt.native_handle} identity={receipt.device_identity} readback=device checksum={receipt.output_checksum} elapsed_us={receipt.elapsed_us}")
         true
+
+    fn _has_ready_virtio_serial_transport() -> bool:
+        if self.host_gpu_transport_kind != "virtio-serial-framed":
+            return false
+        match self.virtio_serial_port:
+            case Some(port): port.is_open()
+            case None: false
+
+    fn _wire_draw_ir_composition(composition: DrawIrComposition) -> DrawIrComposition:
+        var wire_batches: [DrawIrBatch] = []
+        for batch in composition.batches:
+            wire_batches.push(draw_ir_batch_with_source(
+                batch.batch_id,
+                DRAW_IR_BACKEND_GPU,
+                batch.embedding,
+                batch.commands,
+                batch.source
+            ))
+        draw_ir_composition(
+            composition.composition_id,
+            composition.scene_key,
+            DRAW_IR_BACKEND_GPU,
+            wire_batches
+        )
+
+    me _render_host_gpu_virtio_serial(composition: DrawIrComposition, scene_revision: i64) -> bool:
+        val failure_marker = if self.host_gpu_required: "host-gpu-required-rejected" else: "host-gpu-fallback"
+        if self.host_gpu_transport_kind != "virtio-serial-framed":
+            return false
+        match self.virtio_serial_port:
+            case Some(existing_port):
+                var port = existing_port
+                if not port.is_open():
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-not-open")
+                    return false
+                val wire_comp = self._wire_draw_ir_composition(composition)
+                val payload = simpleos_host_gpu_draw_ir_encode(
+                    wire_comp, SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES, SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS
+                )
+                if not payload.ok:
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-draw-ir-encode detail={payload.reason}")
+                    return false
+                val body = payload.bytes
+                var checksum: i64 = 0
+                var bi = 0
+                while bi < body.len():
+                    checksum = simpleos_host_gpu_stream_checksum_step(checksum, body[bi])
+                    if checksum < 0:
+                        _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-checksum-overflow")
+                        return false
+                    bi = bi + 1
+                val generation = self.virtio_serial_generation + 1
+                val run_id = if self.host_gpu_run_id_hash > 0: self.host_gpu_run_id_hash else: 1
+                val raw_now = boot_monotonic_now_us()
+                val now_us = if raw_now > self.virtio_serial_last_clock_us and raw_now > 0:
+                    raw_now
+                else:
+                    self.virtio_serial_last_clock_us + 1
+                self.virtio_serial_last_clock_us = now_us
+                val deadline_us = boot_monotonic_deadline_us(now_us, SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US)
+                if deadline_us <= now_us:
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-invalid-clock")
+                    return false
+                val req = SimpleOsHostGpuStreamHeader(
+                    message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST,
+                    body_bytes: body.len().to_i64(),
+                    body_checksum: checksum,
+                    generation: generation,
+                    run_id_hash: run_id,
+                    frame_id: scene_revision,
+                    backend_code: self.host_gpu_backend_code,
+                    kind_or_status: SIMPLEOS_HOST_GPU_KIND_DRAW_IR
+                )
+                val framed = port.build_stream_request_frame(req, body, now_us, deadline_us)
+                if val Err(reason) = framed:
+                    self.virtio_serial_port = Some(port)
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-frame detail={reason}")
+                    return false
+                val frame_bytes = framed.unwrap()
+                val lease = port.acquire_data_tx(generation, frame_bytes.len().to_i64())
+                if not lease.admitted:
+                    val _ = port.fail_closed_reset("tx-queue-rejected", false)
+                    self.virtio_serial_port = Some(port)
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-tx-queue")
+                    return false
+                val _ = port.complete_lease(lease)
+                self.virtio_serial_port = Some(port)
+                self.virtio_serial_generation = generation
+                self.virtio_serial_last_tx_frame = frame_bytes
+                _engine2d_wm_log("[wm-frame] host-gpu-presented transport=virtio-serial-framed backend={self.host_gpu_backend} generation={generation} run={run_id} frame={scene_revision} payload_bytes={body.len()} checksum={checksum}")
+                return true
+            case None:
+                _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-missing")
+                return false
+
+    me push_virtio_serial_rx(chunk: [u8], now_us: i64) -> VirtioConsoleRxResult:
+        match self.virtio_serial_port:
+            case Some(existing_port):
+                var port = existing_port
+                val rx = port.push_rx_bytes(chunk, now_us)
+                self.virtio_serial_port = Some(port)
+                return rx
+            case None:
+                return VirtioConsoleRxResult(
+                    complete: false, rejected: true, reason: "virtio-serial-missing",
+                    header: None, body: [], body_checksum: -1
+                )
+
+    fn virtio_serial_last_tx_bytes() -> [u8]:
+        self.virtio_serial_last_tx_frame
+
+    fn virtio_serial_has_pending_request() -> bool:
+        match self.virtio_serial_port:
+            case Some(port): port.pending_header.is_some()
+            case None: false
 
     # Retained old/new damage plan. Admission requires a successful prior
     # frame and an unchanged background identity; a changed scene revision
@@ -329,7 +536,9 @@ class Engine2dWmFrameExecutor:
     me render(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock_label: text) -> i64:
         if scene_revision <= 0 or taskbar_revision <= 0:
             return 0
-        if self.host_gpu_required and self.host_gpu_base == 0u64:
+        val has_ivshmem = self.host_gpu_base != 0u64
+        val has_virtio_serial = self._has_ready_virtio_serial_transport()
+        if self.host_gpu_required and not has_ivshmem and not has_virtio_serial:
             _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=negotiation-or-mapping")
             return 0
 
@@ -402,15 +611,19 @@ class Engine2dWmFrameExecutor:
         val filtered_scene = SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: good_windows, background: scene.background)
         val nested_content_frames = shared_wm_nested_content_frames(filtered_scene, content_frames, good_content_frames, scene_revision, 28)
         for frame in nested_content_frames:
+            val nested_provenance_valid = wm_content_frame_web_provenance_valid(frame)
+            if not nested_provenance_valid:
+                _engine2d_wm_log("[wm-frame] content-provenance-rejected nested=true window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
             val image_uri = shared_wm_content_frame_image_uri(frame)
-            images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
-            if self.host_gpu_base != 0u64:
-                host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
-            good_content_frames.push(frame)
+            if nested_provenance_valid and image_uri != "":
+                images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+                if self.host_gpu_base != 0u64:
+                    host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
+                good_content_frames.push(frame)
         if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=composition-begin")
         val composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, self.draw_ir_backend_target, 1000, clock_label, 0)
         if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=composition-end")
-        if self.host_gpu_base != 0u64:
+        if has_ivshmem:
             if self._render_host_gpu(composition, host_images, scene_revision):
                 if degraded_window_count > 0:
                     _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=host-gpu scene_revision={scene_revision}")
@@ -420,6 +633,17 @@ class Engine2dWmFrameExecutor:
                 return scene_revision
             if self.host_gpu_required:
                 _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=device-receipt-or-readback")
+                return 0
+        elif has_virtio_serial:
+            if self._render_host_gpu_virtio_serial(composition, scene_revision):
+                if degraded_window_count > 0:
+                    _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=virtio-serial-framed scene_revision={scene_revision}")
+                for frame in good_content_frames:
+                    _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=virtio-serial-framed window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
+                self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label)
+                return scene_revision
+            if self.host_gpu_required:
+                _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=virtio-serial-submit")
                 return 0
         # The host composition is intentionally not reused after a failed
         # Metal/Vulkan request: its style metadata asks for that target's

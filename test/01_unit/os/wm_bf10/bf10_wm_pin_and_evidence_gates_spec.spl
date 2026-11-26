@@ -1,0 +1,144 @@
+# BF-10: Taskbar pin validation/capacity, QEMU scripts root path fixes, and evidence gates
+# Covers Bugs #6, #7, #8, #12, #13, and #14
+
+use std.spec
+use app.io.mod.{dir_create_all, dir_remove_all, file_exists, file_read, file_write, secure_temp_dir}
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use os.compositor.compositor.{Compositor}
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
+use os.compositor.baremetal_wm_present_owner.{
+    WM_PRESENT_ARCH_X86_64,
+    BaremetalWmPresentOwnerV1,
+    BaremetalWmScanoutIdentityV1
+}
+use os.compositor.backend_render_receipt_producer.{
+    produce_backend_render_receipt_after_present_v1
+}
+use os.compositor.engine2d_render_evidence.{
+    SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+    SimpleOsBuildIdentityV1
+}
+use os.desktop.shell.{DesktopShell}
+use os.services.vfs.vfs_init.{
+    _clear_vfs_rootfs_for_test,
+    _mount_hosted_rootfs_for_test
+}
+use os.services.vfs.vfs_boot_init.{_vfs_ambient_reset_for_test}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+
+fn _pin_test_shell() -> DesktopShell:
+    val backend: CompositorBackend = HeadlessHostCompositorBackend.new(160, 120)
+    DesktopShell.new(Compositor.with_backends(backend, None, 160, 120))
+
+describe "BF-10 DesktopShell taskbar pin validation and capacity":
+    it "rejects empty app_id, deduplicates existing pins, and enforces 64-pin capacity":
+        _vfs_ambient_reset_for_test()
+        _clear_vfs_rootfs_for_test()
+        expect(_mount_hosted_rootfs_for_test(DriverInstance.DbFs(DbFsDriver.new_hosted()))).to_equal(true)
+        var shell = _pin_test_shell()
+        val baseline = shell.pinned_app_count()
+        expect(shell.pin_app("", "Empty", "app")).to_equal(false)
+        expect(shell.pinned_app_count()).to_equal(baseline)
+
+        expect(shell.pin_app("/sys/apps/custom_bf10", "Custom", "app")).to_equal(true)
+        val after_first = shell.pinned_app_count()
+        expect(after_first).to_equal(baseline + 1)
+        # Idempotent re-pin does not duplicate
+        expect(shell.pin_app("/sys/apps/custom_bf10", "Custom", "app")).to_equal(true)
+        expect(shell.pinned_app_count()).to_equal(after_first)
+
+        var idx = shell.pinned_app_count()
+        while idx < 64:
+            expect(shell.pin_app("/sys/apps/pad_{idx}", "Pad {idx}", "app")).to_equal(true)
+            idx = idx + 1
+        expect(shell.pinned_app_count()).to_equal(64)
+        expect(shell.pin_app("/sys/apps/overflow", "Overflow", "app")).to_equal(false)
+        expect(shell.pinned_app_count()).to_equal(64)
+
+describe "BF-10 QEMU harness root resolution & fail-closed render receipt":
+    it "resolves REPO_ROOT via two parent levels in scripts/qemu helpers and enables phase profiling":
+        val create_sh = file_read("scripts/qemu/create-qemu-temp-layout.shs")
+        val cleanup_sh = file_read("scripts/qemu/cleanup-qemu-temp.shs")
+        val bench_sh = file_read("scripts/qemu/linux_qemu_net_parity_bench.shs")
+        val arm64_sh = file_read("scripts/qemu/check_simpleos_arm64_clang_compile.shs")
+
+        expect(create_sh).to_contain("/../..")
+        expect(cleanup_sh).to_contain("/../..")
+        expect(bench_sh).to_contain("/../..")
+        expect(arm64_sh).to_contain("SIMPLE_COMPILER_PHASE_PROFILE")
+        expect(arm64_sh).to_contain("kernel-build.log")
+
+    it "executes cleanup-qemu-temp.shs removing all multi-match globs while keeping base qcow2":
+        val raw_tmp = env_get("TEMP")
+        val fallback_tmp = env_get("TMPDIR")
+        val parent_dir = if raw_tmp != "":
+            raw_tmp.replace("\\", "/")
+        elif fallback_tmp != "":
+            fallback_tmp.replace("\\", "/")
+        else:
+            "/tmp"
+        val tmp_res = secure_temp_dir(parent_dir, "bf10_qemu_cleanup_")
+        expect(tmp_res.is_ok()).to_equal(true)
+        val tmp_root = tmp_res.unwrap().replace("\\", "/")
+        val qemu_dir = "{tmp_root}/scripts/qemu"
+        val vm_dir = "{tmp_root}/build/freebsd/vm"
+        expect(dir_create_all(qemu_dir)).to_equal(true)
+        expect(dir_create_all(vm_dir)).to_equal(true)
+
+        val cleanup_script = "{qemu_dir}/cleanup-qemu-temp.shs"
+        val cleanup_body = file_read("scripts/qemu/cleanup-qemu-temp.shs").replace("\r", "")
+        expect(file_write(cleanup_script, cleanup_body)).to_equal(true)
+
+        val ov1 = "{vm_dir}/one.overlay.qcow2"
+        val ov2 = "{vm_dir}/two.overlay.qcow2"
+        val seed1 = "{vm_dir}/one.seed.iso"
+        val seed2 = "{vm_dir}/two.seed.iso"
+        val tmp1 = "{vm_dir}/one.tmp"
+        val tmp2 = "{vm_dir}/two.tmp"
+        val base_img = "{vm_dir}/FreeBSD-base.qcow2"
+        expect(file_write(ov1, "ov1")).to_equal(true)
+        expect(file_write(ov2, "ov2")).to_equal(true)
+        expect(file_write(seed1, "s1")).to_equal(true)
+        expect(file_write(seed2, "s2")).to_equal(true)
+        expect(file_write(tmp1, "t1")).to_equal(true)
+        expect(file_write(tmp2, "t2")).to_equal(true)
+        expect(file_write(base_img, "base")).to_equal(true)
+
+        val (_out, _err, exit_code) = process_run_bounded("/bin/sh", [cleanup_script], 60000, 65536)
+        expect(exit_code).to_equal(0)
+        expect(file_exists(ov1)).to_equal(false)
+        expect(file_exists(ov2)).to_equal(false)
+        expect(file_exists(seed1)).to_equal(false)
+        expect(file_exists(seed2)).to_equal(false)
+        expect(file_exists(tmp1)).to_equal(false)
+        expect(file_exists(tmp2)).to_equal(false)
+        expect(file_exists(base_img)).to_equal(true)
+        expect(dir_remove_all(tmp_root)).to_equal(true)
+
+    it "fails closed when producing a backend render receipt without an admitted scanout commit":
+        val scanout = BaremetalWmScanoutIdentityV1(
+            architecture: WM_PRESENT_ARCH_X86_64,
+            scanout_id: 29u64,
+            width: 2u32,
+            height: 1u32,
+            stride: 8u32,
+            bpp: 32u32
+        )
+        var owner = BaremetalWmPresentOwnerV1.create(scanout)
+        val missing_commit = owner.commit_present(scanout, 3u64, 7u64, 1u64, false)
+        expect(missing_commit.accepted).to_equal(false)
+        val rejected_receipt = produce_backend_render_receipt_after_present_v1(
+            WM_PRESENT_ARCH_X86_64,
+            SIMPLEOS_RENDER_BACKEND_VIRTIO_GPU,
+            SimpleOsBuildIdentityV1(word0: 1u64, word1: 2u64, word2: 3u64, word3: 4u64),
+            11u64,
+            scanout,
+            missing_commit,
+            [0xff112233u32, 0xff445566u32]
+        )
+        expect(rejected_receipt.accepted).to_equal(false)
+        val ok_commit = owner.commit_present(scanout, 3u64, 7u64, 1u64, true)
+        expect(ok_commit.accepted).to_equal(true)
