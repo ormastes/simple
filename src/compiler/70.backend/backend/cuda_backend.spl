@@ -1490,7 +1490,11 @@ class CudaBackend:
                 if self.type_defs.contains_key(symbol):
                     val type_def: MirTypeDef = self.type_defs[symbol]
                     match type_def.kind:
-                        case MirTypeDefKind.Struct(fields): self.cuda_struct_size(fields)
+                        case MirTypeDefKind.Struct(fields):
+                            # Extent overflow is reported before the packed-field rule.
+                            val checked = self.cuda_struct_size_aligned(fields, self.cuda_struct_def_align(type_def, fields))?
+                            val _ = self.cuda_struct_admitted(type_def, fields)?
+                            Ok(checked)
                         case _: Ok(8)
                 else:
                     Ok(8)
@@ -1518,7 +1522,7 @@ class CudaBackend:
                 if self.type_defs.contains_key(symbol):
                     val type_def: MirTypeDef = self.type_defs[symbol]
                     match type_def.kind:
-                        case MirTypeDefKind.Struct(fields): self.cuda_struct_align(fields)
+                        case MirTypeDefKind.Struct(fields): self.cuda_struct_def_align(type_def, fields)
                         case _: 8
                 else:
                     8
@@ -1544,6 +1548,10 @@ class CudaBackend:
             case _: self.type_mapper.align_of(ty)
 
     me cuda_struct_size(fields: [MirFieldDef]) -> Result<i64, CompileError>:
+        self.cuda_struct_size_aligned(fields, self.cuda_struct_align(fields))
+
+    # @allow(primitive_api) byte alignment in the backend's raw i64 layout pipeline, same as cuda_checked_struct_extent_v1
+    me cuda_struct_size_aligned(fields: [MirFieldDef], alignment: i64) -> Result<i64, CompileError>:
         """
         Total struct size: maximum precomputed field end, rounded up to the
         struct's alignment. Declaration order need not be physical order.
@@ -1558,7 +1566,32 @@ class CudaBackend:
         for field in fields:
             offsets.push(field.offset)
             sizes.push(self.cuda_type_size(field.type_)?)
-        cuda_checked_struct_extent_v1(offsets, sizes, self.cuda_struct_align(fields))
+        cuda_checked_struct_extent_v1(offsets, sizes, alignment)
+
+    me cuda_struct_admitted(type_def: MirTypeDef, fields: [MirFieldDef]) -> Result<(), CompileError>:
+        """Reject an aggregate the producer laid out below CUDA's natural
+        alignment. Packed layouts need byte-wise access this backend does not
+        emit (a misaligned st.global.u64 traps with CUDA_ERROR_MISALIGNED_ADDRESS
+        on the device). Over-alignment keeps every field aligned and is honoured
+        by cuda_struct_def_align. An alignment of 0 was not transported."""
+        # Field offsets decide on their own: a typedef rebuilt without its
+        # alignment (0, e.g. loop_module_shape_projection_v1) still carries
+        # the packed offsets.
+        for field in fields:
+            val field_align = self.cuda_type_align(field.type_)
+            if field.offset % field_align != 0:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate {type_def.name} field {field.name} at offset {field.offset} is not {field_align}-byte aligned; packed aggregates are unsupported"))
+        val natural = self.cuda_struct_align(fields)
+        if type_def.alignment != 0 and type_def.alignment < natural:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate {type_def.name} alignment {type_def.alignment} is below CUDA natural alignment {natural}; packed aggregates are unsupported"))
+        Ok(())
+
+    # @allow(primitive_api) byte alignment in the backend's raw i64 layout pipeline
+    me cuda_struct_def_align(type_def: MirTypeDef, fields: [MirFieldDef]) -> i64:
+        """The producer's alignment when transported (it decides the host
+        stride), otherwise CUDA's natural one."""
+        val natural = self.cuda_struct_align(fields)
+        if type_def.alignment > natural: type_def.alignment else: natural
 
     me cuda_struct_align(fields: [MirFieldDef]) -> i64:
         if fields.len() == 0:
@@ -1612,7 +1645,11 @@ class CudaBackend:
                 if self.type_defs.contains_key(symbol):
                     val type_def: MirTypeDef = self.type_defs[symbol]
                     match type_def.kind:
-                        case MirTypeDefKind.Struct(fields): self.struct_field_layout(fields, field)
+                        case MirTypeDefKind.Struct(fields):
+                            # Extent overflow is reported before the packed-field rule.
+                            val checked = self.struct_field_layout(fields, field)?
+                            val _ = self.cuda_struct_admitted(type_def, fields)?
+                            Ok(checked)
                         case _: Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: type table entry for struct symbol is not a struct"))
                 else:
                     Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: struct symbol not found in module type table"))

@@ -1,0 +1,252 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# Tracks: cuda_packed_aggregate_alignment_missing_2026_11_14
+"""Packed aggregates are rejected by the legacy CUDA backend; natural ones run.
+
+`Packed` (small: u8, wide: u64, packed layout) is lowered by the real MIR
+lowerer: size 9, alignment 1, wide at offset 1. CUDA cannot address that wide
+field with a scalar access (a misaligned st.global.u64 traps with
+CUDA_ERROR_MISALIGNED_ADDRESS on the device), so the backend must refuse the
+aggregate instead of laying it out with natural stride 16. `Plain` is the same
+declaration with the default layout and must still run on the GPU with device
+bytes equal to host-computed values. Only the legacy backend is imported here;
+the plugin backend has its own spec (same-name class collision, see
+interpreter_same_name_class_method_dispatch_collision_2026_11_26).
+
+@tag: integration, gpu, cuda, hardware
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.test_env_gate.{test_env_cuda_available, test_env_gate_skip}
+use compiler.common.config.{Logger}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{HirStruct}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.types.type_layout.{layoutattr_default_, TypeLayoutKind}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind, MirTypeDef, MirTypeDefKind}
+use compiler.backend.backend.cuda_backend.{CudaBackend}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gc_async_mut.cuda.{cuda_memcpy_dtoh, cuda_memcpy_htod, CUDA_SUCCESS}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+val ELEMENT_COUNT: i64 = 32
+val MAX_STRIDE: i64 = 16
+val PAD_BYTE: i64 = 238
+
+fn u8_ty() -> MirType: MirType(kind: MirTypeKind.U8)
+fn u64_ty() -> MirType: MirType(kind: MirTypeKind.U64)
+
+fn lowered_types() -> Dict<SymbolId, MirTypeDef>:
+    val source = "struct Packed:\n    small: u8\n    wide: u64\n\nstruct Plain:\n    small: u8\n    wide: u64\n"
+    val parsed = parse_full_frontend(source, "cuda_packed_live.spl", "cuda_packed_live", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("cuda_packed_live.spl")
+    var hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    for key in hir.structs.keys():
+        var declaration: HirStruct = hir.structs[key]
+        if declaration.name == "Packed":
+            var attr = layoutattr_default_()
+            attr.layout_kind = TypeLayoutKind.Packed
+            attr.is_packed = true
+            declaration.has_layout_attr = true
+            declaration.layout_attr = attr
+            hir.structs[key] = declaration
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    mir.types
+
+fn type_symbol(types: Dict<SymbolId, MirTypeDef>, name: text) -> SymbolId:
+    var found = SymbolId(id: -1)
+    for key in types.keys():
+        if types[key].name == name: found = key
+    found
+
+fn wide_offset(types: Dict<SymbolId, MirTypeDef>, symbol: SymbolId) -> i64:
+    var offset: i64 = -1
+    match types[symbol].kind:
+        case MirTypeDefKind.Struct(fields):
+            for field in fields:
+                if field.name == "wide": offset = field.offset
+        case _: ()
+    offset
+
+# out[i] byte 0 = i, reached as GEP(out, i) bitcast to ptr<u8>: byte stores
+# stay aligned for any stride, so only the element stride is observed.
+fn first_byte_kernel(symbol: SymbolId) -> MirFunction:
+    val element_ptr = MirType.ptr(MirType(kind: MirTypeKind.Struct(symbol)), true)
+    val byte_ptr = MirType.ptr(u8_ty(), true)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("out"), type_: element_ptr, kind: LocalKind.Arg(0), is_ghost: false),
+        MirLocal(id: LocalId(id: 1), name: None, type_: u64_ty(), kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: LocalId(id: 2), name: None, type_: element_ptr, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: LocalId(id: 3), name: None, type_: byte_ptr, kind: LocalKind.Temp, is_ghost: false),
+        MirLocal(id: LocalId(id: 4), name: None, type_: u8_ty(), kind: LocalKind.Temp, is_ghost: false)
+    ]
+    val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+        MirInst(kind: MirInstKind.GpuGlobalId(LocalId(id: 1), 0), span: None),
+        MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 2), MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 1))]), span: None),
+        MirInst(kind: MirInstKind.Bitcast(LocalId(id: 3), MirOperand.copy(LocalId(id: 2)), byte_ptr), span: None),
+        MirInst(kind: MirInstKind.Cast(LocalId(id: 4), MirOperand.copy(LocalId(id: 1)), u8_ty()), span: None),
+        MirInst(kind: MirInstKind.Store(MirOperand.copy(LocalId(id: 3)), MirOperand.copy(LocalId(id: 4))), span: None)
+    ], terminator: MirTerminator.Ret(None))
+    MirFunction(
+        symbol: SymbolId(id: 9201), name: "first_bytes",
+        signature: MirSignature(params: [element_ptr], return_type: MirType.unit(), is_variadic: false),
+        locals: locals, blocks: [block], entry_block: BlockId.entry(), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: None,
+        type_bindings: {}, layout_phase: None, is_kernel: true,
+        gpu_target: "cuda", gpu_backend_order: "cuda", is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: None,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
+    )
+
+fn compile_first_bytes(types: Dict<SymbolId, MirTypeDef>, name: text) -> Result<text, text>:
+    val symbol = type_symbol(types, name)
+    if symbol.id < 0: return Err("type {name} not lowered")
+    val kernel = first_byte_kernel(symbol)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[kernel.symbol] = kernel
+    val module = MirModule(name: "cuda_packed_live", functions: functions, statics: {}, constants: {}, types: types)
+    match CudaBackend.create((8, 6)).compile(module):
+        case Ok(compiled): Ok(compiled.ptx)
+        case Err(error): Err(error.message)
+
+# Runs first_bytes on the device and counts bytes that differ from the host
+# oracle for `host_stride`; padding bytes must stay untouched.
+fn device_mismatches(ptx: text, host_stride: i64) -> text:
+    var session = CudaSession.create()
+    val init_status = session.init()
+    if init_status != CUDA_SUCCESS or session.ctx <= 0:
+        return "no-context status={init_status} ctx={session.ctx}"
+    var result = "module-load-failed"
+    if session.load_module(ptx) > 0:
+        val bytes = ELEMENT_COUNT * MAX_STRIDE
+        val host = rt_alloc(bytes)
+        val values = rt_alloc(8)
+        val args = rt_alloc(8)
+        val device = session.alloc(bytes)
+        if device > 0:
+            var index: i64 = 0
+            while index < bytes:
+                rt_ptr_write_u8(host, index, PAD_BYTE)
+                index = index + 1
+            val up = cuda_memcpy_htod(device, host, bytes)
+            rt_ptr_write_i64(values, 0, device)
+            rt_ptr_write_i64(args, 0, values)
+            val launch = session.launch_kernel_args("first_bytes", 1, 1, 1, ELEMENT_COUNT, 1, 1, args)
+            val sync = session.sync()
+            val down = cuda_memcpy_dtoh(host, device, bytes)
+            var mismatches: i64 = 0
+            index = 0
+            while index < bytes:
+                val element = index / host_stride
+                val expected = if index % host_stride == 0 and element < ELEMENT_COUNT: element else: PAD_BYTE
+                if rt_ptr_read_u8(host, index) != expected: mismatches = mismatches + 1
+                index = index + 1
+            result = "up={up} launch={launch} sync={sync} down={down} mismatches={mismatches}"
+            session.free(device)
+        rt_free(host)
+        rt_free(values)
+        rt_free(args)
+    session.shutdown()
+    result
+
+fn sweep_types() -> Dict<SymbolId, MirTypeDef>:
+    val source = "struct Bytes:\n    a: u8\n    b: u8\n    c: u8\n\n" +
+        "struct Words:\n    a: u32\n    b: f32\n\n" +
+        "struct Flags:\n    a: bool\n    b: u8\n\n" +
+        "class SmallBox:\n    a: u16\n    b: u8\n\n" +
+        "struct Outer:\n    inner: Words\n    z: u8\n\n" +
+        "struct Mixed:\n    a: i16\n    b: f64\n    c: i8\n"
+    val parsed = parse_full_frontend(source, "sweep.spl", "sweep", Logger(level: 0))
+    var hl = HirLowering.with_filename("sweep.spl")
+    val hir = hl.lower_module(parsed)
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir)
+    expect(ml.errors.len()).to_equal(0)
+    mir.types
+
+fn field_offset(types: Dict<SymbolId, MirTypeDef>, symbol: SymbolId, field_name: text) -> i64:
+    var offset: i64 = -1
+    match types[symbol].kind:
+        case MirTypeDefKind.Struct(fields):
+            for field in fields:
+                if field.name == field_name: offset = field.offset
+        case _: ()
+    offset
+
+describe "CUDA packed aggregate layout (legacy backend)":
+    if not test_env_cuda_available():
+        it "env_skip: CUDA device run not requested or unavailable":
+            expect(test_env_gate_skip("SIMPLE_CUDA_TEST")).to_contain("Skipped")
+        return
+
+    it "transports the producer's packed alignment through MIR":
+        val types = lowered_types()
+        val packed = type_symbol(types, "Packed")
+        val plain = type_symbol(types, "Plain")
+        expect("{types[packed].alignment} {wide_offset(types, packed)}").to_equal("1 1")
+        expect("{types[plain].alignment} {wide_offset(types, plain)}").to_equal("8 0")
+
+    it "rejects the packed aggregate instead of laying it out with natural stride":
+        val types = lowered_types()
+        val packed = compile_first_bytes(types, "Packed")
+        val outcome = match packed:
+            case Ok(ptx): "compiled; device(stride 9): {device_mismatches(ptx, 9)}"
+            case Err(message): message
+        expect(outcome).to_contain("CUDA layout: aggregate Packed field wide at offset 1 is not 8-byte aligned")
+
+    it "rejects the packed aggregate even when its alignment was not transported":
+        # A typedef rebuilt with alignment 0 (loop_module_shape_projection_v1)
+        # must still be refused from its field offsets.
+        var types = lowered_types()
+        val packed = type_symbol(types, "Packed")
+        var definition = types[packed]
+        definition.alignment = 0
+        types[packed] = definition
+        val outcome = match compile_first_bytes(types, "Packed"):
+            case Ok(ptx): "compiled; device(stride 9): {device_mismatches(ptx, 9)}"
+            case Err(message): message
+        expect(outcome).to_contain("CUDA layout: aggregate Packed field wide at offset 1 is not 8-byte aligned")
+
+    it "still runs the naturally aligned aggregate on the GPU":
+        val types = lowered_types()
+        val plain = compile_first_bytes(types, "Plain")
+        expect(plain.is_ok()).to_equal(true)
+        if plain.is_ok():
+            expect(device_mismatches(plain.unwrap(), 16)).to_equal("up=0 launch=0 sync=0 down=0 mismatches=0")
+
+    it "admits every default-layout aggregate and honours producer over-alignment":
+        # Outer { inner: Words, z: u8 } is laid out by the producer with
+        # alignment 8 (above CUDA's natural 4); the device stride must follow
+        # the producer, not the natural rule.
+        val types = sweep_types()
+        var report = ""
+        for name in ["Bytes", "Words", "Flags", "SmallBox", "Outer", "Mixed"]:
+            val sym = type_symbol(types, name)
+            val verdict = match compile_first_bytes(types, name):
+                case Ok(_): "ok"
+                case Err(m): m
+            report = report + "{name}(align={types[sym].alignment})={verdict}; "
+        expect(report).to_equal("Bytes(align=1)=ok; Words(align=4)=ok; Flags(align=1)=ok; SmallBox(align=2)=ok; Outer(align=8)=ok; Mixed(align=8)=ok; ")
+        val outer = type_symbol(types, "Outer")
+        val z = field_offset(types, outer, "z")
+        val stride = (z + 1 + 7) / 8 * 8
+        expect("z={z} stride={stride}").to_equal("z=8 stride=16")
+        val ptx = compile_first_bytes(types, "Outer")
+        if ptx.is_ok():
+            expect(device_mismatches(ptx.unwrap(), stride)).to_equal("up=0 launch=0 sync=0 down=0 mismatches=0")
