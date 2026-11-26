@@ -624,6 +624,46 @@ fn _generated_content_present(normal_decls: text, important_decls: text) -> bool
     val value = if important != "": important else: decl_get(normal_decls, "content").trim().lower()
     not (value == "" or value == "none" or value == "normal" or value == "initial" or value == "unset")
 
+fn _ua_em_block_margin_tag(tag: text) -> bool:
+    tag == "p" or tag == "ul" or tag == "ol" or tag == "menu" or tag == "dl" or tag == "pre" or tag == "blockquote" or tag == "figure"
+
+# [top, bottom]: a block margin is declared in `decls` (horizontal-tb names).
+fn _decls_block_margin_authored(decls: text) -> [bool]:
+    var top = false
+    var bottom = false
+    if decls.index_of("margin") < 0:
+        return [top, bottom]
+    for part in decls.split(";"):  # cpu-lane-loop-ok: ONE node's declaration list, scanned only for a UA 1em-margin tag (p/pre/lists/blockquote/figure)
+        val colon = part.index_of(":")
+        if colon > 0:
+            val name = part[0:colon].trim().lower()
+            if name == "margin" or name == "margin-block":
+                top = true
+                bottom = true
+            elif name == "margin-top" or name == "margin-block-start":
+                top = true
+            elif name == "margin-bottom" or name == "margin-block-end":
+                bottom = true
+    [top, bottom]
+
+# ponytail: horizontal-tb only; in a vertical writing mode `margin-block` maps
+# to left/right and this still writes top/bottom. Upgrade: map by writing mode.
+fn _ua_em_block_margin(style: Style, normal: text, inline_normal: text, important: text, inline_important: text) -> Style:
+    var st = style
+    var top = false
+    var bottom = false
+    for decls in [normal, inline_normal, important, inline_important]:  # cpu-lane-loop-ok: the four cascade origins of ONE node
+        val a = _decls_block_margin_authored(decls)
+        top = top or a[0]
+        bottom = bottom or a[1]
+    if not top:
+        st.margin_t = st.font_size
+        st.margin_t_milli = st.font_size_milli
+    if not bottom:
+        st.margin_b = st.font_size
+        st.margin_b_milli = st.font_size_milli
+    st
+
 fn list_container_tag(tag: text) -> bool:
     tag == "ul" or tag == "ol" or tag == "dl" or tag == "menu" or tag == "dir"
 
@@ -1216,6 +1256,13 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 )
             st = apply_decls_without_display_on_writing_mode(
                 st, inline_important, em_base, logical_writing_mode
+            )
+        # UA `margin-block: 1em` (p, pre, lists, blockquote, figure) is 1em of
+        # the element's OWN computed font-size, known only now; tag_defaults
+        # wrote a fixed 16 px. An authored block margin keeps its value.
+        if _ua_em_block_margin_tag(nd.tag) and not nested_list_ua:
+            st = _ua_em_block_margin(
+                st, combined_decls, inline_normal, combined_important_decls, inline_important
             )
         if _wsc_tail_sub_armed():
             _wsc_add_sub2(10, _wsc_now_us() - _sb_t8)

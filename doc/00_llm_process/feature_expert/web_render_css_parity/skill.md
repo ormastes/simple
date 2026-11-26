@@ -5178,3 +5178,25 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
 - **Open (not fixed):**
   - A checkable inside an inline `label`/`span` wrapper sits 3 px lower than Chrome: y=13 vs 10.
   - The raster's 8 px-radius rounded box differs from Draw IR by 44 px, the same on a plain `span`.
+## 2026-11-26 — UA `margin-block: 1em` resolves against the element's own font-size
+
+- **Symptom.** A `ul` with its own `font-size:20px` sat 4 rows higher than Chrome at 1x, and a `24px` one sat 12 rows higher. The error accumulates through margin collapsing between adjacent lists.
+- **Cause.** `tag_defaults` writes a fixed 16 px block margin for p, pre, ul, ol, menu, dl, blockquote and figure. It also runs before the author cascade, so neither an inherited nor an own font-size reached the margin.
+- **Chrome 159 measurements at 1x, after a 24 px spacer:**
+
+  | Element | Chrome top y |
+  |---|---|
+  | `ul` at 13px | 37 |
+  | `ul` at 20px | 44 |
+  | `ul` at 24px | 48 |
+  | `p` at 20px | 44 |
+  | `ol` inheriting 20px | 44 |
+
+  The block after a 24px `ul` is at 108 (48 + 36 + 24).
+- **Fix.** After the whole cascade, `_ua_em_block_margin` (`core.spl`) sets each block margin to the final `font_size`, plus `font_size_milli` when the size is fractional.
+  - It applies only when no origin declares `margin`, `margin-block`, `margin-top`/`margin-block-start` or `margin-bottom`/`margin-block-end`.
+  - It is skipped for a nested list, which `nested_list_ua` already zeroes.
+- **Pins.** `nested_list_container_ua_margin_spec` AC-9..AC-12. AC-12 is the control: an authored `margin-top:16px` stays 16.
+- **Open:**
+  - Vertical writing modes still write top/bottom (marked `# ponytail:`).
+  - The heading margins (0.67em etc.) have the same fixed-at-UA-size shape, so `h1{font-size:20px}` keeps a 21 px margin. Not measured yet.
