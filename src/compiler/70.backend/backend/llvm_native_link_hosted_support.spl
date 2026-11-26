@@ -189,7 +189,11 @@ pub fn compile_entry_point_c_with_receipt_v2(user_objects: [text], pid: i64, ver
     # empty result; tool failures must not masquerade as no initializers.
     val startup_discovery_complete = xray_thread_context_v1 or native_tool_strict_requested_v1()
     val discovered_init_names = if startup_discovery_complete:
-        simpleos_module_init_symbols_checked_v1(user_objects)?
+        match simpleos_module_init_symbols_checked_v1(user_objects):
+            case Ok(names): names
+            case Err(err):
+                val _clean_entry = cleanup_entry_object_v1(entry_o)
+                return Err(err)
     else: simpleos_module_init_symbols(user_objects)
     var init_names: [text] = []
     for extra_init in extra_init_symbols:
@@ -329,6 +333,7 @@ pub fn compile_entry_point_c_with_receipt_v2(user_objects: [text], pid: i64, ver
     else: None
     file_delete(entry_c)
     if ep_code != 0:
+        val _clean_entry = cleanup_entry_object_v1(entry_o)
         return Err("Entry point compilation failed: {ep_out}{ep_err}")
     val object_digest = if startup_discovery_complete and entry_source_written:
         file_hash_sha256(entry_o) ?? ""
@@ -337,6 +342,22 @@ pub fn compile_entry_point_c_with_receipt_v2(user_objects: [text], pid: i64, ver
         entry_source_written, expected_source_digest, written_source_digest ?? "",
         compiled_source_digest ?? "", object_digest, init_names)
     Ok(NativeEntryObjectV2(object_path: entry_o, startup: startup))
+
+@allow(primitive_api)  # matches remove_file_if_exists(path: text) -> bool cleanup helper contract
+pub fn cleanup_entry_object_v1(entry_obj_path: text) -> bool:
+    """Remove entry object file and its per-PID simple_entry_<pid> temp directory."""
+    if entry_obj_path == "":
+        return true
+    val removed_obj = remove_file_if_exists(entry_obj_path)
+    val slash = entry_obj_path.rfind("/")
+    if slash > 0:
+        val entry_dir = entry_obj_path.substring(0, slash)
+        val parent_slash = entry_dir.rfind("/")
+        val dir_name = if parent_slash >= 0: entry_dir.substring(parent_slash + 1) else: entry_dir
+        if dir_name.starts_with("simple_entry_"):
+            val removed_dir = dir_remove_all(entry_dir)
+            return removed_obj and removed_dir
+    removed_obj
 
 # Narrow core runtime lanes must never acquire the Rust hosted archive merely
 # because SIMPLE_RUNTIME_PATH points at the bootstrap directory.

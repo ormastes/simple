@@ -5185,6 +5185,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                 "failed to write empty module C file {empty_c_path}")
         val empty_cc = find_c_compiler()
         if empty_cc == "":
+            val _del_c = file_delete(empty_c_path)
             return _aot_compile_failure(name,
                 "no C compiler available for empty module object {empty_c_path}")
         val empty_args: [text] = if _is_msvc_cc(empty_cc):
@@ -5192,6 +5193,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         else:
             ["-c", "-o", empty_obj_path, empty_c_path]
         val (_empty_out, empty_err, empty_code) = process_run(empty_cc, empty_args)
+        val _del_c = file_delete(empty_c_path)
         if empty_code != 0 or
                 not file_is_regular_no_follow(empty_obj_path):
             return _aot_compile_failure(name,
@@ -5205,6 +5207,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         if not c_ok:
             return Err("Failed to write bootstrap empty C file {c_path}")
         val (_cc_out, cc_err, cc_code) = process_run("cc", ["-c", c_path, "-o", obj_path])
+        val _del_c = file_delete(c_path)
         if cc_code != 0:
             return Err("Bootstrap empty object compile failed: {cc_err}")
         return Ok(obj_path)
@@ -5347,6 +5350,13 @@ fn _finish_selected_module_compile(
                 if (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val bootstrap_obj = llvm_bootstrap_last_object_path()
                     if bootstrap_obj != "" and _sffi_file_copy(bootstrap_obj, obj_path):
+                        val keep_intermediates = (env_get_nullable("SIMPLE_KEEP_BUILD_INTERMEDIATES") ?? "") == "1"
+                        val keep_ir = (env_get_nullable("SIMPLE_KEEP_LLVM_IR") ?? "") == "1"
+                        if not keep_intermediates:
+                            val _del_boot_obj = file_delete(bootstrap_obj)
+                            if not keep_ir and bootstrap_obj.ends_with(".o"):
+                                val boot_ir = bootstrap_obj.slice(0, bootstrap_obj.byte_len() - 1) + "ll"
+                                val _del_boot_ir = file_delete(boot_ir)
                         return Ok(obj_path)
                 match write_elf_bytes_to_file(obj_path, obj_bytes):
                     case Ok(_):
