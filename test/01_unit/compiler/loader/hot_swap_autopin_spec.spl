@@ -15,7 +15,13 @@
 # todo (remaining scope): doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
 use std.spec.*
 use std.spec.step
-use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_delete}
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, dir_create_all, file_delete}
+
+# Fixture paths live under build/test_tmp, absent on a fresh checkout:
+# create it so a write never silently fails and leaves nothing to load.
+fn write_fixture(path: text, bytes: [u8]) -> bool:
+    val _ = dir_create_all("build/test_tmp")
+    file_write_bytes(path, bytes)
 
 use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
 use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
@@ -56,7 +62,7 @@ describe "RB-LOAD-02: batch load auto-pins identity-carrying SMF":
         # @req: REQ-BUILD-SRC-001
         val path = "build/test_tmp/hs_autopin_refuse.smf"
         val v0 = ap_image(ap_identity(), 0x90)
-        expect(file_write_bytes(path, v0)).to_equal(true)
+        expect(write_fixture(path, v0)).to_equal(true)
         var loader = lazymoduleloader_with_defaults()
         step("load without an explicit pin")
         expect(moduleloader_load_native_batch_v1(loader, [path], 4096).is_ok()).to_equal(true)
@@ -67,7 +73,7 @@ describe "RB-LOAD-02: batch load auto-pins identity-carrying SMF":
         step("reload an ABI-changed artifact")
         var bad = ap_identity()
         bad.abi_digest = "abi-v1-dddd"
-        expect(file_write_bytes(path, ap_image(bad, 0x91))).to_equal(true)
+        expect(write_fixture(path, ap_image(bad, 0x91))).to_equal(true)
         val r = moduleloader_reload(loader, path)
         expect(ap_error_text(r).contains("SMF-E-UNIT-ABI-MISMATCH")).to_equal(true)
         val read1 = moduleloader_hot_swap_read_begin(loader, path).unwrap()
@@ -78,7 +84,7 @@ describe "RB-LOAD-02: batch load auto-pins identity-carrying SMF":
     it "re-pin with the same identity is a no-op and a different identity is refused":
         val path = "build/test_tmp/hs_autopin_repin.smf"
         val v0 = ap_image(ap_identity(), 0x90)
-        expect(file_write_bytes(path, v0)).to_equal(true)
+        expect(write_fixture(path, v0)).to_equal(true)
         var loader = lazymoduleloader_with_defaults()
         expect(moduleloader_load_native_batch_v1(loader, [path], 4096).is_ok()).to_equal(true)
         val held = moduleloader_hot_swap_read_begin(loader, path).unwrap()
@@ -95,7 +101,7 @@ describe "RB-LOAD-02: batch load auto-pins identity-carrying SMF":
 
     it "loads a legacy image with no identity record unpinned":
         val path = "build/test_tmp/hs_autopin_legacy.smf"
-        expect(file_write_bytes(path, ap_legacy_image(0x90))).to_equal(true)
+        expect(write_fixture(path, ap_legacy_image(0x90))).to_equal(true)
         var loader = lazymoduleloader_with_defaults()
         expect(moduleloader_load_native_batch_v1(loader, [path], 4096).is_ok()).to_equal(true)
         val read = moduleloader_hot_swap_read_begin(loader, path)

@@ -6,7 +6,13 @@
 # todo (remaining scope): doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
 use std.spec.*
 use std.spec.step
-use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_delete}
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, dir_create_all, file_delete}
+
+# Fixture paths live under build/test_tmp, absent on a fresh checkout:
+# create it so a write never silently fails and leaves nothing to load.
+fn write_fixture(path: text, bytes: [u8]) -> bool:
+    val _ = dir_create_all("build/test_tmp")
+    file_write_bytes(path, bytes)
 
 use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
 use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
@@ -48,7 +54,7 @@ describe "RB-LOAD-02: loader hot reload goes through the hot-swap slot":
         # @req: REQ-BUILD-SRC-001
         val path = "build/test_tmp/hs_wiring_refuse.smf"
         val v0 = image_with(good_identity(), 0x90)
-        expect(file_write_bytes(path, v0)).to_equal(true)
+        expect(write_fixture(path, v0)).to_equal(true)
         var loader = moduleloader_with_defaults()
         step("load and pin generation 0")
         expect(is_success(moduleloader_load(loader, path))).to_equal(true)
@@ -56,7 +62,7 @@ describe "RB-LOAD-02: loader hot reload goes through the hot-swap slot":
         step("replace the artifact with an ABI-changed image and reload")
         var bad = good_identity()
         bad.abi_digest = "abi-v1-bbbb"
-        expect(file_write_bytes(path, image_with(bad, 0x91))).to_equal(true)
+        expect(write_fixture(path, image_with(bad, 0x91))).to_equal(true)
         val r = moduleloader_reload(loader, path)
         expect(error_text(r).contains("SMF-E-UNIT-ABI-MISMATCH")).to_equal(true)
         expect(loader.modules.has(path)).to_equal(true)
@@ -68,13 +74,13 @@ describe "RB-LOAD-02: loader hot reload goes through the hot-swap slot":
 
     it "admits a matching reload and readers then use the new image":
         val path = "build/test_tmp/hs_wiring_admit.smf"
-        expect(file_write_bytes(path, image_with(good_identity(), 0x90))).to_equal(true)
+        expect(write_fixture(path, image_with(good_identity(), 0x90))).to_equal(true)
         var loader = moduleloader_with_defaults()
         expect(is_success(moduleloader_load(loader, path))).to_equal(true)
         expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).is_ok()).to_equal(true)
         step("reload with a matching image")
         val v1 = image_with(good_identity(), 0x92)
-        expect(file_write_bytes(path, v1)).to_equal(true)
+        expect(write_fixture(path, v1)).to_equal(true)
         expect(is_success(moduleloader_reload(loader, path))).to_equal(true)
         val read = moduleloader_hot_swap_read_begin(loader, path).unwrap()
         expect(read.generation()).to_equal(1)
@@ -90,14 +96,14 @@ describe "RB-LOAD-02: loader hot reload goes through the hot-swap slot":
         # @req: REQ-BUILD-SRC-001
         val path = "build/test_tmp/hs_wiring_rollback.smf"
         val v0 = image_with(good_identity(), 0x90)
-        expect(file_write_bytes(path, v0)).to_equal(true)
+        expect(write_fixture(path, v0)).to_equal(true)
         var loader = moduleloader_with_defaults()
         expect(is_success(moduleloader_load(loader, path))).to_equal(true)
         expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).is_ok()).to_equal(true)
         step("an identity-admitted image whose code the loader refuses")
         var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
         opts.unit_identity_bytes = unit_identity_encode(good_identity()).bytes()
-        expect(file_write_bytes(path, generate_smf_with_options([], opts))).to_equal(true)
+        expect(write_fixture(path, generate_smf_with_options([], opts))).to_equal(true)
         val r = moduleloader_reload(loader, path)
         expect(is_success(r)).to_equal(false)
         step("the slot is not left one generation ahead")
@@ -109,18 +115,18 @@ describe "RB-LOAD-02: loader hot reload goes through the hot-swap slot":
 
     it "a good reload after a rolled-back one is admitted, not refused":
         val path = "build/test_tmp/hs_wiring_unwedge.smf"
-        expect(file_write_bytes(path, image_with(good_identity(), 0x90))).to_equal(true)
+        expect(write_fixture(path, image_with(good_identity(), 0x90))).to_equal(true)
         var loader = moduleloader_with_defaults()
         expect(is_success(moduleloader_load(loader, path))).to_equal(true)
         expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).is_ok()).to_equal(true)
         step("fail a reload after the swap was admitted")
         var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
         opts.unit_identity_bytes = unit_identity_encode(good_identity()).bytes()
-        expect(file_write_bytes(path, generate_smf_with_options([], opts))).to_equal(true)
+        expect(write_fixture(path, generate_smf_with_options([], opts))).to_equal(true)
         expect(is_success(moduleloader_reload(loader, path))).to_equal(false)
         step("a good reload afterwards is admitted, not refused as FULL")
         val v2 = image_with(good_identity(), 0x93)
-        expect(file_write_bytes(path, v2)).to_equal(true)
+        expect(write_fixture(path, v2)).to_equal(true)
         val r = moduleloader_reload(loader, path)
         expect(error_text(r)).to_equal("")
         val read = moduleloader_hot_swap_read_begin(loader, path).unwrap()

@@ -2074,8 +2074,24 @@ me moduleloader_reload_with_intent(self: ModuleLoader, path: text, intent: Modul
 me moduleloader_pin_hot_swap(self: ModuleLoader, path: text, row: SmfManifestEntry) -> Result<i64, text>:
     if not self.modules.has(path):
         return Err("SMF-E-HOTSWAP-NOT-LOADED: {path}")
+    if self.hot_swap_slots.has(path):
+        return _compat_hot_swap_repin(self, path, row)
     val slot = hot_swap_slot_load(row, file_read_bytes(path))?
     self.hot_swap_slots[path] = slot
+    Ok(slot.current_generation())
+
+# Re-pin of an already pinned module (same rule as LazyModuleLoader): the same
+# identity is a no-op (Ok = current generation); a different identity is
+# refused and the live slot kept, since readers may hold it.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn _compat_hot_swap_repin(self: ModuleLoader, path: text, row: SmfManifestEntry) -> Result<i64, text>:
+    val slot = self.hot_swap_slots[path]
+    val p = slot.pinned
+    if p.iface_digest != row.iface_digest or p.abi_digest != row.abi_digest or
+            p.native_target != row.native_target or p.profile != row.profile or
+            p.allowed_families != row.allowed_families:
+        return Err("SMF-E-HOTSWAP-ALREADY-PINNED: {path} is pinned to a different unit identity")
     Ok(slot.current_generation())
 
 # Per-call reader pin on a pinned module's current image.

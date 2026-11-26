@@ -1,0 +1,63 @@
+# @req: REQ-BUILD-SRC-001
+# RB-LOAD-02: the compat loader's moduleloader_pin_hot_swap never overwrites a
+# live slot. Same identity re-pin is a no-op; a different identity is refused
+# with SMF-E-HOTSWAP-ALREADY-PINNED and the original slot is kept (matches the
+# fast-path LazyModuleLoader).
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, dir_create_all}
+
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry, smf_manifest_entry_new_with_identity}
+use compiler.loader.module_loader_compat.{LoadResult, moduleloader_with_defaults, moduleloader_load, moduleloader_unload, moduleloader_pin_hot_swap, moduleloader_hot_swap_read_begin}
+use compiler.loader.hot_swap_pin.{hot_swap_read_end}
+
+fn write_fixture(path: text, bytes: [u8]) -> bool:
+    val _ = dir_create_all("build/test_tmp")
+    file_write_bytes(path, bytes)
+
+fn identity(iface: text) -> UnitIdentity:
+    UnitIdentity(
+        iface_digest: iface,
+        abi_digest: "abi-v1-aaaa",
+        target_triple: "x86_64-unknown-linux-gnu",
+        policy: "release",
+        capabilities: ["io"])
+
+fn image_with(code: u8) -> [u8]:
+    var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+    opts.unit_identity_bytes = unit_identity_encode(identity("iface-v1-1111")).bytes()
+    generate_smf_with_options([code, 0xC3], opts)
+
+fn row_for(path: text, iface: text) -> SmfManifestEntry:
+    val id = identity(iface)
+    smf_manifest_entry_new_with_identity(
+        "hs_unit.spl", path, 1, "cranelift", 0, true, false, false,
+        id.policy, id.capabilities, id.iface_digest, id.abi_digest, [], [], id.target_triple)
+
+fn is_success(r: LoadResult) -> bool:
+    match r:
+        case LoadResult.Success(_): true
+        case _: false
+
+describe "RB-LOAD-02: compat re-pin never overwrites a live slot":
+    it "is a no-op for the same identity and refuses a different one":
+        # @req: REQ-BUILD-SRC-001
+        val path = "build/test_tmp/hs_compat_repin.smf"
+        expect(write_fixture(path, image_with(0x90))).to_equal(true)
+        var loader = moduleloader_with_defaults()
+        expect(is_success(moduleloader_load(loader, path))).to_equal(true)
+        expect(moduleloader_pin_hot_swap(loader, path, row_for(path, "iface-v1-1111")).unwrap()).to_equal(0)
+        val held = moduleloader_hot_swap_read_begin(loader, path).unwrap()
+        step("same identity re-pin keeps the slot")
+        expect(moduleloader_pin_hot_swap(loader, path, row_for(path, "iface-v1-1111")).unwrap()).to_equal(0)
+        step("different identity re-pin is refused")
+        val refused = moduleloader_pin_hot_swap(loader, path, row_for(path, "iface-v1-2222"))
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err().contains("SMF-E-HOTSWAP-ALREADY-PINNED")).to_equal(true)
+        step("original slot still serves the original identity")
+        expect(loader.hot_swap_slots[path].pinned.iface_digest).to_equal("iface-v1-1111")
+        hot_swap_read_end(held)
+        moduleloader_unload(loader, path)
+        expect(loader.hot_swap_slots.len()).to_equal(0)
