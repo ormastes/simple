@@ -1,0 +1,139 @@
+"""
+## Purpose and audience
+Purpose: Pin the line box of fallback-face text that is not a bare #text child
+of the block: text inside an inline `<span>`, and a text node that mixes Latin
+with Arabic. Follows `line_box_used_font_metrics_chrome159_spec.spl`, which
+covers a #text node shaped wholly by one fallback face.
+Audience: web renderer inline layout / line-box maintainers.
+
+Chrome rule (Blink, `line-height: normal`): an inline box's line-height box
+holds its primary font's strut and every face its text uses. An inline element
+therefore reaches as far as the union of its text, and a mixed Latin + Arabic
+text node takes the Arabic face as well as the strut.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --window-size=400,300`, `--force-device-scale-factor` 1 and 4).
+The body font is `16px 'Liberation Sans', 'Noto Sans Arabic', 'Noto Sans
+Devanagari'`, with the bundled Noto files loaded by `@font-face`. Simple's page
+names Liberation Sans; it picks the Noto file from `lang`, or from the script when
+the `lang` face cannot shape the run (the mixed node sits in a `lang=en` page).
+
+| block (column at CSS x 300)        | k=1 rows | k=4 rows | k=1 ink | k=4 ink |
+|------------------------------------|----------|----------|---------|---------|
+| `Hx <span lang=ar>مرحبا</span>`     | 30..63   | 120..254 | 40..54  | 162..221 |
+| `<span>हिंदी</span>` (lang=hi)      | 64..84   | 255..339 |         |         |
+| `Hx مرحبا` (one text node)          | 85..118  | 340..474 | 95..109 | 382..441 |
+| `हिंदी`, `line-height:40px`         | 119..158 | 475..634 |         |         |
+| Latin `Hxgl`                       | 159..176 | 635..708 |         |         |
+
+Each fallback line is 34 (Arabic: 22 + 12) or 21 (Devanagari: 14 + 7) tall, as
+for a bare #text. With the line box right, the Latin `Hx` sits on the Arabic
+baseline (22 below the line top), not on the strut (14). Ink is any pixel whose
+three channels are all under 90, between x 20 and 300 CSS px. The k=1 ink edges
+differ by one anti-aliased row and live in `glyph_vertical_raster_phase_chrome159_spec`.
+
+The span-background page (`SPANBG`): `Hx <span lang=ar style=background:#0ff>`,
+`x<span style=background:#0ff>हिंदी`, `<div lang=ar>Hx مرحबا`. Chrome k=1 span
+boxes 38..54 and 64..80: the 17 px content area, not the 34 / 21 px line.
+"""
+"""
+Traceability: REQ-WEB-LINEBOX-USED-FONTS-001 — inline elements and mixed text nodes take the used faces' line box.
+"""
+# @tag: unit, browser_engine, layout, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html lang=\"en\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;width:300px\"><div style=\"background:#f00\">Hx <span lang=ar>مرحبا</span></div><div lang=hi style=\"background:#0f0\"><span>हिंदी</span></div><div style=\"background:#00f\">Hx مرحبا</div><div lang=hi style=\"background:#ff0;line-height:40px\">हिंदी</div><div style=\"background:#f0f\">Hxgl</div></div></body></html>"
+val SPANBG: text = "<!doctype html><html lang=\"en\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;width:300px\"><div style=\"background:#f00\">Hx <span lang=ar style=\"background:#0ff\">مرحبا</span></div><div lang=hi style=\"background:#0f0\">x<span style=\"background:#0ff\">हिंदी</span></div><div lang=ar style=\"background:#00f\">Hx مرحبا</div></div></body></html>"
+
+fn _render(k: i32) -> [u32]:
+    _render_page(PAGE, k)
+
+fn _render_page(page: text, k: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, CSS_W, CSS_H, k, "cpu_simd")
+
+# Non-white colour runs down the column at CSS x 300, as `a..b` device rows.
+fn _blocks(px: [u32], k: i32) -> text:
+    val w = CSS_W * k
+    val h = CSS_H * k
+    if px.len() != (w * h) as i64:
+        return "empty frame"
+    val cx = 300 * k
+    var out = ""
+    var prev: u32 = 0xFFFFFFu32
+    var start = 0
+    var y = 0
+    while y <= h:
+        val p = if y < h: px[y * w + cx] & 0xFFFFFFu32 else: 0xFFFFFFu32
+        if p != prev:
+            if prev != 0xFFFFFFu32:
+                out = if out == "": "{start}..{y - 1}" else: out + " {start}..{y - 1}"
+            prev = p
+            start = y
+        y = y + 1
+    out
+
+# First and last device row with ink (all channels < 90) in rows y0..y1.
+fn _ink_rows(px: [u32], k: i32, y0: i32, y1: i32) -> text:
+    val w = CSS_W * k
+    if px.len() != (w * CSS_H * k) as i64:
+        return "empty frame"
+    var i0 = -1
+    var i1 = -1
+    var y = y0
+    while y <= y1:
+        var x = 20 * k
+        while x < 300 * k:
+            val q = px[y * w + x]
+            if ((q >> 16u32) & 0xFFu32) < 90u32 and ((q >> 8u32) & 0xFFu32) < 90u32 and (q & 0xFFu32) < 90u32:
+                if i0 < 0: i0 = y
+                i1 = y
+            x = x + 1
+        y = y + 1
+    "{i0}..{i1}"
+
+# First and last device row holding the span background (#0ff) in rows y0..y1.
+fn _cyan_rows(px: [u32], k: i32, y0: i32, y1: i32) -> text:
+    val w = CSS_W * k
+    if px.len() != (w * CSS_H * k) as i64:
+        return "empty frame"
+    var i0 = -1
+    var i1 = -1
+    var y = y0
+    while y <= y1:
+        var x = 20 * k
+        while x < 300 * k:
+            if (px[y * w + x] & 0xFFFFFFu32) == 0x00FFFFu32:
+                if i0 < 0: i0 = y
+                i1 = y
+            x = x + 1
+        y = y + 1
+    "{i0}..{i1}"
+
+describe "line box of inline-element and mixed-script text (line-height: normal) against Chrome 159":
+    it "AC-1: the block rows at k=1":
+        step("Chrome k=1: span-Arabic 30..63, span-Devanagari 64..84, mixed 85..118, line-height:40px 119..158, Latin 159..176")
+        expect(_blocks(_render(1), 1)).to_equal("30..63 64..84 85..118 119..158 159..176")
+
+    it "AC-2: the block rows at k=4":
+        step("Chrome k=4: 120..254 255..339 340..474 475..634 635..708")
+        expect(_blocks(_render(4), 4)).to_equal("120..254 255..339 340..474 475..634 635..708")
+
+    it "AC-3: Latin and the span's Arabic share the union baseline":
+        step("Chrome ink of `Hx <span>مرحبا</span>` at k=4: 162..221 (k=1 40..54 is in glyph_vertical_raster_phase_chrome159_spec: one AA row)")
+        expect(_ink_rows(_render(4), 4, 120, 254)).to_equal("162..221")
+
+    it "AC-4: a mixed Latin + Arabic text node sits on the union baseline":
+        step("Chrome ink of `Hx مرحبا` at k=4: 382..441 (k=1 95..109 is in glyph_vertical_raster_phase_chrome159_spec)")
+        expect(_ink_rows(_render(4), 4, 340, 474)).to_equal("382..441")
+
+    it "AC-5: an inline element's background is its own content area inside the taller union line":
+        step("Chrome k=1 span backgrounds: Arabic span 38..54 (17 rows in a 34-row line), Devanagari span 64..80")
+        val px = _render_page(SPANBG, 1)
+        expect(_cyan_rows(px, 1, 30, 62) + " " + _cyan_rows(px, 1, 64, 84)).to_equal("38..54 64..80")
