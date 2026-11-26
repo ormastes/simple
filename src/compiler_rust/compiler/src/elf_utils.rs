@@ -1029,6 +1029,77 @@ mod tests {
         assert!(resolve_runtime_symbol("rt_array_free").unwrap_or(0) != 0);
     }
 
+    /// Every `.spl` extern with a definition in this table (the "runtime
+    /// definition" oracle) must pass the seed JIT's import check without
+    /// `dlsym`. Otherwise a seed linked without `--export-dynamic` routes every
+    /// call to it through the interpreter bridge (`hybrid-interp-splice`). A
+    /// MIR-emitted name with no declaration instead drops the whole module,
+    /// which is what happened with `rt_array_is_byte_packed`.
+    #[test]
+    fn declared_externs_with_a_runtime_definition_resolve_for_the_jit_without_dlsym() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "spl") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("repo root")
+            .to_path_buf();
+        let mut files = Vec::new();
+        for sub in ["src/lib", "src/app", "src/compiler"] {
+            walk(&root.join(sub), &mut files);
+        }
+        assert!(
+            files.len() > 100,
+            "expected a populated .spl tree, found {}",
+            files.len()
+        );
+        let mut declared = std::collections::BTreeSet::new();
+        for file in files {
+            for line in std::fs::read_to_string(&file).unwrap_or_default().lines() {
+                if line.trim_start().starts_with('#') {
+                    continue;
+                }
+                if let Some(idx) = line.find("extern fn ") {
+                    let name: String = line[idx + "extern fn ".len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    declared.insert(name);
+                }
+            }
+        }
+        let backed: Vec<&String> = declared
+            .iter()
+            .filter(|name| resolve_runtime_symbol(name).is_some())
+            .collect();
+        assert!(
+            backed.len() > 100,
+            "oracle intersection unexpectedly small: {}",
+            backed.len()
+        );
+        let provider = simple_native_loader::default_runtime_provider();
+        let missing: Vec<&String> = backed
+            .into_iter()
+            .filter(|name| {
+                !crate::codegen::jit::jit_import_resolves_without_dlsym(provider.as_ref(), name)
+                    && !crate::codegen::instr::calls::is_inline_lowered_byte_accessor(name)
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} declared extern(s) with a runtime definition do not resolve for the JIT without dlsym: {missing:?}",
+            missing.len()
+        );
+    }
+
     #[test]
     fn resolves_call_scoped_packed_byte_runtime_symbols() {
         for symbol in [
