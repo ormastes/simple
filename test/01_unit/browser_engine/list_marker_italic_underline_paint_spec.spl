@@ -53,11 +53,41 @@ fn text_command(cmds: [DrawIrCommand], value: text) -> i32:
         i = i + 1
     -1
 
+# One rect per disc: a 1x disc is painted as coverage spans
+# (`<marker id>::marker-disc_<n>`), merged here into one bounding box per
+# marker. Spans tile the disc, so a marker whose span area exceeds its box
+# painted twice and is listed twice.
 fn marker_rects(cmds: [DrawIrCommand]) -> [DrawIrCommand]:
-    var out: [DrawIrCommand] = []
+    var owners: [text] = []
+    var boxes: [DrawIrCommand] = []
+    var areas: [i32] = []
     for c in cmds:
-        if c.kind == DRAW_IR_COMMAND_RECT and c.component_id.ends_with("::marker-disc"):
-            out.push(c)
+        if c.kind == DRAW_IR_COMMAND_RECT and c.component_id.contains("::marker-disc"):
+            val owner = c.component_id.split("::marker-disc")[0]
+            var k = 0
+            while k < owners.len() and owners[k] != owner:
+                k = k + 1
+            if k == owners.len():
+                owners.push(owner)
+                boxes.push(c)
+                areas.push(c.width * c.height)
+            else:
+                var box = boxes[k]
+                val x1 = if box.x + box.width > c.x + c.width: box.x + box.width else: c.x + c.width
+                val y1 = if box.y + box.height > c.y + c.height: box.y + box.height else: c.y + c.height
+                box.x = if c.x < box.x: c.x else: box.x
+                box.y = if c.y < box.y: c.y else: box.y
+                box.width = x1 - box.x
+                box.height = y1 - box.y
+                boxes[k] = box
+                areas[k] = areas[k] + c.width * c.height
+    var out: [DrawIrCommand] = []
+    var k = 0
+    while k < boxes.len():
+        out.push(boxes[k])
+        if areas[k] > boxes[k].width * boxes[k].height:
+            out.push(boxes[k])
+        k = k + 1
     out
 
 fn style_value(c: DrawIrCommand, key: text) -> text:

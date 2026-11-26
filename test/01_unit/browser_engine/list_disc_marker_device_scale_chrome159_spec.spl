@@ -84,3 +84,87 @@ describe "Disc list markers take the device-size font's metrics (Chrome 159)":
     it "AC-2: at device scale 1 the discs keep Chrome's place":
         expect(_ink(_p1(), 1, 15, 38, 95, 120)).to_equal([24, 28, 106, 110])
         expect(_ink(_p1(), 1, 160, 181, 15, 40)).to_equal([169, 173, 26, 30])
+
+# Chrome 159 1x greens of a 5 px disc (16px face, #172033 on white), row
+# major. Skia's disc is not a symmetric circle: the bottom corners carry more
+# ink (c2) than the top ones (dd), the right column a little more than the left.
+val CHROME_DISC5_G: [i32] = [
+    0xdd, 0x5d, 0x2b, 0x58, 0xdd,
+    0x53, 0x20, 0x20, 0x20, 0x50,
+    0x26, 0x20, 0x20, 0x20, 0x26,
+    0x4c, 0x20, 0x20, 0x20, 0x45,
+    0xc2, 0x56, 0x2b, 0x52, 0xc2
+]
+
+# Pixels of the 5 x 5 box at (x0, y0) whose green differs from Chrome's by
+# more than the catalog tolerance (8).
+fn _disc5_misses(px: [u32], x0: i32, y0: i32) -> i32:
+    var misses = 0
+    var i = 0
+    while i < 25:
+        val g = ((px[(y0 + i / 5) * CSS_W + x0 + i % 5] >> 8u32) & 255u32) as i32
+        val d = g - CHROME_DISC5_G[i]
+        if d > 8 or d < -8:
+            misses = misses + 1
+        i = i + 1
+    misses
+
+# Chrome 159 1x greens of the 4 px (13px face) and 7 px (24px face) discs.
+# Row 4 of the 7 px disc is left-heavy (3b .. 42) while rows 2 and 5 are
+# right-heavy: Skia's oval is point- rather than mirror-symmetric there.
+val CHROME_DISC4_G: [i32] = [
+    0xb3, 0x42, 0x42, 0xb3,
+    0x42, 0x20, 0x20, 0x42,
+    0x42, 0x20, 0x20, 0x42,
+    0xb3, 0x42, 0x42, 0xb3
+]
+val CHROME_DISC7_G: [i32] = [
+    0xfe, 0xa1, 0x46, 0x28, 0x43, 0x9b, 0xfe,
+    0x9d, 0x20, 0x20, 0x20, 0x20, 0x20, 0x96,
+    0x42, 0x20, 0x20, 0x20, 0x20, 0x20, 0x3b,
+    0x26, 0x20, 0x20, 0x20, 0x20, 0x20, 0x26,
+    0x3b, 0x20, 0x20, 0x20, 0x20, 0x20, 0x42,
+    0x8f, 0x20, 0x20, 0x20, 0x20, 0x20, 0x88,
+    0xf4, 0x88, 0x45, 0x27, 0x43, 0x82, 0xf4
+]
+
+# Pixels of the side x side disc of a one-item `ul` page that differ from
+# `chrome` by more than 8. The disc box is the ink box (green < 0xf8) left of
+# the text, so the list's own vertical offset does not count.
+fn _disc_misses_on(font_px: i32, side: i32, chrome: [i32]) -> i32:
+    val page = "<!doctype html><html><head><meta charset=\"utf-8\"><style>*{{box-sizing:border-box}} body{{margin:0;font:16px/1.5 sans-serif;color:#172033;background:#fff}}</style></head><body><ul style=\"font-size:{font_px}px\"><li>Item</li></ul></body></html>"
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, CSS_W, CSS_H, 1, "cpu_simd")
+    var c0 = 1000
+    var r0 = 1000
+    var y = 0
+    while y < CSS_H:
+        var x = 0
+        while x < 36:
+            if ((px[y * CSS_W + x] >> 8u32) & 255u32) < 0xf8u32:
+                if y < r0:
+                    r0 = y
+                if x < c0:
+                    c0 = x
+            x = x + 1
+        y = y + 1
+    if r0 == 1000:
+        return side * side
+    var misses = 0
+    var i = 0
+    while i < side * side:
+        val g = ((px[(r0 + i / side) * CSS_W + c0 + i % side] >> 8u32) & 255u32) as i32
+        val d = g - chrome[i]
+        if d > 8 or d < -8:
+            misses = misses + 1
+        i = i + 1
+    misses
+
+describe "Disc list markers at device scale 1 take Chrome 159's anti-aliasing":
+    it "AC-3: a 5 px disc matches Chrome's greens pixel for pixel (tolerance 8)":
+        step("base paints a radius-2 rounded square: 14 of 25 px off per disc")
+        expect(_disc5_misses(_p1(), 24, 106)).to_equal(0)
+        expect(_disc5_misses(_p1(), 169, 26)).to_equal(0)
+
+    it "AC-4: the 4 px (13px face) and 7 px (24px face) discs match Chrome too":
+        expect(_disc_misses_on(13, 4, CHROME_DISC4_G)).to_equal(0)
+        expect(_disc_misses_on(24, 7, CHROME_DISC7_G)).to_equal(0)
