@@ -14,6 +14,9 @@ use common.ui.widget_hit.{
     widget_dispatch_click,
     widget_dispatch_scroll,
     widget_dispatch_key,
+    widget_dispatch_pointer_down,
+    widget_dispatch_pointer_move,
+    widget_dispatch_pointer_up,
     widget_scrollbar_pointer_down,
     widget_scrollbar_pointer_move,
     widget_scrollbar_pointer_up,
@@ -207,7 +210,7 @@ fn handle_action(state: UIState, name: text) -> UIState:
             si = si + 1
         if last_us > 0:
             val tabs_id = rest.slice(0, last_us)
-            val idx_str = rest.slice(last_us + 1, rest.len())
+            val idx_str = rest.slice(last_us + 1, rest.byte_len())
             val tabs_node = state.tree.find_widget(tabs_id)
             if tabs_node != nil:
                 tabs_node.set_prop("active_index", idx_str)
@@ -259,7 +262,7 @@ fn handle_action(state: UIState, name: text) -> UIState:
             si = si + 1
         if last_us > 0:
             val list_id = rest.slice(0, last_us)
-            val idx_str = rest.slice(last_us + 1, rest.len())
+            val idx_str = rest.slice(last_us + 1, rest.byte_len())
             val list_node = state.tree.find_widget(list_id)
             if list_node != nil:
                 list_node.set_prop("selected_index", idx_str)
@@ -281,20 +284,19 @@ fn handle_pointer(state: UIState, x: i32, y: i32, kind: text) -> UIState:
     val w = _viewport_dim(state, "viewport_w", 640)
     val h = _viewport_dim(state, "viewport_h", 480)
     if kind == "move":
-        widget_scrollbar_pointer_move(root, w, h, y)
-        widget_dispatch_hover(root, w, h, x, y)
+        val layout = compute_pixel_layout(root, 0, 0, w, h)
+        widget_scrollbar_pointer_move(root, w, h, y, layout)
+        widget_dispatch_pointer_move(root, w, h, x, y, layout)
         return state
     if kind == "up":
         widget_scrollbar_pointer_up(root)
-        widget_clear_pressed(root)
+        widget_dispatch_pointer_up(root, w, h, x, y, [])
         return state
-    # down — compute layout once and share it across both dispatch calls
-    # instead of each recomputing it from scratch (they used to run
-    # compute_pixel_layout() independently, doubling layout cost per down event).
+    # down — compute layout once and share it across all pointer dispatch calls
+    # (scrollbar + context menus/dropdowns/floating windows + buttons/inputs).
     val layout = compute_pixel_layout(root, 0, 0, w, h)
-    widget_scrollbar_pointer_down(root, w, h, x, y)
-    widget_set_pressed(root, w, h, x, y, layout)
-    val hit = widget_dispatch_click(root, w, h, x, y, layout)
+    widget_scrollbar_pointer_down(root, w, h, x, y, layout)
+    val hit = widget_dispatch_pointer_down(root, w, h, x, y, layout)
     if hit != "":
         return _with_focus(state, hit)
     return state
@@ -374,7 +376,7 @@ fn handle_drag_drop(state: UIState, mime: text, data: text, x: i32, y: i32, sour
     if not hit.found:
         return state
     val target_kind = WidgetNode(id: hit.id).kind_name()
-    if target_kind == "input" or target_kind == "textfield":
+    if target_kind == "input" or target_kind == "textfield" or target_kind == "textarea":
         WidgetNode(id: hit.id).set_prop("value", data)
     return state
 
