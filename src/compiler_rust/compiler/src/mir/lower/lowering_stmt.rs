@@ -1293,8 +1293,7 @@ impl<'a> MirLowerer<'a> {
 
                         let release_old_string = self.block_array_release
                             && matches!(&target.kind, HirExprKind::Local(local_idx)
-                                if self.array_move_sites.string_overwrite_locals.contains(local_idx)
-                                    && !super::array_move::expr_mentions_local(value, *local_idx));
+                                if self.array_move_sites.string_overwrite_locals.contains(local_idx));
                         let addr_reg = self.lower_lvalue(target)?;
                         self.with_func(|func, current_block| {
                             let old_val = if release_old_string {
