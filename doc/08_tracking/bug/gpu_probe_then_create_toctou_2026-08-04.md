@@ -574,3 +574,102 @@ production defect "two independent backend resolvers disagree"
 disclosed but never fixed. Classification: SKIP for this lane (hardware);
 row should move to hardware-validation tracking rather than staying a
 code-fix OPEN.
+
+## Verification 2026-11-26 (gpuvk lane, Linux aarch64 NVIDIA GB10, real Vulkan + CUDA)
+
+Seed `/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple` (sha256 prefix
+`fb80903917d6d5f5`), worktree on release/1.0.0 `453118ed07c`. Each run was capped with
+`systemd-run --user --scope -p MemoryMax=8G`, and the fd limit was set inside the scope
+(`sh -c 'ulimit -n 44; exec seed test ...'`, with `/proc/self/limits` confirming 44).
+
+| run | result | provenance / disclosure |
+|---|---|---|
+| `engine_strict_create_toctou_spec` | 3/3 | — |
+| same, `ulimit -n 44` | 3/3 | — |
+| `web_engine2d_gpu_offload_parity_spec`, unconstrained | 17/17 | `lane=vulkan source=device_readback handle=4` |
+| same, `ulimit -n 44`, 3 runs | 17/17 each | `device_readback` each time, 4 GPU-PROVEN examples |
+| same, `ulimit -n 64` | 17/17 | `device_readback` |
+| same, `SIMPLE_2D_CREATE_FAULT=vulkan` | 17/17 | `source=cpu_fallback handle=0`, plus `GPU BRANCH SKIPPED — create_requested_backend('vulkan') failed at use time` |
+| same, `SIMPLE_2D_PROBE_FAULT=vulkan` | 17/17 | `lane=software source=cpu_mirror`, plus `GPU BRANCH SKIPPED — CPU/software lane` |
+| `cuda_strict_spec`, unconstrained / `CREATE_FAULT=cuda` / `PROBE_FAULT=cuda` | 26/26 each | no `injected` line in either knob log, so the cuda knobs are NOT shown to reach this spec |
+| `metal_strict_spec` | 14/14 | — |
+| `web_gpu_first_present_decision_spec` | 7/7 | — |
+| `web_gpu_present_paint_coverage_spec` | 23/23 | — |
+| `web_showcase_full_gpu_offload_spec` | 13/13 | — |
+
+Under both fault directions the parity spec stays honest. There is no false red, and every green
+that the device did not serve is labelled `GPU BRANCH SKIPPED ... proves NOTHING`. It never reads
+as a GPU pass. `ulimit -n 44` does not perturb this NVIDIA driver, so the natural race does not
+fire on this host; the two injection knobs supply the divergence instead.
+
+Three specs in the family are red on this host for reasons unrelated to TOCTOU. Each failing
+example is in a non-probe path:
+
+- `backend_cuda_renderbackend_spec` 29/31: "routes both CUDA image blend interfaces through the
+  native kernel" (a source-text `assert_contains`) and "propagates CUDA font completion state to
+  facade readback". The CUDA create succeeds here, so the typed-failure example prints
+  `FAILURE PATH NOT EXERCISED`.
+- `backend_probe_strict_spec` 8/9: "reports architecture-specific CPU SIMD probes without
+  fallback" (aarch64 CPU SIMD probe, `expected false to equal true`).
+- `x25519mlkem768_backend_matrix_spec` 17/20: the three AVX2/NEON/RVV "reject without build
+  provenance" examples get `stage4-source-roots-invalid` where they expect
+  `unavailable` / `Stage-4 build provenance`.
+
+The separate production defect ("two independent backend resolvers disagree") is now its own
+record, `web_engine2d_two_backend_resolvers_disagree_2026-11-26.md`. With that split out, this
+record's scope is narrower, but it is **not yet verified**: see the addendum below.
+
+## Addendum 2026-11-26 — sibling sweep and sabotage: one more instance fixed, three specs blocked
+
+The siblings listed above in "Sibling instances — OPEN" were run on the same host and seed:
+
+| spec | unconstrained | `SIMPLE_2D_CREATE_FAULT=vulkan` |
+|---|---|---|
+| `02_integration/rendering/vulkan_strict_spec.spl` (before this change) | 19/19 | **17/19**, false red: `:276 called unwrap on Err` and "SPIR-V shader modules load ... expected false to equal true" |
+| same, after this change | 19/19 | 19/19, with 2 `[toctou]` disclosures and `GPU BRANCH SKIPPED` |
+| same, after this change, `SIMPLE_2D_PROBE_FAULT=vulkan` | 19/19, 2 `[toctou]` | — |
+| `03_system/gui/draw_backend_matrix/draw_backend_matrix_spec.spl` | 8/8 | — |
+| `01_unit/lib/gpu/engine2d/backend_opencl_facade_spec.spl` | 6/6 | — |
+| `02_integration/gpu/engine2d_backend_matrix_spec.spl` | 14/14 | — |
+| `01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl` | 3/5, semantic error | blocked |
+| `05_perf/graphics_2d/backend_probe_spec.spl` | 0/3, semantic error | blocked |
+| `03_system/gui/draw_backend_matrix/proc_draw_combo_spec.spl` | 8/12, semantic error | blocked |
+
+**Fixed here:** two `vulkan_strict_spec` examples (REQ-VKSTRICT-009 and -011) still asserted
+`create.is_ok()` because the probe had predicted success. They now branch on the create's own
+Result: on success they check the engine, and on failure they call the spec's existing
+`_assert_strict_failure_is_structured` with a `_disclose_toctou` line. Red to green is 17/19 to
+19/19 under `CREATE_FAULT`.
+
+**Sabotage, run on this host:** setting every `device_identity: self.session.device` in
+`backend_vulkan.spl` to `0` (temporary, reverted) turns the parity spec red at 14/17 and
+`vulkan_strict_spec` red at 11/19. Both specs can still fail on a fabricated device identity.
+
+**Blocked:** the last three rows fail on definitions that the 2026-10-01 transplant `88aac2ffe28`
+dropped, so they never reach the probe/create code. Filed as
+`toctou_sibling_specs_broken_by_release_transplant_88aac2ffe28_2026-11-26`. Also not established:
+the cuda knobs reaching `cuda_strict_spec`, and the CUDA typed-failure path in
+`backend_cuda_renderbackend_spec`. That spec stays 29/31 under `CREATE_FAULT=cuda`, prints no
+`injected` line, and its two reds are non-TOCTOU. Status: **fix-implemented-verification-pending**
+until the blocked siblings run.
+
+### Review follow-up 2026-11-26: a host can make a failed create a failure
+
+Review found the gap in the change above. On a Vulkan-capable host whose driver rejects SPIR-V or
+whose init regresses, REQ-VKSTRICT-009 and -011 would pass with only a printed skip. Also,
+REQ-VKSTRICT-010 still gated the create on `probe.is_ok()`. Changes:
+
+- -010 now creates unconditionally and branches on the Result, like -009 and -011.
+- All three call `_fail_if_vulkan_required` on the failure branch. When the host sets
+  `SIMPLE_2D_REQUIRE_VULKAN=1` (the strict lane on a Vulkan runner), a failed create fails the
+  example instead of being disclosed as a skip.
+
+Proof on the GB10 host, `vulkan_strict_spec`:
+
+| env | result |
+|---|---|
+| none | 19/19 |
+| `SIMPLE_2D_CREATE_FAULT=vulkan` | 19/19, 3 `[toctou]` disclosures |
+| `SIMPLE_2D_CREATE_FAULT=vulkan SIMPLE_2D_REQUIRE_VULKAN=1` | **16/19, rc=1**: -009, -010 and -011 fail |
+| `SIMPLE_2D_REQUIRE_VULKAN=1` | 19/19 (the real device creates) |
+| `SIMPLE_2D_PROBE_FAULT=vulkan SIMPLE_2D_REQUIRE_VULKAN=1` | 19/19 (the create is asserted, not the probe) |
