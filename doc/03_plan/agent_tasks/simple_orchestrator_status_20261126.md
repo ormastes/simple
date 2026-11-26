@@ -4,6 +4,26 @@ Snapshot taken 2026-11-26 (Asia/Seoul) against `release/1.0.0` at
 `7035e24b2679a83499cd6c841514b75b5cdd9c72`. Update this plan when a gate
 changes state and record the source revision and supporting evidence.
 
+## Follow-up — 2026-11-26
+
+- The Windows Docker provider landed a live process-isolation smoke test via
+  the Simple Container API. The PR reports one passing run on Windows build
+  26300 with the pinned Nano Server LTSC 2025 image using an opt-in hosted
+  interpreter path. Native AOT execution, interactive terminal and resource
+  enforcement, and the Windows 11 23H2/Server Core 2022 fixture still need
+  independent qualification. [Windows Docker live run](https://github.com/ormastes/simple/pull/11946)
+- The signed helper-authorization spec for **AT-HOST-05** is in a draft PR
+  with a passing structural check. If expiry wins, late authorization cannot
+  issue a lease. If execution wins, expiry and replay cannot release the
+  active reservation. Native
+  execution is `NOT_RUN`. Concurrent fault injection and proof at the
+  provider launch boundary remain open. [Signed helper spec](https://github.com/ormastes/simple/pull/11942)
+- The provisioning draft also passed its structural check. Its native matrix
+  was skipped, so retain the same four gates below. Once the admitted native
+  runner is published, the signed helper spec can run using its private
+  journal fixture while the operator prepares the installed-host fixture.
+  Capture native receipts against each PR's verified head.
+
 ## On the release branch
 
 - Linux has an OCI lifecycle provider wired into CI. The Linux Host V4 service
@@ -67,7 +87,7 @@ remaining failures or gaps.
 | Workstream | Next evidence to collect |
 | --- | --- |
 | Shared daemon, SDN and placement | Run the merged suites and check response loss, exact daemon custody, reservation expiry and replay, and recovery under storage or host failure. |
-| Simple Container and host | Qualify the Linux Podman route through the shared API, including workspace, limits, exec/TTY and exact cleanup. Qualify Windows Docker process isolation independently with an approved host, engine and image. |
+| Simple Container and host | Qualify the Linux Podman route through the shared API, including workspace, limits, exec/TTY and exact cleanup. Extend Windows Docker process-isolation qualification beyond the hosted smoke test. |
 | Live remote enrollment, smux and Caret | Exercise authenticated enrollment, SDN-backed placement, one bound terminal stream, detach/reconnect, cancellation races and exact termination with workspace retention. |
 | Build/test integration | Run remote result verification and incomplete-result refusal alongside local runner regressions. Confirm that the parent controls verdicts and cache publication. |
 | Optional providers | Keep FreeBSD, Apple Linux VM and Kubernetes in separate qualification lanes with their own fixtures and capability evidence. |
