@@ -1,0 +1,75 @@
+# Offline authoring regressions. Genuine probe and workspace qualification
+# remains with the native Host acceptance suite.
+use std.spec.{describe, it, expect, step}
+use app.orchestrator.agent_run_plan_v1.{linux_agent_run_plan_v1, agent_run_plan_command_v1}
+use std.common.contracts.container.agent_workspace_manifest_v1.{agent_workspace_manifest_decode_v1, agent_workspace_manifest_encode_v1}
+use std.common.contracts.container.agent_executable_profile_v1.AgentExecutableProfileV1
+use std.common.contracts.container.linux_agent_workspace_profile_v1.LinuxAgentWorkspaceProfileV1
+use std.common.contracts.container.linux_agent_workspace_profile_v2.{LinuxAgentWorkspaceProfileV2,
+    linux_agent_workspace_layout_digest_v2, linux_agent_workspace_profile_encode_v2}
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.{AgentWorkspaceInvocationManifestV2,
+    agent_workspace_invocation_manifest_encode_v2}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.{linux_oci_retained_request_decode_v1,
+    linux_oci_retained_request_encode_v1}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
+use test.fixtures.orchestration.agent_workspace_invocation_fixture_v1.agent_workspace_invocation_fixture_v1
+
+fn agent_run_plan_fixture_v1() -> (LinuxOciRequestV1, text, text, [text]):
+    var manifest = agent_workspace_invocation_fixture_v1().packet.manifest
+    var workspace = agent_workspace_manifest_decode_v1(manifest.workspace_manifest).unwrap()
+    val base = LinuxAgentWorkspaceProfileV1(machine_policy_digest: "1".repeat(64), workspace_profile_digest: "2".repeat(64),
+        assets_root: "/srv/agent-assets", repository_ref: workspace.repository_ref, revision_oid: workspace.revision_oid,
+        object_format: workspace.object_format, source_manifest_digest: workspace.source_manifest_digest,
+        bootstrap_digest: workspace.bootstrap_digest, git_digest: workspace.git_digest, agent_digest: workspace.agent_digest,
+        bootstrap_program: "/opt/simple/bootstrap", image: "example@sha256:" + "7".repeat(64),
+        agent_program: manifest.inner_argv[0], image_config_id: manifest.image_config_id)
+    val executable = AgentExecutableProfileV1(architecture: "linux-aarch64", image_size_bytes: 290069784,
+        max_image_bytes: 536870912, bootstrap_memory_bytes: 402653184, agent_memory_bytes: 268435456)
+    val profile = LinuxAgentWorkspaceProfileV2(base: base, executable_profile: executable,
+        bootstrap_profile: "linux-agent-worktree-bootstrap-v1", approved_layout: "reserved-workspace-immutable-assets-v1",
+        approved_layout_digest: linux_agent_workspace_layout_digest_v2(base, executable).unwrap())
+    val profile_bytes = linux_agent_workspace_profile_encode_v2(profile).unwrap()
+    workspace.profile_digest = sha256_text(profile_bytes)
+    manifest.workspace_manifest = agent_workspace_manifest_encode_v1(workspace).unwrap()
+    val native_manifest = AgentWorkspaceInvocationManifestV2(base: manifest, executable_profile: executable)
+    val request = LinuxOciRequestV1(pod_uid: manifest.desired.workload_uid, attempt: manifest.task_use.attempt,
+        operation_id: manifest.operation_id, image: base.image, bundle_path: "", command: [base.bootstrap_program],
+        args: [], timeout_ms: manifest.workload_duration_ms, cpu_limit_millis: 1000, memory_limit_bytes: 1073741824,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+    (request, agent_workspace_invocation_manifest_encode_v2(native_manifest).unwrap(), profile_bytes,
+        ["a".repeat(64), "b".repeat(64), "c".repeat(64), "d".repeat(64), "e".repeat(64)])
+
+describe "Linux V4 agent run plan authoring":
+    it "derives exact native bootstrap arguments and both interactive draft pins":
+        step("Build a candidate from the exact manifest, approved profile and ordered probe transcript pins")
+        val (request, manifest, profile, probes) = agent_run_plan_fixture_v1()
+        val source = linux_oci_retained_request_encode_v1(request).unwrap()
+        val plan = linux_agent_run_plan_v1(source, manifest, profile, probes).unwrap()
+        val native = linux_oci_retained_request_decode_v1(plan.draft.request_bytes).unwrap()
+        val invocation = host_agent_invoke_request_decode_v4(plan.invocation).unwrap()
+        expect(invocation.operation_id).to_equal(request.operation_id)
+        expect(invocation.manifest).to_equal(manifest)
+        expect(native.args).to_equal(["--invocation-manifest-sha256", sha256_text(manifest)])
+        expect(plan.draft.request_digest).to_equal(linux_oci_request_digest_v1(native).unwrap())
+        expect(plan.draft.agent_invocation_manifest_digest).to_equal(sha256_text(manifest))
+        expect(plan.draft.remote_build_task_digest).to_equal("")
+        val reordered = [probes[1], probes[0], probes[2], probes[3], probes[4]]
+        val other = linux_agent_run_plan_v1(source, manifest, profile, reordered).unwrap()
+        expect(other.draft.agent_probe_list_digest == plan.draft.agent_probe_list_digest).to_equal(false)
+
+    it "refuses input drift and an incomplete expected provider probe set":
+        val (request, manifest, profile, probes) = agent_run_plan_fixture_v1()
+        val source = linux_oci_retained_request_encode_v1(request).unwrap()
+        expect(linux_agent_run_plan_v1(source, manifest, profile, ["a".repeat(64)]).unwrap_err()).to_equal(
+            "provider-profiled-probe-set-incomplete")
+        var changed = request
+        changed.attempt = changed.attempt + 1
+        expect(linux_agent_run_plan_v1(linux_oci_retained_request_encode_v1(changed).unwrap(), manifest, profile, probes).unwrap_err()).to_equal(
+            "agent-run-workload-binding")
+        changed = request
+        changed.args = ["unexpected"]
+        expect(linux_agent_run_plan_v1(linux_oci_retained_request_encode_v1(changed).unwrap(), manifest, profile, probes).unwrap_err()).to_equal(
+            "agent-run-bootstrap-template")
+        expect(agent_run_plan_command_v1(["agent-run-plan"]).exit_code).to_equal(2)

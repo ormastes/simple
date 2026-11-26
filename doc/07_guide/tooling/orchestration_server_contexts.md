@@ -237,6 +237,24 @@ The Host verifies the current signed attach, exact run, and registered smux pane
 on every request, including a retry. Use this permission only for a controller
 account authorized to read agent terminal output.
 
+### Author a Linux agent run
+
+`simple orchestrator agent-run-plan TEMPLATE MANIFEST PROFILE PROBES` reads
+four absolute paths to bounded SDN inputs. Use the canonical retained Linux
+OCI request as the template. Its command must select the installed profile's
+bootstrap program, its argument list must be empty, and its image must be
+digest-pinned. Supply the full native V2 invocation manifest, the approved V2
+workspace profile, and an SDN array of expected Codex probe transcript SHA-256
+digests in probe index order.
+
+The command emits the canonical V3 draft and V4 invocation frame as SDN text
+values. It binds the invocation hash into the bootstrap argument and records
+the ordered probe list digest in the draft. Treat the output as private task
+data. The command leaves reservation, signing, admission and live probe
+verification to the existing authorities. This authoring path supports the
+Codex adapter and refuses credential references while their native projection
+is unavailable.
+
 ### Provision a target and read an attached agent pane
 
 Add the separate `agent-pane-target` grant to a controller account allowed
