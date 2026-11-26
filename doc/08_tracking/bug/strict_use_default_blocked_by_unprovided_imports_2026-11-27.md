@@ -12,10 +12,10 @@ The first census found 6 sites. PR work/strict-use-census-sites-20261127 fixed 5
 - `env_get_opt`, `dir_exists`: importers moved to the owner.
 - `should_rewrite`, `rewrite_elementwise_add_guarded`: the exports were corrected.
 
-Batch 2 (work/strict-use-census-batch2-20261127) fixed 50 of the 70 wider-census rows (plus the names each fix unmasked); the 20 left are below, with 3 newly unmasked rows:
-- Facade exports added (async-family and `gc_*_immut` facades that lagged their owners): `gc_async_immut`, `gc_sync_immut`, `std.io_runtime`, `nogc_async_mut` `simd_kernels`, `sffi_signature`, `db.accel`, `security.types`, `test_runner.{test_runner_config,system_monitor,sdoctest.extractor,sdoctest.discovery}`, `io.{sqlite_sffi,metal_sffi}`, `driver.null_block_driver`, `concurrent.channel`, `spec`, `database.pure_sql` (both families), `common.compress`, `nogc_sync_mut.engine.build.build_config`.
-- Importers repointed to the owner: simd specs (`std.simd.{fixed,scalable,scalable_adapter,vector}`), `TINY_KEY_*` (`tiny.gui.event_dispatch`), `describe` (`std.spec`), `DbValue` (`database.sql.types`), `normalize_profile_name` (`compiler.common.assurance.policy_names`), `bytes_to_text`/`text_to_bytes` (the `base_encoding_*` / `cbor_*` owner names via `as`), `RunRecord` -> `TrdRunRecord`.
-- Stale names removed: `roots` (a doc-comment example leaked into `storage_roots/__init__`), `DbfsFsDriver` (duplicate export in `nogc_async_mut/db/__init__`), unused `DbRow` import, unused `bytes_to_text` import in `os/userlib/_Window/client_methods`, `parse_signed_nth_length` -> `parse_signed_nth_length_milli` (rename left stale exports).
+Batch 2 (work/strict-use-census-batch2-20261127) fixed 50 of the 70 wider-census rows (plus the names each fix unmasked); the 20 left are below, with 2 newly unmasked rows:
+- Facade exports added (`test_runner_args` `normalize_profile_name`, `app.io.cli_commands` `_run_normalize_profile_name`, async-family and `gc_*_immut` facades that lagged their owners): `gc_async_immut`, `gc_sync_immut`, `std.io_runtime`, `nogc_async_mut` `simd_kernels`, `sffi_signature`, `db.accel`, `security.types`, `test_runner.{test_runner_config,system_monitor,sdoctest.extractor,sdoctest.discovery}`, `io.{sqlite_sffi,metal_sffi}`, `driver.null_block_driver`, `concurrent.channel`, `spec`, `database.pure_sql` (both families), `common.compress`, `nogc_sync_mut.engine.build.build_config`.
+- Importers repointed to the owner: simd specs (`std.simd.{fixed,scalable,scalable_adapter,vector}`), `TINY_KEY_*` (`tiny.gui.event_dispatch`), `describe` (`std.spec`), `DbValue` (`database.sql.types`), `bytes_to_text`/`text_to_bytes` (the `base_encoding_*` / `cbor_*` owner names via `as`), `RunRecord` -> `TrdRunRecord`.
+- Stale names removed: `roots` (a doc-comment example leaked into `storage_roots/__init__`), `DbfsFsDriver` is a different type from `DbFsDriver`; `nogc_async_mut/db/__init__` named it from `dbfs_engine`, which does not provide it, so it now exports it from `dbfs_engine.fs_driver` (gc_async_mut and gc_sync_mut db facades resolve through it), unused `DbRow` import, unused `bytes_to_text` import in `os/userlib/_Window/client_methods`, `parse_signed_nth_length` -> `parse_signed_nth_length_milli` (rename left stale exports).
 
 ## Open
 - **Undefined constants:** `SYM_OS_CRC32_UPDATE_BYTE`, `_U32` and `_U64` are defined nowhere. `test/01_unit/compiler/mir_opt/cipher/cipher_parity_spec.spl` imports them from `compiler.mir_opt.pattern.rules_crypto`. Add the constants or drop them from the spec.
@@ -48,7 +48,6 @@ Columns: distinct importers, symbol, via-module, reason it is still open.
 1	validate_request_path	std.http_server.request_validation.{...}	undefined anywhere
 1	hal_smp_ipi_window	os.kernel.arch.riscv64.hal_smp.{...}	newly unmasked, undefined (riscv_noalloc_dtb_capability_spec)
 1	simple_web_layout_last_render_degraded	std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{...}	newly unmasked (before_after_generated_content_chrome159_spec), not triaged
-1	_run_normalize_profile_name	app.io.cli_commands.{...}	newly unmasked (policy_five_site_convergence_spec), not triaged
 ```
 
 ## Fix direction
