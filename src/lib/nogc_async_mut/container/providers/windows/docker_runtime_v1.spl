@@ -33,6 +33,8 @@ use std.common.contracts.container.runtime_v1.{RuntimeProviderV1,
     RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_REJECTED}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded_environment_v1, process_run_bounded_environment_admitted_v1, process_runtime_is_aot_native_v1}
 use std.nogc_sync_mut.sosix.process.{sosix_process_run_bounded, sosix_process_bounded_timed_out}
+use std.nogc_sync_mut.sosix.host.{env_get as sosix_env_get, secure_temp_dir as sosix_secure_temp_dir, dir_list as sosix_dir_list, dir_remove_all as sosix_dir_remove_all}
+use std.nogc_sync_mut.io.env_ops.{env_vars}
 use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
 use std.nogc_async_mut.container.providers.windows.docker_scope_v2.{windows_docker_scope_values_v2, windows_docker_scoped_create_v2, WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2}
@@ -215,9 +217,10 @@ impl WindowsDockerRuntimeProviderV1:
     fn _binding(request: WindowsDockerRequestV1) -> Result<i64, text>:
         windows_runtime_record_binding_v1(self.records, self.policy, request)
 
-    # All process calls carry --host and a copied allowlist, excluding inherited
-    # DOCKER_CONTEXT/HOST/TLS/config/plugin variables. Native-only Windows
-    # environment capture fails closed on unsupported runtime/provider paths.
+    # Native (AOT) calls carry --host and a copied allowlist, excluding inherited
+    # DOCKER_CONTEXT/HOST/TLS/config/plugin variables. Interpreter/JIT hosts
+    # cannot copy an environment: they are opt-in and refuse when selector
+    # variables are present (see the hosted branch below).
     me fn _execute(command: RuntimeCommandV1, admission_expiry_ms: i64 = 0) -> Result<(text, text, i64), text>:
         val invalid = windows_docker_policy_reason_v1(self.policy)
         if invalid != "": return Err(invalid)
@@ -234,24 +237,43 @@ impl WindowsDockerRuntimeProviderV1:
                 return Err("docker-execution-limit-exceeded")
             if result.exit_code != 0: return Err("docker-command-failed-" + result.exit_code.to_text())
             return Ok((result.stdout, result.stderr, result.exit_code))
-        # Interpreter/JIT hosts have no native clean-environment child owner. Here
-        # docker.exe is pinned to the local pipe by --host and its client config
-        # directory by --config, so inherited DOCKER_HOST/DOCKER_CONTEXT/
-        # DOCKER_CONFIG cannot redirect it; the launch deadline is rechecked
-        # immediately before the effect. The native path above stays the product lane.
+        # Interpreter/JIT hosts have no native clean-environment child owner, so
+        # this lane is OFF unless SIMPLE_DOCKER_HOSTED_LIVE=1 (read through SOSIX).
+        # The parent environment cannot be replaced here: refuse when any
+        # DOCKER_*/proxy variable is set. docker.exe gets --host and a fresh,
+        # exclusively created, empty per-run --config directory, removed on every
+        # path. The native path below stays the product lane.
         if not process_runtime_is_aot_native_v1():
+            if sosix_env_get("SIMPLE_DOCKER_HOSTED_LIVE") != "1": return Err("docker-hosted-launch-not-enabled")
+            if command.args.len() < 2 or command.args[0] != "--host": return Err("docker-hosted-command-shape-invalid")
+            val inherited = env_vars()
+            if inherited.is_none(): return Err("docker-hosted-environment-unobservable")
+            for (name, _value) in inherited.unwrap():
+                val upper = name.to_upper()
+                if upper.starts_with("DOCKER_") or upper == "HTTP_PROXY" or upper == "HTTPS_PROXY" or upper == "NO_PROXY":
+                    return Err("docker-hosted-environment-selector-present:" + upper)
+            val config = match sosix_secure_temp_dir(self.policy.temp_directory, "simple-docker-cfg-"):
+                case Ok(path): path
+                case Err(reason): return Err("docker-hosted-config-dir-failed:" + reason)
+            if sosix_dir_list(config).len() != 0:
+                sosix_dir_remove_all(config)
+                return Err("docker-hosted-config-dir-not-empty")
+            var failure = ""
+            var captured = ("", "", 0)
             if admission_expiry_ms > 0:
                 val now = time_sample_unix_micros_or_failure()
-                if now <= 0: return Err("launch-admission-clock-unavailable-before-effect")
-                if now / 1000 >= admission_expiry_ms: return Err("launch-deadline-expired-before-effect")
-            if command.args.len() < 2 or command.args[0] != "--host": return Err("docker-hosted-command-shape-invalid")
-            val args = command.args.slice(0, 2) + ["--config", self.policy.temp_directory] + command.args.slice(2, command.args.len())
-            val result = sosix_process_run_bounded(command.program, args, self.policy.timeout_ms, self.policy.max_output_bytes)
-            if sosix_process_bounded_timed_out(result.2, result.1): return Err("docker-execution-limit-timeout")
-            if result.0.byte_len() > self.policy.max_output_bytes or result.1.byte_len() > self.policy.max_output_bytes:
-                return Err("docker-execution-limit-output")
-            if result.2 != 0: return Err("docker-command-failed-" + result.2.to_text())
-            return Ok((result.0, result.1, result.2))
+                if now <= 0: failure = "launch-admission-clock-unavailable-before-effect"
+                elif now / 1000 >= admission_expiry_ms: failure = "launch-deadline-expired-before-effect"
+            if failure == "":
+                val args = command.args.slice(0, 2) + ["--config", config] + command.args.slice(2, command.args.len())
+                captured = sosix_process_run_bounded(command.program, args, self.policy.timeout_ms, self.policy.max_output_bytes)
+                if sosix_process_bounded_timed_out(captured.2, captured.1): failure = "docker-execution-limit-timeout"
+                elif captured.0.byte_len() > self.policy.max_output_bytes or captured.1.byte_len() > self.policy.max_output_bytes:
+                    failure = "docker-execution-limit-output"
+                elif captured.2 != 0: failure = "docker-command-failed-" + captured.2.to_text()
+            sosix_dir_remove_all(config)
+            if failure != "": return Err(failure)
+            return Ok(captured)
         val environment = [("SystemRoot", self.policy.system_root),
             ("TEMP", self.policy.temp_directory), ("TMP", self.policy.temp_directory)]
         val result = if admission_expiry_ms > 0:
