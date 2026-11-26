@@ -1,3 +1,7 @@
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_decode_v3
+use std.nogc_sync_mut.io.host_enrollment_v1.host_enrollment_credential_decode_v1
+use std.nogc_sync_mut.orchestration.host_linux_service_install_v3.{
+    HostLinuxServiceInstallRequestV3, HostLinuxServiceProvisionStateV3, host_linux_service_provision_v3}
 # Trusted local administrator CLI composition. These startup arguments are not
 # accepted by the service request wire. Binding bytes still require the actual
 # protected deployment's historical signed enrollment and exact installed pins.
@@ -69,3 +73,46 @@ pub fn host_service_command_v3(args: [text]) -> HostServiceCommandReplyV3:
     if not closed.closed or closed.error != "":
         return service_command_error_v3("host-service-close:" + closed.error, closed.cleanup)
     HostServiceCommandReplyV3(turn.exit_code, turn.response)
+
+
+# Local administrative command only. The signed binding chooses the exact
+# protected parent. These paths supply bytes and carry no native authority.
+fn host_linux_provision_request_v3(args: [text]) -> Result<HostLinuxServiceInstallRequestV3, text>:
+    val binding_bytes = file_read_regular_no_follow_bounded(args[1], 16384)?
+    val binding = host_linux_service_enrollment_decode_v3(binding_bytes)?
+    val credential_bytes = file_read_regular_no_follow_bounded(args[2], 1048576)?
+    val credential = host_enrollment_credential_decode_v1(credential_bytes)?
+    val configuration = file_read_regular_no_follow_bounded(args[3], 1048576)?
+    val engine = file_read_regular_no_follow_bounded(args[4], 1048576)?
+    val broker = file_read_regular_no_follow_bounded(args[5], 1048576)?
+    val helper = file_read_regular_no_follow_bounded(args[6], 1048576)?
+    if (binding.remote_build_template_digest != "") != (args.len() == 8):
+        return Err("host-linux-provision-remote-template-arguments")
+    val remote_template = if args.len() == 8: file_read_regular_no_follow_bounded(args[7], 1048576)? else: ""
+    Ok(HostLinuxServiceInstallRequestV3(binding: binding, credential: credential,
+        configuration_bytes: configuration, engine_policy_bytes: engine,
+        broker_policy_bytes: broker, agent_helper_template_bytes: helper, remote_build_template_bytes: remote_template))
+
+pub fn host_linux_provision_command_v3(args: [text]) -> HostServiceCommandReplyV3:
+    if (args.len() != 7 and args.len() != 8) or args[0] != "host-linux-provision":
+        return service_command_error_v3("host-linux-provision-usage")
+    for index in 1..args.len():
+        if args[index] == "":
+            return service_command_error_v3("host-linux-provision-file-required")
+    val request = host_linux_provision_request_v3(args)
+    if request.is_err(): return service_command_error_v3(request.unwrap_err())
+    val turn = host_linux_service_provision_v3(request.unwrap())
+    val cleanup = if turn.cleanup.is_some(): Some(HostServiceCleanupV3.LinuxProvision(turn.cleanup.unwrap())) else: None
+    val installed = turn.state != HostLinuxServiceProvisionStateV3.Refused
+    val duplicate = turn.state == HostLinuxServiceProvisionStateV3.Existing
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("host-linux-provision-result"),
+        "installed": SdnValue.Bool(installed),
+        "duplicate": SdnValue.Bool(duplicate),
+        "cleanupPending": SdnValue.Bool(cleanup.is_some()),
+        "error": SdnValue.String(turn.error)}
+    if val residue = turn.residue:
+        fields["anchor"] = SdnValue.String(residue.root)
+        fields["bindingDigest"] = SdnValue.String(residue.binding_digest)
+        fields["publicationPhase"] = SdnValue.String(residue.phase)
+    HostServiceCommandReplyV3(if installed: 0 else: 2, sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", cleanup)

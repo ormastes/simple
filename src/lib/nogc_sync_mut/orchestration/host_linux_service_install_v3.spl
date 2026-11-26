@@ -13,6 +13,9 @@ use std.nogc_sync_mut.io.host_linux_service_records_v4.{LinuxServiceVerifiedEnro
     linux_service_enrollment_verify_v1, host_linux_service_root_path_v4, host_linux_service_claim_name_v4}
 use std.nogc_sync_mut.io.host_enrollment_v1.HostEnrollmentCredentialV1
 use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.container.machine_authority_v1.{MachineFreshEpochAdmissionTurnV1,
+    machine_container_authority_open_fresh_epoch_v1}
+use std.nogc_sync_mut.container.machine_fresh_epoch_cleanup_v1.machine_fresh_epoch_admission_turn_close_v1
 
 pub struct HostLinuxServiceInstallRequestV3:
     binding: HostLinuxServiceEnrollmentBindingV3
@@ -22,6 +25,7 @@ pub struct HostLinuxServiceInstallRequestV3:
     broker_policy_bytes: text
     # milestone_0021 F15 (B): installed as agent-helper-template.sdn, pinned by the signed enrollment.
     agent_helper_template_bytes: text
+    remote_build_template_bytes: text = ""
 
 # DATA about durable residue, never a cleanup/recovery permission.
 pub struct HostLinuxServiceInstallResidueV3:
@@ -78,7 +82,7 @@ fn service_install_proof_v3(parent: LinuxProtectedRootReaderV1, request: HostLin
     val policy = service_install_policy_v3(parent, binding)?
     val proof = linux_service_enrollment_verify_v1(policy, binding, request.credential,
         request.configuration_bytes, request.engine_policy_bytes, request.broker_policy_bytes,
-        request.agent_helper_template_bytes)?
+        request.agent_helper_template_bytes, request.remote_build_template_bytes)?
     val repeated = native.current_v3()?
     if repeated.native_machine_id != observation.native_machine_id or repeated.native_boot_id != observation.native_boot_id or
             repeated.owner_generation != observation.owner_generation or repeated.process_identity_digest != observation.process_identity_digest or
@@ -118,3 +122,109 @@ pub fn host_linux_service_install_close_v3(cleanup: OperationHealthLinuxInstallC
     # durable residue; borrowed native/parent owners are untouched.
     val closed = operation_health_linux_install_close_v1(cleanup)
     HostLinuxServiceInstallCloseV3(closed.cleanup, closed.closed, closed.error)
+
+
+# Local provisioning owns the parent reader and actual epoch admission.
+# The installer borrows both and returns only its own outstanding writer.
+pub class HostLinuxServiceProvisionCleanupV3:
+    writer: Option<OperationHealthLinuxInstallCleanupV1> = None
+    parent: Option<LinuxProtectedRootReaderV1> = None
+    admission: Option<MachineFreshEpochAdmissionTurnV1> = None
+    loan: Option<LinuxServiceNativeIdentityBorrowV3> = None
+    diagnostic: text = ""
+
+pub enum HostLinuxServiceProvisionStateV3:
+    Refused
+    Installed
+    Existing
+
+pub struct HostLinuxServiceProvisionTurnV3:
+    cleanup: Option<HostLinuxServiceProvisionCleanupV3>
+    residue: Option<HostLinuxServiceInstallResidueV3>
+    state: HostLinuxServiceProvisionStateV3
+    error: text
+
+pub struct HostLinuxServiceProvisionCloseV3:
+    cleanup: Option<HostLinuxServiceProvisionCleanupV3>
+    error: text
+
+pub fn host_linux_service_provision_close_v3(original: HostLinuxServiceProvisionCleanupV3) -> HostLinuxServiceProvisionCloseV3:
+    var owner = original
+    if val writer = owner.writer:
+        val closed = host_linux_service_install_close_v3(writer)
+        owner.writer = closed.cleanup
+        if owner.diagnostic == "" and closed.error != "": owner.diagnostic = closed.error
+        if owner.writer.is_some(): return HostLinuxServiceProvisionCloseV3(Some(owner), owner.diagnostic)
+        if not closed.closed and owner.diagnostic == "": owner.diagnostic = "linux-service-provision-writer-release-unconfirmed"
+    if val parent = owner.parent:
+        val closed = linux_protected_root_reader_close_v1(parent)
+        owner.parent = closed.owner
+        if owner.diagnostic == "" and closed.error != "": owner.diagnostic = closed.error
+        if owner.parent.is_some(): return HostLinuxServiceProvisionCloseV3(Some(owner), owner.diagnostic)
+        if not closed.completed and owner.diagnostic == "": owner.diagnostic = "linux-service-provision-parent-release-unconfirmed"
+    if val borrow = owner.loan:
+        if owner.admission.is_none() or owner.admission.unwrap().owner.is_none():
+            return HostLinuxServiceProvisionCloseV3(Some(owner), "linux-service-provision-loan-owner-missing")
+        var admission = owner.admission.unwrap()
+        val returned = admission.owner.unwrap().end_service_loan_v1(borrow)
+        admission.owner = Some(returned.owner)
+        owner.admission = Some(admission)
+        if returned.error != "":
+            if owner.diagnostic == "": owner.diagnostic = returned.error
+            return HostLinuxServiceProvisionCloseV3(Some(owner), owner.diagnostic)
+        owner.loan = None
+    if val admission = owner.admission:
+        val closed = machine_fresh_epoch_admission_turn_close_v1(admission)
+        owner.admission = closed.retained
+        if owner.diagnostic == "" and closed.error != "": owner.diagnostic = closed.error
+        if owner.admission.is_some(): return HostLinuxServiceProvisionCloseV3(Some(owner), owner.diagnostic)
+        if not closed.closed and owner.diagnostic == "": owner.diagnostic = "linux-service-provision-admission-release-unconfirmed"
+    HostLinuxServiceProvisionCloseV3(None, owner.diagnostic)
+
+fn service_provision_finish_v3(owner: HostLinuxServiceProvisionCleanupV3,
+        residue: Option<HostLinuxServiceInstallResidueV3>, installed: bool,
+        duplicate: bool, error: text) -> HostLinuxServiceProvisionTurnV3:
+    val closed = host_linux_service_provision_close_v3(owner)
+    var reason = error
+    if closed.error != "":
+        reason = if reason == "": closed.error else: reason + ":cleanup:" + closed.error
+    if closed.cleanup.is_some() and reason == "": reason = "linux-service-provision-cleanup-pending"
+    val state = if reason != "" or not installed: HostLinuxServiceProvisionStateV3.Refused else:
+        if duplicate: HostLinuxServiceProvisionStateV3.Existing else: HostLinuxServiceProvisionStateV3.Installed
+    HostLinuxServiceProvisionTurnV3(closed.cleanup, residue, state, reason)
+
+pub fn host_linux_service_provision_v3(request: HostLinuxServiceInstallRequestV3) -> HostLinuxServiceProvisionTurnV3:
+    val binding = request.binding
+    val canonical = host_linux_service_enrollment_encode_v3(binding)
+    if canonical.is_err(): return HostLinuxServiceProvisionTurnV3(None, None, HostLinuxServiceProvisionStateV3.Refused, canonical.unwrap_err())
+    val opened = linux_protected_root_reader_open_v1(binding.machine_parent)
+    var owner = HostLinuxServiceProvisionCleanupV3(parent: opened.owner)
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        val reason = if opened.error == "": "linux-service-provision-parent-unavailable" else: opened.error
+        return service_provision_finish_v3(owner, None, false, false, reason)
+    val parent = opened.owner.unwrap()
+    val policy = service_install_policy_v3(parent, binding)
+    if policy.is_err(): return service_provision_finish_v3(owner, None, false, false, policy.unwrap_err())
+    # Reject bad or stale signatures before opening the machine admission.
+    val verified = linux_service_enrollment_verify_v1(policy.unwrap(), binding, request.credential,
+        request.configuration_bytes, request.engine_policy_bytes, request.broker_policy_bytes,
+        request.agent_helper_template_bytes, request.remote_build_template_bytes)
+    if verified.is_err(): return service_provision_finish_v3(owner, None, false, false, verified.unwrap_err())
+    var admission = machine_container_authority_open_fresh_epoch_v1()
+    owner.admission = Some(admission)
+    if admission.error != "" or admission.owner.is_none():
+        val reason = if admission.error == "": "linux-service-provision-admission-unavailable" else: admission.error
+        return service_provision_finish_v3(owner, None, false, false, reason)
+    val lent = admission.owner.unwrap().lend_service_identity_v1()
+    admission.owner = Some(lent.owner)
+    owner.admission = Some(admission)
+    owner.loan = lent.native
+    if lent.error != "" or lent.native.is_none():
+        val reason = if lent.error == "": "linux-service-provision-native-unavailable" else: lent.error
+        return service_provision_finish_v3(owner, None, false, false, reason)
+    val installed = host_linux_service_install_v3(parent, lent.native.unwrap(), request)
+    owner.writer = installed.cleanup
+    owner.parent = Some(installed.parent)
+    owner.diagnostic = installed.close_error
+    val reason = if installed.error == "" and not installed.installed: "linux-service-provision-publication-unconfirmed" else: installed.error
+    service_provision_finish_v3(owner, installed.residue, installed.installed, installed.duplicate, reason)

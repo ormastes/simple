@@ -1,0 +1,60 @@
+# Linux signed Host provisioning command
+
+Status **AUTHORED_NOT_RUN**. The executable spec drives the production
+orchestrator dispatcher without acquiring a native owner.
+
+1. Read public help and verify the command is advertised.
+2. Send argument vectors with too few and too many inputs. Require exit 2, the
+   usage diagnostic, and absence of a cleanup carrier.
+3. Send an empty helper template path. Require exit 2 and the missing-file
+   diagnostic before any of the preceding file paths are read.
+
+4. Send an empty optional remote build template path. Require the same refusal
+   before any file reads.
+
+The configured native installation scenario has separate fixture requirements.
+
+<details>
+<summary>Executable SSpec source</summary>
+
+```simple
+# codex-system-test
+# AUTHORED_NOT_RUN. Local command shape checks without a native fixture.
+use std.spec.{describe, it, expect, step}
+use app.orchestrator.command.orchestrator_command_v1
+
+describe "Linux signed Host provisioning command":
+    it "should expose the local provisioning command in orchestrator help":
+        step("Read help through the orchestrator command dispatcher")
+        val result = orchestrator_command_v1(["--help"])
+        expect(result.exit_code).to_equal(0)
+        expect(result.output).to_contain("host-linux-provision <signed-binding.sdn>")
+
+    it "should reject missing and extra signed input arguments before opening a Host":
+        step("Send too few and too many arguments to the public command")
+        for args in [["host-linux-provision"], ["host-linux-provision", "binding", "credential",
+                "config", "engine", "broker", "helper", "remote", "extra"]]:
+            val result = orchestrator_command_v1(args)
+            expect(result.exit_code).to_equal(2)
+            expect(result.output).to_contain("host-linux-provision-usage")
+            expect(result.service_cleanup.is_none()).to_equal(true)
+
+    it "should reject an empty final template path before reading any input":
+        step("Omit the helper template path from an otherwise complete argument vector")
+        val result = orchestrator_command_v1(["host-linux-provision", "binding", "credential",
+            "config", "engine", "broker", ""])
+        expect(result.exit_code).to_equal(2)
+        expect(result.output).to_contain("host-linux-provision-file-required")
+        expect(result.service_cleanup.is_none()).to_equal(true)
+
+
+    it "should reject an empty optional remote build template path before reading files":
+        step("Supply the optional position with an empty path")
+        val result = orchestrator_command_v1(["host-linux-provision", "binding", "credential",
+            "config", "engine", "broker", "helper", ""])
+        expect(result.exit_code).to_equal(2)
+        expect(result.output).to_contain("host-linux-provision-file-required")
+        expect(result.service_cleanup.is_none()).to_equal(true)
+```
+
+</details>
