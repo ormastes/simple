@@ -1,0 +1,78 @@
+# Regression spec for s3_binding_versions_keys_freed_transient_scope_2026-11-19:
+# verifies Scope(0) re-homing in SymbolTable so rt_transient_heap_promote(table.scopes)
+# reaches Scope(0).binding_versions_v1 even when reset_module() ran before
+# rt_transient_array_scope_begin().
+# @cover src/compiler/20.hir/hir_symbol_table_methods.spl
+# @cover src/compiler/20.hir/hir_lowering/types.spl
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_build.spl
+
+use std.spec.*
+use compiler.hir.hir_types.{SymbolTable, SymbolId, SymbolKind, Scope}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+
+fn _churn_strings():
+    var junk: [text] = []
+    var i = 0
+    while i < 256:
+        junk.push("scope0_churn_" + "slot_{i}")
+        i = i + 1
+
+describe "SymbolTable Scope(0) transient re-homing":
+    it "retains Scope(0).binding_versions_v1 keys across transient scope end via table.scopes promotion":
+        var table = SymbolTable.new()
+        table.reset_module()
+
+        val began = rt_transient_array_scope_begin()
+        expect(began).to_equal(true)
+        if not began:
+            return
+
+        val sym_name = "alpha_" + "sym"
+        val sym_id = table.define(sym_name, SymbolKind.Function, None, Span.empty(), Visibility.Public, false, None)
+        table.unbind_local_type(sym_name)
+        table.rebind_local_type("alpha_" + "sym", sym_id)
+
+        val paused = rt_transient_array_scope_pause()
+        expect(paused).to_equal(true)
+        val scopes_ok = if paused: rt_transient_heap_promote(table.scopes) else: false
+        val root_ok = if paused: rt_transient_heap_promote(table.root_scope_symbols) else: false
+        val ended = rt_transient_array_scope_end()
+        _churn_strings()
+
+        expect(scopes_ok).to_equal(true)
+        expect(root_ok).to_equal(true)
+        expect(ended).to_equal(true)
+        val root: Scope = table.scopes[0]
+        expect(root.binding_versions_v1.get("alpha_sym") ?? -1).to_equal(3)
+
+    it "re-homes Scope(0) explicitly even after pre-scope defines before transient begin":
+        var table = SymbolTable.new()
+        table.reset_module()
+        val pre_id = table.define("pre_" + "sym", SymbolKind.Function, None, Span.empty(), Visibility.Public, false, None)
+
+        val began = rt_transient_array_scope_begin()
+        expect(began).to_equal(true)
+        if not began:
+            return
+
+        table.rehome_root_scope_for_active_transient_v1()
+        table.unbind_local_type("pre_sym")
+        table.rebind_local_type("pre_" + "sym", pre_id)
+
+        val paused = rt_transient_array_scope_pause()
+        expect(paused).to_equal(true)
+        val scopes_ok = if paused: rt_transient_heap_promote(table.scopes) else: false
+        val ended = rt_transient_array_scope_end()
+        _churn_strings()
+
+        expect(scopes_ok).to_equal(true)
+        expect(ended).to_equal(true)
+        val root: Scope = table.scopes[0]
+        expect(root.binding_versions_v1.get("pre_sym") ?? -1).to_equal(3)
