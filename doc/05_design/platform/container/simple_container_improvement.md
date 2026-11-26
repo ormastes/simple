@@ -77,8 +77,8 @@ records/<key>.sdn                 # ObjectRecordV1
 aliases/<algorithm>/<digest_hex>  # file content = object_key text, no-replace
 roots/<name>.sdn                  # root pointer: a CACHE of the head generation (may lag)
 roots/<name>.g<N>.claim           # generation N>=2, no-replace, never deleted: the CAS commit
-pins/<pin_id>/owner              # append-only pin dir: owner doc
-pins/<pin_id>/refs/<key>         # one empty-or-record file per retained object key
+pins/<pin_id>/owner              # append-only pin dir: raw owner text
+pins/<pin_id>/refs/<key>         # file content is the key text, one per retained object
 collisions/<algorithm>/<digest_hex>_<n>.sdn   # collision records
 staging/<unique>                  # private staging, removed on success/failure
 quarantine/<date>/                # GC moves, never unlinks

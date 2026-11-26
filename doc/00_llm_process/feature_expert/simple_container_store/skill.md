@@ -1,4 +1,4 @@
-# Feature expert: Simple Container shared immutable store (increments 1-2)
+# Feature expert: Simple Container shared immutable store (increments 1-3)
 
 **Docs:** architecture `doc/04_architecture/platform/container/simple_container_improvement.md`,
 design `doc/05_design/platform/container/simple_container_improvement.md`,
