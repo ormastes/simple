@@ -4,10 +4,12 @@
 - **Area:** module loader / import closure resolution
 - **Severity:** medium — 8x startup penalty on every interpreted run that touches
   Engine2D without also importing winit.
-- **Status:** RESOLVED for the std-lib amplifier (2026-11-05 root-cause section
-  below; verified in-tree 2026-11-25 — see the dated verification note at the
-  end). The residual ~12 s is legitimate Cranelift JIT-lane compilation work,
-  and the fragile substring lane gate is a separate Rust-seed follow-up.
+- **Status:** VERIFIED 2026-11-26 for the 24 s symptom only, with a caveat: re-measured at
+  2.2-2.9 s (see the last section), but no fix commit explains the drop from the 12 s measured
+  after the 2026-11-05 SPIR-V literal fix to about 2.5 s now. The comparison is also cross-seed and
+  was taken on a shared, loaded box. RESOLVED for the std-lib amplifier (2026-11-05 root-cause
+  section below). The remaining gap to the interpreter lane is the substring lane gate, now its own
+  record: `seed_window_winit_substring_lane_gate_2026-11-26`.
 
 ## Repro
 
@@ -131,3 +133,29 @@ Still open (by design, not this bug): the substring lane gate in
 Rust-seed heuristic deserving its own bug record, as the 2026-11-05 section
 already notes; no such record existed as of this check, so it is flagged here
 for the next triage pass rather than silently dropped.
+
+## Verification 2026-11-26 (gpuvk lane, Linux aarch64 NVIDIA GB10) — re-measured, 24 s is gone
+
+Seed `/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple` (sha256 prefix
+`fb80903917d6d5f5`), worktree on release/1.0.0 `453118ed07c`, `SIMPLE_NO_DEPRECATED_WARNINGS=1
+seed run`, five rounds with the run order alternated:
+
+| entry imports | round 1 | rounds 2-5 |
+|---|---|---|
+| `std.gpu.engine2d.engine` only (JIT lane) | 6.48 s | 2.23-2.88 s |
+| + `std.io.window_winit.{winit_loop_new}` (interpreter lane) | 1.75 s | 0.56-0.77 s |
+| engine only + `# window_winit` comment (interpreter lane) | 0.73 s | 0.54-0.72 s |
+| no imports | 0.05 s | 0.04-0.05 s |
+
+The engine2d-only import now costs about 2.5 s, down from 24 s (and from the 12 s measured after the
+2026-11-05 fix). Every probe printed `ok` with rc=0. The remaining gap of about 4x between the
+engine-only row and the comment row is the lane split, not module loading. It is now its own
+record: `seed_window_winit_substring_lane_gate_2026-11-26.md`. Status: **VERIFIED for the 24 s symptom**. No fix commit explains the 12 s to 2.5 s step: the 12 s figure came from a different seed (phase1, 2026-11-05), and these numbers were taken on a loaded shared box.
+
+Follow-up the same day, three rounds:
+
+- `SIMPLE_EXECUTION_MODE=interpret` on the engine-only file: 0.47-0.79 s. That matches the
+  `window_winit` rows, so the residual gap is the lane split.
+- JIT lane with `HOME` pointed at an empty directory: 1.50-1.54 s, which writes nothing there. So
+  the 2-3 s figure does not depend on a warm `~/.cache/simple`. The spread between rounds tracks
+  host load on this shared box, so treat every number here as an envelope, not a constant.
