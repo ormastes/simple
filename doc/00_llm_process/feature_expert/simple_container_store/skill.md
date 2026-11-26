@@ -52,3 +52,34 @@ lane, Lane D, AppContainer confinement and other-host items are in
 `sosix_contain_request_reason_v1`) and `std.common.contracts.container.pure_backend_v1`
 (`pure_container_capability_report_v1`: support + measured evidence -> capability report).
 Design: `doc/04_architecture/platform/container/pure_simple_container.md` §4.1, §6.
+
+## Windows Docker provider (process isolation) — LIVE evidence 2026-11-26
+Provider: `std.nogc_async_mut.container.providers.windows.docker_runtime_v1`
+(`WindowsDockerRuntimeProviderV1`), contract `docker_contract_v1`.
+- **Live run** (host Windows 10.0.26300, Docker Engine 29.10.1 native, npipe
+  `docker_engine`): `prepare -> create -> start -> wait -> logs -> destroy`
+  of `cmd /c echo simple-docker-ok` in `nanoserver:ltsc2025`
+  (`--isolation=process`): exit 0, logs `simple-docker-ok`, exact-ID absence
+  confirmed. Spec: `test/03_system/app/orchestrator/feature/windows_docker_live_process_spec.spl`
+  (1 passed, 0 skipped; skips only when `docker.exe` cannot reach the pipe).
+- **Pins** (contract consts `WINDOWS_DOCKER_PINNED_*_V1`): image id
+  `sha256:b911cb54...4587`, repo digest `...nanoserver@sha256:5c42e42b...35cb`,
+  image OsVersion `10.0.26100.33828`, host kernel `10.0 26300 (26100.1...)`.
+  `windows_docker_build_pair_reason_v1` accepts equal host/image builds and
+  only the 26300/26100 pair; anything else (or unparseable) fails closed.
+- **Blocker found**: `_execute` needs the native clean-environment child owner
+  (`process_run_bounded_environment_v1`), which refuses interpreter/JIT
+  ("requires the matching native C provider"); `windows_command_owner_v2`
+  refuses too (canonical-thread guard). Spec runners are interpreted, so the
+  live lane never ran. Fix: `_execute_hosted_v1` (non-AOT only) runs
+  `docker.exe --host <pipe> --config <temp> ...` through SOSIX
+  `sosix_process_run_bounded`, rechecking the launch deadline before the effect.
+  The AOT-native clean-environment path is unchanged and remains the product lane.
+- **Gap (named, not filled)**: the hosted path inherits the parent environment
+  (neutralised for DOCKER_HOST/CONTEXT/CONFIG by `--host`/`--config`); and the
+  full `WindowsSimpleContainerAdapterV2.open` cannot run here (needs native
+  boot incarnation; host observation is `machine-boot-counter-v1`, interpreter
+  refuses `windows_host_identity_v1`), so the run goes through the provider the
+  adapter delegates to, not the adapter itself.
+- `native-build` of a driver with the Nov-25 seed did not finish in 35+ min
+  (compiler runs interpreted); do not use it as the live-spec route.
