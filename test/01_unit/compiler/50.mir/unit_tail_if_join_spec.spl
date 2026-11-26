@@ -1,0 +1,125 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Unit-function tail if/elif/else joins emit at most one default Const and never define void
+
+Regression spec for `E-BACKEND-LLVM-CONST-TYPE` (`unit_tail_helper` /
+`native_const_type_void_unit_tail_if_join_2026-11-13`):
+When `lower_if` or `lower_if_chain` lowers a statement-position or unit-fn
+tail `if`/`elif`/`else` whose arms are all `Unit` (e.g. `print "..."`),
+`join_needs_default_def_v1` already emits a dominating `Const(result, 0, i64)`
+in the entry block. Emitting a second `Const(result, 0, i64)` in the merge
+block turned `result` into a multi-def local, triggering
+`ssa_alloca_transform_blocks` and colliding `next_temp` with unused `Unit`
+temps allocated by `print "..."` (`dest=_10 const_type=i64 value=0`).
+
+Each case lowers `fn unit_tail_helper` (or `fn a`) through the in-tree MIR
+lowerer and checks that:
+1. No `Const` or `Copy` targets a `Unit`-typed local (`void_word_defs == 0`).
+2. No `LocalId` receives more than one `Const` definition (`multi_const_defs == 0`).
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val helper_lib_source = "pub fn spawn(s: text) -> i64:\n    s.len()\n"
+
+var last_void_word_defs = 0
+var last_multi_const_defs = 0
+
+fn analyze_mir_defs(target_fn_name: text, body: text) -> text:
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(helper_lib_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    modules["app.main"] = consumer_ast
+    val sources = [
+        SourceFile(path: "lib/data.spl", content: helper_lib_source, module_name: "lib.data"),
+        SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module(data_ast.name, surfaces)
+    var consumer_lowering = hirlowering_for_module(consumer_ast.name, surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val mir_mod = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    last_void_word_defs = 0
+    last_multi_const_defs = 0
+    for function in mir_mod.functions.values():
+        if function.name == target_fn_name or function.name.ends_with("." + target_fn_name):
+            var unit_ids: Dict<i64, bool> = {}
+            for local in function.locals:
+                match local.type_.kind:
+                    case MirTypeKind.Unit: unit_ids[local.id.id] = true
+                    case _: pass
+            var const_counts: Dict<i64, i64> = {}
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Const(dest, _, _):
+                            if unit_ids.contains(dest.id):
+                                last_void_word_defs = last_void_word_defs + 1
+                            if const_counts.contains(dest.id):
+                                const_counts[dest.id] = const_counts[dest.id] + 1
+                            else:
+                                const_counts[dest.id] = 1
+                        case MirInstKind.Copy(dest, _):
+                            if unit_ids.contains(dest.id):
+                                last_void_word_defs = last_void_word_defs + 1
+                        case _: pass
+            for count in const_counts.values():
+                if count > 1:
+                    last_multi_const_defs = last_multi_const_defs + 1
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+fn check_unit_tail(target_fn_name: text, body: text) -> i64:
+    val errors = analyze_mir_defs(target_fn_name, body)
+    if errors != "":
+        print("lower errors: " + errors)
+        return -1
+    last_void_word_defs + last_multi_const_defs
+
+describe "unit tail if/elif/else join: single default def and zero void Const defs":
+    it "if/elif/else tail of print literals (probe_unit_tail shape)":
+        val src = "fn unit_tail_helper(kind: text):\n    if kind == \"a\":\n        print \"tail=a\"\n    elif kind == \"b\":\n        print \"tail=b\"\n    else:\n        print \"tail=other\"\n"
+        expect(check_unit_tail("unit_tail_helper", src)).to_equal(0)
+
+    it "two-arm if/else tail of print literals":
+        val src = "fn unit_tail_helper(kind: text):\n    if kind == \"a\":\n        print \"a\"\n    else:\n        print \"b\"\n"
+        expect(check_unit_tail("unit_tail_helper", src)).to_equal(0)
+
+    it "explicit unit return annotation with if/elif/else print tail":
+        val src = "fn unit_tail_helper(kind: text) -> ():\n    if kind == \"a\":\n        print \"a\"\n    elif kind == \"b\":\n        print \"b\"\n    else:\n        print \"c\"\n"
+        expect(check_unit_tail("unit_tail_helper", src)).to_equal(0)
+
+    it "mixed unit and discarded i64 call arms keep single dominating default":
+        val src = "fn unit_tail_helper(kind: text):\n    var seen = false\n    if kind == \"a\":\n        seen = true\n    else:\n        spawn(kind)\n"
+        expect(check_unit_tail("unit_tail_helper", src)).to_equal(0)
+
+    it "mid-body if/else of discarded i64 calls (parser_lower_unit_decl shape)":
+        val src = "fn unit_tail_helper(kind: text):\n    if kind == \"newunit\":\n        spawn(kind)\n    else:\n        spawn(kind + kind)\n    print \"done\"\n"
+        expect(check_unit_tail("unit_tail_helper", src)).to_equal(0)

@@ -4731,7 +4731,12 @@ impl MirLowering:
         # (`out.push(item)`), leaving `result` defined on one edge of the merge
         # only; native backends then read an undefined operand there. A
         # dominating default def makes every edge define it; arms overwrite it.
-        if self.join_needs_default_def_v1(expected_type) and not result_slot_payloadless:
+        # Record `emitted_default_def` so the merge fallback below does not emit
+        # a second `Const 0` on the same `result` local when all arms are unit;
+        # a duplicate `Const` forces `ssa_alloca_transform_blocks` to slot an
+        # unused join temp on unit-fn `if`/`elif`/`else` tails.
+        val emitted_default_def = self.join_needs_default_def_v1(expected_type) and not result_slot_payloadless
+        if emitted_default_def:
             b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         b.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
         self.builder = b
@@ -4824,8 +4829,9 @@ impl MirLowering:
         # The terminator guard skips emit_copy in arms that already returned;
         # if no arm defined result, the returned LocalId would be read while
         # undefined downstream (NULL llvm::Value* -> ICmp SIGSEGV in llvm-lib).
-        # Define it in the merge block so every returned id has a def.
-        if not result_defined and not result_slot_payloadless:
+        # Define it in the merge block only if the dominating entry block did
+        # not already emit the default Const 0.
+        if not result_defined and not emitted_default_def and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known and not mir_join_slot_is_payloadless(inferred_ty):
             self.builder.set_local_type(result, inferred_ty)
@@ -4892,7 +4898,8 @@ impl MirLowering:
         # lower_if -- a statement-position chain with an else whose arms mix a
         # unit statement and a value-yielding one defines `result` on one merge
         # edge only. Dominating default def; arms overwrite it.
-        if chain_has_else and self.join_needs_default_def_v1(expected_type) and not result_slot_payloadless:
+        val emitted_default_def = chain_has_else and self.join_needs_default_def_v1(expected_type) and not result_slot_payloadless
+        if emitted_default_def:
             b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b
         var result_defined = false
@@ -5024,7 +5031,7 @@ impl MirLowering:
         if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
             return result
         self.builder.switch_to_block(merge_block)
-        if not result_defined and not result_slot_payloadless:
+        if not result_defined and not emitted_default_def and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known and chain_has_else and not mir_join_slot_is_payloadless(inferred_ty):
             self.builder.set_local_type(result, inferred_ty)
