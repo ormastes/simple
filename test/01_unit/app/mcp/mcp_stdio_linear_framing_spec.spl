@@ -1,0 +1,66 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/mcp_server_rss_growth_long_session_2026-11-24.md
+"""
+# MCP Linear Stdio Framing and Hot-Accumulator Bounds
+
+Guards against regressions of the O(n^2) and per-character string retention
+bugs in `app.mcp`:
+- `src/app/mcp/main.spl` must declare and delegate `_mcp_read_line` and
+  `_mcp_read_chars` to `rt_stdin_read_line_text` and `rt_stdin_read_chars_text`
+  rather than concatenating `stdin_read_char()` byte-by-byte.
+- `src/app/mcp/main_lazy_json.spl` must slice byte runs in `escape_json` and
+  `strip_ansi` rather than pushing one string per character.
+- `src/app/mcp/main_lazy_ctx_tools.spl` must parse `stats.sdn` linearly in
+  `_ctx_load_stats` and coalesce paired stats bumps via `_ctx_stats_bump2`.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_set, dir_create, dir_remove_all, file_read_text_at, read_file_text, time_now_unix_micros}
+use app.mcp.main_lazy_ctx_tools.{ctx_index_text, ctx_stats_text}
+
+fn _fresh_ctx_store() -> text:
+    var base = env_get("SIMPLE_TEST_TMP") ?? ""
+    if base == "":
+        base = "build/tmp"
+    val dir = base + "/simple_mcp_linear_spec_" + str(time_now_unix_micros())
+    dir_remove_all(dir)
+    dir_create(dir, true)
+    env_set("SIMPLE_CTX_DIR", dir)
+    dir
+
+describe "MCP linear stdio framing contract":
+    it "declares and calls rt_stdin_read_line_text and rt_stdin_read_chars_text":
+        val src = read_file_text("src/app/mcp/main.spl")
+        expect(src.contains("extern fn rt_stdin_read_line_text() -> text")).to_equal(true)
+        expect(src.contains("extern fn rt_stdin_read_chars_text(n: i64) -> text")).to_equal(true)
+        expect(src.contains("extern fn stdin_read_char()")).to_equal(false)
+        expect(src.contains("rt_stdin_read_line_text()")).to_equal(true)
+        expect(src.contains("rt_stdin_read_chars_text(count)")).to_equal(true)
+
+    it "declares linear stdin text primitives in runtime.h":
+        val hdr = read_file_text("src/runtime/runtime.h")
+        expect(hdr.contains("rt_stdin_read_line_text(void)")).to_equal(true)
+        expect(hdr.contains("rt_stdin_read_chars_text(int64_t count)")).to_equal(true)
+
+describe "MCP JSON and ctx stats hot-path accumulators":
+    it "uses byte-slice run copying in escape_json and strip_ansi":
+        val src = read_file_text("src/app/mcp/main_lazy_json.spl")
+        expect(src.contains("s.byte_at(")).to_equal(true)
+        expect(src.contains("s.substring(span_start,")).to_equal(true)
+        expect(src.contains("_json_ctrl_chars")).to_equal(false)
+
+    it "parses stats.sdn linearly and coalesces paired stats bumps":
+        val src = read_file_text("src/app/mcp/main_lazy_ctx_tools.spl")
+        expect(src.contains("parse_sdn_table")).to_equal(false)
+        expect(src.contains("fn _ctx_stats_bump2(")).to_equal(true)
+
+    it "records and reloads ctx stats.sdn across index and stats reads":
+        val dir = _fresh_ctx_store()
+        val count = ctx_index_text("alpha beta gamma\ndelta epsilon", "linear:spec")
+        expect(count.count).to_equal(1)
+        val stats = ctx_stats_text()
+        expect(stats.contains("chunks: 1")).to_equal(true)
+        expect(stats.contains("bytes_indexed: 30")).to_equal(true)
+        expect(stats.contains("calls: index=1")).to_equal(true)
+        dir_remove_all(dir)
