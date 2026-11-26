@@ -1,6 +1,7 @@
 use std.spec
 use app.llm_caret.workbench.remote_pane_view_v1.*
-use app.orchestrator.controller_gateway_v1.controller_gateway_request_decode_v1
+use app.orchestrator.controller_gateway_v1.{ControllerGatewayRequestV1, controller_gateway_request_decode_v1,
+    controller_gateway_request_encode_v1}
 use app.orchestrator.validation.OrchestratorValidationReplyV1
 use std.common.config_core.server_context_types_v1.{ResolvedServerV1, ServerRecordV1}
 use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
@@ -9,6 +10,13 @@ use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneT
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.encode.sdn_encode_canonical
 use std.common.sdn.value.SdnValue
+use app.llm_caret.workbench.remote_pane_control_v1.{CaretRemotePaneRouteV1, caret_remote_pane_target_request_v1,
+    caret_remote_pane_target_complete_v1, caret_remote_pane_from_attach_v1}
+use app.llm_caret.cs_dashboard.{cs_dashboard_new, cs_frame_rows}
+use app.llm_caret.cs_orchestrator_v1.{cs_orchestrator_dispatch_v1, cs_orchestrator_pane_surface_v1}
+use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_encode_v6}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostAgentInvokeRequestV4,
+    host_agent_invoke_request_encode_v4}
 
 fn pane_scope_v1() -> CaretRemotePaneScopeV1:
     val record = ServerRecordV1(name: "ci", transport: "ssh", host: "build.example.test", port: 2222,
@@ -56,6 +64,42 @@ fn pane_complete_v1(view: CaretRemotePaneViewV1, scope: CaretRemotePaneScopeV1, 
     caret_remote_pane_complete_v1(view, scope, source, OrchestratorValidationReplyV1(exit_code: code, output: output))
 
 describe "Caret signed remote pane view":
+    it "admits the exact gateway target request and checks its selected carrier before reading an attach packet":
+        val scope = pane_scope_v1()
+        val route = CaretRemotePaneRouteV1("-", "test", "ci", scope.profile_path)
+        val invoke = host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4(operation_id: scope.operation_id,
+            manifest: "target codec fixture")).unwrap()
+        val sub = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "agent-pane-target", frame: invoke)).unwrap()
+        val source = controller_gateway_request_encode_v1(ControllerGatewayRequestV1(action: "agent-pane-target",
+            controller_id: scope.controller_id, request_uid: scope.operation_id, source: sub,
+            ns: "", name: "", source_digest: "")).unwrap()
+        val prepared = caret_remote_pane_target_request_v1(route, scope.server, source).unwrap()
+        expect(prepared.source).to_equal(source)
+        expect(prepared.invoke_digest).to_equal(sha256_text(invoke))
+        expect(caret_remote_pane_target_complete_v1(prepared, pane_target_v1(scope)).is_err()).to_equal(true)
+        var exact = pane_scope_v1()
+        exact.invoke_digest = sha256_text(invoke)
+        val target = caret_remote_pane_target_complete_v1(prepared, pane_target_v1(exact)).unwrap()
+        var changed = pane_scope_v1().server
+        changed.context = "another-context"
+        expect(caret_remote_pane_from_attach_v1(target, changed, "invalid attach").unwrap_err()).to_equal("caret-remote-pane-endpoint-changed")
+        expect(caret_remote_pane_from_attach_v1(target, scope.server, "invalid attach").is_err()).to_equal(true)
+
+    it "shows an explicitly read-only surface without importing it into the local dashboard":
+        val session = "caret-remote-pane-unit"
+        expect(cs_orchestrator_dispatch_v1(session, ["pane-view", "/unneeded-attach.sdn"])).to_equal(
+            "select a remote pane target in this session first")
+        expect(cs_orchestrator_pane_surface_v1(session).is_none()).to_equal(true)
+        val dashboard = cs_dashboard_new(session)
+        val lines = ["REMOTE PANE (read-only) run-1", "waiting for reply", "escaped \\x1b output"]
+        for cols in [55, 120]:
+            val local = cs_frame_rows(dashboard, cols, 12, "", false).join("\n")
+            val remote = cs_frame_rows(dashboard, cols, 12, "", false, lines).join("\n")
+            expect(local.contains("REMOTE PANE")).to_equal(false)
+            expect(remote).to_contain("REMOTE PANE (read-only)")
+            expect(remote).to_contain("escaped \\x1b output")
+            expect(dashboard.screen.len()).to_equal(0)
+
     it "pins target continuity, native epoch, signed binding metadata, and selected carrier":
         val scope = pane_scope_v1()
         var binding = pane_binding_v1()

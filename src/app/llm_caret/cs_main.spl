@@ -19,7 +19,8 @@ use std.nogc_async_mut.sosix.host_facade.{sosix_platform, sosix_print_raw as pri
 use app.llm_caret.cs_dashboard.{CsAgent, CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_frame_rows,
     cs_poll_screens, cs_resize_agents, cs_agent_area, cs_reap_containers}
-use app.llm_caret.cs_orchestrator_v1.{cs_orchestrator_remote_poll_v1, cs_orchestrator_remote_close_v1}
+use app.llm_caret.cs_orchestrator_v1.{cs_orchestrator_remote_poll_v1, cs_orchestrator_remote_close_v1,
+    cs_orchestrator_pane_visible_v1, cs_orchestrator_pane_surface_v1}
 use app.llm_caret.workbench.capability_checklist.{capability_rows, capability_lines,
     capability_probes_live}
 use app.llm_caret.workbench.key_resolver.{KeyEvent, KeyFocus, KeyRoute, KeyRouteKind,
@@ -122,7 +123,7 @@ fn cs_run(io: CaretIo, session: text) -> CaretLoopResult:
     while running:
         val size = io.terminal_size()
         val (cols, rows) = cs_effective_size(size.cols, size.rows)
-        io.emit(cs_render(d, cols, rows))
+        io.emit(cs_render(d, cols, rows, cs_orchestrator_pane_surface_v1(session) ?? []))
         val read_result = io.read_line()
         val got_line = read_result.0
         val line = read_result.1
@@ -317,6 +318,8 @@ fn _cs_send_raw(session: text, pane: text, bytes: [u8]) -> bool:
 # replayed against the new focus rather than dropped.
 fn _cs_terminal_keys(d0: CsDashboard, state0: LeaderState, focus0: KeyFocus,
         keys: [[u8]], session: text) -> (CsDashboard, LeaderState, KeyFocus, text):
+    if cs_orchestrator_pane_visible_v1(session):
+        return (d0, state0, KeyFocus.NativeView, "")
     cs_terminal_keys_via(d0, state0, focus0, keys,
         \pane, b: _cs_send_raw(session, pane, b))
 
@@ -371,6 +374,9 @@ fn cs_run_live(session: text) -> CaretLoopResult:
     var carry: [u8] = []
     var replay = ""
     while running:
+        if focus == KeyFocus.TerminalSurface and cs_orchestrator_pane_visible_v1(session):
+            focus = KeyFocus.NativeView
+            carry = []
         publish_live_focus(focus)
         val size = _live_size()
         val (cols, rows) = cs_effective_size(size.cols, size.rows)
@@ -408,7 +414,8 @@ fn cs_run_live(session: text) -> CaretLoopResult:
             last_clock = clock
             dirty = true
         if dirty or full:
-            val frame = cs_frame_rows(_cs_show_focus(d, focus), cols, rows, clock, true)
+            val frame = cs_frame_rows(_cs_show_focus(d, focus), cols, rows, clock, true,
+                cs_orchestrator_pane_surface_v1(session) ?? [])
             var cursor = 3 + _char_count(d.input)
             if cursor > cols:
                 cursor = cols
@@ -467,6 +474,9 @@ fn cs_run_live(session: text) -> CaretLoopResult:
             leader_state = kr.state
             if kr.route.kind != KeyRouteKind.Widget:
                 if kr.route.kind == KeyRouteKind.Action and kr.route.action == LeaderAction.ToggleComposerTerminal:
+                    if cs_orchestrator_pane_visible_v1(session):
+                        d = _logged_outcome(d, "remote pane is read-only")
+                        continue
                     focus = toggle_focus(focus)
                     d = _logged_outcome(d, _cs_focus_text(d, focus))
                     continue
