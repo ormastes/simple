@@ -13,23 +13,33 @@ use os.desktop.shell.{DesktopShell}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
+# Windows are admitted at no less than WM_WINDOW_MIN_WIDTH x
+# WM_WINDOW_MIN_HEIGHT (160x120); a smaller request is widened by
+# create_window, which then rejects pixel content sized for the request.
+# Fixtures therefore use 160x120 windows (152x84 content area).
+val CONTENT_W: i32 = 152
+val CONTENT_H: i32 = 84
+
 fn content_dispatch_compositor() -> Compositor:
+    content_dispatch_compositor_sized(160, 240)
+
+fn content_dispatch_compositor_sized(width: i32, height: i32) -> Compositor:
     Compositor.with_backends(
-        HeadlessHostCompositorBackend.new(160, 240), nil, 160, 240
+        HeadlessHostCompositorBackend.new(width, height), nil, width, height
     )
 
 describe "p2_p3_bug_reproduction":
     it "produces distinct canonical GUI Web and pixel frames for one shell scene":
         step("Reproduce the exact failure")
-        var compositor = content_dispatch_compositor()
+        var compositor = content_dispatch_compositor_sized(480, 240)
         val gui = compositor.create_window_with_tree(
-            "GUI", 0, 10, 52, 80,
+            "GUI", 0, 10, 160, 120,
             build_tree(column("gui-root", [label("gui-label", "GUI")]))
         )
-        val web = compositor.create_window("Web", 52, 10, 52, 80)
+        val web = compositor.create_window("Web", 160, 10, 160, 120)
         compositor.update_window_content(web.to_u64(), "<p>Web</p>")
-        val pixel = compositor.create_window("Pixel", 104, 10, 52, 80)
-        val handle = compositor.create_pixel_content(44, 44, 0xff102030u32)
+        val pixel = compositor.create_window("Pixel", 320, 10, 160, 120)
+        val handle = compositor.create_pixel_content(CONTENT_W, CONTENT_H, 0xff102030u32)
         expect(handle > 0).to_equal(true)
         expect(compositor.attach_window_pixel_content(pixel.to_u64(), handle)).to_equal(true)
         var shell = DesktopShell.new(compositor)
@@ -44,11 +54,11 @@ describe "p2_p3_bug_reproduction":
         expect(frames[2].origin_kind).to_equal(WM_CONTENT_ORIGIN_PIXEL_SURFACE)
         for frame in frames:
             expect(frame.scene_revision).to_equal(revision)
-            expect(frame.width).to_equal(44)
-            expect(frame.height).to_equal(44)
-            expect(frame.pixels.len()).to_equal(44 * 44)
+            expect(frame.width).to_equal(CONTENT_W)
+            expect(frame.height).to_equal(CONTENT_H)
+            expect(frame.pixels.len()).to_equal(CONTENT_W * CONTENT_H)
         expect(frames[2].pixels[0]).to_equal(0xff102030u32)
-        expect(frames[2].pixels[44 * 44 - 1]).to_equal(0xff102030u32)
+        expect(frames[2].pixels[CONTENT_W * CONTENT_H - 1]).to_equal(0xff102030u32)
         shell.compositor.destroy_window(gui.value.to_i32())
         shell.compositor.destroy_window(web)
         shell.compositor.destroy_window(pixel)
@@ -58,8 +68,8 @@ describe "p2_p3_bug_reproduction":
     it "presents pixel content through the actual shared executor backend":
         step("Exercise the repaired owner")
         var compositor = content_dispatch_compositor()
-        val pixel = compositor.create_window("Pixel", 8, 10, 52, 80)
-        val handle = compositor.create_pixel_content(44, 44, 0xff102030u32)
+        val pixel = compositor.create_window("Pixel", 0, 10, 160, 120)
+        val handle = compositor.create_pixel_content(CONTENT_W, CONTENT_H, 0xff102030u32)
         expect(compositor.attach_window_pixel_content(pixel.to_u64(), handle)).to_equal(true)
         var shell = DesktopShell.new(compositor)
         var executor = Engine2dWmFrameExecutor.create(
@@ -70,6 +80,33 @@ describe "p2_p3_bug_reproduction":
         expect(shell.last_rendered_scene_revision).to_equal(revision)
         val pixels = executor.engine.read_pixels()
         expect(pixels.len()).to_equal(160 * 240)
+        var content_count = 0
+        var min_x = 160
+        var min_y = 240
+        var max_x = -1
+        var max_y = -1
+        var i = 0
+        while i < pixels.len():
+            if pixels[i] == 0xff102030u32:
+                content_count = content_count + 1
+                val px = i % 160
+                val py = i / 160
+                if px < min_x:
+                    min_x = px
+                if py < min_y:
+                    min_y = py
+                if px > max_x:
+                    max_x = px
+                if py > max_y:
+                    max_y = py
+            i = i + 1
+        # The whole 152x84 content area, and nothing else, is the pixel
+        # surface color: content origin is the 4px border and 32px title bar.
+        expect(content_count).to_equal(CONTENT_W * CONTENT_H)
+        expect(min_x).to_equal(4)
+        expect(min_y).to_equal(42)
+        expect(max_x).to_equal(4 + CONTENT_W - 1)
+        expect(max_y).to_equal(42 + CONTENT_H - 1)
         expect(pixels[50 * 160 + 20]).to_equal(0xff102030u32)
         shell.compositor.destroy_window(pixel)
 
