@@ -132,6 +132,9 @@ int64_t rt_cuda_launch_kernel(int64_t module, const uint8_t *name, uint64_t len,
     if (!name || len != 4 || memcmp(name, "kern", 4) != 0) return -1;
     return module + 2 * gx + 3 * gy + 4 * gz + 5 * bx + 6 * by + 7 * bz + 8 * args;
 }
+int64_t rt_cuda_module_get_function(int64_t module, const char *name) {
+    return name && strcmp(name, "kern") == 0 ? module + 40 : -1;
+}
 const char fake_cuda_name_storage[] = "fake-cuda";
 #ifdef REENTRANT_LOAD
 #include <dlfcn.h>
@@ -203,6 +206,7 @@ int64_t rt_cuda_module_load_data(const uint8_t *, uint64_t);
 int64_t rt_cuda_launch_kernel(int64_t, const uint8_t *, uint64_t, int64_t, int64_t,
     int64_t, int64_t, int64_t, int64_t, int64_t);
 atomic_int fake_loading_started;
+int64_t rt_cuda_module_get_function(int64_t, const char *);
 static int64_t race_results[2];
 static void *race_init(void *slot) {
     *(int64_t *)slot = rt_cuda_init();
@@ -281,8 +285,9 @@ int main(int argc, char **argv) {
      * own storage (which an unload would unmap). */
     name = rt_cuda_device_name(device);
     provider = dlopen(argv[1], RTLD_NOW | RTLD_NOLOAD);
-    printf("launch=%lld name_owned=%d\n",
+    printf("launch=%lld fn=%lld name_owned=%d\n",
         (long long)rt_cuda_launch_kernel(1, (const uint8_t *)"kern", 4, 1, 1, 1, 1, 1, 1, 1),
+        (long long)rt_cuda_module_get_function(2, "kern"),
         provider && dlsym(provider, "fake_cuda_name_storage") != (void *)name &&
             strcmp(name, "fake-cuda") == 0 ? 1 : 0);
     return 0;
@@ -450,7 +455,7 @@ unloaded=1 reloaded=0 count=0 buffer=0 path=0" ]
 [ "$incomplete" = "$bad" ]
 [ "$cuda_good" = "loaded=1 available=1 init=0 ptr=91 fill=0 dtoh=0 word=5a5a5a5a
 dev=5 cc=121 id=77 name=fake-cuda err=CUDA_ERROR_NO_DEVICE slice2d=285 module=3
-launch=36 name_owned=1" ]
+launch=36 fn=42 name_owned=1" ]
 # A second first-call that lands in LOADING waits for the loader, never "unavailable".
 [ "$cuda_race" = "race=0,0" ]
 # A fork child of a process mid-load fails the load instead of waiting forever.
@@ -460,7 +465,7 @@ launch=36 name_owned=1" ]
 # Rejected provider: every query takes the Rust non-cuda twin's sentinel.
 [ "$cuda_incomplete" = "loaded=0 available=0 init=3 ptr=-3 fill=-3 dtoh=-3 word=00000000
 dev=-3 cc=0 id=0 name=No CUDA err=CUDA_ERROR_NO_DEVICE slice2d=-3 module=-3
-launch=-3 name_owned=0" ]
+launch=-3 fn=-3 name_owned=0" ]
 
 if command -v readelf >/dev/null 2>&1; then
     if readelf -d "$TMP/harness" | grep -Fq 'provider.so'; then

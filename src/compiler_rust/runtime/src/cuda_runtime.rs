@@ -2538,8 +2538,14 @@ pub extern "C" fn rt_cuda_module_load_data(ptx_ptr: *const u8, ptx_len: u64) -> 
     }
     unsafe {
         let bytes = std::slice::from_raw_parts(ptx_ptr, ptx_len as usize);
+        // The span is not NUL-terminated, but cuModuleLoadData parses PTX as a
+        // C string: copy and terminate it, as rt_cuda_module_load_data_bytes does.
+        let mut image: Vec<u8> = bytes.to_vec();
+        if image.last() != Some(&0) {
+            image.push(0);
+        }
         let mut module: CUmodule = ptr::null_mut();
-        let err = cuModuleLoadData(&mut module, bytes.as_ptr() as *const c_void);
+        let err = cuModuleLoadData(&mut module, image.as_ptr() as *const c_void);
         if err != 0 {
             return -(err as i64);
         }
@@ -2606,6 +2612,9 @@ pub extern "C" fn rt_cuda_module_load_data_array(data: RuntimeValue) -> i64 {
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_unload(module: i64) -> i64 {
+    if module <= 0 {
+        return -1;
+    }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
@@ -2628,7 +2637,7 @@ pub extern "C" fn rt_cuda_module_unload(_module: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_get_function(module: i64, func_name: *const c_char) -> i64 {
-    if func_name.is_null() {
+    if func_name.is_null() || module <= 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {
@@ -2667,7 +2676,7 @@ pub extern "C" fn rt_cuda_launch_kernel(
     block_z: i64,
     args_ptr: i64,
 ) -> i64 {
-    if func_name_ptr.is_null() || func_name_len == 0 {
+    if func_name_ptr.is_null() || func_name_len == 0 || module <= 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {
@@ -3070,7 +3079,7 @@ pub extern "C" fn rt_cuda_launch_kernel_ex(
     stream: i64,
     args_ptr: i64,
 ) -> i64 {
-    if func_name_ptr.is_null() || func_name_len == 0 || shared_bytes < 0 || stream < 0 {
+    if func_name_ptr.is_null() || func_name_len == 0 || module <= 0 || shared_bytes < 0 || stream < 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {

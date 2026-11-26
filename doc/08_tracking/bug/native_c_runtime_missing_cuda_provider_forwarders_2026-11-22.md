@@ -40,7 +40,7 @@ Extend `scripts/check/check-gpu-provider-dynload-registry.shs` to cover the new 
 
 ## Resolution (2026-11-26, work/bug-cuda-native-20261126) — verified on GB10
 
-- `runtime_dynload.c` now forwards 27 of the 28 externs to the CUDA provider
+- `runtime_dynload.c` forwarded 27 of the 28 externs (all 28 since `cuda_module_get_function_cstr_text_abi_2026-11-26`) to the CUDA provider
   (`GPU_CALLn` rows plus hand-written `f64_slice_2d`, `launch_kernel`,
   `launch_kernel_name` and `device_name`). `device_name` copies the
   provider string into a per-thread runtime-owned buffer while the call is
@@ -54,13 +54,13 @@ Extend `scripts/check/check-gpu-provider-dynload-registry.shs` to cover the new 
   -3, or 0 for `device_compute_capability`/`device_identity`, or `"No CUDA"`
   for `device_name`. `rt_cuda_get_error_string` is a pure C copy of the Rust
   code→name table, so it needs no provider. `module_load` and
-  `module_load_data` take a Simple `text` as (bytes, len), as
-  `launch_kernel_ex` does. `simple_cuda_required[]` is unchanged.
-- **Gap, not filled** (`cuda_module_get_function_cstr_text_abi_2026-11-26`):
-  `rt_cuda_module_get_function`. Rust takes `*const c_char` for its `text`
-  argument, but the Simple text ABI is (bytes, len), so it needs an ABI
-  decision. `rt_cuda_launch_kernel` already takes `(*const u8, u64)` and is
-  forwarded.
+  `module_load_data` take a Simple `text` as (bytes, len): both have a
+  `text_extern_abi.spl` row, so native codegen splits them. `simple_cuda_required[]` is unchanged.
+- **Gap, closed 2026-11-26** (`cuda_module_get_function_cstr_text_abi_2026-11-26`):
+  `rt_cuda_module_get_function` is now forwarded too, so all 28 are. It keeps
+  the C-string ABI: native codegen passes this `text` argument as one
+  `rt_interp_cstr` pointer, because it has no `text_extern_abi.spl` row. See
+  that bug's own doc.
 - **Second root cause, found end to end:** the provider DSO itself could not be
   `dlopen`ed. `runtime_timestamp.c` used initial-exec TLS, which marks
   `libsimple_runtime.so` `DF_STATIC_TLS`. glibc then needs the whole ~72 KiB
