@@ -2438,6 +2438,11 @@ static void rt_core_reclaim_transient_raw(void) {
     rt_core_transient_raw_clear();
 }
 
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+#define PERSISTENT_RAW_REGISTRY_HASH(ptr) rt_core_immortal_hash_ptr(ptr)
+#include "persistent_raw_registry_impl.h"
+#endif
+
 /* caller holds s->lock; table has a free slot */
 static int rt_core_immortal_registry_insert_raw(RtCoreImmortalShard* s, uintptr_t p) {
     size_t mask = s->cap - 1;
@@ -3333,13 +3338,23 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
     }
 #else
     uintptr_t raw = (uintptr_t)value;
-    uintptr_t raw_ptr = raw & RT_VALUE_TAG_MASK ? raw & ~RT_VALUE_TAG_MASK : raw;
-    RtCoreTransientRawAlloc* allocation = rt_core_transient_raw_lookup(raw_ptr);
-    if (allocation) {
-        *node = (RtCoreTransientNode){
-            (void*)raw_ptr, RT_CORE_TRANSIENT_RAW,
-            allocation->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK};
-        return 1;
+    if ((raw & RT_VALUE_TAG_MASK) <= 1) {
+        uintptr_t raw_ptr = raw & ~RT_VALUE_TAG_MASK;
+        if (raw_ptr != 0) {
+            RtCoreTransientRawAlloc* allocation = rt_core_transient_raw_lookup(raw_ptr);
+            if (allocation) {
+                *node = (RtCoreTransientNode){
+                    (void*)raw_ptr, RT_CORE_TRANSIENT_RAW,
+                    allocation->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK};
+                return 1;
+            }
+            size_t raw_bytes = 0;
+            if (rt_persistent_raw_lookup_size((void*)raw_ptr, &raw_bytes)) {
+                *node = (RtCoreTransientNode){
+                    (void*)raw_ptr, RT_CORE_TRANSIENT_RAW, raw_bytes};
+                return 1;
+            }
+        }
     }
 #endif
     {
@@ -3622,7 +3637,14 @@ int8_t rt_transient_heap_promote(int64_t value) {
 #else
                     RtCoreTransientRawAlloc* raw =
                         rt_core_transient_raw_lookup((uintptr_t)node.ptr);
-                    if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                    if (raw) {
+                        size_t raw_bytes = raw->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                        if (!rt_persistent_raw_register(node.ptr, raw_bytes)) {
+                            ok = 0;
+                        } else {
+                            raw->bytes = raw_bytes;
+                        }
+                    }
 #endif
                     break;
                 }
@@ -3732,12 +3754,7 @@ static int core_adopt_module_owned(const RtCoreTransientNode* node, uint32_t mod
         case RT_CORE_TRANSIENT_FLOAT: return ((RtCoreFloat*)node->ptr)->transient_scope_id == module_id;
         case RT_CORE_TRANSIENT_CLOSURE: return ((RtCoreClosure*)node->ptr)->transient_scope_id == module_id;
         case RT_CORE_TRANSIENT_RAW: {
-#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-            return 1; /* ownership not visible here: walk (conservative) */
-#else
-            RtCoreTransientRawAlloc* raw = rt_core_transient_raw_lookup((uintptr_t)node->ptr);
-            return raw && (raw->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
-#endif
+            return 1; /* raw blocks are not session-tagged: walk (conservative) */
         }
         default:
             return 0;
@@ -3837,7 +3854,14 @@ int8_t rt_transient_heap_adopt(int64_t value) {
 #else
                 RtCoreTransientRawAlloc* raw =
                     rt_core_transient_raw_lookup((uintptr_t)node.ptr);
-                if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                if (raw) {
+                    size_t raw_bytes = raw->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                    if (!rt_persistent_raw_register(node.ptr, raw_bytes)) {
+                        ok = 0;
+                    } else {
+                        raw->bytes = raw_bytes;
+                    }
+                }
 #endif
                 break;
             }
@@ -8563,6 +8587,11 @@ static void rt_core_transient_raw_reclaim_batch(void** raws, size_t count) {
     rt_struct_alloc_lock_acquire();
     for (size_t i = 0; i < count; i++) rt_struct_alloc_unregister_locked(raws[i]);
     rt_struct_alloc_lock_release();
+    rt_persistent_raw_lock_acquire();
+    if (rt_persistent_raw_cap != 0 && rt_persistent_raw_len != 0) {
+        for (size_t i = 0; i < count; i++) rt_persistent_raw_unregister_locked(raws[i]);
+    }
+    rt_persistent_raw_lock_release();
     for (size_t i = 0; i < count; i++) {
         /* Now that sampled guard slots are registered here too, reclaim
          * must not hand one to free(): a slot is a page-aligned mmap
@@ -8583,6 +8612,17 @@ static void rt_core_transient_raw_reclaim_batch(void** raws, size_t count) {
  * SIMPLE_CORE_C_STANDALONE: a native-all link needs the hosted providers below
  * even though it still compiles runtime_memory.c beside runtime_native.c. */
 #if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+static int rt_core_raw_register_alloc(void* ptr, size_t size) {
+    if (!rt_core_transient_raw_register(ptr, size)) return 0;
+    if (!rt_core_transient_array_scope_active || rt_core_transient_array_scope_paused) {
+        if (!rt_persistent_raw_register(ptr, size)) {
+            rt_core_transient_raw_erase(ptr);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 void* rt_alloc(int64_t size) {
     if (size < 0) return NULL;
     if (rt_mem_guard_should_sample((size_t)size)) {
@@ -8595,7 +8635,7 @@ void* rt_alloc(int64_t size) {
              * could not classify a tagged raw root that happened to be
              * sampled, so it refused, and a promoted live graph was reported
              * unpromotable under SIMPLE_MEM_GUARD_RATE. */
-            if (!rt_core_transient_raw_register(guarded, (size_t)size)) {
+            if (!rt_core_raw_register_alloc(guarded, (size_t)size)) {
                 rt_mem_guard_free_sampled(guarded);
                 return NULL;
             }
@@ -8605,8 +8645,8 @@ void* rt_alloc(int64_t size) {
          * to the normal allocator below rather than returning NULL for a
          * sampling decision that isn't itself an OOM. */
     }
-    void* ptr = rt_observed_malloc_v1((size_t)size);
-    if (ptr && !rt_core_transient_raw_register(ptr, (size_t)size)) {
+    void* ptr = rt_observed_calloc_v1(1, (size_t)size);
+    if (ptr && !rt_core_raw_register_alloc(ptr, (size_t)size)) {
         free(ptr);
         return NULL;
     }
@@ -8654,6 +8694,9 @@ int8_t rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t a
 void* rt_realloc(void* ptr, int64_t size) {
     if (size < 0) return NULL;
     if (!ptr) return rt_alloc(size);
+    size_t persistent_old_size = 0;
+    int persistent_tracked = rt_persistent_raw_lookup_size(ptr, &persistent_old_size);
+    RtCoreTransientRawAlloc* tracked = rt_core_transient_raw_lookup((uintptr_t)ptr);
     size_t struct_bytes = 0;
     if (rt_struct_alloc_lookup_size(ptr, &struct_bytes)) {
         if (size == 0) {
@@ -8662,6 +8705,23 @@ void* rt_realloc(void* ptr, int64_t size) {
         }
         void* next = rt_struct_alloc(size);
         if (!next) return NULL;
+        if (tracked) {
+            int owned = (tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
+            RtCoreTransientRawAlloc* next_t = rt_core_transient_raw_lookup((uintptr_t)next);
+            if (next_t) {
+                next_t->bytes = (size_t)size | (owned ? RT_CORE_TRANSIENT_RAW_OWNED_BIT : 0);
+            }
+            if (!owned && !rt_persistent_raw_register(next, (size_t)size)) {
+                rt_free(next);
+                return NULL;
+            }
+        } else if (persistent_tracked) {
+            rt_core_transient_raw_erase(next);
+            if (!rt_persistent_raw_register(next, (size_t)size)) {
+                rt_free(next);
+                return NULL;
+            }
+        }
         memcpy(next, ptr, struct_bytes < (size_t)size ? struct_bytes : (size_t)size);
         rt_free(ptr);
         return next;
@@ -8676,43 +8736,77 @@ void* rt_realloc(void* ptr, int64_t size) {
         RtMemGuardSlot* slot = rt_mem_guard_find(ptr);
         size_t old_size = slot ? slot->size : 0;
         if (size == 0) {
+            rt_persistent_raw_unregister(ptr);
+            rt_core_transient_raw_erase(ptr);
             rt_mem_guard_free_sampled(ptr);
             return NULL;
         }
-        void* next = rt_observed_malloc_v1((size_t)size);
+        void* next = rt_observed_calloc_v1(1, (size_t)size);
         if (!next) return NULL;
-        if (!rt_core_transient_raw_register(next, (size_t)size)) {
+        if (tracked) {
+            int owned = (tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
+            if (!rt_core_transient_raw_register_state(next, (size_t)size, owned) ||
+                    (!owned && !rt_persistent_raw_register(next, (size_t)size))) {
+                free(next);
+                return NULL;
+            }
+        } else if (persistent_tracked && !rt_persistent_raw_register(next, (size_t)size)) {
             free(next);
             return NULL;
         }
         memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
+        rt_persistent_raw_unregister(ptr);
+        rt_core_transient_raw_erase(ptr);
         rt_mem_guard_free_sampled(ptr);
         return next;
     }
-    RtCoreTransientRawAlloc* tracked = rt_core_transient_raw_lookup((uintptr_t)ptr);
-    if (!tracked) return rt_observed_realloc_v1(ptr, (size_t)size);
+    if (!tracked) {
+        if (size == 0 && persistent_tracked) {
+            rt_free(ptr);
+            return NULL;
+        }
+        void* next = rt_observed_realloc_v1(ptr, (size_t)size);
+        if (next && persistent_tracked) {
+            if ((uintptr_t)next != (uintptr_t)ptr) {
+                rt_persistent_raw_unregister(ptr);
+            }
+            (void)rt_persistent_raw_register(next, (size_t)size);
+            if ((size_t)size > persistent_old_size) {
+                memset((uint8_t*)next + persistent_old_size, 0,
+                       (size_t)size - persistent_old_size);
+            }
+        }
+        return next;
+    }
     if (size == 0) {
+        rt_persistent_raw_unregister(ptr);
         rt_core_transient_raw_erase(ptr);
         free(ptr);
         return NULL;
     }
     size_t old_size = tracked->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK;
     int owned = (tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
-    void* next = rt_observed_malloc_v1((size_t)size);
+    void* next = rt_observed_calloc_v1(1, (size_t)size);
     if (!next) return NULL;
-    if (!rt_core_transient_raw_register_state(next, (size_t)size, owned)) {
+    if (!rt_core_transient_raw_register_state(next, (size_t)size, owned) ||
+            (!owned && !rt_persistent_raw_register(next, (size_t)size))) {
+        rt_core_transient_raw_erase(next);
         free(next);
         return NULL;
     }
     memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
+    rt_persistent_raw_unregister(ptr);
     rt_core_transient_raw_erase(ptr);
     free(ptr);
     return next;
 }
 
 void rt_free(void* ptr) {
+    if (!ptr) return;
     rt_struct_alloc_unregister(ptr);
+    rt_persistent_raw_unregister(ptr);
     if (rt_mem_guard_is_slot(ptr)) {
+        rt_core_transient_raw_erase(ptr);
         rt_mem_guard_free_sampled(ptr);
         return;
     }

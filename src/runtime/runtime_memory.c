@@ -60,6 +60,9 @@ static RT_MEMORY_THREAD_LOCAL int rt_transient_raw_paused = 0;
 void rt_free(uint8_t* ptr);
 void spl_free_batch_v1(uint8_t** ptrs, size_t count);
 static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out);
+static int rt_persistent_raw_register(void* ptr, size_t bytes);
+static void rt_persistent_raw_unregister(void* ptr);
+static int rt_persistent_raw_lookup_size(void* ptr, size_t* bytes_out);
 
 static size_t rt_transient_raw_hash(uintptr_t ptr) {
     uint64_t value = (uint64_t)ptr;
@@ -176,7 +179,9 @@ int32_t rt_transient_raw_scope_pause(void) {
 
 int64_t rt_transient_raw_words(
     int64_t value, const uintptr_t** words, uintptr_t* canonical_ptr) {
+    if ((((uintptr_t)value) & (uintptr_t)7) > 1) return -1;
     uintptr_t ptr = ((uintptr_t)value) & ~(uintptr_t)7;
+    if (ptr == 0) return -1;
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     uint64_t bytes = 0;
     if (rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) {
@@ -192,11 +197,16 @@ int64_t rt_transient_raw_words(
         return (int64_t)((entry->bytes & RT_TRANSIENT_RAW_SIZE_MASK) / sizeof(uintptr_t));
     }
 #endif
-    /* A lowering owner is allocated before its per-module transient scope.
-     * It is therefore absent from the transient allocation table, but its
-     * fields are the roots through which scope-owned arrays and strings must
-     * be discovered.  The struct registry is the existing fail-closed proof
-     * that this is a live native object and supplies its exact scan bound. */
+    /* A lowering owner or persistent raw container (e.g. SymbolTable.scopes[0]
+     * / Scope(0), or a promoted Scope-1 block queried in Scope 2) lives outside
+     * the current transient allocation table, yet its fields are roots through
+     * which scope-owned arrays, dicts, and strings must be discovered. */
+    size_t raw_bytes = 0;
+    if (rt_persistent_raw_lookup_size((void*)ptr, &raw_bytes)) {
+        if (words) *words = (const uintptr_t*)ptr;
+        if (canonical_ptr) *canonical_ptr = ptr;
+        return (int64_t)(raw_bytes / sizeof(uintptr_t));
+    }
     size_t struct_bytes = 0;
     if (!rt_struct_alloc_lookup_size((void*)ptr, &struct_bytes)) return -1;
     if (words) *words = (const uintptr_t*)ptr;
@@ -205,22 +215,27 @@ int64_t rt_transient_raw_words(
 }
 
 int32_t rt_transient_raw_promote(uintptr_t ptr) {
-#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     ptr &= ~(uintptr_t)7;
+    if (ptr == 0) return 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     uint64_t bytes = 0;
     if (rt_transient_raw_owner_query((void*)ptr, &bytes, NULL)) {
+        if (!rt_persistent_raw_register((void*)ptr, (size_t)bytes)) return 0;
         return rt_transient_raw_owner_register_state((void*)ptr, bytes, 0) != 0;
     }
 #else
-    RtTransientRawAlloc* entry = rt_transient_raw_lookup(ptr & ~(uintptr_t)7);
+    RtTransientRawAlloc* entry = rt_transient_raw_lookup(ptr);
     if (entry) {
-        entry->bytes &= RT_TRANSIENT_RAW_SIZE_MASK;
+        size_t bytes = entry->bytes & RT_TRANSIENT_RAW_SIZE_MASK;
+        if (!rt_persistent_raw_register((void*)ptr, bytes)) return 0;
+        entry->bytes = bytes;
         return 1;
     }
-    ptr &= ~(uintptr_t)7;
 #endif
-    /* Persistent struct roots are already outside the transient owner's
-     * reclaim set.  Promotion is intentionally a validated no-op for them. */
+    /* Persistent raw and struct roots are already outside the transient
+     * owner's reclaim set.  Promotion is intentionally a validated no-op. */
+    size_t raw_bytes = 0;
+    if (rt_persistent_raw_lookup_size((void*)ptr, &raw_bytes)) return 1;
     size_t struct_bytes = 0;
     return rt_struct_alloc_lookup_size((void*)ptr, &struct_bytes) ? 1 : 0;
 }
@@ -364,12 +379,34 @@ int64_t rt_mem_harden_check_native(void) {
     return tampered;
 }
 
+static int rt_raw_register_alloc(void* ptr, size_t size) {
+    if (!rt_transient_raw_register(ptr, size)) return 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    int8_t transient_owned = 0;
+    int tracked = rt_transient_raw_owner_query(ptr, NULL, &transient_owned) != 0;
+    if (!tracked || !transient_owned) {
+        if (!rt_persistent_raw_register(ptr, size)) {
+            if (tracked) rt_transient_raw_owner_unregister(ptr);
+            return 0;
+        }
+    }
+#else
+    if (!rt_transient_raw_active || rt_transient_raw_paused) {
+        if (!rt_persistent_raw_register(ptr, size)) {
+            rt_transient_raw_erase(ptr);
+            return 0;
+        }
+    }
+#endif
+    return 1;
+}
+
 uint8_t* rt_alloc(int64_t size) {
     if (size <= 0) return NULL;
     if (rt_mem_guard_should_sample((size_t)size)) {
         void* guarded = rt_mem_guard_alloc_sampled((size_t)size);
         if (guarded != NULL) {
-            if (!rt_transient_raw_register(guarded, (size_t)size)) {
+            if (!rt_raw_register_alloc(guarded, (size_t)size)) {
                 rt_mem_guard_free_sampled(guarded);
                 return NULL;
             }
@@ -385,14 +422,14 @@ uint8_t* rt_alloc(int64_t size) {
         if (!base) return NULL;
         *(size_t*)base = (size_t)size;
         uint8_t* user = base + RT_MEM_HARDEN_HEADER_BYTES;
-        if (!rt_transient_raw_register(user, (size_t)size)) {
+        if (!rt_raw_register_alloc(user, (size_t)size)) {
             free(base);
             return NULL;
         }
         return user;
     }
     uint8_t* ptr = (uint8_t*)rt_observed_calloc_v1(1, (size_t)size);
-    if (ptr && !rt_transient_raw_register(ptr, (size_t)size)) {
+    if (ptr && !rt_raw_register_alloc(ptr, (size_t)size)) {
         free(ptr);
         return NULL;
     }
@@ -405,6 +442,9 @@ uint8_t* rt_alloc(int64_t size) {
 #define STRUCT_ALLOC_REGISTRY_COUNT_WRITE_LOCKS 1
 #endif
 #include "struct_alloc_registry_impl.h"
+
+#define PERSISTENT_RAW_REGISTRY_HASH(ptr) rt_transient_raw_hash(ptr)
+#include "persistent_raw_registry_impl.h"
 
 uint8_t* rt_struct_alloc(int64_t size) {
     if (size <= 0) return NULL;
@@ -460,6 +500,8 @@ void* rt_realloc(void* ptr, int64_t size) {
     }
 
     size_t old_size = 0;
+    size_t persistent_old_size = 0;
+    int persistent_tracked = rt_persistent_raw_lookup_size(ptr, &persistent_old_size);
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     uint64_t transient_bytes = 0;
     int8_t transient_owned = 0;
@@ -474,10 +516,29 @@ void* rt_realloc(void* ptr, int64_t size) {
                 rt_free((uint8_t*)(next_ptr)); \
                 return NULL; \
             } \
+            if (!transient_owned && !rt_persistent_raw_register(next_ptr, (size_t)size)) { \
+                rt_free((uint8_t*)(next_ptr)); \
+                return NULL; \
+            } \
+        } else if (persistent_tracked) { \
+            if (!rt_transient_raw_promote((uintptr_t)(next_ptr)) || \
+                    !rt_persistent_raw_register(next_ptr, (size_t)size)) { \
+                rt_free((uint8_t*)(next_ptr)); \
+                return NULL; \
+            } \
         } \
     } while (0)
 #else
-#define RT_PRESERVE_TRANSIENT_REALLOC(next_ptr) do { (void)(next_ptr); } while (0)
+#define RT_PRESERVE_TRANSIENT_REALLOC(next_ptr) \
+    do { \
+        if (persistent_tracked) { \
+            if (!rt_transient_raw_promote((uintptr_t)(next_ptr)) || \
+                    !rt_persistent_raw_register(next_ptr, (size_t)size)) { \
+                rt_free((uint8_t*)(next_ptr)); \
+                return NULL; \
+            } \
+        } \
+    } while (0)
 #endif
     if (rt_struct_alloc_lookup_size(ptr, &old_size)) {
         void* next = rt_struct_alloc(size);
@@ -529,6 +590,16 @@ void* rt_realloc(void* ptr, int64_t size) {
     }
 
     void* next = rt_observed_realloc_v1(ptr, (size_t)size);
+    if (next && persistent_tracked) {
+        if ((uintptr_t)next != (uintptr_t)ptr) {
+            rt_persistent_raw_unregister(ptr);
+        }
+        (void)rt_persistent_raw_register(next, (size_t)size);
+        if ((size_t)size > persistent_old_size) {
+            memset((uint8_t*)next + persistent_old_size, 0,
+                   (size_t)size - persistent_old_size);
+        }
+    }
 #undef RT_PRESERVE_TRANSIENT_REALLOC
     return next;
 }
@@ -540,6 +611,7 @@ static void rt_free_struct_unregistered(uint8_t* ptr) {
         /* Guard slots are never transient-scope-owned and never enter the
          * harden quarantine -- guard_free_sampled already PROT_NONEs the
          * whole mapping, which is the stronger (page-fault) protection. */
+        rt_persistent_raw_unregister(ptr);
         rt_transient_raw_erase(ptr);
         rt_mem_guard_free_sampled(ptr);
         return;
@@ -549,6 +621,7 @@ static void rt_free_struct_unregistered(uint8_t* ptr) {
             /* Double free of a quarantined block: refused, not acted on. */
             return;
         }
+        rt_persistent_raw_unregister(ptr);
         rt_transient_raw_erase(ptr);
         uint8_t* base = ptr - RT_MEM_HARDEN_HEADER_BYTES;
         size_t size = *(size_t*)base;
@@ -556,6 +629,7 @@ static void rt_free_struct_unregistered(uint8_t* ptr) {
         rt_mem_quarantine_push(ptr, base, size);
         return;
     }
+    rt_persistent_raw_unregister(ptr);
     rt_transient_raw_erase(ptr);
     free(ptr);
 }
@@ -584,6 +658,11 @@ void spl_free_batch_v1(uint8_t** ptrs, size_t count) {
     rt_struct_alloc_lock_acquire();
     for (size_t i = 0; i < count; i++) rt_struct_alloc_unregister_locked(ptrs[i]);
     rt_struct_alloc_lock_release();
+    rt_persistent_raw_lock_acquire();
+    if (rt_persistent_raw_cap != 0 && rt_persistent_raw_len != 0) {
+        for (size_t i = 0; i < count; i++) rt_persistent_raw_unregister_locked(ptrs[i]);
+    }
+    rt_persistent_raw_lock_release();
     for (size_t i = 0; i < count; i++) {
         if (ptrs[i]) rt_free_struct_unregistered(ptrs[i]);
     }
