@@ -325,6 +325,10 @@ class SoftwareBackend:
     kernel_table: CpuKernelTable   # per-op provider table for simd_span_batch_execute
     kernel_table_ready: bool       # true once the honest timing gate has run and sealed the table
     simd_batch_hits: i64           # observable: ops the batch dispatcher actually routed to SIMD_ISA
+    # Last kernel-filled opaque span ([colour; count]) and the batch's
+    # non-scalar lookup count for it; see sw_fill_rect_rows.
+    _fill_memo_span: [u32]
+    _fill_memo_lookups: i64
 
     static fn create() -> SoftwareBackend:
         """Create an uninitialized software backend."""
@@ -349,7 +353,9 @@ class SoftwareBackend:
             mirror_valid: false,
             kernel_table: kernel_table_new(),
             kernel_table_ready: false,
-            simd_batch_hits: 0
+            simd_batch_hits: 0,
+            _fill_memo_span: [],
+            _fill_memo_lookups: 0
         )
 
     static fn create_cpu_simd() -> SoftwareBackend:
@@ -429,7 +435,8 @@ impl RenderBackend for SoftwareBackend:
         emu_draw_rect(self, x, y, w, h, color)
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
-        val has_alpha = color_a(color) < 255
+        # color_a(color) < 255 without the cross-module call (~4 us a fill).
+        val has_alpha = color < 0xFF000000u32
         val row_end = y + h
         val clip_y_end = self.clip_y + self.clip_h
         val clip_x_end = self.clip_x + self.clip_w
@@ -445,6 +452,21 @@ impl RenderBackend for SoftwareBackend:
                     alpha_row = self.clip_y
                 if alpha_end > clip_y_end:
                     alpha_end = clip_y_end
+            if not mask_active and self.native_simd_spans and native_pixel_rows_enabled():
+                # The x clip _clip_span applies to every row, done once.
+                if w <= 0 or alpha_end <= alpha_row:
+                    return
+                var blend_x = if x > 0: x else: 0
+                var blend_end = if x + w < self.w: x + w else: self.w
+                if self.clip_enabled:
+                    if blend_x < self.clip_x:
+                        blend_x = self.clip_x
+                    if blend_end > clip_x_end:
+                        blend_end = clip_x_end
+                if blend_end <= blend_x:
+                    return
+                self._sw_blend_const_rect_rows(blend_x, alpha_row, alpha_end, blend_end - blend_x, color)
+                return
             # cpu-lane-loop-ok: one blended span per in-frame row
             while alpha_row < alpha_end:
                 self.sw_hline_blend(x, alpha_row, w, color)
@@ -1025,17 +1047,11 @@ impl RenderBackend for SoftwareBackend:
         val alpha = color_a(color)
         if alpha == 0:
             return
-        if alpha == 255:
-            self.draw_rect_filled(x, y, w, h, color)
-            return
-        var row = 0
-        # Route each clipped row through the backend's constant-colour span
-        # owner.  The mask-off path blends in place with the native
-        # AVX2/SSE2/NEON/RVV primitive; clipped and masked rows retain the
-        # exact per-pixel fallback owned by sw_hline_blend.
-        while row < h:
-            self.sw_hline_blend(x, y + row, w, color)
-            row = row + 1
+        # Opaque is a plain fill; a translucent draw_rect_filled is the same
+        # per-row sw_hline_blend walk (clipped to the frame rows first, where
+        # sw_hline_blend is a no-op anyway) and its mask-off SIMD path blends
+        # the rect in one call.
+        self.draw_rect_filled(x, y, w, h, color)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if w <= 0 or h <= 0:
@@ -1704,6 +1720,21 @@ impl SoftwareBackend:
             return
         var span: [u32] = []
         if self.native_simd_spans and native_pixel_rows_enabled():
+            # The kernel's span is [colour; count] whichever provider ran, so
+            # the last one is reused for the same (colour, count): dash runs
+            # repeat it, and the span-batch dispatch cost ~68 us a call for an
+            # 8 px span. Counters advance per row as before, with the batch's
+            # recorded non-scalar lookup count.
+            val memo = self._fill_memo_span
+            if memo.len() == count and memo[0] == color:
+                var memo_row = start_y
+                # cpu-lane-loop-ok: counter bookkeeping only, one increment per row the old per-row kernel call made
+                while memo_row < end_y:
+                    record_simd_fill_hit()
+                    memo_row = memo_row + 1
+                self.simd_batch_hits = self.simd_batch_hits + self._fill_memo_lookups * ((end_y - start_y) as i64)
+                self._sw_write_rect_rows(memo, start_x, start_y, end_y, count)
+                return
             self.ensure_kernel_table()
             var batch = span_batch_new(1)
             span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, count as i64, color as i64, 0)
@@ -1728,8 +1759,15 @@ impl SoftwareBackend:
                 self.simd_batch_hits = self.simd_batch_hits + batch.non_scalar_lookups
                 hit_row = hit_row + 1
             span = work_buf
+            self._fill_memo_span = work_buf
+            self._fill_memo_lookups = batch.non_scalar_lookups
         else:
             span = [color; count]
+        self._sw_write_rect_rows(span, start_x, start_y, end_y, count)
+
+    # Writes `span[0, count)` to rows [start_y, end_y) at start_x of the taken
+    # surface and marks the touched tiles dirty.
+    me _sw_write_rect_rows(span: [u32], start_x: i32, start_y: i32, end_y: i32, count: i32):
         var surface = self.buf
         self.buf = []
         var row = start_y
@@ -1738,12 +1776,67 @@ impl SoftwareBackend:
             surface.write_span(span, (row * self.w + start_x) as i64, 0, count as i64)
             row = row + 1
         self.buf = surface
+        self._sw_mark_rect_dirty(start_x, start_y, end_y, count)
+
+    # The tiles mark_span_dirty(start_x, tile_row * TILE_SIZE, count) marks
+    # per tile row, in one call: a mark_span_dirty call per tile row was
+    # ~10 us for a one-tile span.
+    me _sw_mark_rect_dirty(start_x: i32, start_y: i32, end_y: i32, count: i32):
+        val tx0 = start_x / TILE_SIZE
+        val tx1 = (start_x + count - 1) / TILE_SIZE
+        val tile_count = self.dirty_tiles.len()
         var tile_row = start_y / TILE_SIZE
         val last_tile_row = (end_y - 1) / TILE_SIZE
-        # cpu-lane-loop-ok: one dirty mark per tile row, bounded by tiles_y
+        # cpu-lane-loop-ok: one dirty mark per touched tile, bounded by tiles_x * tiles_y
         while tile_row <= last_tile_row:
-            self.mark_span_dirty(start_x, tile_row * TILE_SIZE, count)
+            var tx = tx0
+            # cpu-lane-loop-ok: tiles of one tile row, bounded by tiles_x
+            while tx <= tx1:
+                val idx = tile_row * self.tiles_x + tx
+                if idx >= 0 and idx < tile_count:
+                    self.dirty_tiles[idx] = true
+                tx = tx + 1
             tile_row = tile_row + 1
+
+    # One translucent constant-colour rect, rows [start_y, end_y) x
+    # [start_x, start_x + count), already clipped to the frame and the clip
+    # rect, mask off, SIMD spans on. Byte-identical to sw_hline_blend per row:
+    # the blend-const kernel is per pixel, so the rows are gathered into one
+    # scratch (at most SW_FILL_CONTIGUOUS_CHUNK_PIXELS), blended by ONE extern
+    # call and written back. Per row this was a clip, a scratch, an extern, a
+    # write-back and a dirty walk: ~60 us a row.
+    me _sw_blend_const_rect_rows(start_x: i32, start_y: i32, end_y: i32, count: i32, color: u32):
+        var rows_per_chunk = SW_FILL_CONTIGUOUS_CHUNK_PIXELS / count
+        if rows_per_chunk < 1:
+            rows_per_chunk = 1
+        val stride = self.w
+        var surface = self.buf
+        self.buf = []
+        var row = start_y
+        # cpu-lane-loop-ok: one extern blend per chunk of rows, bounded by ceil(pixels / chunk)
+        while row < end_y:
+            val chunk_end = if row + rows_per_chunk < end_y: row + rows_per_chunk else: end_y
+            val n = (chunk_end - row) * count
+            var scratch: [u32] = [0u32; n]
+            var r = row
+            var so: i64 = 0
+            # cpu-lane-loop-ok: one bulk span gather per row of the chunk
+            while r < chunk_end:
+                scratch.write_span(surface, so, (r * stride + start_x) as i64, count as i64)
+                so = so + count as i64
+                r = r + 1
+            scratch = rt_engine2d_simd_blend_const_span_u32(scratch, 0, n.to_i64(), color.to_i64())
+            r = row
+            so = 0
+            # cpu-lane-loop-ok: one bulk span write-back per row of the chunk
+            while r < chunk_end:
+                record_simd_alpha_hit()
+                surface.write_span(scratch, (r * stride + start_x) as i64, so, count as i64)
+                so = so + count as i64
+                r = r + 1
+            row = chunk_end
+        self.buf = surface
+        self._sw_mark_rect_dirty(start_x, start_y, end_y, count)
 
     # `self.buf.write_span(...)` on the FIELD copies the whole surface per call
     # in the interpreter (1.8 ms at 3600 x 3040, against 4 us here): the field
