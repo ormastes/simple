@@ -56,7 +56,7 @@ use app.bug.workaround_index.{WorkaroundCompleteness}
 # defect 3). `stderr_write` calls `rt_stderr_write` directly with no builtin
 # name to mis-resolve, so the relay path no longer depends on that dispatch.
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
-use compiler.frontend.cache_dir_evict.{cache_dir_evict_to_cap}
+use compiler.frontend.cache_dir_evict.{cache_dir_evict_to_cap, cache_dir_evict_frontend_to_cap_v1, cache_dir_max_bytes}
 
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity}
 use std.io_runtime.{get_args}
@@ -978,7 +978,12 @@ fn parse_shard_queue_dir() -> text:
         if user_root == "":
             return ""
         root = "{user_root}/cache/compiler/native-build/v1/{lane_name}/frontend"
-    val dir = "{root}/queue-{getpid()}"
+    val _pruned_queues = disk_bound_keep_newest_prefix_dirs(root, "queue-", 4, 21600)
+    var serial: i64 = 0
+    var dir = "{root}/queue-{getpid()}"
+    while dir_exists(dir):
+        serial = serial + 1
+        dir = "{root}/queue-{getpid()}-{serial}"
     if not dir_create_all(dir):
         return ""
     dir
@@ -1075,6 +1080,10 @@ fn run_parse_shards_with_base(base: [text], count: i64, simple_bin: text, timeou
             eprint "[parse-shard] {live.len()} killed shard(s) not confirmed stopped ({live}); queue retained, no reclaim: {queue_dir}"
         else:
             val _removed = dir_remove_all(queue_dir)
+    if live.len() == 0:
+        val fe_root = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+        if fe_root != "":
+            val _evicted = cache_dir_evict_frontend_to_cap_v1(fe_root, cache_dir_max_bytes())
     val mode = if queue_dir != "": "queue" else: "static"
     print "[parse-shard] {done}/{count} shard(s) completed split={mode}"
 
