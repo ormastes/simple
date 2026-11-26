@@ -1,8 +1,8 @@
 # Host external content ownership
 
-Status: rendering overwrite fixed; remote application presentation implemented
-and verified on the resident headless WM daemon lane only (2026-11-26). Owner decision
-2026-11-26: in scope for release 1.0.0. Open items are listed at
+Status: fix-implemented-verification-pending — rendering overwrite fixed; remote application presentation implemented
+and verified across Wave 1/2 (2026-11-26), plus HostCompositor scalar host-bridge present-slot APIs added (BF-10). Owner decision
+2026-11-26: in scope for release 1.0.0. Open items (`hosted_entry.spl` winit loop execution, peer credential) are listed at
 the end.
 
 ## Root cause
@@ -104,3 +104,12 @@ superseded by the "Remote application presentation", "Wave 2" and "Still
 open" sections earlier in this document. The owner decided the same day that
 the feature is in scope for 1.0.0; the present command, shared slot, event
 receiver and request pump it lists as missing now exist.
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:** `src/os/compositor/host_compositor_core.spl` now admits external `WM_CONTENT_ORIGIN_GUI` and `WM_CONTENT_ORIGIN_PIXEL_SURFACE` frames in `_set_external_web_frame_with_ownership` while preserving strict `WM_CONTENT_ORIGIN_SIMPLE_WEB` theme identity gating, and exposes bounded scalar host-bridge present slots (`submit_host_bridge_pixel_present`, `submit_host_bridge_gui_present`, `external_present_slot_owner`, `external_present_slot_revision`, `content_owner_for`) enforcing exact client dimensions, monotonic `content_revision`, and non-zero `wm_content_frame_checksum` without leaking empty slots or retaining stale GUI trees.
+- **Host specs verified (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/wm_bf10/bf10_host_compositor_content_owner_spec.spl` (`3 passed, 0 failed`, `outcome=OK`)
+  - `test/01_unit/os/compositor/host_content_frame_admission_spec.spl` (`1 passed, 0 failed`, `outcome=OK`)
+  - `test/01_unit/os/compositor/external_web_frame_theme_identity_guard_spec.spl` (`4 passed, 0 failed`, `outcome=OK`)
+- **Pending verification:** Execute `hosted_entry.spl` winit loop with remote app pump under live display server per upstream Wave 2 follow-up above.

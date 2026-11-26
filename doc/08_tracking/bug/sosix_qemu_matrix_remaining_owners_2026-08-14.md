@@ -6,8 +6,7 @@ across RV64/x86_32/ARM32/Windows/FreeBSD/macOS guests, each blocker requiring
 a real or QEMU-emulated target host and an admitted Stage-4 CLI build. Not
 reproducible or actionable from a pure-Simple bugfix worktree. Left OPEN.
 
-Status: OPEN — re-verified 2026-11-11; p3fix-lane BLOCKED, verbatim grants in
-the dated addendum below.
+Status: fix-implemented-verification-pending (re-verified 2026-11-26; scripts/qemu fixes landed, cross-target QEMU/Stage-4 matrix pending)
 
 Canonical plan:
 [`sosix_parallel_qemu_refactor.md`](../../03_plan/agent_tasks/sosix_parallel_qemu_refactor.md)
@@ -82,3 +81,9 @@ Grants carried verbatim from this record for the sanctioned lanes:
   `release/x86_64-unknown-linux-gnu/simple spipe-docgen test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl --output doc/06_spec --no-index`
   (require PASS and zero stubs); per-owner focused specs and gates as
   listed in the tables above.
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:** Repaired `REPO_ROOT` / `ROOT` two-level parent path resolution (`/../..`) in `scripts/qemu/create-qemu-temp-layout.shs`, `scripts/qemu/cleanup-qemu-temp.shs` (with multi-match glob iteration in `remove_if_exists`), and `scripts/qemu/linux_qemu_net_parity_bench.shs` (which previously resolved `scripts/` instead of repo root). Verified via `sh -n`, `sh scripts/qemu/simple-qemu-settings.shs --self-test` (`simple_qemu_settings_self_test=pass`), and `test/01_unit/os/wm_bf10/bf10_wm_pin_and_evidence_gates_spec.spl` (`4 passed, 0 failed`). Kernel/compiler/CLI/check-script items (`src/os/kernel/`, `src/compiler/`, `scripts/check/`) remain outside BF-10 file ownership.
+- **Pending cross-host QEMU verification:** Run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -AllGuests -Run`, FreeBSD `sh scripts/qemu/simple-freebsd-media.shs --check`, macOS `sh scripts/check/check-sosix-qemu-matrix.shs --host macos --all-guests --run --parallel`, and Stage-4 `test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl`.

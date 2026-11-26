@@ -176,3 +176,9 @@ origin/release/1.0.0 tip (6233df4b9f9ea) in the boot24 worktree.**
    `.claude/rules/board-runnable.md`). In-lane QEMU/bootstrap runs are
    forbidden by campaign policy. Owner: bootstrap/stage-chain lane.
 
+
+
+## BF-10 Status Update (2026-11-26)
+
+- **Bounded fix landed inside BF-10 scope:** Repaired two-level `REPO_ROOT`/`ROOT` resolution (`/../..`) in `scripts/qemu/create-qemu-temp-layout.shs`, `scripts/qemu/cleanup-qemu-temp.shs` (with multi-match glob cleanup), and `scripts/qemu/linux_qemu_net_parity_bench.shs`; verified with `sh -n`, `simple-qemu-settings.shs --self-test` (`simple_qemu_settings_self_test=pass`), and `bf10_wm_pin_and_evidence_gates_spec.spl` (`4 passed, 0 failed`).
+- **Remains `ARCHITECTURAL-OPEN` (out of BF-10 file ownership):** `--arch` dispatch in `scripts/bootstrap/bootstrap-from-scratch.sh` and `src/app/test/`, plus executing six QEMU guest boots (`build/multiarch/<triple>/{smoke,bootstrap}_result.json`), sit outside BF-10 allowed paths and remain open.

@@ -1,6 +1,6 @@
 # WM content-kind render runtime gate
 
-Status: fix-implemented-verification-pending — shell routes through the shared frame executor; Linux host pixel evidence 2026-11-26; SimpleOS guest gate outstanding.
+Status: fix-implemented-verification-pending — shell routes through the shared frame executor and HostCompositor routes GUI/pixel owners safely; Linux host pixel evidence 2026-11-26; SimpleOS guest gate outstanding.
 
 ## Current source truth
 
@@ -103,3 +103,11 @@ The spec now asserts that count and box.
 Still open: the SimpleOS guest frame/provenance gate (QEMU lane, not run here)
 and a live hosted GUI-frame producer (see
 `wm_host_external_content_owner_2026-07-29.md`).
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:** `src/os/compositor/host_compositor_core.spl` (`_taskbar_render_input`) now dispatches `HOST_CONTENT_OWNER_GUI` windows (`self.is_gui_content_window(win.id)`) through `gui_session_content_frame` (`UISession` + focused widget + client resize) and fails closed on detached GUI trees or `HOST_CONTENT_OWNER_PIXEL` slots without admitted external frames rather than falling back to `simple_web_content_frame_cached_at_time`. `attach_window_gui_tree` clears stale external Web slots and `detach_window_gui_tree` restores default ownership cleanly.
+- **Host specs verified (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/wm_bf10/bf10_host_compositor_content_owner_spec.spl`: `3 passed, 0 failed` (`outcome=OK`)
+  - `test/01_unit/os/compositor/wm_shell_content_dispatch_spec.spl`: `4 passed, 2 failed` (`p2_p3_adjacent_regression` 4/4 PASS; `p2_p3_bug_reproduction` 2 pixel-store examples require freestanding `rt_alloc` beyond Windows seed interpreter).
+- **Pending QEMU / hardware verification:** Build `simple-core` / self-hosted Stage-4 binary and execute native `wm_shell_content_dispatch_spec.spl` + SimpleOS QEMU desktop run proving `gui` + `pixel_surface` + `simple_web` content frames render non-empty surfaces on boot.

@@ -1,6 +1,6 @@
 # Taskbar pin persistence was not transactional
 
-- **Status:** fixed; live native persistence evidence blocked by VFS global lowering
+- **Status:** fix-implemented-verification-pending (was: fixed; live native persistence evidence blocked by VFS global lowering)
 - **Affected owner:** `DesktopShell.pin_app` / `DesktopShell.unpin_app`
 
 ## Root cause
@@ -46,3 +46,12 @@ handling in the unrelated generated module
 the import closure — a seed loader limitation, not a pin-logic failure.
 Verification here is therefore by code inspection only; the live native
 persistence evidence remains blocked as the status line records.
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:** Hardened `DesktopShell.pin_app` in `src/os/desktop/_DesktopShell/shell_workspace_methods.spl` to fail closed on empty `app_id` and enforce the 64-pin capacity limit (`pinned_app_ids.len() >= 64`, symmetric with `load_pinned_layout`), preserving VFS transactional rollback on save failures.
+- **Host specs verified (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/desktop/shell_taskbar_pin_spec.spl`: `3 passed, 0 failed` (`outcome=OK`)
+  - `test/01_unit/os/wm_bf10/bf10_wm_pin_and_evidence_gates_spec.spl`: `4 passed, 0 failed` (`outcome=OK`)
+- **Pending verification:** Native SimpleOS boot test verifying persisted `/sys/config/taskbar_pins.sdn` survives guest reboot over VFS/FAT32 without stubbed `g_vfs_write_file_text` globals.

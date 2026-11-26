@@ -2,6 +2,8 @@
 
 # SimpleOS QEMU VirtIO-serial host-GPU transport gap
 
+Status: fix-implemented-verification-pending
+
 ## Triage 2026-11-25 — deferred: multi-component transport program, QEMU-only evidence (status unchanged: BLOCKED/OPEN)
 
 Triaged in the P2 ledger pass on worktree `wt-p2w5-al` (release/1.0.0 HEAD
@@ -358,3 +360,13 @@ BLOCKED  SIMPLE_LIB=src bin/simple test test/03_system/os/qemu/simpleos_qemu_hos
 The interpreter spec was not retried because this checkout has no admitted
 `bin/simple`, and this delegated lane forbids bootstrap. This environmental
 blocker does not change the transport finding.
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:**
+  - Created `src/os/drivers/virtio/virtio_console.spl` (`VirtioSerialHostGpuPort`, `VirtioConsoleControlMessage`, `VirtioConsoleRxResult`) implementing VirtIO §5.3.6.2 control event encode/decode (`DEVICE_READY`, `DEVICE_ADD`, `PORT_NAME` matching `"org.simple.hostgpu"`, `PORT_READY`, `PORT_OPEN`, `DEVICE_REMOVE`), dynamic port-to-queue binding via `VirtioConsoleQueueOwner` (`x86-pci` and `riscv-mmio`), incremental split-descriptor and coalesced `SHGF` RX stream reassembly + checksum verification, strict one-in-flight correlation, deadline expiry, and fail-closed reset.
+  - Updated `src/os/compositor/engine2d_wm_frame_executor.spl` with `host_gpu_transport_kind`, stored `virtio_serial_port: VirtioSerialHostGpuPort?`, `host_gpu_transport_active()`, `Engine2dWmFrameExecutor.create_host_gpu_with_transport`, and wired `"virtio-serial-framed"` into `Engine2dWmFrameExecutor.render()` (admitting when `host_gpu_required == true` without `ivshmem`, encoding DrawIR payloads to SHGF `SUBMIT_REQUEST` TX frames over `VirtioSerialHostGpuPort`, enforcing 1-in-flight correlation until `push_virtio_serial_rx` completes, and failing closed otherwise).
+- **Host spec verified (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/wm_bf10/bf10_virtio_console_stream_transport_spec.spl`: `5 passed, 0 failed` (`outcome=OK`)
+- **Pending QEMU / out-of-ownership verification:** Extend `src/app/simpleos_gpu_host/` UNIX socket endpoint, `src/os/lib/gpu_bridge/host_gpu_virtio_serial.spl`, PCI/PLIC device registration, and `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`, then execute live x86_64 (`-device virtio-serial-pci`) and RISC-V (`-device virtio-serial-device`) QEMU tests (`test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl`).

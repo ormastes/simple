@@ -1,7 +1,7 @@
 # WM lane rung (d): the guest renders the theme sheet with `var()` UNRESOLVED — two admission terms fail, not one
 
 - **ID:** wm_guest_css_var_unresolved_blocks_material_admission_2026-08-09
-- **Status:** OPEN
+- **Status:** fix-implemented-verification-pending (was: OPEN)
 - **Severity:** high (true blocker for SimpleOS x86_64 WM lane rung (d))
 - **Found by:** host-side reproduction of the 2026-08-08 lane serial log, 2026-08-09
 - **Lane:** `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
@@ -426,3 +426,15 @@ window material.
   with `SIMPLEOS_WM_READINESS_TIMEOUT_MS=420000` on a Linux host against current
   release, and read the `css-var-unresolved` / `css-var-pass-bailed` serial
   lines. If `props=0` persists, bisect `find_from` / `substring` in the guest.
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Disposition:** `fix-implemented-verification-pending` (verify waiting — host unit specs pass; live diskless SimpleOS QEMU desktop boot verification pending).
+- **Root Fix (`src/os/compositor/simple_web_window_renderer.spl`):**
+  - Added `_canonical_theme_id`, `_embedded_theme_snapshot`, `_resolved_snapshot_from_package` (detecting missing `--app-surface` / `--ui-fg` tokens and empty `family_id` so icon-only CSS / empty SHA-256 digests / dark defaults never short-circuit embedded fallback), `_resolved_theme_package_css`, `_resolved_theme_source_fingerprint`, `_theme_solid_fallback_rgba`, `_theme_text_rgba`, and `_simple_web_theme_cache_fingerprint`.
+  - Updated `_wm_root_data_attrs`, `simple_web_external_content_frame`, and `_simple_web_content_frame_cached_impl` (canonicalizing `""`, `"light"`, and `"dark"` while falling back to the embedded `ThemeRenderSnapshot` CSS/material/SHA-256 package on diskless SimpleOS guests).
+- **Host Verification:**
+  - `SIMPLE_LIB=.../src simple.exe test test/01_unit/os/compositor/simple_web_window_renderer_spec.spl --mode=interpreter` (`28 passed, 0 failed`)
+  - `SIMPLE_LIB=.../src simple.exe test test/01_unit/os/wm_bf10/bf10_theme_css_provenance_spec.spl --mode=interpreter` (`5 passed, 0 failed`)
+- **QEMU Verification Needed:**
+  - Boot the built SimpleOS WM diskless desktop image under QEMU and verify window material admission and rendered DOM CSS variables resolve with zero missing-theme rejections.

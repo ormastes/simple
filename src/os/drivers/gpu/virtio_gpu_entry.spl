@@ -10,6 +10,7 @@
 
 use os.drivers.pci.pci.{PciBus, PciDevice, pci_read_bar}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+use os.drivers.virtio.virtio_gpu_capset.{GpuCapset, GpuCapsetQueryRequest, gpu_query_capsets_bounded, gpu_capset_probe_report}
 use os.drivers.virtio.virtio_gpu_types.{VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM}
 use os.drivers.gpu.gpu_accel.{set_gpu_accel_supported_from_driver}
 use os.kernel.types.device_mem_types.{DeviceGrant}
@@ -160,3 +161,38 @@ fn gpu_test_main():
         log_info("[gpu] " + "NO VIRTIO-GPU FOUND")
 
     log_info("[gpu] " + "[gpu-test] Test entry complete")
+
+fn gpu_capset_probe_report_from_caps(has_device: bool, caps: [GpuCapset]) -> bool:
+    """Emit VIRTIO_GPU_CAPSETS report line and fail closed if device or capsets missing."""
+    if not has_device:
+        log_info("[gpu] " + "NO VIRTIO-GPU FOUND")
+        val empty_report = gpu_capset_probe_report([])
+        log_raw_println(empty_report.line)
+        log_info("[gpu] " + empty_report.line)
+        return false
+    val report = gpu_capset_probe_report(caps)
+    log_raw_println(report.line)
+    log_info("[gpu] " + report.line)
+    report.admitted
+
+fn gpu_capset_probe_main(capset_budget: u32 = 8u32) -> bool:
+    """QEMU virtio-gpu capset smoke entrypoint; emits VIRTIO_GPU_CAPSETS n=<count> venus=<0|1>."""
+    log_info("[gpu] " + "[gpu-capset] VirtIO-GPU capset probe entry starting")
+    var pci = PciBus.new()
+    pci.scan()
+    var gpu_dev: PciDevice? = None
+    val display_devs = pci.find_by_class(0x03, 0x80)
+    if display_devs.len() > 0:
+        gpu_dev = display_devs[0]
+    else:
+        val disp00 = pci.find_by_class(0x03, 0x00)
+        if disp00.len() > 0:
+            gpu_dev = disp00[0]
+    if val Some(found_dev) = gpu_dev:
+        val grant = grant_from_pci(found_dev)
+        var gpu = VirtioGpuDriver.new()
+        if val Ok(_ok) = gpu.init_from_grant(grant):
+            val caps = gpu_query_capsets_bounded(gpu, GpuCapsetQueryRequest(capset_budget: capset_budget))
+            return gpu_capset_probe_report_from_caps(true, caps)
+        log_info("[gpu] " + "[gpu-capset] GPU init failed")
+    gpu_capset_probe_report_from_caps(false, [])

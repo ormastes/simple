@@ -1,0 +1,135 @@
+# BF-10: HostCompositor content-kind dispatch & scalar host-bridge present slots
+# Covers Bugs #2 (wm_content_kind_render_runtime_gate_2026-07-29)
+# and #3 (wm_host_external_content_owner_2026-07-29)
+
+use std.spec
+use common.ui.builder.{build_tree, column, label}
+use common.ui.window_scene.{
+    WM_CONTENT_ORIGIN_GUI,
+    WM_CONTENT_ORIGIN_PIXEL_SURFACE,
+    WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    wm_content_frame_checksum
+}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend}
+use os.compositor.wm_action_lifecycle.{
+    HOST_CONTENT_OWNER_GUI,
+    HOST_CONTENT_OWNER_LOCAL_WEB,
+    HOST_CONTENT_OWNER_PIXEL
+}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+fn _solid_pixels(w: i32, h: i32, color: u32) -> [u32]:
+    var out: [u32] = []
+    var i = 0
+    while i < w * h:
+        out.push(color)
+        i = i + 1
+    out
+
+describe "BF-10 HostCompositor multi-owner runtime routing":
+    it "dispatches attached GUI tree via gui_session_content_frame instead of Simple Web":
+        var backend = HeadlessHostCompositorBackend.new(320, 240)
+        var comp = HostCompositor.new(backend, Size.wh(320, 240))
+        comp.apply_bridge_request(1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "GUI Win", 10, 10, 108, 96, "<p>fallback</p>", 10, "settings")
+        comp.apply_bridge_request(2, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Web Win", 120, 10, 108, 96, "<p>web-doc</p>", 11, "editor")
+        val tree = build_tree(column("root", [label("lbl", "Settings Body")]))
+        expect(comp.attach_window_gui_tree(1, tree)).to_equal(true)
+        expect(comp.content_owner_for(1)).to_equal(HOST_CONTENT_OWNER_GUI)
+        expect(comp.content_owner_for(2)).to_equal(HOST_CONTENT_OWNER_LOCAL_WEB)
+
+        comp.render_frame()
+        val input = comp._taskbar_render_input(
+            wm_chrome_theme(), 1000, "software"
+        )
+        val frames = input.render.content_frames
+        expect(frames.len()).to_equal(2)
+        expect(frames[0].window_id).to_equal("1")
+        expect(frames[0].origin_kind).to_equal(WM_CONTENT_ORIGIN_GUI)
+        expect(frames[0].pixels.len()).to_equal(100 * 60)
+        expect(frames[0].checksum).to_be_greater_than(0u64)
+
+        expect(frames[1].window_id).to_equal("2")
+        expect(frames[1].origin_kind).to_equal(WM_CONTENT_ORIGIN_SIMPLE_WEB)
+
+        expect(comp.detach_window_gui_tree(1)).to_equal(true)
+        expect(comp.content_owner_for(1)).to_equal(HOST_CONTENT_OWNER_LOCAL_WEB)
+
+    it "enforces scalar host-bridge pixel/GUI present slots with monotonic revisions and checksum":
+        var backend = HeadlessHostCompositorBackend.new(320, 240)
+        var comp = HostCompositor.new(backend, Size.wh(320, 240))
+        comp.apply_bridge_request(1, 5, COMP_CREATE_WINDOW.to_i64(), 0, "Canvas", 10, 20, 108, 96, "", 20, "canvas")
+        val px = _solid_pixels(100, 60, 0xFF11AA22u32)
+        val sum = wm_content_frame_checksum(px)
+
+        # Reject corrupted checksum and mismatched size
+        expect(comp.submit_host_bridge_pixel_present(1, 1, 100, 60, px, sum ^ 1u64)).to_equal(false)
+        expect(comp.submit_host_bridge_pixel_present(1, 1, 99, 60, px, sum)).to_equal(false)
+
+        # Accept valid pixel present and transition scalar owner
+        expect(comp.submit_host_bridge_pixel_present(1, 1, 100, 60, px, sum)).to_equal(true)
+        expect(comp.content_owner_for(1)).to_equal(HOST_CONTENT_OWNER_PIXEL)
+        expect(comp.external_present_slot_owner(1)).to_equal(WM_CONTENT_ORIGIN_PIXEL_SURFACE)
+        expect(comp.external_present_slot_revision(1)).to_equal(1)
+
+        # Reject non-monotonic revision
+        expect(comp.submit_host_bridge_pixel_present(1, 1, 100, 60, px, sum)).to_equal(false)
+
+        # Accept higher revision via external GUI present slot
+        val px2 = _solid_pixels(100, 60, 0xFF334455u32)
+        val sum2 = wm_content_frame_checksum(px2)
+        expect(comp.submit_host_bridge_gui_present(1, 2, 100, 60, px2, sum2)).to_equal(true)
+        expect(comp.content_owner_for(1)).to_equal(HOST_CONTENT_OWNER_GUI)
+        expect(comp.external_present_slot_owner(1)).to_equal(WM_CONTENT_ORIGIN_GUI)
+        expect(comp.external_present_slot_revision(1)).to_equal(2)
+
+        # Missing external frame fails closed (empty frame), never falls back to HTML
+        comp.invalidate_external_web_frame(1)
+        comp.render_frame()
+        val input = comp._taskbar_render_input(
+            wm_chrome_theme(), 2000, "software"
+        )
+        expect(input.render.content_frames[0].pixels.len()).to_equal(0)
+        expect(input.render.content_frames[0].checksum).to_equal(0u64)
+
+    it "rejects invalid or capacity-capped host bridge frames without leaking slots and releases prior GUI trees":
+        var backend = HeadlessHostCompositorBackend.new(400, 300)
+        var comp = HostCompositor.new(backend, Size.wh(400, 300))
+        comp.apply_bridge_request(1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Local", 10, 20, 108, 96, "<p>local-web</p>", 30, "editor")
+        val bad_px = _solid_pixels(100, 60, 0xFF556677u32)
+        val bad_sum = wm_content_frame_checksum(bad_px)
+        expect(comp.submit_host_bridge_pixel_present(1, 1, 100, 60, bad_px, bad_sum ^ 1u64)).to_equal(false)
+        expect(comp.submit_host_bridge_pixel_present(1, 1, 9000, 60, bad_px, bad_sum)).to_equal(false)
+        expect(comp.external_web_window_ids.len()).to_equal(0)
+        expect(comp.content_owner_for(1)).to_equal(HOST_CONTENT_OWNER_LOCAL_WEB)
+
+        # Fill all 32 external slots with valid frames, then verify 33rd window rejects without leaking a slot
+        var slot: i64 = 0
+        val small_px = _solid_pixels(100, 60, 0xFF112233u32)
+        val small_sum = wm_content_frame_checksum(small_px)
+        while slot < 32:
+            val slot_wid = 2 + slot
+            comp.apply_bridge_request(slot_wid, 5, COMP_CREATE_WINDOW.to_i64(), 0, "Slot", 0, 0, 108, 96, "", slot_wid, "slot")
+            expect(comp.submit_host_bridge_pixel_present(slot_wid, 1, 100, 60, small_px, small_sum)).to_equal(true)
+            slot = slot + 1
+        expect(comp.external_web_window_ids.len()).to_equal(32)
+        expect(comp.submit_host_bridge_pixel_present(1, 1, 100, 60, bad_px, bad_sum)).to_equal(false)
+        expect(comp.external_web_window_ids.len()).to_equal(32)
+        expect(comp.content_owner_for(1)).to_equal(HOST_CONTENT_OWNER_LOCAL_WEB)
+
+        # Release one slot and verify accepted host-bridge presentation clears any prior local GUI tree
+        comp.release_external_web_frame(2)
+        val tree = build_tree(column("root", [label("old", "Old Local GUI")]))
+        expect(comp.attach_window_gui_tree(1, tree)).to_equal(true)
+        expect(comp.is_gui_content_window(1)).to_equal(true)
+        expect(comp.gui_content_window_ids.len()).to_equal(1)
+
+        expect(comp.submit_host_bridge_pixel_present(1, 1, 100, 60, bad_px, bad_sum)).to_equal(true)
+        expect(comp.content_owner_for(1)).to_equal(HOST_CONTENT_OWNER_PIXEL)
+        expect(comp.is_gui_content_window(1)).to_equal(false)
+        expect(comp.gui_content_window_ids.len()).to_equal(0)
+        comp.invalidate_external_web_frame(1)
+        expect(comp.gui_content_window_ids.len()).to_equal(0)
+        comp.release_external_web_frame(1)
+        expect(comp.content_owner_for(1)).to_equal(HOST_CONTENT_OWNER_LOCAL_WEB)

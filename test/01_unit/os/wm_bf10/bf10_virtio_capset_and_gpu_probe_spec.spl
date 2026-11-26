@@ -1,0 +1,78 @@
+# BF-10: VirtIO-GPU capset report formatting & GPU vendor probe honesty gates
+# Covers Bugs #9, #10, and #15
+
+use std.spec
+use os.drivers.virtio.virtio_gpu_capset.{
+    GpuCapset,
+    gpu_capset_venus_bit,
+    gpu_capset_probe_report_line,
+    gpu_capset_probe_admitted
+}
+use os.drivers.virtio.virtio_gpu_types.{VIRTIO_GPU_CAPSET_VIRGL, VIRTIO_GPU_CAPSET_VENUS}
+use os.drivers.gpu.gpu_vendor_probe.{CudaGpuProbe, GpuProbeState, GpuVendorRegistry}
+use os.drivers.gpu.virtio_gpu_entry.{gpu_capset_probe_report_from_caps}
+use os.drivers.gpu.board_vulkan.boundary_enumeration_provider.{
+    candidate_enumeration_is_available,
+    candidate_enumeration_status,
+    lavapipe_reference_enumeration,
+    parse_vulkaninfo_lavapipe,
+    vulkan_enumeration_plan_sources
+}
+use std.common.spec.evidence.counterpart.model.{ProviderStatus}
+
+describe "BF-10 VirtIO-GPU capset smoke formatting":
+    it "formats VIRTIO_GPU_CAPSETS with n and venus bit matching QEMU smoke gate":
+        val virgl = GpuCapset(id: VIRTIO_GPU_CAPSET_VIRGL, max_version: 2u32, max_size: 256u32)
+        val venus = GpuCapset(id: VIRTIO_GPU_CAPSET_VENUS, max_version: 0u32, max_size: 1024u32)
+
+        expect(gpu_capset_venus_bit([virgl])).to_equal(0u32)
+        expect(gpu_capset_probe_report_line([virgl])).to_equal("VIRTIO_GPU_CAPSETS n=1 venus=0")
+        expect(gpu_capset_probe_admitted([virgl])).to_equal(true)
+
+        expect(gpu_capset_venus_bit([virgl, venus])).to_equal(1u32)
+        expect(gpu_capset_probe_report_line([virgl, venus])).to_equal("VIRTIO_GPU_CAPSETS n=2 venus=1")
+        expect(gpu_capset_probe_admitted([virgl, venus])).to_equal(true)
+
+        expect(gpu_capset_probe_report_line([])).to_equal("VIRTIO_GPU_CAPSETS n=0 venus=0")
+        expect(gpu_capset_probe_admitted([])).to_equal(false)
+        expect(gpu_capset_probe_report_from_caps(false, [])).to_equal(false)
+        expect(gpu_capset_probe_report_from_caps(true, [])).to_equal(false)
+        expect(gpu_capset_probe_report_from_caps(true, [virgl, venus])).to_equal(true)
+
+describe "BF-10 GPU vendor probe & enumeration honesty":
+    it "distinguishes unrun NotProbed vendor stubs from probed NoDevice results":
+        var registry = GpuVendorRegistry.create()
+        expect(registry.probe_all()).to_equal(0)
+        expect(registry.not_probed_count()).to_equal(5)
+        expect(registry.no_device_count()).to_equal(0)
+        expect(registry.all_probes_unrun()).to_equal(true)
+        expect(registry.best_available()).to_equal("none")
+        val rep = registry.report()
+        expect(rep).to_contain("not_probed=5 no_device=0 best=none")
+
+        registry.cuda_ = CudaGpuProbe(
+            device_id: 0,
+            state: GpuProbeState.NoDevice,
+            compute_capability_major: 0,
+            compute_capability_minor: 0,
+            vram_mb: 0,
+            cuda_cores: 0,
+            driver_version: "",
+            has_unified_memory: false
+        )
+        expect(registry.not_probed_count()).to_equal(4)
+        expect(registry.no_device_count()).to_equal(1)
+        expect(registry.all_probes_unrun()).to_equal(false)
+        expect(registry.report()).to_contain("not_probed=4 no_device=1 best=none")
+
+    it "keeps candidate Vulkan enumeration unavailable and fails closed on empty vulkaninfo":
+        expect(candidate_enumeration_is_available()).to_equal(false)
+        expect(candidate_enumeration_status()).to_equal(ProviderStatus.unavailable)
+        val sources = vulkan_enumeration_plan_sources()
+        expect(sources.len()).to_equal(2)
+        expect(parse_vulkaninfo_lavapipe("").is_some()).to_equal(false)
+        val lvp = lavapipe_reference_enumeration()
+        if lvp.?:
+            expect(lvp.unwrap().queue_families.len()).to_be_greater_than(0)
+        else:
+            expect(lvp.is_some()).to_equal(false)

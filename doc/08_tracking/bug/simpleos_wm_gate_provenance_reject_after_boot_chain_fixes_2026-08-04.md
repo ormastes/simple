@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN
+- Status: fix-implemented-verification-pending (was: OPEN)
 - Date: 2026-08-04
 - Lane: `scripts/check/check-simpleos-wm-fullscreen-evidence.shs` (x86_64, OVMF pflash, macOS arm64 TCG host)
 - Owner note: the rejecting code path is in the WM theme/provenance plumbing that has
@@ -66,3 +66,15 @@ Serial: `build/simpleos_wm_fullscreen_evidence/serial.log` (440 lines; rejection
 
 Out of lane: needs a QEMU OVMF pflash boot to verify the WM content-provenance rejection path. No change made.
 
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Disposition:** `fix-implemented-verification-pending` (verify waiting — host unit specs pass; live SimpleOS WM QEMU gate run pending).
+- **Root Fix:**
+  - `src/os/compositor/simple_web_window_renderer.spl`: Embedded `ThemeRenderSnapshot` CSS/material/SHA-256 fallback via `_canonical_theme_id`, `_embedded_theme_snapshot`, `_resolved_snapshot_from_package` (guarding against icon-only/unbacked diskless snapshots), `_resolved_theme_package_css`, `_resolved_theme_source_fingerprint`, `_theme_solid_fallback_rgba`, `_theme_text_rgba`, and `_simple_web_theme_cache_fingerprint`; canonicalized `""`/`"light"`/`"dark"` in `_wm_root_data_attrs`, `simple_web_external_content_frame`, and `_simple_web_content_frame_cached_impl`.
+  - `src/os/compositor/engine2d_wm_frame_executor.spl`: Enforced fail-closed `wm_content_frame_web_provenance_valid` and non-empty URI validation on `nested_content_frames` in `render()`.
+- **Host Verification:**
+  - `SIMPLE_LIB=.../src simple.exe test test/01_unit/os/compositor/simple_web_window_renderer_spec.spl --mode=interpreter` (`28 passed, 0 failed`)
+  - `SIMPLE_LIB=.../src simple.exe test test/01_unit/os/wm_bf10/bf10_theme_css_provenance_spec.spl --mode=interpreter` (`5 passed, 0 failed`)
+- **QEMU Verification Needed:**
+  - Re-run the SimpleOS WM QEMU boot/capture gate and confirm rendered desktop/app frames pass provenance markers, theme identity, and non-empty URI checks.

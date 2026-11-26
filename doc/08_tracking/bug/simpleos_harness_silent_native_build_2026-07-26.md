@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-26
 - **Lane:** `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`, macOS host
-- **Status:** harness-honesty half fixed 2026-11-09 (verified 2026-11-25); compiler-side flush + subprocess-buffering landmine remain open (seed/compiler scope)
+- **Status:** fix-implemented-verification-pending (harness-honesty half + scripts/qemu phase profile fixed; compiler-side flush + runtime verification pending)
 
 ## Symptom
 During harness runs 3-8, both the harness stdout log and `$BUILD_DIR/native-build.out`
@@ -95,3 +95,12 @@ lane), so verification is by inspection only. Still-open remainder (compiler
 `rt_stdout_flush()` after per-module prints; `native_build_main.spl`
 double-subprocess buffering landmine) is seed/compiler scope, unchanged.
 Status header updated to reflect the 2026-11-09 fix.
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:** Updated `scripts/qemu/check_simpleos_arm64_clang_compile.shs` to default `SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}"` and emit an explicit `[a64-clang] WARNING: kernel build produced zero-byte log ($OUT/kernel-build.log)` diagnostic instead of failing silently when native-build produces zero output, complementing the existing `scripts/check/lib/simpleos-wm-fullscreen/build.shs` harness-honesty fix. Compiler/runtime stdout flushing (`rt_stdout_flush()` in `src/compiler/` and `src/runtime/`) remains outside BF-10 file ownership.
+- **Host verification (`SIMPLE_LIB=src`):**
+  - `sh -n scripts/qemu/check_simpleos_arm64_clang_compile.shs` (exit 0)
+  - `test/01_unit/os/wm_bf10/bf10_wm_pin_and_evidence_gates_spec.spl`: `4 passed, 0 failed` (`outcome=OK`)
+- **Pending QEMU / native build verification:** Execute live ARM64/x86_64 kernel builds (`check_simpleos_arm64_clang_compile.shs`, `check-simpleos-wm-fullscreen-evidence.shs`) with an admitted compiler runtime and verify live `[BOOTSTRAP-PHASE]` / byte-count progress output.

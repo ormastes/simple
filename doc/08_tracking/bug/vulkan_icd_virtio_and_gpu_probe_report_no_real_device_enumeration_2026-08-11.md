@@ -179,3 +179,12 @@ flip to `executed` on id-only data. Closing this needs one of two things:
 
 Both are board/driver-lane work and need board evidence under `.claude/rules/board-runnable.md`.
 No code change in this lane.
+
+## BF-10 Addendum (2026-11-26, status stays OPEN)
+
+- **Code hardening (`src/os/drivers/gpu/`):**
+  - Added `GpuVendorRegistry.not_probed_count()`, `no_device_count()`, `all_probes_unrun()`, and explicit `not_probed=<n> no_device=<n>` reporting in `src/os/drivers/gpu/gpu_vendor_probe.spl` so unrun `NotProbed` stubs remain visibly distinguishable from real probed `NoDevice` states.
+  - Replaced raw `shell(_lavapipe_vulkaninfo_command())` with `process_run_bounded("/usr/bin/env", ["VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json", "vulkaninfo"], LAVAPIPE_ENUMERATION_TIMEOUT_MS, LAVAPIPE_ENUMERATION_MAX_OUTPUT_BYTES)` in `src/os/drivers/gpu/board_vulkan/boundary_enumeration_provider.spl`.
+- **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter`):**
+  - `test/01_unit/os/wm_bf10/bf10_virtio_capset_and_gpu_probe_spec.spl` (plus `venus_icd_fail_closed_spec.spl` and `readback_boundary_gate_spec.spl`).
+- **Remaining open gap:** Matches upstream 2026-11-26 triage above — SimpleOS candidate still needs queue families, memory heaps/types, and limits via board PCI/Venus transport (`status=open` preserved).
