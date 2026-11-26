@@ -1100,9 +1100,54 @@ impl HmInferContext:
             case NogradBlock(nograd_body):
                 self._infer_block_expr(nograd_body, span)
 
-            # Control transfer: `return expr` and bare `return`.
+            # Control transfer: `return expr` and bare `return`, `break`, `continue`.
             case Return(value):
                 self.infer_return_expr(value, span)
+
+            case Break(_, break_value):
+                if val Some(v) = break_value:
+                    match self.synthesize_expr(v):
+                        case Ok(_): pass
+                        case Err(e): return Err(e)
+                Ok(HirType(kind: HirTypeKind.Never, span: span))
+
+            case Continue(_):
+                Ok(HirType(kind: HirTypeKind.Never, span: span))
+
+            # Loops: infer condition/iterable and loop body so nested
+            # patterns (such as desugared `while val Some(w) = x:`) reach
+            # type inference instead of failing on an unhandled loop expr.
+            case Loop(loop_body, _):
+                match self.infer_block(loop_body):
+                    case Ok(_): Ok(HirType(kind: HirTypeKind.Unit, span: span))
+                    case Err(e): Err(e)
+
+            case While(cond, while_body, _):
+                match self.synthesize_expr(cond):
+                    case Ok(cond_ty):
+                        val bool_ty = HirType(kind: HirTypeKind.Bool, span: cond.span)
+                        match self.unify(cond_ty, bool_ty):
+                            case Err(e): return Err(e)
+                            case _: pass
+                    case Err(e): return Err(e)
+                match self.infer_block(while_body):
+                    case Ok(_): Ok(HirType(kind: HirTypeKind.Unit, span: span))
+                    case Err(e): Err(e)
+
+            case For(loop_var, iter, for_body, _):
+                match self.synthesize_expr(iter):
+                    case Ok(iter_ty):
+                        val resolved_iter = self.resolve(iter_ty)
+                        val elem_ty = match resolved_iter.kind:
+                            case Array(elem, _): elem
+                            case Slice(elem): elem
+                            case Str: HirType(kind: HirTypeKind.Str, span: span)
+                            case _: self.fresh_var(span)
+                        self.bind_mono(loop_var.id.to_text(), elem_ty)
+                    case Err(e): return Err(e)
+                match self.infer_block(for_body):
+                    case Ok(_): Ok(HirType(kind: HirTypeKind.Unit, span: span))
+                    case Err(e): Err(e)
 
             # Target-neutral @cfg/@when select: every arm is inferred
             # independently (no condition evaluation, no narrowing). The

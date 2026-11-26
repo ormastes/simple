@@ -229,3 +229,21 @@ Out of lane: fixing a verb-only lint heuristic overfiring on ~208 findings needs
 ## Triage 2026-11-04 (c28-w4)
 
 Triage 2026-11-04 (no change, lint rule owned by others): claim p2-resource-lint-20261103 was taken and released 2026-11-03 with no open PR, so the row is unclaimed. Blocker unchanged: the residual ~160 findings need the resource registry consumed by the rule dispatch (shared lint registry). QUESTION: is resource-registry wiring scheduled, or should the rule be demoted to opt-in (critical profile only) until it is?
+
+## Verification 2026-11-26 (`work/bf-1-compiler-hir-sem-20261126`)
+
+Verified that both halves of the prior triage are already addressed on
+`origin/release/1.0.0`:
+1. `src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl` carries the
+   2026-11-10 return-type and known-resource-family discriminator
+   (`_ufr_is_resource_return_type`, `_ufr_known_family_tokens`,
+   `_ufr_is_handle_acquire`), gating out non-handle returns (`bool`, scalars,
+   strings) and non-resource helper calls.
+2. `src/compiler/90.tools/lint/_LintMain/config_and_model.spl` (`:311`, `:578`)
+   sets `unwrapped_foreign_resource` to `allow` by default and `warn` only under
+   the `critical` profile.
+3. Re-executed `test/01_unit/compiler/lint/unwrapped_foreign_resource_spec.spl`
+   (`SIMPLE_LIB=src`, `--mode=interpreter --timeout 60`): **31 examples, 0
+   failures** (including all 9 examples under `verb-only over-fire (bug
+   w_mc_res_001_overfires_verb_only_heuristic_2026-08-07)` and profile-default
+   checks). Status: `ALREADY-FIXED-VERIFIED`.

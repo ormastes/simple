@@ -1010,3 +1010,42 @@ over a non-Option scrutinee is a named `[E-TYPE-NIL-COMPARE]` error in the
 self-hosted checker, and the seed interpreter warns when Option arms meet a
 `Result` value. Remaining: bare `case None:` over scalars; scalar (non-Result)
 scrutinees in the seed stay env-gated (`SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1`).
+
+## 2026-11-26 - Semantic checker loop & HIR-warning gates fixed (`work/bf-1-compiler-hir-sem-20261126`)
+
+Fixed three remaining gaps in the pure-Simple semantic checker (`30.types/**`,
+`90.tools/**`):
+
+1. **`simple_semantic_check_source` (`src/compiler/90.tools/lint/semantic_check.spl`):**
+   `HirLowering.warning(...)` messages (`"HIR lowering warning ..."`, such as
+   `W-MATCH-NONE-SCALAR`) were pushed into `diagnostics`, causing
+   `if diagnostics.len() == 0:` to skip `HmInferContext` and emit `"HIR lowering
+   failed..."` on warnings. Warnings now go into `warnings`, allowing
+   `HmInferContext` to run and report `[E-TYPE-NIL-COMPARE]` on `case nil` over
+   scalars (`option_nil_pattern_non_option_scrutinee_spec.spl`: 2/3 -> 3/3 pass;
+   `case_none_scalar_spec.spl`: 8/8 pass).
+2. **Loop expressions in HM inference (`src/compiler/30.types/type_infer/inference_expr.spl`):**
+   Added `While`, `Loop`, `For`, `Break`, `Continue` handling in
+   `_infer_expr_synth` so `while val Some(w) = n:` reaches `infer_option_pattern`
+   (`error[SPL-PAT-001]`) instead of aborting on
+   `unsupported expression kind: HirExprKind::While(...)`.
+3. **Non-optional composite method receivers (`src/compiler/30.types/type_infer/inference_expr_calls.spl`):**
+   Extended `never_optional` for `unwrap`/`unwrap_or`/`expect`/`is_some`/`is_none`
+   to `Unit`, `Tuple`, `Array`, `Slice`, `Dict`, `Function`, plus `is_some`/`is_none`
+   on `Result`.
+
+Regression tests added & passing (`SIMPLE_LIB=src`, `--mode=interpreter`):
+- `test/01_unit/compiler/type_infer/option_while_val_and_receiver_regression_spec.spl`: 6/6 pass
+- `test/01_unit/compiler/lint/frontend_diag/option_nil_pattern_non_option_scrutinee_spec.spl`: 3/3 pass
+- `test/01_unit/compiler/lint/frontend_diag/option_pattern_non_option_scrutinee_spec.spl`: 3/3 pass
+- `test/01_unit/compiler/type_infer/option_method_receiver_spec.spl`: 2/2 pass
+- `test/01_unit/compiler/type_infer/option_pattern_scrutinee_spec.spl`: 6/6 pass
+
+Pre-existing out-of-scope remainders (Rust seed / `20.hir` / `80.driver`
+untouched by `BF-1` file ownership):
+- `test/01_unit/compiler/interpreter/option_on_non_option_scrutinee_class_spec.spl`
+  still fails 3/4 on raw `simple run` (the frozen Rust seed does not enforce the
+  semantic-check gate on bare `run`).
+- `test/03_system/language/policy/option_if_while_bind_staged_spec.spl`
+  (`@tag:in-development`) passes 2/3 (`while val` passes; static `if val v = o`
+  on `i64?` still receives `E-TYPE-NIL-COMPARE` from `20.hir` desugaring).

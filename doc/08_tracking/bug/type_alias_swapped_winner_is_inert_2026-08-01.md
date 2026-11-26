@@ -183,3 +183,21 @@ inertness argument above holds. The fix (first-write-wins in `SymbolTable.define
 is only meaningful together with alias transparency and has no observable
 behaviour to pin today, so a failing spec cannot be written. Stays open as the
 documented precondition of the alias-transparency work.
+
+## 2026-11-26 - Live alias registry made first-write-wins (`work/bf-1-compiler-hir-sem-20261126`)
+
+1. `src/compiler/35.semantics/lint/semantic_api/alias_registry.spl` (tracked as
+   the live store in `bug_db.sdn`): `alias_registry_populate` previously
+   overwrote `ALIAS_TEXT[name]` unconditionally (last-write-wins across module
+   populates without `alias_registry_clear()`). Updated to preserve
+   first-write-wins (`if type_aliases.contains_key(name) and not ALIAS_TEXT.contains_key(name):`).
+2. Added `test/01_unit/compiler/semantics/alias_registry_duplicate_winner_spec.spl`
+   (2 examples, 0 failures) and verified:
+   - `test/01_unit/compiler/semantics/semantic_alias_registry_spec.spl`: 10 examples, 0 failures
+   - `test/01_unit/compiler/hir/type_alias_representation_spec.spl`: 11 examples, 0 failures
+3. Note on `20.hir` boundary: `src/compiler/20.hir/hir_types.spl`
+   (`SymbolTable.define` / `is_type_symbol`) is outside `BF-1`'s file
+   ownership (`30.types/**`, `35.semantics/**`, `55.borrow/**`, `90.tools/**`)
+   and was left untouched; cross-module imported aliases in `20.hir` already
+   guard with `if not already_bound:` in
+   `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl:1050-1059`.

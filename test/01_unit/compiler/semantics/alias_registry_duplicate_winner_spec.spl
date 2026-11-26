@@ -1,0 +1,50 @@
+# Regression coverage for bug type_alias_swapped_winner_is_inert_2026-08-01.
+"""Regression specs verifying first-write-wins preservation in alias_registry."""
+# @tag: unit, compiler, semantics
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.{ParserTypeAlias}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.semantics.lint.semantic_api.alias_registry.{
+    alias_registry_clear, alias_registry_populate, alias_registry_resolve
+}
+
+fn named_alias(name: text, target: text) -> ParserTypeAlias:
+    val span = Span(0, 0, 0, 0, "", 0)
+    ParserTypeAlias(
+        name: name,
+        type_params: [],
+        type_: Type(kind: TypeKind.Named(target, []), span: span),
+        visibility: Visibility.Public,
+        is_public: true,
+        span: span
+    )
+
+describe "alias_registry duplicate-alias winner preservation":
+    """Verifies that repeated populate calls retain the first-defined alias target."""
+    it "preserves the first-registered target across repeated populate calls":
+        alias_registry_clear()
+        var mod_a: Dict<text, ParserTypeAlias> = {}
+        mod_a["HandleId"] = named_alias("HandleId", "i64")
+        alias_registry_populate(mod_a)
+
+        var mod_b: Dict<text, ParserTypeAlias> = {}
+        mod_b["HandleId"] = named_alias("HandleId", "text")
+        alias_registry_populate(mod_b)
+
+        expect(alias_registry_resolve("HandleId")).to_equal("i64")
+
+    it "allows re-registration only after alias_registry_clear":
+        alias_registry_clear()
+        var mod_a: Dict<text, ParserTypeAlias> = {}
+        mod_a["HandleId"] = named_alias("HandleId", "i64")
+        alias_registry_populate(mod_a)
+        expect(alias_registry_resolve("HandleId")).to_equal("i64")
+
+        alias_registry_clear()
+        var mod_b: Dict<text, ParserTypeAlias> = {}
+        mod_b["HandleId"] = named_alias("HandleId", "text")
+        alias_registry_populate(mod_b)
+        expect(alias_registry_resolve("HandleId")).to_equal("text")
