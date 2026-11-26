@@ -35,7 +35,7 @@
 
 use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
-use compiler.frontend.cache_dir_evict.{cache_dir_evict_due, cache_dir_evict_frontend_to_cap_v1, cache_dir_max_bytes}
+use compiler.frontend.cache_dir_evict.{cache_dir_evict_frontend_tick_v1}
 use std.io_runtime.{
     env_get_opt, file_exists, file_read_result,
     file_hash_sha256_or_empty, dir_create_all,
@@ -231,14 +231,13 @@ pub fn frontend_parse_cache_store(key: text, blob: text, identity_sha: text) -> 
     val final_path = frontend_parse_cache_path(key)
     val entry = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob, identity_sha)
     # Free-space admission BEFORE anything is written (review 2026-10-24 P1).
-    if not disk_publish_admitted(dir, entry.len()):
+    if not disk_publish_admitted(dir, entry.byte_len()):
         return false
     if not file_atomic_write(final_path, entry):
         frontend_parse_cache_note_store_failure(dir, made)
         return false
     _fe_cache_stores = _fe_cache_stores + 1
-    if cache_dir_evict_due(_fe_cache_stores):
-        val _evicted = cache_dir_evict_frontend_to_cap_v1(dir, cache_dir_max_bytes())
+    val _evicted = cache_dir_evict_frontend_tick_v1(dir)
     true
 
 # SPL-UNIT-006 conflicts are queued only while the parser runs, so a cache hit
@@ -255,7 +254,7 @@ pub fn frontend_parse_cache_store_unit_conflicts(key: text, messages: [text]) ->
     val path = frontend_parse_cache_unit_conflicts_path(key)
     if messages.len() == 0:
         if file_exists(path):
-            return file_delete(path)
+            return file_delete(path) or not file_exists(path)
         return true
     val _made = dir_create_all(frontend_parse_cache_dir())
     file_atomic_write(path, messages.join("\n"))
@@ -296,7 +295,7 @@ pub fn frontend_parse_cache_store_phase3_immutable_v1(key: text, blob: text, ide
     if file_exists(final_path):
         return false
     val encoded = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob, identity_sha)
-    if not disk_publish_admitted(dir, encoded.len()):
+    if not disk_publish_admitted(dir, encoded.byte_len()):
         return false
     val tmp_path = "{final_path}.{getpid()}.{_fe_cache_next_tmp_seq()}.tmp"
     if not file_write(tmp_path, encoded):
@@ -312,8 +311,7 @@ pub fn frontend_parse_cache_store_phase3_immutable_v1(key: text, blob: text, ide
     if not published:
         return false
     _fe_cache_stores = _fe_cache_stores + 1
-    if cache_dir_evict_due(_fe_cache_stores):
-        val _evicted = cache_dir_evict_frontend_to_cap_v1(dir, cache_dir_max_bytes())
+    val _evicted = cache_dir_evict_frontend_tick_v1(dir)
     true
 
 pub fn frontend_parse_cache_note_hit():
