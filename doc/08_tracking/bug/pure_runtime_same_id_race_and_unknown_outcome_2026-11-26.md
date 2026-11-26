@@ -1,7 +1,7 @@
 # pure_runtime_v1: same-id race deletes the other run's view; unknown outcome reported as phase error
 
 - Found: Fable final review of pure-Simple lane P4, 2026-11-26.
-- Status: partly fixed 2026-11-27. The view-exists path and the unknown outcome are fixed; create exclusivity is still open (see "Open" below).
+- Status: fixed 2026-11-27 (race, unknown outcome, create exclusivity, loser journal). Only the half-created-view test gap remains.
 - File: `src/lib/nogc_sync_mut/container/pure_runtime_v1.spl`.
 
 ## 1. Same-id race (data loss)
@@ -25,5 +25,7 @@ Expected: allow the lifecycle edges into the outcome-unknown state and report `t
   - Where: `storage_view_v1.spl` `_sv_create_with` checks `is_dir(view_dir)`, then calls `dir_create_all`, which succeeds on an existing dir. Its journal and meta writes are non-exclusive.
   - Effect: two same-id creates that both pass the check either share one view, or one fails with a non-`view-exists` reason and tears down the winner's view.
   - Fix: an exclusive mkdir (SOSIX `dir_create` that fails on exists), or an ownership nonce in the view journal.
-- **Loser's journal over-claims.** STILL OPEN: clearing `owned_paths` in `_after_create_refused_v1` needs a rebuilt journal record, not a one-liner; skipped. It reaches `destroyed` while `owned_paths` names the winner's dirs.
+- **Loser's journal over-claims. FIXED 2026-11-27.** `_after_create_refused_v1` now also rebuilds the session journal with empty `owned_paths` on `view-exists`, so the loser's journal (still `destroyed`, status `rejected`) no longer names the winner's view dir or the attempt root. Spec: the view-exists loser asserts both are absent from its `owned_paths`.
 - **Untested path.** A failure after `dir_create_all(view_dir)` (a truly half-created view) has no spec.
+- **Fixed 2026-11-27:** `_prepare_v1` also refuses a `view_dir` that is a regular file, so that case no longer reaches create and leaks the loser's own attempt root.
+- **Still open:** a racer with the same `view_root` but a different `state_root`, if admission allows it, would still blank an attempt root it created. This is fail-closed: it leaves a permanent `attempt-exists`, with no data loss.
