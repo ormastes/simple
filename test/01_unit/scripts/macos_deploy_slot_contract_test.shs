@@ -1,0 +1,219 @@
+#!/bin/sh
+# Contract test for macOS (Darwin arm64) deploy-slot canonicalisation and
+# bootstrap-CLI refusal across release-platform.shs, setup.shs, and launchers.
+# Regression guard for:
+#   doc/08_tracking/bug/macos_test_runner_blocked_inline_unsafe_and_wrong_deploy_slot_2026-08-31.md
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/macos-deploy-slot-contract.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+checked=0
+check() { checked=$((checked + 1)); "$@" || fail "check $checked: $*"; }
+
+# ---------------------------------------------------------------------------
+# 1. release-platform.shs canonical Darwin mapping
+# ---------------------------------------------------------------------------
+. "$root/scripts/setup/release-platform.shs"
+
+checked=$((checked + 1))
+[ "$(simple_release_platform_dir aarch64-apple-darwin)" = "aarch64-apple-darwin-macho" ] ||
+  fail "check $checked: aarch64-apple-darwin did not map to aarch64-apple-darwin-macho"
+
+checked=$((checked + 1))
+[ "$(simple_release_platform_dir x86_64-apple-darwin)" = "x86_64-apple-darwin-macho" ] ||
+  fail "check $checked: x86_64-apple-darwin did not map to x86_64-apple-darwin-macho"
+
+checked=$((checked + 1))
+[ "$(simple_release_platform_dir aarch64-apple-darwin-macho)" = "aarch64-apple-darwin-macho" ] ||
+  fail "check $checked: aarch64-apple-darwin-macho mapping not idempotent"
+
+# ---------------------------------------------------------------------------
+# 2. Generation launcher + symlink binding must NOT infinitely recurse
+# ---------------------------------------------------------------------------
+gen_repo="$scratch/gen-repo"
+gen_slot="$gen_repo/bin/release/aarch64-apple-darwin-macho"
+mkdir -p "$gen_slot"
+cat >"$gen_slot/simple" <<'EOF'
+#!/bin/sh
+printf 'Simple v1.0.0-rc.1 (gen-slot)\n'
+EOF
+chmod 755 "$gen_slot/simple"
+for p in simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server; do
+  printf '#!/bin/sh\nexit 0\n' >"$gen_slot/$p"
+  chmod 755 "$gen_slot/$p"
+done
+for p in simple simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server; do
+  simple_release_write_generation_launcher "$gen_slot/launcher.$p" "$p" v1
+done
+simple_release_bind_generation_launchers "$gen_repo" "aarch64-apple-darwin-macho" ""
+
+# Guard against infinite exec recursion if launcher fails to dereference bin/simple.
+checked=$((checked + 1))
+if command -v timeout >/dev/null 2>&1; then
+  gen_out=$(timeout -k 1 2 "$gen_repo/bin/simple" --version 2>/dev/null || true)
+elif command -v gtimeout >/dev/null 2>&1; then
+  gen_out=$(gtimeout -k 1 2 "$gen_repo/bin/simple" --version 2>/dev/null || true)
+else
+  gen_out=$(perl -e 'my $p=fork(); if($p==0){setpgrp(0,0); exec @ARGV} $SIG{ALRM}=sub{kill 9,-$p; exit 124}; alarm 2; waitpid($p,0); exit($?>>8)' "$gen_repo/bin/simple" --version 2>/dev/null || true)
+fi
+[ "$gen_out" = "Simple v1.0.0-rc.1 (gen-slot)" ] ||
+  fail "check $checked: symlinked bin/simple generation launcher failed (got '$gen_out')"
+
+# ---------------------------------------------------------------------------
+# 3. Helper to build an isolated setup.shs sandbox with Darwin arm64 uname
+# ---------------------------------------------------------------------------
+fakebin="$scratch/fakebin"
+mkdir -p "$fakebin"
+cat >"$fakebin/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  -s) echo Darwin ;;
+  -m) echo arm64 ;;
+  *) echo Darwin ;;
+esac
+EOF
+chmod 755 "$fakebin/uname"
+
+make_sandbox() {
+  sb="$1"
+  mkdir -p "$sb/repo/bin" "$sb/repo/scripts" "$sb/repo/config" "$sb/repo/src/lib" "$sb/repo/src/compiler_rust" "$sb/home"
+  cp -R "$root/scripts/setup" "$sb/repo/scripts/setup"
+  cp -R "$root/scripts/lib" "$sb/repo/scripts/lib"
+  cp -R "$root/scripts/check" "$sb/repo/scripts/check"
+  cp -R "$root/scripts/hooks" "$sb/repo/scripts/hooks"
+  [ -d "$root/config/host" ] && cp -R "$root/config/host" "$sb/repo/config/host"
+  [ -f "$root/config/llvm_toolchain.sdn" ] && cp "$root/config/llvm_toolchain.sdn" "$sb/repo/config/"
+  printf 'channel = "1.88.0"\n' >"$sb/repo/src/compiler_rust/rust-toolchain.toml"
+  git -C "$sb/repo" init -q
+  git -C "$sb/repo" config user.email test@test
+  git -C "$sb/repo" config user.name test
+  git -C "$sb/repo" commit -qm init --allow-empty
+}
+
+run_setup() {
+  sb="$1"
+  PATH="$fakebin:$PATH" HOME="$sb/home" SIMPLE_HOST_CONFIG="$sb/host.sdn" \
+    sh "$sb/repo/scripts/setup/setup.shs"
+}
+
+# ---------------------------------------------------------------------------
+# 4. Legacy aarch64-apple-darwin slot MUST NOT be linked as bin/simple
+# ---------------------------------------------------------------------------
+sb_legacy="$scratch/sb-legacy"
+make_sandbox "$sb_legacy"
+mkdir -p "$sb_legacy/repo/bin/release/aarch64-apple-darwin"
+cat >"$sb_legacy/repo/bin/release/aarch64-apple-darwin/simple" <<'EOF'
+#!/bin/sh
+echo "Simple v1.0.0-beta"
+EOF
+chmod 755 "$sb_legacy/repo/bin/release/aarch64-apple-darwin/simple"
+legacy_err=$(run_setup "$sb_legacy" 2>&1 || true)
+checked=$((checked + 1))
+[ ! -e "$sb_legacy/repo/bin/simple" ] && [ ! -L "$sb_legacy/repo/bin/simple" ] ||
+  fail "check $checked: setup.shs must NOT point bin/simple at legacy aarch64-apple-darwin"
+checked=$((checked + 1))
+case "$legacy_err" in
+  *"release/aarch64-apple-darwin-macho/simple not found"*) : ;;
+  *) fail "check $checked: expected missing -macho notice, got: $legacy_err" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 5. Bootstrap CLI in aarch64-apple-darwin-macho MUST be refused
+#    (and any pre-existing bin/simple link to that bootstrap slot cleared)
+# ---------------------------------------------------------------------------
+sb_boot="$scratch/sb-boot"
+make_sandbox "$sb_boot"
+mkdir -p "$sb_boot/repo/bin/release/aarch64-apple-darwin-macho"
+cat >"$sb_boot/repo/bin/release/aarch64-apple-darwin-macho/simple" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "simple-bootstrap 1.0.0-rc.1"
+  exit 0
+fi
+echo "error: unknown command '$1'" >&2
+exit 1
+EOF
+chmod 755 "$sb_boot/repo/bin/release/aarch64-apple-darwin-macho/simple"
+ln -sf "release/aarch64-apple-darwin-macho/simple" "$sb_boot/repo/bin/simple"
+
+boot_out=$(run_setup "$sb_boot" 2>&1)
+checked=$((checked + 1))
+[ ! -e "$sb_boot/repo/bin/simple" ] && [ ! -L "$sb_boot/repo/bin/simple" ] ||
+  fail "check $checked: bin/simple must not remain linked to simple-bootstrap"
+checked=$((checked + 1))
+case "$boot_out" in
+  *"is the bootstrap CLI, not the full CLI"*) : ;;
+  *) fail "check $checked: missing bootstrap-CLI refusal message: $boot_out" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 6. Full CLI in aarch64-apple-darwin-macho IS accepted even if legacy exists
+# ---------------------------------------------------------------------------
+sb_full="$scratch/sb-full"
+make_sandbox "$sb_full"
+mkdir -p "$sb_full/repo/bin/release/aarch64-apple-darwin" \
+         "$sb_full/repo/bin/release/aarch64-apple-darwin-macho"
+cat >"$sb_full/repo/bin/release/aarch64-apple-darwin/simple" <<'EOF'
+#!/bin/sh
+echo "Simple v0.9-legacy"
+EOF
+cat >"$sb_full/repo/bin/release/aarch64-apple-darwin-macho/simple" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "Simple v1.0.0-rc.1"
+  exit 0
+fi
+if [ "${1:-}" = "run" ]; then
+  echo "deployed-simple-probe-ok os=macos"
+  exit 0
+fi
+EOF
+chmod 755 "$sb_full/repo/bin/release/aarch64-apple-darwin/simple" \
+          "$sb_full/repo/bin/release/aarch64-apple-darwin-macho/simple"
+
+full_out=$(run_setup "$sb_full" 2>&1)
+checked=$((checked + 1))
+[ -L "$sb_full/repo/bin/simple" ] || fail "check $checked: bin/simple symlink was not created"
+checked=$((checked + 1))
+[ "$(readlink "$sb_full/repo/bin/simple")" = "release/aarch64-apple-darwin-macho/simple" ] ||
+  fail "check $checked: bin/simple points to $(readlink "$sb_full/repo/bin/simple"), want release/aarch64-apple-darwin-macho/simple"
+checked=$((checked + 1))
+[ "$("$sb_full/repo/bin/simple" --version)" = "Simple v1.0.0-rc.1" ] ||
+  fail "check $checked: bin/simple --version did not come from -macho slot"
+
+# ---------------------------------------------------------------------------
+# 7. Generated wrappers & runtime provenance prefer -macho over legacy slots
+# ---------------------------------------------------------------------------
+for wrapper in simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_mcp_server; do
+  checked=$((checked + 1))
+  wpath="$sb_full/repo/bin/$wrapper"
+  [ -x "$wpath" ] || fail "check $checked: missing generated wrapper $wpath"
+  macho_line=$(grep -n -E '(\$\{platform_dir\}|aarch64-apple-darwin-macho)/' "$wpath" | grep 'release/' | head -n 1 | cut -d: -f1)
+  legacy_line=$(grep -n 'release/aarch64-apple-darwin/' "$wpath" | head -n 1 | cut -d: -f1)
+  [ -n "$macho_line" ] && [ -n "$legacy_line" ] && [ "$macho_line" -lt "$legacy_line" ] ||
+    fail "check $checked: $wrapper checks legacy aarch64-apple-darwin (line $legacy_line) before -macho/platform_dir (line $macho_line)"
+done
+
+checked=$((checked + 1))
+devhub_macho=$(grep -n -E '(\$\{platform_dir\}|aarch64-apple-darwin-macho)/simple' "$root/bin/devhub" | head -n 1 | cut -d: -f1)
+devhub_legacy=$(grep -n 'aarch64-apple-darwin/simple' "$root/bin/devhub" | head -n 1 | cut -d: -f1)
+[ -n "$devhub_macho" ] && [ -n "$devhub_legacy" ] && [ "$devhub_macho" -lt "$devhub_legacy" ] ||
+  fail "check $checked: bin/devhub checks legacy aarch64-apple-darwin (line $devhub_legacy) before -macho (line $devhub_macho)"
+
+. "$root/scripts/lib/simple-runtime-provenance.shs"
+checked=$((checked + 1))
+first_cand=$(SIMPLE_RUNTIME_HOST_OS=Darwin SIMPLE_RUNTIME_HOST_ARCH=arm64 simple_runtime_release_candidates "$root" | head -n 1)
+[ "$first_cand" = "$root/bin/release/aarch64-apple-darwin-macho/simple" ] ||
+  fail "check $checked: simple_runtime_release_candidates first Darwin arm64 candidate is $first_cand"
+
+# ---------------------------------------------------------------------------
+# 8. check-deployed-simple-runnable.shs selftest works on stock macOS PATH
+# ---------------------------------------------------------------------------
+checked=$((checked + 1))
+PATH="/usr/bin:/bin:/usr/sbin:/sbin" sh "$root/scripts/check/check-deployed-simple-runnable.shs" --selftest >/dev/null ||
+  fail "check $checked: check-deployed-simple-runnable.shs --selftest failed without Homebrew PATH"
+
+printf 'PASS: %s macOS deploy-slot contract checks\n' "$checked"

@@ -73,6 +73,20 @@ fi
 WORK=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 
+run_with_timeout() {
+  _secs=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$_secs" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV' "$_secs" "$@"
+  else
+    "$@"
+  fi
+}
+
 # probe_entry ROOT BIN -> sets EV_EXECUTED, EV_RC, EV_STATE (ok|fail|missing),
 # EV_BIN, EV_DETAIL. Never prints a verdict.
 probe_entry() {
@@ -104,13 +118,8 @@ probe_entry() {
     _probe=$(cygpath -m "$_probe")
   fi
   EV_EXECUTED=1
-  if command -v timeout >/dev/null 2>&1; then
-    (cd "$_root" && timeout "$TIMEOUT_SECS" "$_bin" run "$_probe") > "$_dir/out" 2> "$_dir/err"
-    EV_RC=$?
-  else
-    (cd "$_root" && "$_bin" run "$_probe") > "$_dir/out" 2> "$_dir/err"
-    EV_RC=$?
-  fi
+  (cd "$_root" && run_with_timeout "$TIMEOUT_SECS" "$_bin" run "$_probe") > "$_dir/out" 2> "$_dir/err"
+  EV_RC=$?
   if [ "$EV_RC" -eq 0 ] && grep -q "$TOKEN" "$_dir/out"; then
     EV_STATE=ok
     return 0
@@ -177,11 +186,11 @@ run_selftest() {
   # 7. a value-less trailing flag must ERROR (exit 2) and terminate, not loop;
   # 8. a non-numeric --timeout must ERROR as a usage error, not as a selftest failure.
   for _flag in --bin --root --timeout; do
-    _out=$(timeout 20 sh "$0" "$_flag" 2>/dev/null); _rc=$?
+    _out=$(run_with_timeout 20 sh "$0" "$_flag" 2>/dev/null); _rc=$?
     [ "$_rc" -eq 2 ] || selftest_fail "value-less $_flag exited $_rc, expected 2"
     case "$_out" in "ERROR — nothing was checked ($_flag requires a value)") : ;; *) selftest_fail "value-less $_flag verdict: $_out" ;; esac
   done
-  _out=$(timeout 20 sh "$0" --timeout abc 2>/dev/null); _rc=$?
+  _out=$(run_with_timeout 20 sh "$0" --timeout abc 2>/dev/null); _rc=$?
   [ "$_rc" -eq 2 ] || selftest_fail "--timeout abc exited $_rc, expected 2"
   case "$_out" in *"--timeout must be a positive integer"*) : ;; *) selftest_fail "--timeout abc verdict: $_out" ;; esac
 }
@@ -206,7 +215,13 @@ if [ "$EV_EXECUTED" -eq 0 ]; then
   exit 2
 fi
 
-ident=$(sha256sum "$EV_BIN" 2>/dev/null | cut -c1-12)
+if command -v sha256sum >/dev/null 2>&1; then
+  ident=$(sha256sum "$EV_BIN" 2>/dev/null | cut -c1-12)
+elif command -v shasum >/dev/null 2>&1; then
+  ident=$(shasum -a 256 "$EV_BIN" 2>/dev/null | cut -c1-12)
+else
+  ident=""
+fi
 [ -n "$ident" ] || ident=unknown
 
 if [ "$EV_STATE" = ok ]; then
