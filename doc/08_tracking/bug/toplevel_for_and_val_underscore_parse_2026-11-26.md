@@ -45,7 +45,7 @@ There is no superlinear term. In HIR mode `inventory --sdn` and `boundaries` sha
 - The parse cache (`frontend_parse_or_restore`, xxh3 key) does not hit across runs for `robust_hir`: file 1 cost ~10 s in every run.
 - Spec fix: `bound_origin_facts_spec` walks the large directory with `--source text` and covers the HIR default on `fixtures/bound_graph` (42 lines).
 
-TODO(seed, P2): fix the `FileHandle`/`File` = `AsyncFile` alias collision in `src/lib/nogc_async_mut/io/file.spl` together with the seed SEGV it exposes once the frontend is JIT-admitted (repro: re-export `std.nogc_sync_mut.io.file.{FileHandle, File}` there, then run `run_robust(["boundaries", "--source", "hir", <one file>])` on the seed -> rc=139). Then re-measure on a pure-Simple binary.
+The `FileHandle`/`File` = `AsyncFile` alias collision and the rc=139 crash it exposed are fixed (verification-pending): see `doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md`.
 
 ## Root causes and fix (added 2026-11-26)
 - Bug A: `convert_flat_expr` in `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl` had no case for EXPR_FOR / EXPR_WHILE (tags 16 / 17), so module-scope loops were reported as unhandled.
