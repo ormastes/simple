@@ -31,7 +31,7 @@ use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1, SosixConta
 use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
 use std.nogc_sync_mut.storage.storage_view_v1.{ViewBytesV1, storage_view_v1_create, storage_view_v1_write, storage_view_v1_save, storage_view_v1_base_entries}
 use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, StoreGenerationV1}
-use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, PureContainerQualifyV1, pure_container_qualify_v1, pure_container_run_v1, _prepare_v1, _execute_v1, _teardown_v1}
+use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, PureContainerQualifyV1, pure_container_qualify_v1, pure_container_run_v1, _prepare_v1, _execute_v1, _teardown_v1, _advance_v1, _chain_v1, _exec_unknown_v1, _fail_prepare_v1, _after_create_refused_v1, _no_view_v1}
 
 val SEED = "C:/dev/keep/seeds/simple-local-20261126.exe"
 val CAP_BYTES = 276824064
@@ -331,6 +331,56 @@ describe "pure simple container admission refusals":
         val again = pure_container_run_v1(spec_with("pure-failprep", base_args("7"), evidence, requirement_sandbox(), "host"))
         expect(again.reason).to_equal("")
         expect(again.exit_code.value).to_equal(7)
+
+    it "does not delete a view another run with the same id created when its own create returns view-exists":
+        if not ready(): return
+        val winner = _prepare_v1(spec_with("pure-race", base_args("0"), evidence, requirement_sandbox(), "host"))
+        expect(winner.status).to_equal("ready")
+        # The loser has no view of its own: its create returned view-exists for the winner's directory.
+        var loser = winner.session
+        loser.view = _no_view_v1()
+        val failed = _fail_prepare_v1(_after_create_refused_v1(loser, "view-exists"), "view-view-exists")
+        expect(failed.status).to_equal("rejected")
+        expect(failed.reason).to_equal("view-view-exists")
+        expect(is_dir(view_root() + "/pure-race")).to_equal(true)
+        expect(is_dir(winner.session.attempt_root)).to_equal(true)
+        expect(_teardown_v1(winner.session).reason).to_equal("")
+        expect(is_dir(view_root() + "/pure-race")).to_equal(false)
+
+    it "still removes a view dir this run half-created when create fails for another reason":
+        if not ready(): return
+        val session = _prepare_v1(spec_with("pure-half", base_args("0"), evidence, requirement_sandbox(), "host")).session
+        val kept = _after_create_refused_v1(session, "view-dir-failed")
+        expect(kept.view_dir).to_equal(session.view_dir)
+        expect(kept.attempt_root).to_equal(session.attempt_root)
+        expect(_teardown_v1(session).reason).to_equal("")
+
+    it "rejects a missing store at create, leaves nothing behind and runs the id again":
+        if not ready(): return
+        var spec = spec_with("pure-nostore", base_args("0"), evidence, requirement_sandbox(), "host")
+        spec.store = base_dir() + "/no-such-store"
+        spec.base_root = ""
+        val failed = pure_container_run_v1(spec)
+        expect(failed.reason).to_equal("view-store-missing")
+        expect(failed.status).to_equal("rejected")
+        expect(failed.journal.phase).to_equal("destroyed")
+        expect(is_dir(view_root() + "/pure-nostore")).to_equal(false)
+        expect(is_dir(state_root() + "/attempts/pure-nostore-a1")).to_equal(false)
+
+    it "reports the real reason, not lifecycle-phase-unknown, when the outcome is unknown":
+        if not ready(): return
+        val prepared = _prepare_v1(spec_with("pure-unknown", base_args("0"), evidence, requirement_sandbox(), "host"))
+        expect(prepared.status).to_equal("ready")
+        val pending = _advance_v1(prepared.session.life, "launch").unwrap()
+        val interrupted = _exec_unknown_v1(prepared.session, pending, "tree-not-empty")
+        expect(interrupted.status).to_equal("cleanup-unproven")
+        expect(interrupted.reason).to_equal("tree-not-empty")
+        expect(interrupted.session.life.state).to_equal("outcome-unknown")
+        val running = _chain_v1(pending, ["admitted"]).unwrap()
+        val uncertain = _chain_v1(running, ["leader-exit", "uncertain"])
+        expect(uncertain.is_ok()).to_equal(true)
+        expect(uncertain.unwrap().state).to_equal("outcome-unknown")
+        expect(_teardown_v1(prepared.session).reason).to_equal("")
 
     it "removes the spec root":
         if not ready(): return

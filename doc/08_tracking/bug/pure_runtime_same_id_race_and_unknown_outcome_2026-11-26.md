@@ -1,6 +1,7 @@
 # pure_runtime_v1: same-id race deletes the other run's view; unknown outcome reported as phase error
 
 - Found: Fable final review of pure-Simple lane P4, 2026-11-26.
+- Status: fixed 2026-11-27.
 - File: `src/lib/nogc_sync_mut/container/pure_runtime_v1.spl`.
 
 ## 1. Same-id race (data loss)
@@ -13,3 +14,8 @@ Expected: allow the lifecycle edges into the outcome-unknown state and report `t
 
 ## Also
 - The create-failure path (view dir exists, view not completed) has no direct test. A nonexistent `store` would exercise it cheaply.
+
+## Fix (2026-11-27)
+- Race: `_after_create_refused_v1` clears `view_dir` and `attempt_root` on the session when `storage_view_v1_create` returns `view-exists`, so the loser's teardown removes neither (same id means the same attempt scratch). Other create failures keep both, so a half-created view is still removed.
+- Unknown outcome: `_advance_v1` accepts the outcome-unknown and quarantined states even though they project to the unknown runtime phase, so `uncertain`/`interrupted` reach `cleanup-unproven` with the real reason (`tree-not-empty`). Other unknown projections are still rejected.
+- Tests in `test/03_system/app/container/feature/pure_simple_container_v1_spec.spl`: view-exists keeps the winner's view, half-created view still removed, missing store at create, unknown outcome reports the real reason. The race itself is emulated through the helper, since a spec cannot interleave two runs.
