@@ -7876,7 +7876,7 @@ impl MirLowering:
         val call_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Call(nil_expr, [], []))
         if expr_disc == call_disc:
             match expr_value.kind:
-                case HirExprKind.Call(callee, args, _):
+                case HirExprKind.Call(callee, args, call_type_args):
                     # Built-in Option construction: `Some(v)` / `None(...)` ->
                     # rt_enum_new with Option's discriminants (Some=0, None=1,
                     # registered in enum_variant_index). The callee is a bare
@@ -7903,7 +7903,7 @@ impl MirLowering:
                                     return self.lower_enum_construct_named("Option", nv_name, args)
                             case _:
                                 self.payload_decode_failed("HirExprKind.NamedVar", expr_value.span)
-                    return self.lower_call(callee, args)
+                    return self.lower_call(callee, args, call_type_args)
                 case _:
                     self.payload_decode_failed("HirExprKind.Call", expr_value.span)
         val block_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
@@ -8746,7 +8746,10 @@ impl MirLowering:
                 # struct_value_syms for their own freshly-produced locals.
                 var result_struct_name = ""
                 var exists_nominal_payload = false
+                var exists_inner_is_erased_tp = false
                 if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):
+                    if not self.current_fn_is_method and not self.native_trait_concrete_option_locals.contains(base_local.id) and self.hir_type_is_bare_type_param(exists_inner_type):
+                        exists_inner_is_erased_tp = true
                     match exists_inner_type.kind:
                         case HirTypeKind.Tuple(_):
                             # The result is payload-or-nil, not the Optional
@@ -8845,6 +8848,8 @@ impl MirLowering:
                 elif self.runtime_array_locals.contains(base_local.id) or self.runtime_dict_locals.contains(base_local.id):
                     # Already a decoded container handle from a runtime container read.
                     ()
+                elif exists_inner_is_erased_tp:
+                    some_value = self.enum_payload_value(some_value, result_type)
                 elif self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
                     some_value = self.runtime_option_scalar_payload(base, base_local, result_type)
                 else:
@@ -8855,7 +8860,20 @@ impl MirLowering:
                     # integer payload decode_erased_scalar_call_payload decoded.
                     # A substituted generic trait dispatch carries the impl's
                     # raw payload, not an erased-T tagged one: leave it raw.
-                    if self.static_optional_payload_is_type_param(base) and not self.native_trait_concrete_option_locals.contains(base_local.id):
+                    # A concrete turbofish ExistsCheck (`payload_get<i64>(..)`)
+                    # already has a concrete `Optional(Int)` on `expr_value.type_`,
+                    # so its binder is raw and must NOT be re-tagged.
+                    var exists_expr_inner_is_concrete = false
+                    if expr_value.has_type_:
+                        if val exists_expr_ty = expr_value.type_:
+                            match exists_expr_ty.kind:
+                                case HirTypeKind.Optional(expr_opt_inner):
+                                    if not self.hir_type_is_bare_type_param(expr_opt_inner):
+                                        match expr_opt_inner.kind:
+                                            case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                                            case _: exists_expr_inner_is_concrete = true
+                                case _: ()
+                    if not exists_expr_inner_is_concrete and self.static_optional_payload_is_type_param(base) and not self.native_trait_concrete_option_locals.contains(base_local.id):
                         if val erased_inner = self.option_inner_hir_type_for_local(base, base_local):
                             match erased_inner.kind:
                                 case HirTypeKind.Int(_, _): some_value = self.box_runtime_value(some_value)
@@ -8898,7 +8916,7 @@ impl MirLowering:
                     # A presence-carrying base is already decoded (see above):
                     # never mark it for another runtime decode.
                     ()
-                elif self.is_runtime_value_local(some_value.id):
+                elif exists_inner_is_erased_tp or self.is_runtime_value_local(some_value.id):
                     self.mark_runtime_value_local(result_local.id)
                 if self.runtime_array_locals.contains(some_value.id):
                     self.runtime_array_locals[result_local.id] = true
@@ -9010,6 +9028,10 @@ impl MirLowering:
                 var uw_inner_type = self.option_inner_hir_type_for_local(base, uw_base_local)
                 if uw_inner_type == None:
                     uw_inner_type = self.unwrap_concrete_fallback_hir_type_v1(base, uw_base_local)
+                val is_erased_type_param_bang = (not self.current_fn_is_method and
+                    not self.native_trait_concrete_option_locals.contains(uw_base_local.id) and
+                    uw_inner_type != None and
+                    self.hir_type_is_bare_type_param(uw_inner_type ?? HirType(kind: HirTypeKind.Error, span: base.span)))
                 if uw_inner_type != None:
                     val uw_found_inner = uw_inner_type ?? HirType(kind: HirTypeKind.Error, span: base.span)
                     match uw_found_inner.kind:
@@ -9056,7 +9078,7 @@ impl MirLowering:
                 var some_val_uw = self.option_payload_or_self(uw_base_local)
                 if uw_is_text:
                     some_val_uw = self.option_text_value(some_val_uw, uw_result_type)
-                elif self.is_runtime_value_local(uw_base_local.id) and not self.option_value_locals.contains(uw_base_local.id):
+                elif not is_erased_type_param_bang and self.is_runtime_value_local(uw_base_local.id) and not self.option_value_locals.contains(uw_base_local.id):
                     some_val_uw = self.decode_runtime_value(some_val_uw, uw_result_type)
                 elif uw_is_bool:
                     some_val_uw = self.option_bool_value(some_val_uw)
@@ -9087,7 +9109,7 @@ impl MirLowering:
                 b_none_uw.terminate_goto(merge_block_uw)
                 self.builder = b_none_uw
 
-                if self.is_runtime_value_local(some_val_uw.id):
+                if is_erased_type_param_bang or self.is_runtime_value_local(some_val_uw.id):
                     self.mark_runtime_value_local(result_local_uw.id)
 
                 if val payload_type_uw = uw_inner_type:

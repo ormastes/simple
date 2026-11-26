@@ -1,18 +1,21 @@
 # Purpose and audience: executable specification evidence for the owning engineering team.
 # @req REQ-SSPEC-COMPILER
 """
-An erased generic `-> T` tail `.unwrap()` keeps the producer's tagged word.
+An erased generic `-> T` tail `.unwrap()`, `if val`, and `match` keep the tagged `T` word.
 
 Bug: doc/08_tracking/bug/stage2_generic_tail_unwrap_reboxes_record_2026-11-19.md
 
-A free generic call whose `T?` result's `T` is also carried by an encoded
-parameter slot (`first(xs: [T]) -> T?`) stores the tagged `T` word as its
-Some payload. The `.unwrap()` arm left that word unmarked, so the `-> T`
-tail re-boxed it with `rt_value_int_wide`: an integer came back tagged twice
-and a record handle came back shifted. A `T?` parameter or closure result
-(raw payload from a concrete caller) and a forwarder with no encoded `T`
-slot (`tuple_at<T>(t, i)` returns an enum payload tuple's raw scalar words)
-keep the tail box: their payload encoding is not provable in the body.
+Inside a free erased generic function, every `T?` payload (from a `T?`
+parameter, an `rt_tuple_get<T>` / `tuple_at<T>` call, a `[T]` helper `first(xs)`,
+or a `fn() -> T?` closure) carries the tagged `T` word:
+- Callers encode scalar payloads of `T?` arguments (`encode_erased_scalar_opt_arg_v1`)
+  and multi-field enum tuple slots (`encode_enum_tuple_payload_slot_v1`).
+- Unwrapping `T?` inside a free generic function (`.unwrap()`, `!`, `if val`,
+  `match Some(x)`) marks the extracted `T` word as a runtime value so the `-> T`
+  tail does not emit `rt_value_int_wide` (no `ptr << 3` SIGSEGV on records and
+  no `x8` double-boxing on scalars).
+- Concrete `-> T` callers decode scalars via `rt_value_as_int_wide` /
+  `rt_value_as_float` and pass records through directly.
 
 HIR is lowered with SIMPLE_BOOTSTRAP=1 and SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1
 (how native-build lowers a module). The native oracle is
@@ -72,32 +75,37 @@ describe "erased generic tail unwrap (bootstrap HIR)":
     it "lowers the probe module without MIR errors":
         expect(lower_bootstrap_mir()["__errors__"] ?? "missing").to_equal("")
 
-    it "keeps the tail box for a forwarder with no encoded T slot (raw tuple words)":
-        # tuple_at<T>(t, i) forwards an enum payload tuple's RAW scalar words
-        # (rt_tuple_set stores 7, not 56), so the body cannot tell a raw i64
-        # from a record handle. Known-ambiguous shape: see the bug record.
+    it "does not re-box the tagged payload of tuple_at<T>(t, i).unwrap() at the tail":
         val mir = lower_bootstrap_mir()["get_req"] ?? ""
-        expect(mir).to_contain("rt_value_int_wide")
+        expect(mir).to_contain("rt_unwrap_or_self")
+        expect(mir.contains("rt_value_int_wide")).to_equal(false)
 
     it "does not re-box the tagged payload of an erased generic-call unwrap":
         val mir = lower_bootstrap_mir()["head"] ?? ""
         expect(mir).to_contain("rt_unwrap_or_self")
         expect(mir.contains("rt_value_int_wide")).to_equal(false)
 
-    it "still boxes the raw payload of a T? parameter unwrap at the tail":
+    it "does not re-box the tagged payload of a T? parameter unwrap at the tail":
         val mir = lower_bootstrap_mir()["req"] ?? ""
-        expect(mir).to_contain("rt_value_int_wide")
+        expect(mir).to_contain("rt_unwrap_or_self")
+        expect(mir.contains("rt_value_int_wide")).to_equal(false)
 
-    it "still boxes the raw payload of a closure-call unwrap at the tail":
+    it "does not re-box the tagged payload of a closure-call unwrap at the tail":
         val mir = lower_bootstrap_mir()["get_or"] ?? ""
-        expect(mir).to_contain("rt_value_int_wide")
+        expect(mir).to_contain("rt_unwrap_or_self")
+        expect(mir.contains("rt_value_int_wide")).to_equal(false)
 
-    it "concrete callers still decode the erased -> T result":
+    it "concrete callers encode scalar T? args and decode the erased -> T result":
         val fns = lower_bootstrap_mir()
+        expect(fns["use_int"] ?? "").to_contain("rt_value_int_wide")
         expect(fns["use_int"] ?? "").to_contain("rt_value_as_int_wide")
+        expect(fns["use_int_if"] ?? "").to_contain("rt_value_int_wide")
+        expect(fns["use_int_if"] ?? "").to_contain("rt_value_as_int_wide")
         expect(fns["use_get_int"] ?? "").to_contain("rt_value_as_int_wide")
         expect(fns["use_head_int"] ?? "").to_contain("rt_value_as_int_wide")
         expect((fns["use_get_rec"] ?? "").contains("rt_value_as_int_wide")).to_equal(false)
+        expect((fns["use_rec"] ?? "").contains("rt_value_int_wide")).to_equal(false)
+        expect((fns["use_rec"] ?? "").contains("rt_value_as_int_wide")).to_equal(false)
 
     it "a generic-class method (plain T) keeps the tail box":
         val mir = lower_bootstrap_mir()["Bag2.top"] ?? ""
