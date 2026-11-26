@@ -1,0 +1,50 @@
+# @cover src/lib/nogc_async_mut/container/backend_select_v1.spl 80%
+# Increment-2 lane N2 (review-only): the FreeBSD jail runtime is a selection
+# candidate on FreeBSD hosts only, its report comes from the jail runtime's own
+# probe translation, and with no host evidence it is never admitted. Pure data;
+# no FreeBSD host was available, so this makes no capability claim.
+use std.spec.*
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1, container_capability_requirement_v1_empty, CONTAINER_ISOLATION_KIND_NATIVE_V1}
+use std.common.contracts.container.runtime_v1.{RuntimeProbeV1, RUNTIME_PRIVILEGE_ROOT}
+use std.nogc_async_mut.container.providers.freebsd.jail_runtime_v1.{FREEBSD_JAIL_ENGINE_V1}
+use std.nogc_async_mut.container.backend_select_v1.{container_backend_candidates_freebsd_v1, container_backend_select_v1, container_backend_selection_text_v1, CONTAINER_BACKEND_FREEBSD_JAIL_V1, CONTAINER_FREEBSD_JAIL_REVIEW_ONLY_V1, CONTAINER_SELECT_NO_CANDIDATES_V1}
+
+fn _capable_probe() -> RuntimeProbeV1:
+    RuntimeProbeV1(provider: FREEBSD_JAIL_ENGINE_V1, engine: "ocijail", engine_present: true,
+        healthy: true, launch_capable: true, privilege: RUNTIME_PRIVILEGE_ROOT, reason: "")
+
+fn _requirement() -> ContainerCapabilityRequirementV1:
+    var r = container_capability_requirement_v1_empty()
+    r.required_isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_V1
+    r.required_launch_qualified = ContainerCapabilityFlagV1(true)
+    r
+
+describe "container backend selection: FreeBSD jail (review-only)":
+    it "offers no FreeBSD candidate off-host":
+        for os in ["windows", "linux", "macos", "simpleos", ""]:
+            val c = container_backend_candidates_freebsd_v1(os, "x86_64", _capable_probe(), ContainerCapabilityFlagV1(true))
+            expect(c.len()).to_equal(0)
+        val sel = container_backend_select_v1(container_backend_candidates_freebsd_v1("windows", "x86_64", _capable_probe(), ContainerCapabilityFlagV1(true)), _requirement())
+        expect(sel.admitted.value).to_equal(false)
+        expect(sel.reason).to_equal(CONTAINER_SELECT_NO_CANDIDATES_V1)
+
+    it "lists the jail runtime on a FreeBSD host with its own probe-derived report":
+        val c = container_backend_candidates_freebsd_v1("freebsd", "x86_64", _capable_probe(), ContainerCapabilityFlagV1(true))
+        expect(c.len()).to_equal(1)
+        expect(c[0].backend).to_equal(CONTAINER_BACKEND_FREEBSD_JAIL_V1)
+        expect(c[0].report.host_os).to_equal("freebsd")
+        expect(c[0].report.client_authority).to_equal("delegated")
+        expect(c[0].report.launch_qualified.value).to_equal(false)
+        expect(c[0].report.evidence_revision).to_equal("")
+
+    it "never admits the evidence-less jail report, with a named gap":
+        val c = container_backend_candidates_freebsd_v1("freebsd", "x86_64", _capable_probe(), ContainerCapabilityFlagV1(true))
+        expect(c[0].unavailable_reason).to_equal(CONTAINER_FREEBSD_JAIL_REVIEW_ONLY_V1)
+        val sel = container_backend_select_v1(c, _requirement())
+        expect(sel.admitted.value).to_equal(false)
+        expect(sel.refusals[0].reason).to_equal(CONTAINER_FREEBSD_JAIL_REVIEW_ONLY_V1)
+
+    it "carries the probe's own reason when the scripted/live probe is unavailable":
+        val c = container_backend_candidates_freebsd_v1("freebsd", "x86_64", _capable_probe(), ContainerCapabilityFlagV1(false))
+        expect(c[0].unavailable_reason).to_equal("freebsd-jail-live-probe-unavailable")
+        expect(container_backend_select_v1(c, _requirement()).admitted.value).to_equal(false)
