@@ -25,7 +25,7 @@ SDN-text-file store; header of `core.spl` forbids manual `.sdn` edits.
 | Sibling | `src/lib/nogc_sync_mut/enterprise_store/file_backend.spl` (`SPLSTORE1`) | append-only text-line store, sqlite-free fallback behind the enterprise-store façade |
 
 - Apps: `src/app/check_dbs/main.spl`, `src/app/cli/{check_dbs,fix_dbs}.spl`, `src/app/enterprise_store_app/`
-- Tests: `test/system/database/` (db_sdn, sdn_checksum, atomic_lock_excl, atomic_fsync, wal_replay_row_materialization, requirement_db), `test/02_integration/lib/database_{core,atomic,query,e2e}_spec.spl`
+- Tests: `test/03_system/stdlib/database/` (db_sdn, sdn_checksum, atomic_lock_excl, atomic_fsync, wal_replay_row_materialization, requirement_db), `test/02_integration/lib/database_{core,atomic,query,e2e}_spec.spl`
 - Guide: [simple_db.md](simple_db.md), [enterprise_store.md](enterprise_store.md)
 
 ## 2. Embedded DB

@@ -1,7 +1,7 @@
 # SimpleOS Desktop-With-Apps Framebuffer Baseline (SYS-GUI-006 with-apps variant)
 
 This directory holds the checked-in PPM baseline for
-`test/system/simpleos_desktop_with_apps_framebuffer_spec.spl`. The spec boots
+`test/03_system/os/simpleos_desktop_with_apps_framebuffer_spec.spl`. The spec boots
 the same `desktop_e2e_entry.spl` target as the bare-desktop baseline
 (`test/09_baselines/simpleos_desktop_framebuffer/`), but waits for the
 `remote-grouping:ok` marker so the two default demo apps are open before
@@ -42,6 +42,6 @@ required app manifest markers —
 `browser_demo_remote_main`/`hello_world_remote_main`/`file_manager_remote_main`/
 `shell_remote_main`/`editor_remote_main`/`smux_remote_main` — so the disk
 fixture itself is not the blocker), then run
-`UPDATE_BASELINE=1 bin/simple test test/system/simpleos_desktop_with_apps_framebuffer_spec.spl`
+`UPDATE_BASELINE=1 bin/simple test test/03_system/os/simpleos_desktop_with_apps_framebuffer_spec.spl`
 *after* the bare-desktop baseline has been confirmed correct with a real
 capture.

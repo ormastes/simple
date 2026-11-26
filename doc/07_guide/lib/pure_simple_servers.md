@@ -134,7 +134,7 @@ admitted Stage-4 CLI.
   `doc/00_llm_process/feature_expert/database_sql/skill.md`
 - Existing executable DB scenarios:
   `test/03_system/database/server/db_server_tier_spec.spl` and
-  `db_durability_spec.spl` (the mirrored legacy `test/system/` copies are not
+  `db_durability_spec.spl` (the legacy mirror copies, retired 2026-11-27, were not
   separate acceptance evidence).
 - Final requirements, NFRs, architecture, detail design, test plan, and agent
   plan share the slug `secure_pure_simple_servers` in their canonical trees.

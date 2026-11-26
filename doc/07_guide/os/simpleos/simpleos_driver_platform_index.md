@@ -9,7 +9,7 @@ This index connects the recent SimpleOS driver, desktop, and game-platform work 
 | Area | Design/plan | Primary tests |
 | --- | --- | --- |
 | x86_64 desktop driver completion | `doc/03_plan/sys_test/x86_64_desktop_driver_completion.md` | `test/03_system/simpleos/driver_acceleration_perf_spec.spl`, `test/03_system/simpleos/display_dma_contract_spec.spl` |
-| Driver safety and performance boundary | `doc/05_design/hardware_driver_safety_and_performance_2026-04-15.md`, `doc/05_design/driver_api_heavy_path.md` | driver sys-tests and perf tests under `test/system` and `test/perf` |
+| Driver safety and performance boundary | `doc/05_design/hardware_driver_safety_and_performance_2026-04-15.md`, `doc/05_design/driver_api_heavy_path.md` | driver sys-tests and perf tests under `test/03_system` and `test/perf` |
 | SimpleOS production backlog | `doc/plans/simple_os_production_remaining_goal_2026-05-13.md` | `test/02_integration/simpleos_self_host_spec.spl`, OS boot/sys tests |
 | Game compatibility platform | SimpleOS production plan and Wine/process-session specs | Wine/process/session tests under `test/01_unit/lib/common` and `test/01_unit/os/kernel/wine` |
 | Scheduler process isolation | `doc/05_design/scheduler_process_isolation.md`, `doc/05_design/scheduler_process_isolation_duplication_analysis.md` | `test/01_unit/os/scheduler_isolation_spec.spl` |

@@ -318,10 +318,10 @@ K5/K6 are both now landed; no remaining gap in this plan's own execution.
 - Kernel: `src/app/jupyter_kernel/{main,protocol,session,render_adapter}.spl`;
   REPL sibling `src/app/repl/main.spl`.
 - Specs: `test/03_system/tools/jupyter/` (NOT `test/03_system/jupyter/`), plus
-  `test/system/jupyter/` and `test/02_integration/app/jupyter_kernel_log_modes_spec.spl`.
+  `test/03_system/tools/jupyter/` and `test/02_integration/app/jupyter_kernel_log_modes_spec.spl`.
 - Web stack: `src/lib/nogc_sync_mut/http_server/` (`SimpleHttpServer` server.spl:20,
   `Router` router.spl:25); UI contract `src/lib/common/ui/semantic_contract.spl`;
-  contract spec `test/system/ui/shared_ui_contract_spec.spl`.
+  contract spec `test/03_system/gui/ui/shared_ui_contract_spec.spl`.
 - LSP backend: `src/app/lsp/main.spl`; editor grammar donor: `src/app/vscode_extension/`.
 - Landed: `src/lib/nogc_sync_mut/notebook/{session_manager,executor,types,ipynb,
   snb_sdn,magics,lane_locks,remote_exec,local_exec,lsp_bridge,vulkan_exec,
