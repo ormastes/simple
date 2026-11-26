@@ -9,10 +9,18 @@ use std.common.contracts.container.capability_report_v1.{ContainerCapabilityRepo
     ContainerCapabilityRequirementV1, ContainerCapabilityFlagV1, container_capability_v1_admission_reason}
 use std.common.contracts.container.backend_identity_v1.{container_backend_known_v1,
     CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1}
+use std.common.contracts.container.runtime_v1.{RuntimeProbeV1}
+use std.common.contracts.container.capability_report_v1.{container_capability_report_v1_empty, CONTAINER_ISOLATION_KIND_NATIVE_V1}
+use std.nogc_async_mut.container.providers.freebsd.jail_runtime_v1.{freebsd_jail_capability_from_probe_v1}
 
 pub const CONTAINER_SELECT_ISOLATION_REQUIRED_V1 = "backend-select-isolation-required"
 pub const CONTAINER_SELECT_NO_CANDIDATES_V1 = "backend-select-no-candidates"
 pub const CONTAINER_SELECT_NONE_ADMITTED_V1 = "backend-select-none-admitted"
+
+# FreeBSD jail candidate. Selection-local identity: the jail runtime has no
+# effect-admitted facade backend yet, so this name is known to selection only.
+pub const CONTAINER_BACKEND_FREEBSD_JAIL_V1 = "freebsd-jail"
+pub const CONTAINER_FREEBSD_JAIL_REVIEW_ONLY_V1 = "freebsd-jail-unqualified-no-host-evidence"
 
 # unavailable_reason is the leaf probe's own reason when the backend could not
 # be observed at all; non-empty means "not available", whatever the report says.
@@ -44,6 +52,26 @@ pub fn container_backend_candidates_windows_v1(pure_report: ContainerCapabilityR
      ContainerBackendCandidateV1(backend: CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1, report: docker_report,
         unavailable_reason: docker_unavailable_reason)]
 
+# FreeBSD hosts only: the jail runtime is a candidate whose report comes from the
+# jail runtime's own probe translation. This lane is review-only (no FreeBSD
+# host evidence), so launch_qualified stays false and evidence_revision empty,
+# and unavailable_reason always names the gap: it can never be admitted. Any
+# other host_os gets no FreeBSD candidate at all.
+pub fn container_backend_candidates_freebsd_v1(host_os: text, host_arch: text, probe: RuntimeProbeV1,
+        live_source: ContainerCapabilityFlagV1) -> [ContainerBackendCandidateV1]:
+    if host_os != "freebsd":
+        return []
+    val capability = freebsd_jail_capability_from_probe_v1(probe, live_source.value)
+    var report = container_capability_report_v1_empty()
+    report.host_os = "freebsd"
+    report.host_arch = host_arch
+    report.guest_abi = "freebsd"
+    report.isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_V1
+    report.client_authority = capability.client_privilege
+    report.provider_version = capability.provider_id
+    val gap = if capability.launch_capable: CONTAINER_FREEBSD_JAIL_REVIEW_ONLY_V1 else capability.reason
+    [ContainerBackendCandidateV1(backend: CONTAINER_BACKEND_FREEBSD_JAIL_V1, report: report, unavailable_reason: gap)]
+
 pub fn container_backend_select_v1(candidates: [ContainerBackendCandidateV1],
         requirement: ContainerCapabilityRequirementV1) -> ContainerBackendSelectionV1:
     if requirement.required_isolation_kind == "":
@@ -53,7 +81,7 @@ pub fn container_backend_select_v1(candidates: [ContainerBackendCandidateV1],
     var refusals: [ContainerBackendRefusalV1] = []
     for candidate in candidates:
         var reason = ""
-        if not container_backend_known_v1(candidate.backend):
+        if not (container_backend_known_v1(candidate.backend) or candidate.backend == CONTAINER_BACKEND_FREEBSD_JAIL_V1):
             reason = "backend-unsupported"
         elif candidate.unavailable_reason != "":
             reason = candidate.unavailable_reason
@@ -76,5 +104,6 @@ pub fn container_backend_selection_text_v1(selection: ContainerBackendSelectionV
     out
 
 export ContainerBackendCandidateV1, ContainerBackendRefusalV1, ContainerBackendSelectionV1
+export container_backend_candidates_freebsd_v1, CONTAINER_BACKEND_FREEBSD_JAIL_V1, CONTAINER_FREEBSD_JAIL_REVIEW_ONLY_V1
 export container_backend_select_v1, container_backend_candidates_windows_v1, container_backend_selection_text_v1
 export CONTAINER_SELECT_ISOLATION_REQUIRED_V1, CONTAINER_SELECT_NO_CANDIDATES_V1, CONTAINER_SELECT_NONE_ADMITTED_V1
