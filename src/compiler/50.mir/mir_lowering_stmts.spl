@@ -4761,6 +4761,7 @@ impl MirLowering:
         val pre_branch_local_limit = b.next_local_id
         val pre_branch_tagged = self.snapshot_tagged_text_locals()
         val pre_branch_rv = self.snapshot_runtime_value_local_ids()
+        val pre_branch_decoded_text_opt = self.snapshot_decoded_text_option_locals()
         val then_block = b.new_block(Some("then"))
         val else_block = b.new_block(Some("else"))
         val merge_block = b.new_block(Some("merge"))
@@ -4844,7 +4845,8 @@ impl MirLowering:
         self.builder = b3
         val then_end_tagged = self.snapshot_tagged_text_locals()
         val then_end_rv = self.snapshot_runtime_value_local_ids()
-        self.restore_pre_branch_representation_marks(pre_branch_local_limit, pre_branch_tagged, pre_branch_rv)
+        val then_end_decoded_text_opt = self.snapshot_decoded_text_option_locals()
+        self.restore_pre_branch_representation_marks(pre_branch_local_limit, pre_branch_tagged, pre_branch_rv, pre_branch_decoded_text_opt)
 
         # Else block
         var b4 = self.builder
@@ -4887,9 +4889,9 @@ impl MirLowering:
         if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
             return result
         if then_reaches_merge and else_reaches_merge:
-            self.intersect_pre_branch_representation_marks(pre_branch_local_limit, then_end_tagged, then_end_rv)
+            self.intersect_pre_branch_representation_marks(pre_branch_local_limit, then_end_tagged, then_end_rv, then_end_decoded_text_opt)
         elif then_reaches_merge and not else_reaches_merge:
-            self.restore_pre_branch_representation_marks(pre_branch_local_limit, then_end_tagged, then_end_rv)
+            self.restore_pre_branch_representation_marks(pre_branch_local_limit, then_end_tagged, then_end_rv, then_end_decoded_text_opt)
         self.builder.switch_to_block(merge_block)
         # The terminator guard skips emit_copy in arms that already returned;
         # if no arm defined result, the returned LocalId would be read while
@@ -4976,6 +4978,7 @@ impl MirLowering:
         var chain_has_merge_marks = false
         var merged_chain_tagged: Dict<i64, bool> = {}
         var merged_chain_rv: [i64] = []
+        var merged_chain_decoded_text_opt: Dict<i64, bool> = {}
         var arm_index = 0
 
         while arm_index < arms.len():
@@ -5032,6 +5035,7 @@ impl MirLowering:
             self.builder = b_cond
             val pre_arm_tagged = self.snapshot_tagged_text_locals()
             val pre_arm_rv = self.snapshot_runtime_value_local_ids()
+            val pre_arm_decoded_text_opt = self.snapshot_decoded_text_option_locals()
 
             if has_if_val_scalar_binding:
                 val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
@@ -5049,11 +5053,13 @@ impl MirLowering:
                 if not chain_has_merge_marks:
                     merged_chain_tagged = self.snapshot_tagged_text_locals()
                     merged_chain_rv = self.snapshot_runtime_value_local_ids()
+                    merged_chain_decoded_text_opt = self.snapshot_decoded_text_option_locals()
                     chain_has_merge_marks = true
                 else:
-                    self.intersect_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv)
+                    self.intersect_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv, merged_chain_decoded_text_opt)
                     merged_chain_tagged = self.snapshot_tagged_text_locals()
                     merged_chain_rv = self.snapshot_runtime_value_local_ids()
+                    merged_chain_decoded_text_opt = self.snapshot_decoded_text_option_locals()
                 if arm_result.?:
                     val arm_fallback = LocalId(id: 0)
                     val arm_local = arm_result ?? arm_fallback
@@ -5072,7 +5078,7 @@ impl MirLowering:
                 merge_has_incoming = true
             b_then.switch_to_block(false_block)
             self.builder = b_then
-            self.restore_pre_branch_representation_marks(pre_chain_local_limit, pre_arm_tagged, pre_arm_rv)
+            self.restore_pre_branch_representation_marks(pre_chain_local_limit, pre_arm_tagged, pre_arm_rv, pre_arm_decoded_text_opt)
             arm_index = arm_index + 1
 
         # The final false edge owns the optional terminal else.  With no else,
@@ -5082,7 +5088,7 @@ impl MirLowering:
             var b_else = self.builder
             if not b_else.current_block_has_explicit_terminator():
                 if chain_has_merge_marks:
-                    self.intersect_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv)
+                    self.intersect_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv, merged_chain_decoded_text_opt)
                 if else_result.?:
                     val else_fallback = LocalId(id: 0)
                     val else_local = else_result ?? else_fallback
@@ -5101,11 +5107,11 @@ impl MirLowering:
                 merge_has_incoming = true
             else:
                 if chain_has_merge_marks:
-                    self.restore_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv)
+                    self.restore_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv, merged_chain_decoded_text_opt)
             self.builder = b_else
         else:
             if chain_has_merge_marks:
-                self.intersect_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv)
+                self.intersect_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv, merged_chain_decoded_text_opt)
             var b_no_else = self.builder
             # A no-else chain is Unit-typed. Its false edge reaches the merge
             # with the unit local, which has no runtime payload to define.
@@ -5207,8 +5213,9 @@ impl MirLowering:
         val pre_loop_local_limit = self.builder.next_local_id
         val pre_loop_tagged = self.snapshot_tagged_text_locals()
         val pre_loop_rv = self.snapshot_runtime_value_local_ids()
+        val pre_loop_decoded_text_opt = self.snapshot_decoded_text_option_locals()
         self.lower_block(body)
-        self.intersect_pre_branch_representation_marks(pre_loop_local_limit, pre_loop_tagged, pre_loop_rv)
+        self.intersect_pre_branch_representation_marks(pre_loop_local_limit, pre_loop_tagged, pre_loop_rv, pre_loop_decoded_text_opt)
 
         # If the body's last statement already terminated the current block
         # (an explicit break/continue/return with no trailing code), don't
@@ -5404,8 +5411,9 @@ impl MirLowering:
         val pre_loop_local_limit = self.builder.next_local_id
         val pre_loop_tagged = self.snapshot_tagged_text_locals()
         val pre_loop_rv = self.snapshot_runtime_value_local_ids()
+        val pre_loop_decoded_text_opt = self.snapshot_decoded_text_option_locals()
         self.lower_block(body)
-        self.intersect_pre_branch_representation_marks(pre_loop_local_limit, pre_loop_tagged, pre_loop_rv)
+        self.intersect_pre_branch_representation_marks(pre_loop_local_limit, pre_loop_tagged, pre_loop_rv, pre_loop_decoded_text_opt)
 
         # If the body's last statement already terminated the current block
         # (an explicit break/continue/return with no trailing code), don't
@@ -6038,8 +6046,9 @@ impl MirLowering:
         val pre_loop_local_limit = self.builder.next_local_id
         val pre_loop_tagged = self.snapshot_tagged_text_locals()
         val pre_loop_rv = self.snapshot_runtime_value_local_ids()
+        val pre_loop_decoded_text_opt = self.snapshot_decoded_text_option_locals()
         self.lower_block(body)
-        self.intersect_pre_branch_representation_marks(pre_loop_local_limit, pre_loop_tagged, pre_loop_rv)
+        self.intersect_pre_branch_representation_marks(pre_loop_local_limit, pre_loop_tagged, pre_loop_rv, pre_loop_decoded_text_opt)
 
         # Fall through into the increment block. If the body's last statement
         # already terminated the current block (an explicit break/continue/
