@@ -1,0 +1,136 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# Tracks: cuda_gpu_gated_spec_defects_2026-08-09
+"""Interpreter CUDA shims reach the real driver through dlopen.
+
+Item 3 of cuda_gpu_gated_spec_defects_2026-08-09: in a seed built without the
+`cuda` feature, rt_cuda_ctx_destroy, rt_cuda_memcpy_dtod, rt_cuda_module_load
+and rt_cuda_get_error_string returned the -3 / "CUDA support disabled"
+sentinels while their neighbours used the driver. Every check below runs on
+the GPU and compares device results with host-computed values.
+
+@tag: integration, gpu, cuda, hardware
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.test_env_gate.{test_env_cuda_available, test_env_gate_skip}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_remove, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.gc_async_mut.cuda.{cuda_init, cuda_ctx_create, cuda_ctx_destroy, cuda_ctx_set_current,
+    cuda_mem_alloc, cuda_mem_free, cuda_memcpy_htod, cuda_memcpy_dtoh, cuda_memcpy_dtod,
+    cuda_module_load, cuda_module_unload, cuda_launch_kernel, cuda_sync, cuda_get_error_string, CUDA_SUCCESS}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+val WORDS: i64 = 64
+
+# out[i] = i * 3 + 11 for i < n, one thread per element.
+val FILL_PTX: text = ".version 8.0\n.target sm_86\n.address_size 64\n" +
+    ".visible .entry fill3(.param .u64 out, .param .u32 n)\n{\n" +
+    "    .reg .u64 %a;\n    .reg .u64 %o;\n    .reg .u32 %i;\n    .reg .u32 %n;\n    .reg .u32 %v;\n    .reg .pred %p;\n" +
+    "    ld.param.u64 %a, [out];\n    ld.param.u32 %n, [n];\n    mov.u32 %i, %tid.x;\n" +
+    "    setp.ge.u32 %p, %i, %n;\n    @%p bra DONE;\n" +
+    "    mad.lo.u32 %v, %i, 3, 11;\n    mul.wide.u32 %o, %i, 4;\n    add.u64 %a, %a, %o;\n" +
+    "    st.global.u32 [%a], %v;\nDONE:\n    exit;\n}\n"
+
+describe "interpreter CUDA driver shims":
+    if not test_env_cuda_available():
+        it "env_skip: CUDA device run not requested or unavailable":
+            expect(test_env_gate_skip("SIMPLE_CUDA_TEST")).to_contain("Skipped")
+        return
+
+    it "destroys every context it creates":
+        expect(cuda_init()).to_equal(CUDA_SUCCESS)
+        var created: i64 = 0
+        var destroyed: i64 = 0
+        var round: i64 = 0
+        while round < 48:
+            val ctx = cuda_ctx_create(0)
+            if ctx > 0:
+                created = created + 1
+                if cuda_ctx_destroy(ctx) == 0: destroyed = destroyed + 1
+            round = round + 1
+        expect("created={created} destroyed={destroyed}").to_equal("created=48 destroyed=48")
+
+    it "copies device to device and reads back host-computed words":
+        expect(cuda_init()).to_equal(CUDA_SUCCESS)
+        val ctx = cuda_ctx_create(0)
+        expect(ctx).to_be_greater_than(0)
+        if ctx > 0:
+            val bytes = WORDS * 4
+            val host = rt_alloc(bytes)
+            val src = cuda_mem_alloc(bytes)
+            val dst = cuda_mem_alloc(bytes)
+            var i: i64 = 0
+            while i < WORDS:
+                rt_ptr_write_i32(host, i * 4, (i * 7 + 1) as i32)
+                i = i + 1
+            expect(cuda_memcpy_htod(src, host, bytes)).to_equal(CUDA_SUCCESS)
+            expect(cuda_memcpy_dtod(dst, src, bytes)).to_equal(CUDA_SUCCESS)
+            i = 0
+            while i < WORDS:
+                rt_ptr_write_i32(host, i * 4, 0)
+                i = i + 1
+            expect(cuda_memcpy_dtoh(host, dst, bytes)).to_equal(CUDA_SUCCESS)
+            var bad: i64 = 0
+            i = 0
+            while i < WORDS:
+                if rt_ptr_read_i32(host, i * 4) as i64 != i * 7 + 1: bad = bad + 1
+                i = i + 1
+            expect(bad).to_equal(0)
+            cuda_mem_free(src)
+            cuda_mem_free(dst)
+            rt_free(host)
+            expect(cuda_ctx_destroy(ctx)).to_equal(0)
+
+    it "loads a PTX module from a file path and runs it":
+        expect(cuda_init()).to_equal(CUDA_SUCCESS)
+        val ctx = cuda_ctx_create(0)
+        expect(ctx).to_be_greater_than(0)
+        if ctx > 0:
+            val dir = secure_temp_dir("/tmp", "cuda-shim-module-").unwrap()
+            val path = dir + "/fill3.ptx"
+            file_write(path, FILL_PTX)
+            val module = cuda_module_load(path)
+            expect(module).to_be_greater_than(0)
+            if module > 0:
+                val bytes = WORDS * 4
+                val host = rt_alloc(bytes)
+                val values = rt_alloc(16)
+                val args = rt_alloc(16)
+                val out = cuda_mem_alloc(bytes)
+                rt_ptr_write_i64(values, 0, out)
+                rt_ptr_write_i64(values, 8, WORDS)
+                rt_ptr_write_i64(args, 0, values)
+                rt_ptr_write_i64(args, 8, values + 8)
+                expect(cuda_launch_kernel(module, "fill3", 1, 1, 1, WORDS, 1, 1, args)).to_equal(CUDA_SUCCESS)
+                expect(cuda_sync()).to_equal(CUDA_SUCCESS)
+                expect(cuda_memcpy_dtoh(host, out, bytes)).to_equal(CUDA_SUCCESS)
+                var bad: i64 = 0
+                var i: i64 = 0
+                while i < WORDS:
+                    if rt_ptr_read_i32(host, i * 4) as i64 != i * 3 + 11: bad = bad + 1
+                    i = i + 1
+                expect(bad).to_equal(0)
+                cuda_mem_free(out)
+                rt_free(host)
+                rt_free(values)
+                rt_free(args)
+                cuda_module_unload(module)
+            file_remove(path)
+            dir_remove(dir, false)
+            expect(cuda_ctx_destroy(ctx)).to_equal(0)
+
+    it "names driver errors from the driver":
+        expect(cuda_init()).to_equal(CUDA_SUCCESS)
+        expect("{cuda_get_error_string(0)} {cuda_get_error_string(-700)} {cuda_get_error_string(-716)}").to_equal(
+            "CUDA_SUCCESS CUDA_ERROR_ILLEGAL_ADDRESS CUDA_ERROR_MISALIGNED_ADDRESS")
+
+    it "never hands a failed-create status to cuCtxDestroy":
+        # A negative value is a CUresult from a failed create, not a handle.
+        expect(cuda_init()).to_equal(CUDA_SUCCESS)
+        expect("{cuda_ctx_destroy(0)} {cuda_ctx_destroy(-2)}").to_equal("-1 -1")

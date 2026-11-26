@@ -301,6 +301,9 @@ mod cuda_dlopen {
     // CUdevice_attribute values: 75 = COMPUTE_CAPABILITY_MAJOR, 76 = MINOR.
     type CuDeviceGetAttribute = unsafe extern "C" fn(*mut i32, i32, i32) -> i32;
     type CuModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> i32;
+    type CuModuleLoad = unsafe extern "C" fn(*mut *mut c_void, *const std::os::raw::c_char) -> i32;
+    type CuMemcpyDtoD = unsafe extern "C" fn(u64, u64, usize) -> i32;
+    type CuGetErrorName = unsafe extern "C" fn(i32, *mut *const std::os::raw::c_char) -> i32;
     type CuModuleUnload = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuModuleGetFunction = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const std::os::raw::c_char) -> i32;
     type CuLaunchKernel = unsafe extern "C" fn(
@@ -351,6 +354,9 @@ mod cuda_dlopen {
         pub memcpy_htod: CuMemcpyHtoD,
         pub memcpy_dtoh: CuMemcpyDtoH,
         pub module_load_data: CuModuleLoadData,
+        pub module_load: Option<CuModuleLoad>,
+        pub memcpy_dtod: Option<CuMemcpyDtoD>,
+        pub get_error_name: Option<CuGetErrorName>,
         pub module_unload: CuModuleUnload,
         pub module_get_function: CuModuleGetFunction,
         pub launch_kernel: CuLaunchKernel,
@@ -497,6 +503,9 @@ mod cuda_dlopen {
             memcpy_htod: sym!("cuMemcpyHtoD_v2"),
             memcpy_dtoh: sym!("cuMemcpyDtoH_v2"),
             module_load_data: sym!("cuModuleLoadData"),
+            module_load: sym_opt!("cuModuleLoad"),
+            memcpy_dtod: sym_opt!("cuMemcpyDtoD_v2"),
+            get_error_name: sym_opt!("cuGetErrorName"),
             module_unload: sym!("cuModuleUnload"),
             module_get_function: sym!("cuModuleGetFunction"),
             launch_kernel: sym!("cuLaunchKernel"),
@@ -1522,6 +1531,17 @@ pub fn rt_cuda_ctx_destroy_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        // Without this every interpreter-created context leaked until
+        // cuCtxCreate failed with OUT_OF_MEMORY (cuda_gpu_gated_spec_defects item 3).
+        if let Some(fns) = get_cuda_dl() {
+            // 0 is no context and a negative value is a CUresult from a failed
+            // create; neither is a handle the driver may be given.
+            if ctx <= 0 {
+                return Ok(Value::Int(-1));
+            }
+            let r = unsafe { (fns.ctx_destroy)(ctx as *mut std::os::raw::c_void) };
+            return Ok(Value::Int(cuda_driver_status(r)));
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -2101,6 +2121,15 @@ pub fn rt_cuda_memcpy_dtod_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(memcpy_dtod) = fns.memcpy_dtod {
+                if size < 0 {
+                    return Ok(Value::Int(-1));
+                }
+                let r = unsafe { memcpy_dtod(dst as u64, src as u64, size as usize) };
+                return Ok(Value::Int(cuda_driver_status(r)));
+            }
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -2281,6 +2310,17 @@ pub fn rt_cuda_module_load_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(module_load) = fns.module_load {
+                let c_path = c_string_or_error(path, "rt_cuda_module_load")?;
+                let mut module: *mut std::os::raw::c_void = std::ptr::null_mut();
+                let r = unsafe { module_load(&mut module, c_path.as_ptr()) };
+                if r == 0 {
+                    return Ok(Value::Int(module as i64));
+                }
+                return Ok(Value::Int(-(r as i64)));
+            }
+        }
         Ok(Value::Int(-3))
     }
 }
@@ -2479,6 +2519,20 @@ pub fn rt_cuda_get_error_string_fn(args: &[Value]) -> Result<Value, CompileError
     }
     #[cfg(not(feature = "cuda"))]
     {
+        // Same contract as the runtime table: negative codes are CUresult
+        // values, and the reply is the driver's CUDA_ERROR_* name.
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(get_error_name) = fns.get_error_name {
+                let code = error_code.checked_abs().and_then(|c| i32::try_from(c).ok()).unwrap_or(-1);
+                let mut name: *const std::os::raw::c_char = std::ptr::null();
+                let r = unsafe { get_error_name(code, &mut name) };
+                if r == 0 && !name.is_null() {
+                    let text = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+                    return Ok(Value::text(text));
+                }
+                return Ok(Value::text(format!("CUDA_ERROR_UNKNOWN({})", error_code)));
+            }
+        }
         Ok(Value::text(String::from("CUDA support disabled")))
     }
 }

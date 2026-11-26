@@ -1669,6 +1669,11 @@ pub extern "C" fn rt_cuda_ctx_set_current(_ctx: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_ctx_destroy(ctx: i64) -> i64 {
+    // 0 is no context and a negative value is the CUresult of a failed
+    // create; neither is a handle cuCtxDestroy may be given.
+    if ctx <= 0 {
+        return -1;
+    }
     unsafe {
         let err = cuCtxDestroy_v2(ctx as CUcontext);
         if err != 0 {
@@ -3588,5 +3593,13 @@ mod tests {
         assert_eq!(rt_cuda_mem_free(values_dev), 0);
         assert_eq!(rt_cuda_mem_free(out_1d_dev), 0);
         assert_eq!(rt_cuda_mem_free(out_2d_dev), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn ctx_destroy_refuses_failed_create_status() {
+        // A negative value is the CUresult of a failed create, never a handle.
+        assert_eq!(rt_cuda_ctx_destroy(0), -1);
+        assert_eq!(rt_cuda_ctx_destroy(-2), -1);
     }
 }
