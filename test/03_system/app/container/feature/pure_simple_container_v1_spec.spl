@@ -31,7 +31,7 @@ use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1, SosixConta
 use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
 use std.nogc_sync_mut.storage.storage_view_v1.{ViewBytesV1, storage_view_v1_create, storage_view_v1_write, storage_view_v1_save, storage_view_v1_base_entries}
 use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, StoreGenerationV1}
-use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, PureContainerQualifyV1, pure_container_qualify_v1, pure_container_run_v1, _prepare_v1, _execute_v1, _teardown_v1, _advance_v1, _chain_v1, _exec_unknown_v1, _fail_prepare_v1, _after_create_refused_v1, _no_view_v1}
+use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, PureContainerQualifyV1, pure_container_qualify_v1, pure_container_run_v1, _prepare_v1, _execute_v1, _teardown_v1, _advance_v1, _chain_v1, _exec_unknown_v1, _fail_prepare_v1, _after_create_refused_v1, _no_view_v1, _life_new_v1}
 
 val SEED = "C:/dev/keep/seeds/simple-local-20261126.exe"
 val CAP_BYTES = 276824064
@@ -336,9 +336,14 @@ describe "pure simple container admission refusals":
         if not ready(): return
         val winner = _prepare_v1(spec_with("pure-race", base_args("0"), evidence, requirement_sandbox(), "host"))
         expect(winner.status).to_equal("ready")
-        # The loser has no view of its own: its create returned view-exists for the winner's directory.
+        # The loser is admitted for a different state_root, so it owns its own attempt root; its create
+        # returned view-exists for the winner's directory.
+        val loser_root = state_root() + "/attempts/pure-race-loser"
+        expect(dir_create_all(loser_root + "/home")).to_equal(true)
         var loser = winner.session
         loser.view = _no_view_v1()
+        loser.attempt_root = loser_root
+        loser.life = _life_new_v1("pure-race", [winner.session.view_dir, loser_root])
         val failed = _fail_prepare_v1(_after_create_refused_v1(loser, "view-exists"), "view-view-exists")
         expect(failed.status).to_equal("rejected")
         expect(failed.reason).to_equal("view-view-exists")
@@ -346,10 +351,47 @@ describe "pure simple container admission refusals":
         expect(winner.session.life.journal.owned_paths.contains(winner.session.view_dir)).to_equal(true)
         expect(failed.session.life.journal.owned_paths.contains(winner.session.view_dir)).to_equal(false)
         expect(failed.session.life.journal.owned_paths.contains(winner.session.attempt_root)).to_equal(false)
+        expect(failed.session.life.journal.owned_paths.contains(loser_root)).to_equal(true)
+        expect(is_dir(loser_root)).to_equal(false)
         expect(is_dir(view_root() + "/pure-race")).to_equal(true)
         expect(is_dir(winner.session.attempt_root)).to_equal(true)
         expect(_teardown_v1(winner.session).reason).to_equal("")
         expect(is_dir(view_root() + "/pure-race")).to_equal(false)
+
+    it "refuses an attempt root another run already claimed and leaves it alone":
+        if not ready(): return
+        val first = _prepare_v1(spec_with("pure-claim", base_args("0"), evidence, requirement_sandbox(), "host"))
+        expect(first.status).to_equal("ready")
+        val second = _prepare_v1(spec_with("pure-claim", base_args("0"), evidence, requirement_sandbox(), "host"))
+        expect(second.status).to_equal("rejected")
+        expect(second.reason).to_equal("attempt-exists")
+        expect(is_dir(first.session.attempt_root)).to_equal(true)
+        expect(is_dir(first.session.view_dir)).to_equal(true)
+        expect(_teardown_v1(first.session).reason).to_equal("")
+
+    it "removes a view dir claimed but never completed, with the attempt root, and the id runs again":
+        if not ready(): return
+        # Any session shell will do: teardown is driven only by view/view_dir/attempt_root.
+        val ready_session = _prepare_v1(spec_with("pure-claimsrc", base_args("0"), evidence, requirement_sandbox(), "host")).session
+        expect(_teardown_v1(ready_session).reason).to_equal("")
+        # State of a create that failed right after its exclusive mkdir: an empty claimed dir and no view.
+        val view_dir = view_root() + "/pure-claimed"
+        val attempt = state_root() + "/attempts/pure-claimed-a1"
+        expect(dir_create_all(attempt + "/home")).to_equal(true)
+        expect(dir_create_all(view_dir)).to_equal(true)
+        var session = ready_session
+        session.view = _no_view_v1()
+        session.view_dir = view_dir
+        session.attempt_root = attempt
+        session.life = _life_new_v1("pure-claimed", [view_dir, attempt])
+        val failed = _fail_prepare_v1(_after_create_refused_v1(session, "view-dir-failed"), "view-view-dir-failed")
+        expect(failed.status).to_equal("rejected")
+        expect(failed.session.life.journal.phase).to_equal("destroyed")
+        expect(is_dir(view_dir)).to_equal(false)
+        expect(is_dir(attempt)).to_equal(false)
+        val again = pure_container_run_v1(spec_with("pure-claimed", base_args("7"), evidence, requirement_sandbox(), "host"))
+        expect(again.reason).to_equal("")
+        expect(again.exit_code.value).to_equal(7)
 
     it "still removes a view dir this run half-created when create fails for another reason":
         if not ready(): return

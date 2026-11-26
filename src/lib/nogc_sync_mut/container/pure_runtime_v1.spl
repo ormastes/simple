@@ -25,7 +25,7 @@ use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
 use std.nogc_sync_mut.storage.storage_view_v1.{StorageViewV1, ViewBytesV1, ViewFlagV1, storage_view_v1_create, storage_view_v1_destroy}
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1, immutable_store_v1_root_head}
 use std.nogc_sync_mut.storage.rootfs_materialize_v1.{rootfs_materialize_v1, rootfs_dematerialize_v1}
-use std.nogc_sync_mut.sosix.fs_v1.{is_dir, file_exists, dir_create_all, dir_remove_all, dir_is_real_no_follow, file_read_regular_no_follow_bounded, sosix_fs_hardlink, sosix_fs_write_file, file_delete, sosix_fs_host_os, sosix_fs_host_arch}
+use std.nogc_sync_mut.sosix.fs_v1.{is_dir, file_exists, dir_create_all, dir_create_new, dir_remove_all, dir_is_real_no_follow, file_read_regular_no_follow_bounded, sosix_fs_hardlink, sosix_fs_write_file, file_delete, sosix_fs_host_os, sosix_fs_host_arch}
 use std.nogc_sync_mut.sosix.host.{sosix_getpid}
 # Accepted by design: the reader ACE the read grant puts on store objects survives teardown.
 
@@ -299,17 +299,17 @@ fn _fail_prepare_v1(session: PureContainerSessionV1, reason: text) -> PurePrepar
             report: session.report, life: down.life, view_dir: session.view_dir,
             attempt_root: session.attempt_root, stdout_path: session.stdout_path))
 
-# `view-exists` means another run with this id created the view (and, same id, the attempt
-# scratch) between our check and our create: neither path is ours, so teardown must not remove them
-# and the journal must not claim them.
+# `view-exists` means another run with this id created the view: the view dir is not ours, so
+# teardown must not remove it and the journal must not claim it. The attempt root is ours (claimed
+# exclusively before create), so it stays owned and is removed.
 fn _after_create_refused_v1(session: PureContainerSessionV1, reason: text) -> PureContainerSessionV1:
     if reason != "view-exists": return session
     val journal = session.life.journal
     val unowned = ContainerLifecycleJournalV1(format_version: journal.format_version, container_id: journal.container_id,
         generation: journal.generation, provider_id: journal.provider_id, phase: journal.phase,
-        owned_paths: [], owned_objects: journal.owned_objects)
+        owned_paths: [session.attempt_root], owned_objects: journal.owned_objects)
     PureContainerSessionV1(spec: session.spec, view: session.view, request: session.request, report: session.report,
-        life: PureLifecycleV1(state: session.life.state, journal: unowned), view_dir: "", attempt_root: "", stdout_path: session.stdout_path)
+        life: PureLifecycleV1(state: session.life.state, journal: unowned), view_dir: "", attempt_root: session.attempt_root, stdout_path: session.stdout_path)
 
 # Admission, then every effect up to a launchable container: view, lower/, grants.
 fn _prepare_v1(spec: PureContainerSpecV1) -> PurePreparedV1:
@@ -341,6 +341,11 @@ fn _prepare_v1(spec: PureContainerSpecV1) -> PurePreparedV1:
     var session = PureContainerSessionV1(spec: spec, view: _no_view_v1(), request: request, report: unadmitted,
         life: _life_new_v1(spec.container_id, [layout.view_dir, layout.plan.attempt_root]),
         view_dir: layout.view_dir, attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path)
+    # The exclusive mkdir is the claim: after it the attempt root is provably this run's.
+    if not dir_create_all(layout.plan.state_root + "/attempts"): return _rejected_v1(spec, unadmitted, "scratch-create-failed")
+    val claimed = dir_create_new(layout.plan.attempt_root)
+    if claimed == "exists": return _rejected_v1(spec, unadmitted, "attempt-exists")
+    if claimed != "ok": return _rejected_v1(spec, unadmitted, "scratch-create-failed")
     for dir in [layout.plan.home, layout.plan.tmp, layout.plan.output]:
         if not dir_create_all(dir): return _fail_prepare_v1(session, "scratch-create-failed")
     val created = storage_view_v1_create(spec.store, spec.view_root, spec.container_id, spec.base_root,
