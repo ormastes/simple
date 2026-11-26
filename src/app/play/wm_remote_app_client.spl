@@ -12,7 +12,7 @@ use std.daemon_sdk.client.{daemon_submit_and_wait}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.ui.wm_remote_surface.{wm_remote_surface_write}
 use common.ui.window_scene.{wm_content_frame_checksum}
-use app.play.wm_daemon_client.{wm_daemon_config, WMD_WINDOW_CLOSE, WMD_SURFACE_OPEN, WMD_SURFACE_PRESENT, WMD_SURFACE_EVENTS}
+use app.play.wm_daemon_client.{wm_daemon_config, WMD_WINDOW_CLOSE, WMD_SURFACE_OPEN, WMD_SURFACE_PRESENT, WMD_SURFACE_EVENTS, WMD_SURFACE_RESIZE}
 
 val WM_REMOTE_APP_TIMEOUT_MS: i64 = 30000
 
@@ -86,6 +86,18 @@ pub fn wm_remote_app_damage_request(window: WmRemoteAppWindow, pixels: [u32], re
     req.set_field("checksum", "{wm_content_frame_checksum(rect)}")
     req
 
+pub fn wm_remote_app_resize_request(window: WmRemoteAppWindow, width: i32, height: i32, client_pid: i64) -> DaemonRequest:
+    """Ask for a slot of a new size: either the client wants a different
+    size, or it is acknowledging a `configure|w|h` event. The reply decodes
+    with wm_remote_app_window_from_response; the next present must be a
+    full frame."""
+    var req = daemon_request_new(WMD_SURFACE_RESIZE)
+    req.set_field("id", "{window.window_id}")
+    req.set_field("w", "{width}")
+    req.set_field("h", "{height}")
+    req.set_field("pid", "{client_pid}")
+    req
+
 pub fn wm_remote_app_open(title: text, width: i32, height: i32) -> WmRemoteAppWindow:
     val resp = daemon_submit_and_wait(
         wm_remote_app_open_request(title, width, height, getpid()),
@@ -98,6 +110,12 @@ pub fn wm_remote_app_present(window: WmRemoteAppWindow, pixels: [u32], revision:
     daemon_submit_and_wait(
         wm_remote_app_present_request(window, pixels, revision, getpid()),
         wm_daemon_config(), WM_REMOTE_APP_TIMEOUT_MS)
+
+pub fn wm_remote_app_resize(window: WmRemoteAppWindow, width: i32, height: i32) -> WmRemoteAppWindow:
+    val resp = daemon_submit_and_wait(
+        wm_remote_app_resize_request(window, width, height, getpid()),
+        wm_daemon_config(), WM_REMOTE_APP_TIMEOUT_MS)
+    wm_remote_app_window_from_response(resp)
 
 pub fn wm_remote_app_poll_events(window: WmRemoteAppWindow) -> [text]:
     """Drain input the window manager routed to this window. Each row is

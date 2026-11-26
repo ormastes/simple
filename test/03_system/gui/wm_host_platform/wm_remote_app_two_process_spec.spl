@@ -43,13 +43,22 @@ fn spawn_logged(fixture: text, log: text, base: text, corrupt: text) -> i64:
     # not lower through the seed JIT, so both children run interpreted.
     process_spawn_async("sh", [
         "-c",
-        "exec env SIMPLE_WM_DAEMON_DIR=\"$3\" WM_REMOTE_CLIENT_CORRUPT=\"$4\" SIMPLE_EXECUTION_MODE=interpreter \"$0\" run \"$1\" > \"$2\" 2>&1",
+        "exec env SIMPLE_WM_DAEMON_DIR=\"$3\" WM_REMOTE_CLIENT_CORRUPT=\"$4\" SIMPLE_WM_DAEMON_RENDER=1 SIMPLE_EXECUTION_MODE=interpreter \"$0\" run \"$1\" > \"$2\" 2>&1",
         simple_exe(), fixture, log, base, corrupt])
 
 fn probe(config: DaemonConfig, window_id: i64) -> DaemonResponse:
     var req = daemon_request_new(WMD_FRAME_PROBE)
     req.set_field("color", "{KNOWN}")
     req.set_field("id", "{window_id}")
+    daemon_submit_and_wait(req, config, 60000)
+
+fn probe_unrendered(config: DaemonConfig, window_id: i64) -> DaemonResponse:
+    # Reads the framebuffer without rendering: whatever is there was put
+    # there by the serve loop's continuous render (SIMPLE_WM_DAEMON_RENDER=1).
+    var req = daemon_request_new(WMD_FRAME_PROBE)
+    req.set_field("color", "{KNOWN}")
+    req.set_field("id", "{window_id}")
+    req.set_field("render", "0")
     daemon_submit_and_wait(req, config, 60000)
 
 fn field(resp: DaemonResponse, key: text) -> i64:
@@ -117,6 +126,17 @@ describe "remote application presentation across processes":
         # The real thing: a second client process presents valid pixels.
         val client_pid = spawn_logged("test/fixtures/wm_remote_app_client_probe.spl", "{base}/client.log", base, "0")
         expect(client_pid != wm_pid and client_pid != getpid() and wm_pid != getpid()).to_equal(true)
+        # Continuous path first: from here until the assertion only
+        # non-rendering probes are sent, so the pixels can only have been
+        # composited by the serve loop's own per-cycle render.
+        var continuous = probe_unrendered(config, 2)
+        waited = 0
+        while field(continuous, "content_count") != CONTENT_PIXELS and waited < 150000:
+            sleep_ms(500)
+            waited = waited + 500
+            continuous = probe_unrendered(config, 2)
+        expect(field(continuous, "content_count")).to_equal(CONTENT_PIXELS)
+        print "evidence continuous_render content_count={continuous.get_field(\"content_count\")} hash={continuous.get_field(\"hash\")}"
         var shown = wait_for_surfaces(config, 2, 1, 120000)
         waited = 0
         while field(shown, "content_count") != CONTENT_PIXELS and waited < 60000:

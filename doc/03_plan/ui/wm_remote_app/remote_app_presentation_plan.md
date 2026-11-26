@@ -43,6 +43,7 @@ processes.
   message, so there is never a concurrent reader and writer and no
   cross-process memory-ordering assumption (the host is aarch64).
 - Verbs: `surface-open` (6), `surface-present` (7), `surface-events` (8),
+  `surface-resize` (11),
   `surface-input` (9), `frame-probe` (10). Existing verbs are unchanged.
 
 ## Ownership and lifetime
@@ -54,8 +55,8 @@ daemon's `window_1`. A slot lives exactly as long as its window: removed on
 `window-close` and on reap; the instance directory is removed on daemon
 stop, and directories left by a crashed daemon are swept at the next start.
 The WM holds no mapping between presents. Size is fixed at open; a WM-side
-resize keeps the last frame until the client reopens (slot reallocation is
-not in this change).
+resize is announced to the client, which acknowledges with `surface-resize`;
+until then its old-size presents are refused with the size to adopt.
 
 ## Damage
 
@@ -107,12 +108,19 @@ count 0; a killed client removes the window. Both PIDs are printed.
 
 1. Slot + present + probe + two-process gate (red spec first).
 2. Input queue, damage, reap.
-3. Not in this change:
-   - the windowed host (`src/os/hosted/hosted_entry.spl`, SDL2) has no
-     request pump, so only the resident headless WM serves these verbs;
-   - `host_gui_event_router.spl` does not forward to `surface-input`
-     (no display server on the verification host);
-   - slot reallocation on resize.
+3. Wave 2 (done): `surface-resize` (11) reallocates the slot, and a WM-side
+   resize is announced with one `configure|w|h` event; the windowed host
+   serves the verbs through `src/os/hosted/hosted_remote_app_pump.spl`
+   (off unless `SIMPLE_HOSTED_WM_REMOTE_APPS=1`, same singleton lock as the
+   daemon, request directory read at most every 16 ms);
+   `HostGuiEventRouter.remote_input_target` resolves host events for
+   pixel-owned windows and the pump queues them; the continuous render
+   path is covered by the two-process spec.
+4. Still unproven: `hosted_entry.spl`'s own winit loop does not load on
+   the verification host (no display server, and the file fails to
+   interpret for unrelated reasons), so its six pump call sites have not
+   executed; the windowed host presents through its Engine2d raster,
+   which the frame probe does not read.
 
 Perf: zero remote clients costs one length check per serve cycle; compositor
 frame time A/B must stay within 2%.

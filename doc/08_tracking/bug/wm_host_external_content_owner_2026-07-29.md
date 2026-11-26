@@ -2,7 +2,7 @@
 
 Status: rendering overwrite fixed; remote application presentation implemented
 and verified on the resident headless WM daemon lane only (2026-11-26). Owner decision
-2026-11-26: in scope for release 1.0.0. Three follow-ups remain open, listed at
+2026-11-26: in scope for release 1.0.0. Open items are listed at
 the end.
 
 ## Root cause
@@ -55,16 +55,30 @@ Evidence on this host (aarch64 Linux, seed
   `app.play.wm_remote_app_client`. Mutation: making the client skip the slot
   write turns 3 of the 6 examples red.
 
+## Wave 2 (2026-11-26)
+
+- Resize: `surface-resize` reallocates the slot; a WM-side resize queues one
+  `configure|w|h` event (`wm_remote_app_resize_spec.spl`, 4 examples).
+- Windowed host: `src/os/hosted/hosted_remote_app_pump.spl` serves the verbs
+  when `SIMPLE_HOSTED_WM_REMOTE_APPS=1`; proven with the production
+  compositor in `hosted_remote_app_pump_spec.spl` and across three
+  processes in `hosted_remote_app_pump_two_process_spec.spl` (24000/24000).
+- Input: the hosted event router resolves move/button/key for pixel-owned
+  windows and the pump queues them (`hosted_remote_app_input_spec.spl`).
+- Continuous render path covered by the two-process spec (render=0 probes).
+- Review hardening: private-snapshot slot read (no SIGBUS), per-instance
+  0700 slot directory, pid sanity and surface caps, input sender and kind
+  validation; the trust boundary (user id) is stated in the plan.
+
 ## Still open
 
-1. The windowed host (`src/os/hosted/hosted_entry.spl`, SDL2) has no request
-   pump: it seeds windows in-process and never reads client messages, so only
-   the resident headless WM serves the remote verbs.
-2. The hosted SDL2 event loop (`host_gui_event_router.spl`) does not yet call
-   the `surface-input` route for a remote-owned window; only the injection
-   verb does. Not verifiable on this host (no display server).
-3. A WM-side resize does not reallocate the slot; the last frame stays until
-   the client reopens.
+1. `hosted_entry.spl`'s own winit loop has not executed with the pump: no
+   display server on the verification host, and the file does not load in
+   the interpreter for unrelated, pre-existing reasons. The windowed host
+   presents through its Engine2d raster, which the frame probe does not
+   read.
+2. The client pid is client-supplied (no peer credential in the file
+   transport); see the plan's trust boundary.
 
 Separately observed, not caused by this change: on the release-head seed the
 compositor module graph does not lower through the JIT
@@ -83,3 +97,10 @@ slot or scalar host bridge, no remote GUI/pixel event receiver, and no
 deployed native server poll. Building them is feature work, not a bug fix.
 The row stays open on the 2026-11-04 owner question: is remote application
 presentation in scope for 1.0.0, or should it move to a feature request?
+
+Note 2026-11-26 (later the same day): the re-check above predates the remote
+application presentation feature (wave 1, now on release/1.0.0) and is
+superseded by the "Remote application presentation", "Wave 2" and "Still
+open" sections earlier in this document. The owner decided the same day that
+the feature is in scope for 1.0.0; the present command, shared slot, event
+receiver and request pump it lists as missing now exist.
