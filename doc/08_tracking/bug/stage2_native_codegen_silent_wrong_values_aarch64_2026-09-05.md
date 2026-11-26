@@ -239,3 +239,49 @@ repro run was NOT repeated per the no-green-rerun rule):
   `fixing` (updated_at 2026-11-03) while this header and the per-row evidence
   read FIXED — master-table sync gap for the bookkeeping pass, same shape as
   the row-2 note in this lane's verdict file.
+
+## 2026-11-26: verified at tip on aarch64, with one new caveat
+
+**Compiler under test: an admitted Stage 2 built on this host** (aarch64 Linux,
+DGX GB10), using
+`COMPILER_BUILD_TIMEOUT_SECONDS=900 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2 --backend=cranelift`.
+It ran detached under `systemd-run -p MemoryMax=40G`, with no other job of
+this lane running.
+
+- **Source and seed.** The tree was pinned at `4995f23e7ccd`, which is
+  origin/release/1.0.0 57e92cb68fc7 plus a docs and tests commit only. The
+  pinned seed's sha256 prefix is `27cfa68556a374c9`.
+- **Build.** The seed native-built the compiler:
+  `Build complete: 1620 compiled, 0 cached, 0 failed` (210.4s compile + 5.7s link).
+- **Admission.** `stage2-sanity.receipt` says `stage2-sanity: pass`, and both
+  frontend legs (`SIMPLE_BOOTSTRAP=0` and `=1`) report `status=complete raw_status=0`.
+  The admitted binary
+  (`stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`) has sha256
+  `53e9e2e7513658f1...` and is 58,552,816 bytes.
+- **Earlier run.** A first run at 57e92cb68fc7 compiled identically but its
+  admission sanity timed out (rc=124, 180s default) on the 1-module
+  `stage2-module-path-naming` smoke. That was the only difference. Probe
+  results were the same on both binaries.
+
+Probes were built with
+`SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 <stage2> native-build main.spl --backend=<cranelift|llvm> --entry-closure`.
+They were run and compared byte for byte with hand-checked expected output,
+which is identical to the 11-26 seed interpreter output. Scope: the probes
+themselves ran on the `SIMPLE_BOOTSTRAP=1` native-build leg only.
+
+Exact reproducers of the five defects, both backends:
+
+1. Indirect call `apply(dbl, 7)` -> `14` (PASS).
+2. `xs.map(_ * 2)` -> `ys_len=3` (PASS for the map result).
+3. Closure `add_k(5)` -> `15`, no SIGSEGV (PASS).
+4. `Dict.len()` -> `1` and `2` (PASS).
+5. `d.size()` -> build refused with `unresolved method call 'size' is a FATAL
+   lowering error` (PASS).
+
+Caveat: defect 2's reproducer still differs on its two print lines.
+`"ys={ys}"` and `"xs={xs}"` print `ys=` and `xs=`, where the September run
+printed `xs=[1, 2, 3]`. This is a separate, arch-neutral regression in string
+interpolation of arrays, filed as
+`native_interpolation_array_renders_empty_2026-11-26.md`. The map result
+itself is correct. The five recorded defects are verified fixed; status ->
+verified.
