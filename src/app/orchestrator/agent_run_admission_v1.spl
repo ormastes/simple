@@ -1,0 +1,180 @@
+# Controller-side composition for the Linux interactive workload. The installed
+# issuer and retained ControllerDispatchOwnerV3 remain the effect owners.
+use app.orchestrator.agent_run_plan_v1.{LinuxAgentRunPlanV1, linux_agent_run_plan_v1}
+use app.orchestrator.controller_authority_issue_v1.ControllerIssuedAuthorityV1
+use app.orchestrator.remote_run_frames_v1.remote_run_execute_reply_check_v1
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2,
+    container_scope_fence_id_v2, container_execution_plan_digest_v2, container_execution_request_encode_v2}
+use std.common.contracts.container.execution_draft_v3.{container_execution_draft_bind_v3, container_execution_draft_encode_v3}
+use std.common.contracts.distributed_control_v2.{ExecutionEnvironmentV2, ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_environment_digest_v2, distributed_grant_digest_v2,
+    distributed_encode_operation_v2}
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.agent_workspace_invocation_manifest_decode_v2
+use std.common.contracts.orchestration.host_controller_status_v3.{HostControllerStatusV3, host_controller_status_encode_v3}
+use std.common.contracts.orchestration.host_capacity_v1.{HostLedgerFenceV1, HostReservationV1, HostReservationStateV1}
+use std.common.contracts.orchestration.host_reservation_codec_v1.{HostReservationIntentV1, host_reservation_bind_intent_v1}
+use std.common.contracts.orchestration.host_prepare_request_v1.HostPrepareRequestV1
+use std.common.contracts.orchestration.host_prepare_associated_v3.{HostPrepareAssociatedRequestV3,
+    host_prepare_associated_encode_v3, host_prepare_associated_transport_v3}
+use std.common.contracts.orchestration.host_execution_association_v3.{HostPreparedAssociatedReplyV3,
+    host_prepared_associated_reply_decode_v3, host_execution_association_digest_v3}
+use std.common.contracts.orchestration.host_execute_associated_v3.{HostExecuteAssociatedRequestV3,
+    host_execute_associated_encode_v3, host_execute_associated_operation_v3}
+use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
+use std.common.contracts.provider_cli.adapter_v1.provider_cli_probe_count_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.{linux_oci_retained_request_decode_v1,
+    linux_oci_retained_request_encode_v1}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
+
+pub struct LinuxAgentAdmissionFactsV1:
+    controller_id: text
+    principal: text
+    project: text
+    environment: ExecutionEnvironmentV2
+    policy_revision: i64
+    revocation_epoch: i64
+    session_generation: i64
+    grant_id: text
+    reservation_nonce: text
+    prepare_deadline_ms: i64
+
+pub struct LinuxAgentAdmissionV1:
+    plan: LinuxAgentRunPlanV1
+    host: HostControllerStatusV3
+    native_scope: ContainerHostScopeV2
+    controller_id: text
+    grant: ExecutionGrantV2
+    reservation: HostReservationIntentV1
+    operation: OperationEnvelopeV2
+
+pub struct LinuxAgentPreparedV1:
+    admitted: LinuxAgentAdmissionV1
+    reply: HostPreparedAssociatedReplyV3
+    operation: OperationEnvelopeV2
+
+pub struct LinuxAgentExecuteV1:
+    operation_id: text
+    association_digest: text
+    execute_wire: text
+    invocation: text
+
+# status comes from the authenticated Controller reader. Native identity is
+# also pinned by the signed manifest and checked again against the reply.
+pub fn linux_agent_admission_v1(plan: LinuxAgentRunPlanV1, status: HostControllerStatusV3,
+        native_scope: ContainerHostScopeV2, facts: LinuxAgentAdmissionFactsV1, profile_bytes: text,
+        probe_transcripts: [text], now: i64) -> Result<LinuxAgentAdmissionV1, text>:
+    val _status = host_controller_status_encode_v3(status)?
+    if status.backend != "linux-service" or not status.ready:
+        return Err("agent-admission-linux-host-not-ready")
+    val service = status.scope
+    val native_scope_bytes = container_host_scope_bytes_v2(native_scope)?
+    if (native_scope.continuity_mode != "native-boot-incarnation-v1" or
+            not native_scope.service_scope_id.starts_with("epoch-") or native_scope.boot_id == "" or
+            native_scope.continuity_id != native_scope.boot_id or native_scope.physical_host_id != service.physical_host_id or
+            native_scope.native_machine_id != service.native_machine_id or native_scope.provider_generation != service.provider_generation or
+            facts.environment.host_id != service.physical_host_id or
+            facts.environment.isolation_class != "native-container"):
+        return Err("agent-admission-host-scope")
+    val invoke = host_agent_invoke_request_decode_v4(plan.invocation)?
+    val decoded_manifest = agent_workspace_invocation_manifest_decode_v2(invoke.manifest)?
+    val manifest = decoded_manifest.base
+    if manifest.task_use.controller_id != facts.controller_id or manifest.task_use.host_scope_digest != sha256_text(native_scope_bytes):
+        return Err("agent-admission-task-use-scope")
+
+    # Reproduce the authored profile, exact launch request and ordered probes.
+    # Clearing only the injected arguments recovers the original draft input.
+    val request = linux_oci_retained_request_decode_v1(plan.draft.request_bytes)?
+    var template = request
+    template.args = []
+    val authored = linux_agent_run_plan_v1(linux_oci_retained_request_encode_v1(template)?, invoke.manifest,
+        profile_bytes, probe_transcripts)?
+    if (authored.invocation != plan.invocation or
+            container_execution_draft_encode_v3(authored.draft)? != container_execution_draft_encode_v3(plan.draft)?):
+        return Err("agent-admission-plan-drift")
+    if (request.cpu_limit_millis <= 0 or request.cpu_limit_millis > status.available_cpu_millis or
+            request.memory_limit_bytes > status.available_memory_bytes or request.pid_limit <= 0):
+        return Err("agent-admission-host-capacity")
+    # Match the Host's per-probe cap in host_linux_service_agent_budget_v4.
+    val probe_ms = if request.timeout_ms < 30000: request.timeout_ms else: 30000
+    val duration = manifest.workload_duration_ms
+    if request.timeout_ms + provider_cli_probe_count_v1(ProviderCliProviderV1.Codex) * probe_ms > duration:
+        return Err("agent-admission-probe-duration")
+    if (now <= 0 or manifest.not_after <= now or manifest.not_after - now < duration or
+            facts.prepare_deadline_ms <= now or facts.prepare_deadline_ms > manifest.not_after - duration):
+        return Err("agent-admission-window")
+    val service_request = container_execution_draft_bind_v3(plan.draft, service)?
+    val row = HostReservationV1(id: plan.draft.operation_id + "-reservation", operation_id: plan.draft.operation_id,
+        payload_digest: "0".repeat(64), service_scope_id: service.service_scope_id, assignment_generation: 1,
+        nonce: facts.reservation_nonce, cpu_millis: request.cpu_limit_millis, memory_bytes: request.memory_limit_bytes,
+        exclusive_devices: [], prepare_deadline_ms: facts.prepare_deadline_ms, state: HostReservationStateV1.Prepared)
+    val reservation = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: service.physical_host_id,
+        fence: HostLedgerFenceV1(authority_id: status.authority_id, boot_id: container_scope_fence_id_v2(service)?,
+            provider_generation: service.provider_generation, revision: status.revision),
+        plan_digest: container_execution_plan_digest_v2(service_request.plan)?, reservation: row))?
+    val environment_digest = distributed_environment_digest_v2(facts.environment)?
+    val operation = OperationEnvelopeV2(version: 2, id: plan.draft.operation_id, payload_digest: reservation.reservation.payload_digest,
+        principal: facts.principal, project: facts.project, host_id: service.physical_host_id, operation: "host_reservation_v1",
+        environment_digest: environment_digest, policy_revision: facts.policy_revision, revocation_epoch: facts.revocation_epoch,
+        session_generation: facts.session_generation, memory_bytes: request.memory_limit_bytes, duration_ms: duration)
+    val grant = ExecutionGrantV2(id: facts.grant_id, principal: operation.principal, project: operation.project,
+        host_id: operation.host_id, operations: ["host_reservation_v1", "host_execute_associated_v3"],
+        environment_digest: environment_digest, policy_revision: operation.policy_revision, revocation_epoch: operation.revocation_epoch,
+        expires_at: manifest.not_after, maximum_memory_bytes: operation.memory_bytes, maximum_duration_ms: duration)
+    val _operation = distributed_encode_operation_v2(operation)?
+    val _grant = distributed_grant_digest_v2(grant)?
+    Ok(LinuxAgentAdmissionV1(plan, status, native_scope, facts.controller_id, grant, reservation, operation))
+
+fn linux_agent_pair_check_v1(admitted: LinuxAgentAdmissionV1, operation: OperationEnvelopeV2,
+        pair: ControllerIssuedAuthorityV1) -> Result<(), text>:
+    val grant_digest = distributed_grant_digest_v2(admitted.grant)?
+    if (pair.signed.issuer_id != admitted.controller_id or distributed_grant_digest_v2(pair.signed.grant)? != grant_digest or
+            pair.approval.grant_digest != grant_digest or pair.approval.request_digest != sha256_text(distributed_encode_operation_v2(operation)?) or
+            pair.approval.policy_revision != operation.policy_revision or pair.approval.session_generation != operation.session_generation or
+            pair.approval.expires_at != admitted.grant.expires_at):
+        return Err("agent-admission-proof-binding")
+    Ok(())
+
+pub fn linux_agent_prepare_wire_v1(admitted: LinuxAgentAdmissionV1, pair: ControllerIssuedAuthorityV1) -> Result<text, text>:
+    val _proof = linux_agent_pair_check_v1(admitted, admitted.operation, pair)?
+    val request = HostPrepareAssociatedRequestV3(prepare: HostPrepareRequestV1(intent: admitted.reservation,
+        operation: admitted.operation, signed: pair.signed, approval: pair.approval), draft: admitted.plan.draft,
+        service_scope: admitted.host.scope)
+    val _bound = host_prepare_associated_transport_v3(request)?
+    host_prepare_associated_encode_v3(request)
+
+pub fn linux_agent_prepared_v1(admitted: LinuxAgentAdmissionV1, reservation_pair: ControllerIssuedAuthorityV1,
+        reply_wire: text, now: i64) -> Result<LinuxAgentPreparedV1, text>:
+    val expected = linux_agent_prepare_wire_v1(admitted, reservation_pair)?
+    val reply = host_prepared_associated_reply_decode_v3(reply_wire)?
+    if host_prepare_associated_encode_v3(reply.prepare)? != expected:
+        return Err("agent-admission-prepare-echo")
+    val association = reply.association
+    val expected_execution = container_execution_draft_bind_v3(admitted.plan.draft, admitted.native_scope)?
+    if (association.enrollment_digest != admitted.host.enrollment_digest or
+            container_execution_request_encode_v2(association.execution)? != container_execution_request_encode_v2(expected_execution)?):
+        return Err("agent-admission-native-association")
+    if (now <= 0 or now >= admitted.reservation.reservation.prepare_deadline_ms or
+            admitted.grant.expires_at - now < admitted.operation.duration_ms):
+        return Err("agent-admission-window")
+    val operation = host_execute_associated_operation_v3(admitted.operation, association)?
+    Ok(LinuxAgentPreparedV1(admitted, reply, operation))
+
+pub fn linux_agent_execute_wire_v1(prepared: LinuxAgentPreparedV1, pair: ControllerIssuedAuthorityV1,
+        now: i64) -> Result<LinuxAgentExecuteV1, text>:
+    val admitted = prepared.admitted
+    if (now <= 0 or now >= admitted.reservation.reservation.prepare_deadline_ms or
+            admitted.grant.expires_at - now < admitted.operation.duration_ms):
+        return Err("agent-admission-window")
+    val _proof = linux_agent_pair_check_v1(admitted, prepared.operation, pair)?
+    val reply = prepared.reply
+    val wire = host_execute_associated_encode_v3(HostExecuteAssociatedRequestV3(prepare: reply.prepare,
+        receipt: reply.receipt, association: reply.association, operation: prepared.operation, signed: pair.signed, approval: pair.approval))?
+    Ok(LinuxAgentExecuteV1(prepared.operation.id, host_execution_association_digest_v3(reply.association)?, wire, admitted.plan.invocation))
+
+# Feed execute_wire once to controller_dispatch_remote_send_v3(handle, "execute", ...).
+# That owner publishes the immutable archive before sending and rejects every
+# resend. An uncertain execution requires owner inspection, never another send.
+pub fn linux_agent_admitted_invocation_v1(execute: LinuxAgentExecuteV1, reply_wire: text) -> Result<text, text>:
+    val _slot = remote_run_execute_reply_check_v1(reply_wire, execute.operation_id, execute.association_digest)?
+    Ok(execute.invocation)
