@@ -298,6 +298,31 @@ returned Host identity, epoch and registry IDs to construct and sign the
 separate V4 attach packet. The V6 wire request still uses the independent
 ready-reader listener incarnation.
 
+For a held run with an archived signed execute and already-authorized attach
+helper, the local Controller can author both signed frames in one operation.
+
+```text
+simple orchestrator controller-agent-pane-author CONTROLLER_ROOT CONFIG_DIGEST KEY_STORE APPROVER_ID ATTACH_GRANT_ID DETACH_GRANT_ID TTL_MS AUTHOR_INPUT.sdn
+```
+
+The input is a canonical SDN object with `kind: "controller-agent-pane-author-input"`,
+`version: 1` and seven text fields. `bindingUid` names the binding. `invoke`,
+`plan`, `helperRequest`, `helperExecuteProof`, `streamPolicy` and
+`installedHelperTemplate` hold their exact canonical source bytes. Obtain the
+plan and helper proofs for the actual retained runtime and signed parent budget.
+The command obtains both the pane target and current runtime observation through
+the retained authenticated Controller exchange. It reads the original V3 execute
+from the protected Controller journal under the operation ID.
+
+The issuer and approver policy keys must authorize `host_agent_attach_v4` and
+`host_agent_detach_v4` for that run's scope and budget. Use distinct grant IDs.
+The Controller returns the relative `bundleKey` and the bundle, attach and detach
+digests after publishing one immutable record and verifying its readback. Read
+the protected bundle and use its `attach` and `detach` strings verbatim as the
+V4 frames. An existing bundle requires explicit reconciliation before reuse.
+This command requires an already held interactive agent and pre-authorized
+helper prepare and execution proofs.
+
 Send `agent-pane-claim` with `epoch: 0` and `readId: 0` after
 `agent-inspect` reports verified terminal authority. The binding UID comes
 from the signed attach frame. `attachDigest` is the SHA-256 digest of that
