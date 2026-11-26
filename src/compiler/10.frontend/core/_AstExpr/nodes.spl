@@ -13,7 +13,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process, file_read_nullable}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
-use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrI64StoreV1, attr_i64_store_v1, AttrPlacementV1, attr_placement_from_token_v1, attr_placement_token_v1, attr_layout_from_token_v1, attr_store_detached_v1}
+use compiler.common.data.attribute_schema_v1.{AttributeStoreV1, AttrPlacementV1, attr_placement_from_token_v1, attr_placement_token_v1, attr_layout_from_token_v1, attr_store_detached_v1}
 use compiler.common.data.data_schema_resolver.{data_attr_storage_resolve_v1, data_policy_rules_from_sdn_v1}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}  # explicit: a glob is not an import-origin for surface projection
 
@@ -392,7 +392,7 @@ pub fn expr_owner_right(idx: i64) -> i64: expr_right[idx]
 # once per expr_reset into the mode slot (an array slot, so the value persists
 # across interpreter calls).
 var expr_attr_extra_mode: [i64] = [0]
-var expr_attr_extra_stores: [AttrI64StoreV1] = []
+var expr_attr_extra_stores: [AttributeStoreV1<i64>] = []
 var expr_attr_s_val_mode: [i64] = [0]
 var expr_attr_s_val_stores: [AttributeStoreV1<text>] = []
 # Node attribute `op` (AttrId compiler.ast#op): the `i_val` slot of BINARY (7),
@@ -400,7 +400,7 @@ var expr_attr_s_val_stores: [AttributeStoreV1<text>] = []
 # sparse_hash is the placement choice; column is supported for parity only (it
 # wins only with a per-tag-family index). Other tags keep `i_val` in the array.
 var expr_attr_op_mode: [i64] = [0]
-var expr_attr_op_stores: [AttrI64StoreV1] = []
+var expr_attr_op_stores: [AttributeStoreV1<i64>] = []
 # 1 when op is placed off the array or access counting is on: the only extra
 # per-read cost of `expr_owner_int` on the default path is this slot read.
 var expr_attr_int_route: [i64] = [0]
@@ -469,27 +469,37 @@ fn expr_attr_placement_of(mode: i64) -> AttrPlacementV1:
     if mode == 3: return AttrPlacementV1.ArrayIndex
     AttrPlacementV1.SparseHash
 
-# Fail-closed gate: a native build can corrupt the generic store's payloads
+# Fail-closed gate: a pre-fix native build can corrupt generic store payloads
 # (doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md),
-# so a non-direct placement is used only after a fresh store round-trips.
-# extra/op use the concrete AttrI64StoreV1 (no erased `T` payload); the check
-# exercises that same store, with a negative value for the x8 shape.
+# so a non-direct placement is used only after a fresh store round-trips
+# wide, small, negative, 3 (nil-sentinel collision check), and zero values.
 fn expr_attr_i64_round_trips(placement: AttrPlacementV1) -> bool:
-    match attr_i64_store_v1("self_check", placement):
+    match attr_store_detached_v1<i64>("self_check", placement):
         case Ok(s):
             var store = s
             val _a = store.set(3, 9000000000)
             val _b = store.set(5, 7)
             val _c = store.set(8, -5)
+            val _d = store.set(9, 3)
+            val _e = store.set(0, 0)
             val g3: Result<i64, text> = store.get(3)
             val g5: Result<i64, text> = store.get(5)
             val g8: Result<i64, text> = store.get(8)
+            val g9: Result<i64, text> = store.get(9)
+            val g0: Result<i64, text> = store.get(0)
             match g3:
                 case Ok(v3):
                     match g5:
                         case Ok(v5):
                             match g8:
-                                case Ok(v8): return v3 == 9000000000 and v5 == 7 and v8 == -5 and store.len() == 3
+                                case Ok(v8):
+                                    match g9:
+                                        case Ok(v9):
+                                            match g0:
+                                                case Ok(v0):
+                                                    return v3 == 9000000000 and v5 == 7 and v8 == -5 and v9 == 3 and v0 == 0 and store.len() == 5 and store.retire(9) and not store.has(9)
+                                                case Err(_): return false
+                                        case Err(_): return false
                                 case Err(_): return false
                         case Err(_): return false
                 case Err(_): return false
@@ -557,7 +567,7 @@ pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     expr_attr_int_route[0] = expr_attr_count_on[0]
     expr_attr_op_stores.clear()
     if op_mode != 0:
-        match attr_i64_store_v1("op", expr_attr_placement_of(op_mode)):
+        match attr_store_detached_v1<i64>("op", expr_attr_placement_of(op_mode)):
             case Ok(store): expr_attr_op_stores.push(store)
             case Err(e): return Err(e)
         expr_attr_op_mode[0] = op_mode
@@ -574,7 +584,7 @@ pub fn expr_attr_apply_config(spec: text) -> Result<bool, text>:
     expr_attr_s_val_stores.clear()
     if extra_mode != 0:
         val placement = expr_attr_placement_of(extra_mode)
-        match attr_i64_store_v1("extra", placement):
+        match attr_store_detached_v1<i64>("extra", placement):
             case Ok(store): expr_attr_extra_stores.push(store)
             case Err(e): return Err(e)
         expr_attr_extra_mode[0] = extra_mode
@@ -689,7 +699,7 @@ fn expr_extra_load(values: [i64]):
         expr_extra = values
         return
     expr_attr_extra_stores.clear()
-    match attr_i64_store_v1("extra", expr_attr_placement_of(expr_attr_extra_mode[0])):
+    match attr_store_detached_v1<i64>("extra", expr_attr_placement_of(expr_attr_extra_mode[0])):
         case Ok(store): expr_attr_extra_stores.push(store)
         case Err(_):
             expr_attr_extra_mode[0] = 0
@@ -816,7 +826,7 @@ fn expr_i_val_load(values: [i64]):
     if expr_attr_op_mode[0] == 0:
         return
     expr_attr_op_stores.clear()
-    match attr_i64_store_v1("op", expr_attr_placement_of(expr_attr_op_mode[0])):
+    match attr_store_detached_v1<i64>("op", expr_attr_placement_of(expr_attr_op_mode[0])):
         case Ok(store): expr_attr_op_stores.push(store)
         case Err(_):
             # values is dense (op included), so falling back to direct is lossless.

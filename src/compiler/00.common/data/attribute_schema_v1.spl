@@ -62,7 +62,7 @@ class AttributeStoreV1<T>:
     owner: AttrOwnerV1<T>?
     slots: [T?]
     present: i64
-    hash: Dict<i64, T>
+    hash: Dict<i64, T?>
     index_owner: AttrOwnerV1<i64>?
     free: [i64]
 
@@ -164,7 +164,9 @@ impl AttributeStoreV1<T>:
                         case None: pass
             case SparseHash:
                 if self.hash.contains_key(node):
-                    return Ok(self.hash[node])
+                    match self.hash[node]:
+                        case Some(v): return Ok(v)
+                        case None: pass
             case ArrayIndex:
                 val s = self.slot_of(node)
                 if s >= 0:
@@ -193,7 +195,7 @@ impl AttributeStoreV1<T>:
                     self.present = self.present + 1
                 self.slots[node] = Some(value)
             case SparseHash:
-                self.hash[node] = value
+                self.hash[node] = Some(value)
             case ArrayIndex:
                 val held = self.slot_of(node)
                 if held >= 0:
@@ -246,7 +248,7 @@ impl AttributeStoreV1<T>:
 
 fn attr_store_new_v1<T>(attr: text, placement: AttrPlacementV1, owner: AttrOwnerV1<T>?,
                         index_owner: AttrOwnerV1<i64>?) -> AttributeStoreV1<T>:
-    val h: Dict<i64, T> = {}
+    val h: Dict<i64, T?> = {}
     val s: [T?] = []
     val f: [i64] = []
     AttributeStoreV1(attr: attr, placement: placement, owner: owner, slots: s, present: 0, hash: h,
@@ -290,18 +292,11 @@ pub fn attr_store_detached_v1<T>(attr: text, placement: AttrPlacementV1) -> Resu
     Ok(attr_store_new_v1<T>(attr, placement, None, None))
 
 # Concrete (non-generic) i64 store for column / array_index / sparse_hash.
-# KEPT-WITH-REASON: Pure Dict<K, T> stores (`Store<T>`) and pure raw generic
-# wrappers (`Box<T>`) are fixed at the erased boundary, whereas
-# `AttributeStoreV1<T>` still mixes raw `slots: [T?]` / `AttrOwnerV1<T>?`
-# (`owner.owner_read` returns raw `i64?`) with tagged `hash: Dict<i64, T>`
-# inside a single erased `set`/`get` body (no single caller scalar convention
-# satisfies both without specialization). Also referenced by `_AstExpr/nodes.spl`.
-# This store has no type parameter, no Option payloads and no trait-object `T?`
-# return: slots are a plain [i64] with a parallel presence [bool], array_index
-# keeps its node slot table in a plain [i64] (-1 = none), and the hash is
-# Dict<i64, i64> read via contains_key + index
-# (doc/07_guide/language/dict_native_pitfalls.md).
-# @workaround bug=native_erased_generic_optional_return_2026-11-15 reason=mixed_raw_slots_owner_and_tagged_dict_hash_in_AttributeStoreV1
+# Retained as a concrete i64 specialization without Option-boxed slots or
+# Dict<i64, T?> wrappers. The generic AttributeStoreV1<T> above now stores
+# `T?` uniformly across owner/slots/hash (`Dict<i64, T?>`), so `AttributeStoreV1<i64>`
+# also works identically across all four placements (Embedded, Column, ArrayIndex,
+# SparseHash) without mixed raw/tagged ABI drift.
 class AttrI64StoreV1:
     attr: text
     placement: AttrPlacementV1

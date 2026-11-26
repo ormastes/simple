@@ -1,7 +1,6 @@
 # Native: erased generic class `T?` returns/params miscompile (2026-11-15)
 
-**Status:** verification-pending for scope item 1 on `Dict<K, T>`-valued generic classes (call-site encode landed 2026-11-18, MIR-shape verified only, not native); items 2 and 3 remain open (root cause pinned 2026-11-17,
-store-side workaround verification-pending). Pre-existing and involves no traits. The `Box<T>` and
+**Status:** fixed / `@workaround` retired (2026-11-26). `AttributeStoreV1<T>` now stores `T?` uniformly across `owner: AttrOwnerV1<T>?`, `slots: [T?]`, and `hash: Dict<i64, T?>` (`Some(value)` / `case Some(v): return Ok(v)`), eliminating the mixed raw-vs-tagged ABI split inside `AttributeStoreV1<T>`. `nodes.spl` (`extra`, `op`) now uses `AttributeStoreV1<i64>` (`attr_store_detached_v1<i64>`), and `# @workaround bug=native_erased_generic_optional_return_2026-11-15` is retired from `attribute_schema_v1.spl` and `attribute_layouts_spec.spl`. Pre-fix Stage 2 (`81625788a20`) and `P3` (`162c481782f`, pre-`08ce3f6bb79`/pre-`#11865`) notes retained below for history.
 `G<T>` repros below were run on an older Stage 2 (run 33,
 `/home/yoon/dev/simple-boot-fable-20261112/build/bootstrap/pinned-src/pinned-8220cfef5b8a/build/bootstrap-fable-33/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`)
 and on the Stage 2 built from `81625788a20` (pre-rebase sha of `1570c5778b8`). The true pre-fix base is run 34
@@ -220,3 +219,24 @@ workaround stays. A `Result<T, E>` read (`Store.get`) was traced balanced: one
    not alias `rt_dict_get`'s `TAG_NIL` miss sentinel); without specialization, no
    single caller scalar ABI can serve both placements simultaneously. Also
    referenced by `src/compiler/10.frontend/core/_AstExpr/nodes.spl`.
+
+## Uniform `T?` payload in `AttributeStoreV1<T>` + `@workaround` retirement (2026-11-26)
+
+1. **`attribute_schema_v1.spl`**: changed `AttributeStoreV1<T>.hash` from
+   `Dict<i64, T>` to `Dict<i64, T?>` (`self.hash[node] = Some(value)` and
+   `match self.hash[node]: case Some(v): return Ok(v)`). Because every `Some(value)`
+   is a `TAG_HEAP` `RtCoreEnum` handle holding the raw scalar/payload word (and
+   never collides with `rt_dict_get`'s `TAG_NIL == 3` miss sentinel or triggers
+   `rt_value_as_int_wide` `>> 3`), `Embedded` (`AttrOwnerV1<T>?`), `Column`
+   (`[T?]`), `ArrayIndex` (`[T?]`), and `SparseHash` (`Dict<i64, T?>`) now all
+   share the exact same raw-payload `class_erased_raw_slot_flags_v1` (`08ce3f6bb79`)
+   + `instantiate_method_return_hir_v1` (`#11865`) ABI across `9000000000`, `7`,
+   `-5`, `3`, `0`, and `nil`/absent.
+2. **`nodes.spl` & `@workaround` retirement**: switched `expr_attr_extra_stores`,
+   `expr_attr_op_stores`, and `expr_attr_i64_round_trips` back to
+   `AttributeStoreV1<i64>` (`attr_store_detached_v1<i64>`). Retired
+   `# @workaround bug=native_erased_generic_optional_return_2026-11-15` from
+   `attribute_schema_v1.spl` and `attribute_layouts_spec.spl` (keeping
+   `AttrI64StoreV1` as an optional non-generic concrete `i64` store without the
+   `@workaround` marker). Updated `wa_src_lane4_workaround_audit_spec.spl`,
+   `attribute_layouts_spec.spl`, and `generic_method_erased_i64_boundary_spec.spl`.
