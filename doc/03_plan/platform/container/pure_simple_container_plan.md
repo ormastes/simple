@@ -13,7 +13,7 @@ parallel. P4 integrates.
 
 | Lane | Owns | Depends on |
 |---|---|---|
-| S0 extraction | new `src/lib/common/contracts/container/{contained_lifecycle_v1,sandbox_canary_v1}.spl`, new `src/lib/common/container_policy/attempt_dir_plan_v1.spl`; edits to `providers/macos/{seatbelt_provider_v1,seatbelt_capabilities_v1}.spl` and `common/contracts/container/sandbox_capability_v1.spl`; three specs | none |
+| S0 extraction | new `src/lib/common/contracts/container/{contained_lifecycle_v1,sandbox_canary_v1}.spl`, new `src/lib/common/container_policy/attempt_dir_plan_v1.spl`; edits to `providers/macos/{seatbelt_provider_v1,seatbelt_capabilities_v1}.spl`, `common/contracts/container/sandbox_capability_v1.spl` and `common/container_policy/sandbox_policy_decode_v1.spl`; three specs | none |
 | P0 contract | `src/lib/common/contracts/sosix/containment_v1.spl`, `src/lib/common/contracts/container/pure_backend_v1.spl`, their two specs | none |
 | P1 Windows identity + write grant | `src/lib/nogc_sync_mut/sosix/windows/{security_abi_v1,restricted_identity_v1,contained_write_v1}.spl`, `src/lib/nogc_sync_mut/sosix/contained_write_v1.spl`, two specs | P0 |
 | P2 contained launch | `src/lib/nogc_sync_mut/io/windows_process_owner.spl` (edit), `src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl` (edit), `src/lib/nogc_sync_mut/sosix/containment_v1.spl`, `src/lib/nogc_sync_mut/sosix/{windows,linux,freebsd,macos,simpleos}/containment_v1.spl`, every `src/lib/nogc_sync_mut/sosix/**/FILE.md` edit (P1's entries included), one spec, fixtures | P0; P1 merged before the `restricted` examples run |
@@ -61,7 +61,11 @@ pub fn sandbox_canary_status_v1(plan: [SandboxCanaryPlanV1],
   manifest identity checks and calls `sandbox_canary_status_v1` for the canary
   comparison. `SEATBELT_*` constants alias the new ones.
 - `sandbox_capability_v1.spl`: add `SANDBOX_BACKEND_SIMPLE_PURE_V1 =
-  "simple-pure-process"` and admit it wherever the Seatbelt id is checked.
+  "simple-pure-process"`; add it to the backend choice list at
+  `sandbox_policy_decode_v1.spl:284` (the only hard check).
+- `container_attempt_dir_plan_v1` does not call `seatbelt_path_check_v1` (that
+  requires a leading `/`). It applies the host-independent checks listed in
+  architecture §9; the Seatbelt forward runs its own check first.
 - Specs: `test/01_unit/lib/common/contracts/container/contained_lifecycle_v1_spec.spl`,
   `test/01_unit/lib/common/contracts/container/sandbox_canary_v1_spec.spl`,
   `test/01_unit/lib/common/container_policy/attempt_dir_plan_v1_spec.spl`.
@@ -101,6 +105,10 @@ pub fn pure_container_capability_report_v1(support: SosixContainSupportV1,
   evidence.memory_cap_enforced.value`.
 - Specs: `test/01_unit/lib/common/contracts/sosix/containment_v1_spec.spl`,
   `test/01_unit/lib/common/contracts/container/pure_backend_v1_spec.spl`.
+- Changed 2026-11-26 after P0 started: §4.1 gained one reason,
+  `containment-readonly-requires-restricted`, checked second (right after
+  `containment-request-invalid`): non-empty `readonly_dirs` with `identity`
+  other than `restricted`. No type, field or file name changed.
 - Acceptance: each refusal reason in §4.1 has one example, in the stated order;
   a Windows-shaped support with empty `evidence_revision` fails
   `capability-evidence-missing` against a constrained requirement; a
@@ -212,6 +220,7 @@ pub fn rootfs_dematerialize_v1(view: StorageViewV1) -> text   # "" = lower remov
 - `pure_sandbox_observed_v1.spl`:
   `pub fn pure_container_observed_capability_v1(support: SosixContainSupportV1,
   evidence: PureContainerEvidenceV1) -> SandboxObservedCapabilityV1`.
+  Field mapping is the table in architecture §7.
   Qualified only from `sandbox_canary_status_v1` over the Windows canaries
   (base-file write denied, granted-dir write allowed, process limit hit,
   descendants gone after cancel).
@@ -245,9 +254,9 @@ N1–N3 cannot run here: source plus Fable/Opus review only, no capability claim
 | N1 Linux | `sosix/linux/containment_v1.spl` | review-only |
 | N2 FreeBSD | `sosix/freebsd/containment_v1.spl` | review-only |
 | N3 macOS | `sosix/macos/containment_v1.spl` over `sosix/darwin_sandbox_v1` and `seatbelt_profile_v1` | review-only |
-| N4 SimpleOS | `sosix/simpleos/containment_v1.spl` over `os/sosix/process_launch_provider_v1` and `os/services/container/runtime_provider_v1`; `container_namespace.spl` calls shared `canonical_path_within_v1` | QEMU real-firmware lane, then board |
+| N4 SimpleOS | `sosix/simpleos/containment_v1.spl` over `os/sosix/process_launch_provider_v1` and `os/services/container/runtime_provider_v1`; maps `ResourceDomain` `mem`/`pids` and names the other fields as gaps | QEMU real-firmware lane, then board |
 | W2 AppContainer | `sosix/windows/app_container_v1.spl`, identity `app-sandbox` | Windows: read and network denial measured |
-| A1 selection + API wiring | `backend_select_v1.spl` (pure or Docker on Windows by capability admission, architecture §10), `api_v2.spl` owner case, async adapter | Windows, both backends live |
+| A1 selection + API wiring | `backend_select_v1.spl` (pure or Docker on Windows by capability admission, architecture §10), Docker probe -> `ContainerCapabilityReportV1` adapter, `api_v2.spl` owner case, async adapter | Windows, both backends live |
 | R2 report v2 | `capability_report_v2.spl` with `network_isolation`, `pid_isolation` | pure |
 
 Host mapping for N1–N3 is the table in architecture §4.2.
