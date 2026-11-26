@@ -1,0 +1,113 @@
+"""
+## Purpose and audience
+Purpose: Verify inline `unsafe(...): expr` and `danger(...): expr` parsing in statement and expression positions, with single and multiple capabilities and optional reason metadata.
+Audience: compiler frontend engineers.
+"""
+# @req: REQ-COMPILER-FRONTEND-001
+
+use std.spec.*
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_name, decl_get_tag,
+    decl_get_body, DECL_FN}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_str, expr_get_left,
+    expr_get_args, expr_get_stmts, EXPR_CALL, EXPR_UNSAFE_BLOCK}
+use compiler.core.ast_stmt.{stmt_get_expr, stmt_get_name}
+use compiler.core.parser.{parse_module, parser_has_errors}
+
+fn parse_clean_inline_unsafe(source: text, path: text) -> bool:
+    ast_reset()
+    parse_module(source, path)
+    if parser_has_errors():
+        fail("unexpected parser errors for {path}")
+        return false
+    true
+
+fn fn_body(name: text) -> [i64]:
+    val decls = module_get_decls()
+    for decl in decls:
+        if decl_get_tag(decl) == DECL_FN and decl_get_name(decl) == name:
+            return decl_get_body(decl)
+    fail("missing function declaration `{name}`")
+    []
+
+describe "inline unsafe(...): expr parser contract":
+    it "parses statement-position single-line unsafe with single capability":
+        val src =
+            "extern fn rt_random_randint(a: i64, b: i64) -> i64\n" +
+            "fn f(a: i64, b: i64) -> i64:\n" +
+            "    unsafe(capabilities: [ffi]): rt_random_randint(a, b)\n"
+        if not parse_clean_inline_unsafe(src, "unsafe_inline_stmt_single_cap.spl"):
+            return
+        val body = fn_body("f")
+        expect(body.len()).to_equal(1)
+        val u = stmt_get_expr(body[0])
+        expect(expr_get_tag(u)).to_equal(EXPR_UNSAFE_BLOCK)
+        expect(expr_get_str(u)).to_equal("ffi")
+        val u_stmts = expr_get_stmts(u)
+        expect(u_stmts.len()).to_equal(1)
+        val call = stmt_get_expr(u_stmts[0])
+        expect(expr_get_tag(call)).to_equal(EXPR_CALL)
+        expect(expr_get_str(expr_get_left(call))).to_equal("rt_random_randint")
+        expect(expr_get_args(call).len()).to_equal(2)
+
+    it "parses statement-position single-line unsafe with multiple capabilities and reason":
+        val src =
+            "extern fn rt_volatile_read_u64(addr: u64) -> u64\n" +
+            "fn r(addr: u64) -> u64:\n" +
+            "    unsafe(reason: \"mmio register\", capabilities: [ffi, raw_ptr]): rt_volatile_read_u64(addr)\n"
+        if not parse_clean_inline_unsafe(src, "unsafe_inline_stmt_multi_cap.spl"):
+            return
+        val body = fn_body("r")
+        expect(body.len()).to_equal(1)
+        val u = stmt_get_expr(body[0])
+        expect(expr_get_tag(u)).to_equal(EXPR_UNSAFE_BLOCK)
+        expect(expr_get_str(u)).to_equal("ffi,raw_ptr")
+        val u_stmts = expr_get_stmts(u)
+        expect(u_stmts.len()).to_equal(1)
+        val call = stmt_get_expr(u_stmts[0])
+        expect(expr_get_tag(call)).to_equal(EXPR_CALL)
+        expect(expr_get_str(expr_get_left(call))).to_equal("rt_volatile_read_u64")
+
+    it "parses expression-position val binding with inline unsafe and multi-capability danger":
+        val src =
+            "extern fn rt_volatile_read_u64(addr: u64) -> u64\n" +
+            "fn load_both(addr: u64) -> u64:\n" +
+            "    val a = unsafe(capabilities: [ffi]): rt_volatile_read_u64(addr)\n" +
+            "    val b = danger(reason: \"mmio\", capabilities: [ffi, raw_ptr]): rt_volatile_read_u64(addr)\n" +
+            "    a\n"
+        if not parse_clean_inline_unsafe(src, "unsafe_inline_expr_val.spl"):
+            return
+        val body = fn_body("load_both")
+        expect(body.len()).to_equal(3)
+        expect(stmt_get_name(body[0])).to_equal("a")
+        val ua = stmt_get_expr(body[0])
+        expect(expr_get_tag(ua)).to_equal(EXPR_UNSAFE_BLOCK)
+        expect(expr_get_str(ua)).to_equal("ffi")
+        expect(stmt_get_name(body[1])).to_equal("b")
+        val ub = stmt_get_expr(body[1])
+        expect(expr_get_tag(ub)).to_equal(EXPR_UNSAFE_BLOCK)
+        expect(expr_get_str(ub)).to_equal("ffi,raw_ptr")
+
+    it "parses inline unsafe inside control-flow bodies":
+        val src =
+            "extern fn rt_volatile_read_u64(addr: u64) -> u64\n" +
+            "fn guarded(addr: u64, on: bool) -> u64:\n" +
+            "    if on:\n" +
+            "        unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_read_u64(addr)\n" +
+            "    else:\n" +
+            "        0\n"
+        if not parse_clean_inline_unsafe(src, "unsafe_inline_control_flow.spl"):
+            return
+        val body = fn_body("guarded")
+        expect(body.len()).to_equal(1)
+
+    it "rejects missing colon and unterminated capability header":
+        ast_reset()
+        parse_module(
+            "fn bad1(addr: u64) -> u64:\n    unsafe(capabilities: [ffi, raw_ptr]) rt_volatile_read_u64(addr)\n",
+            "unsafe_inline_bad1.spl")
+        expect(parser_has_errors()).to_equal(true)
+        ast_reset()
+        parse_module(
+            "fn bad2(addr: u64) -> u64:\n    unsafe(capabilities: [ffi, raw_ptr: rt_volatile_read_u64(addr)\n",
+            "unsafe_inline_bad2.spl")
+        expect(parser_has_errors()).to_equal(true)
