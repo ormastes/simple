@@ -1,6 +1,6 @@
 # Profile HIR workers on Linux: the owned executable pin rejected every dynamically linked compiler
 
-- Status: fix-implemented (verification pending a runtime-authority + Stage 2 rebuild)
+- Status: verified 2026-11-26 (Linux aarch64; see "Verification 2026-11-26")
 - Severity: P1. On Linux, every HIR shard pool (the coordinator and the Stage 3 capsule) still ran serially after #8639 and #8663.
 - Found: 2026-11-12, by the Phase 3 lane on aarch64 Linux; recorded 2026-11-13
 - Component: `src/runtime/runtime_process_owned.c` (Linux pin since 2026-11-13, beside the Darwin pin; was `runtime_process.c`, which the Rust runtime crate never compiles) and `src/compiler_rust/runtime/src/value/sffi/env_process.rs` (Rust stubs)
@@ -256,3 +256,22 @@ test_runner_build FAIL). Confirms the diagnosis end-to-end: the Rust runtime
 crate linked the stub pin; without the crate-link fix the admission fix cannot
 execute. J2 lane re-pinned at 3a0aac3773a (includes 34886d22cc2) to verify the
 fixed pin under the full test matrix.
+
+## Verification 2026-11-26 (Linux aarch64, DGX GB10)
+
+- Native: P4 run `boot-fable-lane-scripts/p4/cli-f23` (2026-11-21) used the
+  Stage 2 `stage2-admitted` built from `8d850c22c549`, which contains
+  `34886d22cc2`. Its log has 9 `[rt-pin] dynamic ELF admitted` lines, 0
+  `pin was rejected`, and `[hir-shard] completed_workers=9 failed_workers=0
+  peak_live_workers=9/9`. Runs `cli-f25` and `cli-f28` also log 0 rejections;
+  their failed workers are module failures, not pin refusals.
+- The archive gate from "Native confirmation" holds on a Stage 2 built from
+  `cd29cfa8b64c`: `grep -a -c simple-rthal` = 1.
+- Current tip `79445b063c4`: `cargo test -p simple-runtime --lib linux_owned_pin`
+  gives 3 passed, and `runtime_process_owned_loader_env_linux_selfcheck` gives
+  PASS (7 checks).
+- `runtime_process_pin_dynamic_elf_linux_selfcheck.c` had stopped linking.
+  `a306d5d1505` (Linux PTY owner) and the fork CPU-time reader made
+  `runtime_process.c` need `rt_fork_parent_user_cpu_micros`,
+  `rt_fork_parent_system_cpu_micros`, `rt_value_bool` and `rt_array_get_text`.
+  With link-only stubs added, it gives PASS (29 checks).
