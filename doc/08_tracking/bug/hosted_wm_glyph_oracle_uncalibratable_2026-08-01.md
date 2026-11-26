@@ -256,3 +256,15 @@ string, recorded here so the next calibration run is not misread.
 procedure above remains the only admissible fix, and it requires the
 admitted X11 phase environment (toolchain + quiet host + pure-Simple binary
 + runtime provider DSO).
+
+## Linux x86_64 Re-check (2026-11-26, Lane 1)
+
+- `GLYPH_RGB_SHA256=pending` remains at `scripts/check/check-linux-hosted-wm-live-window-evidence.shs:26`.
+- `sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs --self-test`: **PASS** (exit 0).
+- `test/03_system/gui/linux_hosted_wm_live_window_spec.spl`: 1 passed (Example 3
+  source contract), 2 failed (Example 1 requires live `build/linux-hosted-wm-font-event-current/evidence.env`;
+  Example 2 fails on `{comp.render_revision}` interpolation in spec line 285).
+- Live calibration (`LINUX_HOSTED_WM_CALIBRATE_GLYPH=1`) remains blocked on this
+  host: `xdotool`, `Xvfb`, ImageMagick `import`/`convert`, and a GUI-enabled
+  `simple` binary (`rt_winit_event_loop_new`) are absent, and `cargo build` is
+  not runnable here. No hash fabricated; status stays `open`.

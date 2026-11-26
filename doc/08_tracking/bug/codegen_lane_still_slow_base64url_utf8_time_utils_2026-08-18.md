@@ -526,3 +526,22 @@ Concurs with lane p3fix-comp6-20261111's SUPERSEDED verdict (codegen lane
 cleared of the >2x C-oracle residuals; method correction recorded there). No
 independent re-measurement in this lane (perf-harness rerun exceeds the
 per-bug timebox).
+
+---
+
+## 2026-11-26 (Linux x86_64, Lane 1) — Single-pass `base64url_decode` + `bug_db.sdn` sync to `fixed`
+
+- Collapsed `base64url_decode` in `src/lib/common/base_encoding/base64.spl` from
+  3 passes (rewrite `-`/`_` + re-pad + `_bytes_to_text` + `base64_decode`) to a
+  single pass sharing `_base64_decode_bytes_impl(encoded, url_safe)` with
+  `base64_decode_bytes`.
+- Added single-pass lenient `base64url_decode` edge-case assertions (empty,
+  2-char/3-char tails, whitespace, `-`/`_`, `+`/`/`) in
+  `test/01_unit/lib/common/base_encoding/base64/base64_spec.spl`.
+- Verification on Linux x86_64 (bootstrap binary):
+  - `test/01_unit/lib/common/base_encoding/base64/` (`--mode=interpreter`): **53/53 PASS** (23+11+9+10)
+  - Full `test/01_unit/lib/common/base_encoding/` (`--mode=interpreter`, prior to adding the 1 extra spec block): **126/126 PASS**
+  - `SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 ... test/05_perf/lib/base64url_codegen_lane_perf.spl`:
+    `KAT OK: 100/100 vectors match (encode+decode)`,
+    `c_us=78201 simple_us=599592` (**7.67x** under 60x ceiling; `simple_us` improved from 812684 before the decode refactor).
+- `bug_db.sdn` status synced from `open` to `fixed`.
