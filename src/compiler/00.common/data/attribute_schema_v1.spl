@@ -290,14 +290,18 @@ pub fn attr_store_detached_v1<T>(attr: text, placement: AttrPlacementV1) -> Resu
     Ok(attr_store_new_v1<T>(attr, placement, None, None))
 
 # Concrete (non-generic) i64 store for column / array_index / sparse_hash.
-# AttributeStoreV1<i64> corrupts i64 payloads in native builds: its erased body
-# stores tagged words (v<<3|tag) in Dict<i64,T> / [T?] while the concrete caller
-# decodes them raw (sparse_hash 9000000000 -> 1125000000, 7 -> 0). This store has
-# no type parameter, no Option payloads and no trait-object `T?` return: slots
-# are a plain [i64] with a parallel presence [bool], array_index keeps its node
-# slot table in a plain [i64] (-1 = none), and the hash is Dict<i64, i64> read
-# via contains_key + index (doc/07_guide/language/dict_native_pitfalls.md).
-# @workaround bug=native_erased_generic_optional_return_2026-11-15
+# KEPT-WITH-REASON: Pure Dict<K, T> stores (`Store<T>`) and pure raw generic
+# wrappers (`Box<T>`) are fixed at the erased boundary, whereas
+# `AttributeStoreV1<T>` still mixes raw `slots: [T?]` / `AttrOwnerV1<T>?`
+# (`owner.owner_read` returns raw `i64?`) with tagged `hash: Dict<i64, T>`
+# inside a single erased `set`/`get` body (no single caller scalar convention
+# satisfies both without specialization). Also referenced by `_AstExpr/nodes.spl`.
+# This store has no type parameter, no Option payloads and no trait-object `T?`
+# return: slots are a plain [i64] with a parallel presence [bool], array_index
+# keeps its node slot table in a plain [i64] (-1 = none), and the hash is
+# Dict<i64, i64> read via contains_key + index
+# (doc/07_guide/language/dict_native_pitfalls.md).
+# @workaround bug=native_erased_generic_optional_return_2026-11-15 reason=mixed_raw_slots_owner_and_tagged_dict_hash_in_AttributeStoreV1
 class AttrI64StoreV1:
     attr: text
     placement: AttrPlacementV1
