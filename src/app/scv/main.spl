@@ -32,6 +32,8 @@ use std.scv.refs.{scv_bookmarks, scv_bookmark_set, scv_tag_list, scv_tag_set}
 use std.scv.backend_git.{scv_backend_status, scv_backend_map, scv_backend_verify, scv_promote_verify}
 use std.scv.shadow.{scv_shadow_sync}
 use std.scv.gc.{scv_gc_command}
+use std.scv.store.{scv_repo_exists}
+use std.nogc_sync_mut.storage.scv_adapter_v1.{scv_adapter_v1_enable, scv_adapter_v1_store_root}
 use std.scv.recover.{scv_recover}
 use std.scv.file_history.{scv_snapshot_with_identity, scv_file_history}
 use std.scv.three_view_diff.{scv_diff_views}
@@ -55,7 +57,7 @@ fn scv_help() -> text:
     lines.push(scv_gateway_command_help_v1())
     lines.push(scv_gateway_publish_command_help_v2())
     lines.push("scv config check | scv config route <repository-relative-path> (native SDN schema inspection)")
-    lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|syntax-pack-write|syntax-pack-verify|syntax-pack-status|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set|new-change|close-change|checkpoint|doctor|verify-backends|backend|rebuild-db|promote-verify|shadow-sync|gc|recover|file-history|commit-policy|event-record|event-commit|event-replay|events>")
+    lines.push("Usage: scv <init|snapshot|auto-snapshot|watch|status|log|op-log|restore-op|diff|parse-gate|parse-index|compile-gate|test-gate|mark-state|public-ready|stats|fsck|export-tree|export-manifest|import-manifest|export-git-fast-import|import-git-fast-import|db-index|pack-status|pack-write|pack-verify|pack-import|syntax-pack-write|syntax-pack-verify|syntax-pack-status|private-sync|private-sync-verify|private-sync-import|public-export|public-export-verify|public-push|public-push-verify|public-pull|network-push|network-push-verify|network-push-cas|network-pull|network-config|gc-dry-run|gc-prune|merge-commits|conflicts|resolve-conflict|bookmarks|bookmark-set|parsers|parser-install|parser-verify|langmap|langmap-set|new-change|close-change|checkpoint|doctor|verify-backends|backend|rebuild-db|promote-verify|shadow-sync|gc|store-init|recover|file-history|commit-policy|event-record|event-commit|event-replay|events>")
     lines.push("Wave-3 D-01: scv cst-store <path>   # store the file CST in the P-05 root store (revision+ContentId)")
     lines.push("Wave-4 I-06: scv identity <link|unlink|split|merge|trace> ...   # logged identity corrections")
     lines.push("Wave-5 B-06: scv pack-write-v2r | pack-verify-v2r | pack-fuzz-v2 <seed> <cases> | pack-soak-v2 <iterations>   # reachability-aware pack v2, delta fuzz, GC soak")
@@ -452,6 +454,14 @@ fn main() -> i64:
             return scv_cli_result(scv_gc_dry_run(root))
         case "gc-prune":
             return scv_cli_result(scv_gc_prune(root))
+        case "store-init":
+            # Opt in to the shared immutable store so `scv gc` pins reachable chunks.
+            if not scv_repo_exists(root):
+                return scv_cli_verdict("ERROR — nothing was checked (repository not initialized)\n")
+            val store_reason = scv_adapter_v1_enable(root)
+            if store_reason != "":
+                return scv_cli_verdict("FAIL — scv store-init failed: {store_reason}\n")
+            return scv_cli_verdict("PASS — scv store enabled at {scv_adapter_v1_store_root(root)}\n")
         case "gc":
             # MIG-21: dry run by default; --prune --checkpoint <id> to quarantine
             return scv_cli_verdict(scv_gc_command(root, args))
