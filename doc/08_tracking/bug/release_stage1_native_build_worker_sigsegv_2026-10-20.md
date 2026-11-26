@@ -129,3 +129,16 @@ runners: run 42457312983.
 
 - **Current CI evidence (`55ed337beea`, PR `#11877`):** Per `doc/08_tracking/bug/phase_ladder_linux_phase2_stage1_sigsegv_hir_2026-11-26.md`, Linux Phase 2 driven by `stage1` still SIGSEGVs during `phase=hir` (Run `45659415417` at HIR module 480/1629; Run `45739034803` rung 2 at HIR module 291/1630). Phase 2 by `stage1` has not passed.
 - **Workflow disposition:** Kept `.github/workflows/release.yml:1006` (`# @workaround bug=release_stage1_native_build_worker_sigsegv_2026_10_20 reason=stage1-native-build-worker-sigsegv`) and the Rust-seed fallback for `simple_test_runner`; removing this guard without fixing the underlying `stage1` HIR SIGSEGV would break release packaging on Linux. Verified `release_checker_contract_spec.spl` (2/2 pass) and `release_archive_layout_spec.spl` (2/2 pass).
+
+## Linux x86_64 Verification Note (2026-11-26, Lane 1)
+
+- Compiled and ran the upstream Linux seed-link witness
+  `src/runtime/test/bootstrap_process_bridge_unavailable_selfcheck.c` with
+  `clang -std=c11` against `src/runtime/runtime_bootstrap_process_bridge_unavailable.c`:
+  **PASS** (`PASS bootstrap_process_bridge_unavailable: 5 seed bridges resolve and fail closed`).
+- `.github/workflows/release.yml:1006` still carries
+  `# @workaround bug=release_stage1_native_build_worker_sigsegv_2026_10_20`.
+- Status remains `verification-pending`: verifying the stage1 native-build
+  HIR worker fix requires a `release.yml` CI `linux-x86_64` / `windows-x86_64`
+  run reaching stage1 `native-build` of `test_runner_new/main.spl` (cannot run
+  full stage1 bootstrap on this host during P3a).

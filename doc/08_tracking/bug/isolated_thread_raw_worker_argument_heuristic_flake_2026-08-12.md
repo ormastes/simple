@@ -212,3 +212,22 @@ and the native-compiled Simple smoke are still unexecuted. Ubuntu WSL failed
 to start with `Wsl/Service/CreateInstance/E_FAIL`; no Linux result is inferred
 from that installed distribution. The Simple smoke requires a proven native
 compiler/runtime; a Rust-seed result cannot establish self-hosted qualification.
+
+## Linux x86_64 Verification (2026-11-26, Lane 1)
+
+- Source check: `RT_WORKER_CLOSURE_ADDRESS=1`, `RT_WORKER_CLOSURE_VALUE=2`,
+  `rt_thread_spawn_isolated_kind`, and `rt_thread_spawn_isolated_with_args_kind`
+  are present in `src/compiler_rust/runtime/src/executor.rs`,
+  `src/runtime/runtime_thread.c`, and `src/lib/nogc_async_mut/concurrent/thread.spl`.
+- C runtime owner contract (`sh scripts/check/check-rt-thread-owner-contract.shs`):
+  **PASS** (`rt_thread_owner_contract_selfcheck: ok`, 42 core-C objects linked).
+- Interpreted Simple specs (bootstrap binary `--mode=interpreter`):
+  - `test/01_unit/lib/nogc_async_mut/isolated_thread_barrier_spec.spl`: 3 passed, 0 failed
+  - `test/01_unit/lib/nogc_async_mut/isolated_thread_spawn_barrier_spec.spl`: 2 passed, 0 failed
+  - `test/01_unit/lib/nogc_async_mut/thread_sffi_spec.spl`: 5 passed, 0 failed
+  - `test/01_unit/lib/nogc_async_mut/thread_handle_unique_spec.spl`: 1 passed, 0 failed
+- Still pending: self-hosted native smoke (`check-thread-spawn-with-args-native.shs`
+  calls `compile --native`, unsupported on bootstrap Stage 2 binary; direct
+  Stage 2 `native-build` refused by 24576 MiB RAM reserve with 22619 MiB
+  available during concurrent P3a bootstrap), `cargo test`, aarch64, and board runs.
+  Status kept `fix-implemented-verification-pending`.

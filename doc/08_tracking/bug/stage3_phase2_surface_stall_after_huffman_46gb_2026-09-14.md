@@ -407,3 +407,18 @@ LIVE, root cause confirmed in the seed (gdb backtraces on record), mitigation
 (call-count batching 9788f8341a8) landed. The remaining fix is seed-lane
 work, not a P3 tools patch; per runaway-guard rules the live concurrence is
 not re-measured here.
+
+## 2026-11-26 (Linux x86_64, Lane 1) — Rust root cause landed on `release/1.0.0`; moved to `fix-implemented-verification-pending`
+
+- Confirmed in `src/compiler_rust/runtime/src/value/collections.rs:97-193` that
+  the Rust `TransientHeapScope` O(N) `Vec::retain` defect is **already fixed** on
+  `release/1.0.0` via commits `627440328c2` ("perf(runtime): index transient scope
+  objects so promote is O(reachable)") and `7cfa794e2c2` ("perf(runtime): defer
+  Rust transient-scope compaction to scope end (BSM P0)"): `by_ptr` `HashMap`
+  index + `release_reachable()` O(reachable) tombstoning + single deferred
+  compaction at `rt_transient_array_scope_end`.
+- Confirmed `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`
+  **PASS 5/5** on Linux x86_64 (`--mode=interpreter`).
+- Status updated in `bug_db.sdn` from `open` to `fix-implemented-verification-pending`:
+  full Stage-2 -> Stage-3 832-surface `bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3`
+  confirmation remains pending (cannot run `bootstrap-from-scratch.sh` here during P3a).

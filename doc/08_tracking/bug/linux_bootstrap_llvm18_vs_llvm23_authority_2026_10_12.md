@@ -51,3 +51,17 @@ Concrete blocker for the remaining acceptance (real archive install + native boo
 `.github/workflows/rust-bootstrap-multiplatform.yml`, runs on `ubuntu-24.04` (x86_64). No arm64 job
 consumes it, so an aarch64 host cannot qualify this; it needs a Linux x86_64 CI run of that lane.
 A local `--features llvm` check was not run: local LLVM is 23.1.0, not the pinned 23.1.1 authority.
+
+## Linux x86_64 Verification (2026-11-26, Lane 1)
+
+- `sh test/01_unit/scripts/linux_phase23_llvm23_toolchain_test.shs`: **PASS**
+  (`Linux LLVM authority: one valid binding and eight fail-closed scenarios PASS`)
+- `sh test/01_unit/scripts/linux_phase23_llvm23_workflow_test.shs`: **PASS**
+  (`Actual Linux workflow wiring: valid commands + seven negative removals PASS`)
+- `sh test/01_unit/scripts/linux_phase23_llvm23_archive_test.shs`: **PASS**
+  (`LLVM archive policy: bad size and real digest rejected before extraction PASS`)
+- Local host `/home/yoon/.simple/llvm23/bin/clang-23` is 23.1.6 (`x86_64-pc-linux-gnu`).
+- Still pending: real ~2 GB official LLVM 23.1.1 archive installation via
+  `install-linux-phase23-llvm23.shs` and native bootstrap on the `ubuntu-24.04`
+  `llvm` CI lane of `.github/workflows/rust-bootstrap-multiplatform.yml`. Status
+  kept `fix-implemented-verification-pending`.
