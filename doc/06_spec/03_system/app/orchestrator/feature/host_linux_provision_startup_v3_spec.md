@@ -5,9 +5,12 @@ and cleanup finalizer as the executable. It then uses the production installed
 Host domain to query status and close the service.
 
 On a dedicated Linux fixture machine, provision the installed machine profiles
-and a protected parent with its trusted authority policy. Run as the original
-Host process under the required native profile. Configure these fixture
-environment variables.
+and a protected parent with its trusted authority policy. Run the compiled
+case binary on its main thread as the active Host service's systemd
+`MainPID`. The ordinary SSpec runner launches that binary as a child. Keep
+its native build provenance and collect the exact binary's separate execution
+receipt from the installed service. Configure these fixture environment
+variables.
 
 | Variable | Fixture value |
 | --- | --- |

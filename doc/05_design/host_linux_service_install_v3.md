@@ -67,15 +67,20 @@ Use a dedicated Linux host or guest with a root-owned
 `/etc/simple/container/machine-policy.sdn` and the configured systemd supervisor
 and Podman provider socket units. The installed machine policy supplies both the
 fresh epoch and supervisor profiles. The native opener verifies the calling
-process on its main thread, the provider and cgroup topology, and access to the
-retained epoch lock under `/var/lib/simple/container`. A rootless Podman version
-or capability probe alone cannot satisfy these checks.
+process on its main thread as the active configured systemd service's
+`MainPID`. It also checks the provider and cgroup topology and access to
+the retained epoch lock under `/var/lib/simple/container`. Keep the provider
+service and socket unused for the fixture's fresh epoch.
 
 Prepare the protected enrollment parent and its `authority-policy.sdn` on that
 fixture. Supply fresh controller output storage, authorized issuer and approver
 keys, and an enrollment binding for the fixture's actual native identity and
 provider. For this Linux provider, `nativeMachineId` is the exact 32 lowercase
 hexadecimal characters from the fixture's `/etc/machine-id`, without a prefix
-or newline. Run the scenario in the installed Host profile using a qualified
-self-hosted Simple runner. The fixture inputs and expected receipts are in the
+or newline. Build the SSpec with the qualified self-hosted toolchain, then run
+the exact compiled case binary as the installed service's main process. The
+ordinary native runner launches case binaries as children, so starting that
+runner as the service would give the case the wrong PID. Record the build
+provenance and the direct service execution separately. The fixture inputs
+and expected receipts are in the
 [signed provisioning SSpec manual](../06_spec/03_system/app/orchestrator/feature/host_linux_provision_startup_v3_spec.md).
