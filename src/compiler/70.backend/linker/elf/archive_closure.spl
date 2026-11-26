@@ -131,10 +131,44 @@ fn elf_archive_closure_retained_wrapped(roots: [ElfObject], archives: [[u8]],
             undef[name] = false
         elif name != "" and defined[name] == 2:
             undef[name] = true
+    # Index defined global/weak symbols -> candidate member indices once so each
+    # fixpoint pass inspects only members that define a currently-demanded symbol.
+    var sym_to_members: {text: [i64]} = {}
+    var idx_mi: i64 = 0
+    while idx_mi < members.len():
+        for sym in members[idx_mi].obj.symbols:
+            if sym.name != "" and sym.st_shndx != SHN_UNDEF:
+                val bind = elf_symbol_binding(sym)
+                if bind == STB_GLOBAL or bind == STB_WEAK:
+                    if sym_to_members.has(sym.name):
+                        var list = sym_to_members[sym.name]
+                        if list[list.len() - 1] != idx_mi:
+                            list.push(idx_mi)
+                            sym_to_members[sym.name] = list
+                    else:
+                        sym_to_members[sym.name] = [idx_mi]
+        idx_mi = idx_mi + 1
+
     while undef.len() > 0:
+        var candidates: [i64] = []
+        var cand_seen: {i64: bool} = {}
+        for uname in undef.keys():
+            if sym_to_members.has(uname):
+                for cmi in sym_to_members[uname]:
+                    if not taken[cmi] and not cand_seen.has(cmi):
+                        cand_seen[cmi] = true
+                        candidates.push(cmi)
+        var ci: i64 = 1
+        while ci < candidates.len():
+            val cur = candidates[ci]
+            var cj = ci
+            while cj > 0 and candidates[cj - 1] > cur:
+                candidates[cj] = candidates[cj - 1]
+                cj = cj - 1
+            candidates[cj] = cur
+            ci = ci + 1
         var taken_now: [i64] = []
-        var mi: i64 = 0
-        while mi < members.len():
+        for mi in candidates:
             if not taken[mi] and elf_closure_member_satisfies(members[mi].obj, undef):
                 taken[mi] = true
                 selected = selected.push(members[mi])
@@ -153,7 +187,6 @@ fn elf_archive_closure_retained_wrapped(roots: [ElfObject], archives: [[u8]],
                             undef[sym.name] = true
                         else:
                             undef.remove(sym.name)
-            mi = mi + 1
         if taken_now.len() == 0:
             break
         passes = passes + 1

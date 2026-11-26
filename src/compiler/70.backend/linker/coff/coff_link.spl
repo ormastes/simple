@@ -238,9 +238,10 @@ fn _coff_section_is_image_input(section: CoffSection) -> bool:
     # they are dropped as with `-s` until the linker emits long-name debug sections.
     not section.name.starts_with(".debug$") and not section.name.starts_with(".debug_")
 
-fn _coff_gc_target(objects: [CoffObject], accepted: [[bool]],
+fn _coff_gc_target_indexed(objects: [CoffObject], accepted: [[bool]],
         source_object: i64, symbol: CoffSymbol,
-        aliases: {text: text}) -> Result<CoffSymbolLocation, text>:
+        aliases: {text: text},
+        ext_locs: {text: [CoffSymbolLocation]}) -> Result<CoffSymbolLocation, text>:
     if symbol.is_defined():
         val section_index = symbol.section_number - 1
         if section_index < 0 or section_index >= accepted[source_object].len():
@@ -257,20 +258,12 @@ fn _coff_gc_target(objects: [CoffObject], accepted: [[bool]],
     if alternate.is_err(): return Err(alternate.unwrap_err())
     if not names.contains(alternate.unwrap()): names = names.push(alternate.unwrap())
     for name in names:
-        var found = CoffSymbolLocation(
-            object_index: -1, section_index: -1, rva: 0)
-        var oi: i64 = 0
-        while oi < objects.len():
-            for candidate in objects[oi].symbols:
-                if candidate.name == name and candidate.is_external() and candidate.is_defined():
-                    val si = candidate.section_number - 1
-                    if si >= 0 and si < accepted[oi].len() and accepted[oi][si]:
-                        if found.object_index >= 0:
-                            return Err("duplicate external COFF symbol '{name}'")
-                        found = CoffSymbolLocation(object_index: oi,
-                            section_index: si, rva: 0)
-            oi = oi + 1
-        if found.object_index >= 0: return Ok(found)
+        if ext_locs.has(name):
+            val locs = ext_locs[name]
+            if locs.len() > 1:
+                return Err("duplicate external COFF symbol '{name}'")
+            if locs.len() == 1:
+                return Ok(locs[0])
     Ok(CoffSymbolLocation(object_index: -1, section_index: -1, rva: 0))
 
 fn _coff_section_gc_eligible(section: CoffSection) -> bool:
@@ -284,16 +277,50 @@ fn _coff_section_gc_eligible(section: CoffSection) -> bool:
 fn _coff_gc_accepted(objects: [CoffObject], accepted: [[bool]],
         roots: [text], aliases: {text: text}) -> Result<[[bool]], text>:
     var live: [[bool]] = []
+    var work_oi: [i64] = []
+    var work_si: [i64] = []
+    var assoc_children: [{i64: [i64]}] = []
     var oi: i64 = 0
     while oi < objects.len():
         var object_live: [bool] = []
+        var obj_assoc: {i64: [i64]} = {}
         var si: i64 = 0
         while si < objects[oi].sections.len():
             val section = objects[oi].sections[si]
-            object_live = object_live.push(accepted[oi][si] and
-                not _coff_section_gc_eligible(section))
+            val keep_root = accepted[oi][si] and not _coff_section_gc_eligible(section)
+            object_live = object_live.push(keep_root)
+            if keep_root:
+                work_oi.push(oi)
+                work_si.push(si)
+            elif accepted[oi][si] and section.comdat_selection == 5:
+                val parent = section.associative_section - 1
+                if parent >= 0:
+                    if obj_assoc.has(parent):
+                        var kids = obj_assoc[parent]
+                        kids.push(si)
+                        obj_assoc[parent] = kids
+                    else:
+                        obj_assoc[parent] = [si]
             si = si + 1
         live = live.push(object_live)
+        assoc_children = assoc_children.push(obj_assoc)
+        oi = oi + 1
+
+    # Index external defined symbols in accepted sections once in O(objects * symbols).
+    var ext_locs: {text: [CoffSymbolLocation]} = {}
+    oi = 0
+    while oi < objects.len():
+        for symbol in objects[oi].symbols:
+            if symbol.name != "" and symbol.is_external() and symbol.is_defined():
+                val si = symbol.section_number - 1
+                if si >= 0 and si < accepted[oi].len() and accepted[oi][si]:
+                    val loc = CoffSymbolLocation(object_index: oi, section_index: si, rva: 0)
+                    if ext_locs.has(symbol.name):
+                        var locs = ext_locs[symbol.name]
+                        locs.push(loc)
+                        ext_locs[symbol.name] = locs
+                    else:
+                        ext_locs[symbol.name] = [loc]
         oi = oi + 1
 
     for root in roots:
@@ -306,44 +333,39 @@ fn _coff_gc_accepted(objects: [CoffObject], accepted: [[bool]],
         var found_root = false
         for name in names:
             if found_root: continue
-            oi = 0
-            while oi < objects.len():
-                for symbol in objects[oi].symbols:
-                    if symbol.name == name and symbol.is_external() and symbol.is_defined():
-                        val si = symbol.section_number - 1
-                        if si >= 0 and si < accepted[oi].len() and accepted[oi][si]:
-                            live[oi][si] = true
-                            found_root = true
-                oi = oi + 1
+            if ext_locs.has(name):
+                for loc in ext_locs[name]:
+                    if not live[loc.object_index][loc.section_index]:
+                        live[loc.object_index][loc.section_index] = true
+                        work_oi.push(loc.object_index)
+                        work_si.push(loc.section_index)
+                    found_root = true
 
-    var changed = true
-    while changed:
-        changed = false
-        oi = 0
-        while oi < objects.len():
-            var si: i64 = 0
-            while si < objects[oi].sections.len():
-                val section = objects[oi].sections[si]
-                if accepted[oi][si] and not live[oi][si] and
-                        section.comdat_selection == 5:
-                    val parent = section.associative_section - 1
-                    if parent >= 0 and parent < live[oi].len() and live[oi][parent]:
-                        live[oi][si] = true
-                        changed = true
-                if accepted[oi][si] and live[oi][si]:
-                    for relocation in section.relocations:
-                        val symbol_result = coff_symbol_at_table_index(
-                            objects[oi], relocation.symbol_index)
-                        if symbol_result.is_err(): return Err(symbol_result.unwrap_err())
-                        val target = _coff_gc_target(
-                            objects, accepted, oi, symbol_result.unwrap(), aliases)?
-                        if (target.object_index >= 0 and
-                                accepted[target.object_index][target.section_index] and
-                                not live[target.object_index][target.section_index]):
-                            live[target.object_index][target.section_index] = true
-                            changed = true
-                si = si + 1
-            oi = oi + 1
+    var cursor: i64 = 0
+    while cursor < work_oi.len():
+        val cur_oi = work_oi[cursor]
+        val cur_si = work_si[cursor]
+        cursor = cursor + 1
+        if assoc_children[cur_oi].has(cur_si):
+            for child_si in assoc_children[cur_oi][cur_si]:
+                if accepted[cur_oi][child_si] and not live[cur_oi][child_si]:
+                    live[cur_oi][child_si] = true
+                    work_oi.push(cur_oi)
+                    work_si.push(child_si)
+        val section = objects[cur_oi].sections[cur_si]
+        for relocation in section.relocations:
+            val symbol_result = coff_symbol_at_table_index(
+                objects[cur_oi], relocation.symbol_index)
+            if symbol_result.is_err(): return Err(symbol_result.unwrap_err())
+            val target = _coff_gc_target_indexed(
+                objects, accepted, cur_oi, symbol_result.unwrap(), aliases, ext_locs)?
+            if (target.object_index >= 0 and
+                    accepted[target.object_index][target.section_index] and
+                    not live[target.object_index][target.section_index]):
+                live[target.object_index][target.section_index] = true
+                work_oi.push(target.object_index)
+                work_si.push(target.section_index)
+
     var result = accepted
     oi = 0
     while oi < objects.len():
@@ -532,20 +554,48 @@ fn _coff_layout_sections(objects: [CoffObject],
     val common_sizes = _coff_common_symbol_sizes(objects, defined)
 
     var group_names: [text] = []
+    var group_seen: {text: bool} = {}
+    var subsections_by_group: {text: [text]} = {}
+    var subsection_seen: {text: bool} = {}
+    var sec_oi_by_name: {text: [i64]} = {}
+    var sec_si_by_name: {text: [i64]} = {}
     oi = 0
     while oi < objects.len():
         var si: i64 = 0
         while si < objects[oi].sections.len():
             if accepted[oi][si]:
-                val group = _coff_output_section_name(objects[oi].sections[si].name)
-                if group.is_err(): return Err(group.unwrap_err())
-                if not group_names.contains(group.unwrap()): group_names = group_names.push(group.unwrap())
+                val sec_name = objects[oi].sections[si].name
+                val group_res = _coff_output_section_name(sec_name)
+                if group_res.is_err(): return Err(group_res.unwrap_err())
+                val gname = group_res.unwrap()
+                if not group_seen.has(gname):
+                    group_seen[gname] = true
+                    group_names = group_names.push(gname)
+                    subsections_by_group[gname] = []
+                if not subsection_seen.has(sec_name):
+                    subsection_seen[sec_name] = true
+                    var g_subs = subsections_by_group[gname]
+                    g_subs.push(sec_name)
+                    subsections_by_group[gname] = g_subs
+                    sec_oi_by_name[sec_name] = [oi]
+                    sec_si_by_name[sec_name] = [si]
+                else:
+                    var ois = sec_oi_by_name[sec_name]
+                    ois.push(oi)
+                    sec_oi_by_name[sec_name] = ois
+                    var sis = sec_si_by_name[sec_name]
+                    sis.push(si)
+                    sec_si_by_name[sec_name] = sis
             si = si + 1
         oi = oi + 1
-    if import_code_count > 0 and not group_names.contains(".text"):
+    if import_code_count > 0 and not group_seen.has(".text"):
+        group_seen[".text"] = true
         group_names = group_names.push(".text")
-    if common_sizes.len() > 0 and not group_names.contains(".bss"):
+        subsections_by_group[".text"] = []
+    if common_sizes.len() > 0 and not group_seen.has(".bss"):
+        group_seen[".bss"] = true
         group_names = group_names.push(".bss")
+        subsections_by_group[".bss"] = []
 
     var ga: i64 = 1
     while ga < group_names.len():
@@ -566,77 +616,95 @@ fn _coff_layout_sections(objects: [CoffObject],
     var common_base_rva: i64 = 0
     var common_size: i64 = 0
     var common_symbols: {text: i64} = {}
+    var icf_buckets_oi: {text: [i64]} = {}
+    var icf_buckets_si: {text: [i64]} = {}
     for group in group_names:
-        var subsection_names: [text] = []
-        oi = 0
-        while oi < objects.len():
-            var si: i64 = 0
-            while si < objects[oi].sections.len():
-                if accepted[oi][si]:
-                    val section = objects[oi].sections[si]
-                    val output_name = _coff_output_section_name(section.name).unwrap()
-                    if output_name == group and not subsection_names.contains(section.name):
-                        subsection_names = subsection_names.push(section.name)
-                si = si + 1
-            oi = oi + 1
-        var a: i64 = 0
-        while a < subsection_names.len():
-            var b = a + 1
-            while b < subsection_names.len():
-                if _coff_subsection_sort_key(subsection_names[b]) <
-                        _coff_subsection_sort_key(subsection_names[a]):
-                    val temporary = subsection_names[a]
-                    subsection_names[a] = subsection_names[b]
-                    subsection_names[b] = temporary
-                b = b + 1
-            a = a + 1
+        var subsection_names: [text] = if subsections_by_group.has(group): subsections_by_group[group] else: []
+        var sub_keys: {text: text} = {}
+        for sub_name in subsection_names:
+            sub_keys[sub_name] = _coff_subsection_sort_key(sub_name)
+        var sub_width: i64 = 1
+        while sub_width < subsection_names.len():
+            var merged_subs: [text] = []
+            var s_start: i64 = 0
+            while s_start < subsection_names.len():
+                val s_mid = if s_start + sub_width < subsection_names.len(): s_start + sub_width else: subsection_names.len()
+                val s_end = if s_start + sub_width + sub_width < subsection_names.len(): s_start + sub_width + sub_width else: subsection_names.len()
+                var s_left = s_start
+                var s_right = s_mid
+                while s_left < s_mid or s_right < s_end:
+                    var take_left = false
+                    if s_left < s_mid and s_right < s_end:
+                        take_left = sub_keys[subsection_names[s_left]] <= sub_keys[subsection_names[s_right]]
+                    elif s_left < s_mid:
+                        take_left = true
+                    if take_left:
+                        merged_subs.push(subsection_names[s_left])
+                        s_left = s_left + 1
+                    else:
+                        merged_subs.push(subsection_names[s_right])
+                        s_right = s_right + 1
+                s_start = s_end
+            subsection_names = merged_subs
+            sub_width = sub_width + sub_width
         var group_offset: i64 = 0
         var group_base_rva: i64 = 0
         var group_has_content = false
         for subsection in subsection_names:
-            oi = 0
-            while oi < objects.len():
-                var si: i64 = 0
-                while si < objects[oi].sections.len():
-                    val section = objects[oi].sections[si]
-                    if accepted[oi][si] and section.name == subsection:
-                        val logical_size = if section.virtual_size > section.data.len(): section.virtual_size else: section.data.len()
-                        var folded_rva: i64 = 0
-                        if (icf_sections and
-                                (section.characteristics & COFF_SECTION_LNK_COMDAT) != 0):
-                            var candidate_object: i64 = 0
-                            while candidate_object < objects.len() and folded_rva == 0:
-                                var candidate_section: i64 = 0
-                                while (candidate_section < objects[candidate_object].sections.len() and
-                                        folded_rva == 0):
-                                    if result[candidate_object][candidate_section] > 0:
-                                        val eq_res = _coff_icf_equal(objects,
-                                            oi, si, candidate_object,
-                                            candidate_section, aliases)
-                                        if eq_res.is_err(): return Err(eq_res.unwrap_err())
-                                        if eq_res.unwrap():
-                                            folded_rva = result[candidate_object][candidate_section]
-                                    candidate_section = candidate_section + 1
-                                candidate_object = candidate_object + 1
-                        if folded_rva > 0:
-                            result[oi][si] = folded_rva
-                            if group_base_rva == 0 or folded_rva < group_base_rva:
-                                group_base_rva = folded_rva
-                            if logical_size > 0: group_has_content = true
-                            si = si + 1
-                            continue
-                        val alignment = _coff_section_alignment(section)
-                        if alignment.is_err(): return Err(alignment.unwrap_err())
-                        group_offset = pe_align_up(
-                            next_rva + group_offset, alignment.unwrap()) - next_rva
-                        val section_rva = next_rva + group_offset
-                        result[oi][si] = section_rva
-                        if group_base_rva == 0 or section_rva < group_base_rva:
-                            group_base_rva = section_rva
-                        if logical_size > 0: group_has_content = true
-                        group_offset = group_offset + logical_size
-                    si = si + 1
-                oi = oi + 1
+            val sub_ois = sec_oi_by_name[subsection]
+            val sub_sis = sec_si_by_name[subsection]
+            var sub_pos: i64 = 0
+            while sub_pos < sub_ois.len():
+                oi = sub_ois[sub_pos]
+                val si = sub_sis[sub_pos]
+                sub_pos = sub_pos + 1
+                val section = objects[oi].sections[si]
+                val logical_size = if section.virtual_size > section.data.len(): section.virtual_size else: section.data.len()
+                var folded_rva: i64 = 0
+                if (icf_sections and
+                        (section.characteristics & COFF_SECTION_LNK_COMDAT) != 0 and
+                        section.comdat_selection != 5):
+                    val bucket_key = "{group}|{logical_size}|{section.characteristics}|{section.relocations.len()}|{section.data.len()}"
+                    if icf_buckets_oi.has(bucket_key):
+                        val cand_ois = icf_buckets_oi[bucket_key]
+                        val cand_sis = icf_buckets_si[bucket_key]
+                        var ci: i64 = 0
+                        while ci < cand_ois.len() and folded_rva == 0:
+                            val coi = cand_ois[ci]
+                            val csi = cand_sis[ci]
+                            if result[coi][csi] > 0:
+                                val eq_res = _coff_icf_equal(objects, oi, si, coi, csi, aliases)
+                                if eq_res.is_err(): return Err(eq_res.unwrap_err())
+                                if eq_res.unwrap():
+                                    folded_rva = result[coi][csi]
+                            ci = ci + 1
+                    if folded_rva == 0:
+                        if icf_buckets_oi.has(bucket_key):
+                            var cois = icf_buckets_oi[bucket_key]
+                            cois.push(oi)
+                            icf_buckets_oi[bucket_key] = cois
+                            var csis = icf_buckets_si[bucket_key]
+                            csis.push(si)
+                            icf_buckets_si[bucket_key] = csis
+                        else:
+                            icf_buckets_oi[bucket_key] = [oi]
+                            icf_buckets_si[bucket_key] = [si]
+                if folded_rva > 0:
+                    result[oi][si] = folded_rva
+                    if group_base_rva == 0 or folded_rva < group_base_rva:
+                        group_base_rva = folded_rva
+                    if logical_size > 0: group_has_content = true
+                    continue
+                val alignment = _coff_section_alignment(section)
+                if alignment.is_err(): return Err(alignment.unwrap_err())
+                group_offset = pe_align_up(
+                    next_rva + group_offset, alignment.unwrap()) - next_rva
+                val section_rva = next_rva + group_offset
+                result[oi][si] = section_rva
+                if group_base_rva == 0 or section_rva < group_base_rva:
+                    group_base_rva = section_rva
+                if logical_size > 0: group_has_content = true
+                group_offset = group_offset + logical_size
         if group == ".text" and import_code_count > 0:
             val aligned_offset = pe_align_up(next_rva + group_offset, 4) - next_rva
             import_thunk_rva = next_rva + aligned_offset
@@ -704,32 +772,38 @@ fn _coff_image_characteristics(characteristics: i64) -> i64:
 
 fn _coff_merge_object_sections(contributions: [PeImageSection]) -> [PeImageSection]:
     var names: [text] = []
+    var by_name: {text: [PeImageSection]} = {}
     for contribution in contributions:
-        if not names.contains(contribution.name): names = names.push(contribution.name)
+        if not by_name.has(contribution.name):
+            names = names.push(contribution.name)
+            by_name[contribution.name] = [contribution]
+        else:
+            var group = by_name[contribution.name]
+            group.push(contribution)
+            by_name[contribution.name] = group
     var result: [PeImageSection] = []
     for name in names:
+        val group = by_name[name]
         var base: i64 = 0
         var virtual_end: i64 = 0
         var raw_end: i64 = 0
         var characteristics: i64 = 0
-        for contribution in contributions:
-            if contribution.name == name:
-                if base == 0 or contribution.virtual_address < base: base = contribution.virtual_address
-                val contribution_end = contribution.virtual_address + contribution.virtual_size
-                if contribution_end > virtual_end: virtual_end = contribution_end
-        for contribution in contributions:
-            if contribution.name == name and contribution.data.len() > 0:
+        for contribution in group:
+            if base == 0 or contribution.virtual_address < base: base = contribution.virtual_address
+            val contribution_end = contribution.virtual_address + contribution.virtual_size
+            if contribution_end > virtual_end: virtual_end = contribution_end
+        for contribution in group:
+            if contribution.data.len() > 0:
                 val contribution_raw_end = contribution.virtual_address - base + contribution.data.len()
                 if contribution_raw_end > raw_end: raw_end = contribution_raw_end
         # Allocated once at its final size; contributions are copied in with
         # native `write_span` instead of per-byte pushes and stores.
         var data: [u8] = elf_u8_zeros(raw_end)
-        for contribution in contributions:
-            if contribution.name == name:
-                characteristics = characteristics | _coff_image_characteristics(contribution.characteristics)
-                val offset = contribution.virtual_address - base
-                val count = contribution.data.len()
-                if count > 0: data.write_span(contribution.data, offset, 0, count)
+        for contribution in group:
+            characteristics = characteristics | _coff_image_characteristics(contribution.characteristics)
+            val offset = contribution.virtual_address - base
+            val count = contribution.data.len()
+            if count > 0: data.write_span(contribution.data, offset, 0, count)
         # An empty output section (e.g. clang's zero-length `.data`/`.bss`)
         # would share its RVA with the next section; the Windows loader rejects
         # such an image ("not a valid Win32 application"), so lld omits it.
@@ -739,16 +813,30 @@ fn _coff_merge_object_sections(contributions: [PeImageSection]) -> [PeImageSecti
         result = result.push(PeImageSection(name: name, virtual_address: base,
             virtual_size: virtual_end - base, data: data,
             characteristics: characteristics))
-    var sa: i64 = 0
-    while sa < result.len():
-        var sb = sa + 1
-        while sb < result.len():
-            if result[sb].virtual_address < result[sa].virtual_address:
-                val temporary = result[sa]
-                result[sa] = result[sb]
-                result[sb] = temporary
-            sb = sb + 1
-        sa = sa + 1
+    var width: i64 = 1
+    while width < result.len():
+        var merged: [PeImageSection] = []
+        var start: i64 = 0
+        while start < result.len():
+            val mid = if start + width < result.len(): start + width else: result.len()
+            val end = if start + width + width < result.len(): start + width + width else: result.len()
+            var left = start
+            var right = mid
+            while left < mid or right < end:
+                var take_left = false
+                if left < mid and right < end:
+                    take_left = result[left].virtual_address <= result[right].virtual_address
+                elif left < mid:
+                    take_left = true
+                if take_left:
+                    merged.push(result[left])
+                    left = left + 1
+                else:
+                    merged.push(result[right])
+                    right = right + 1
+            start = end
+        result = merged
+        width = width + width
     result
 
 fn coff_attach_amd64_tls_directory(sections: [PeImageSection],
@@ -1014,6 +1102,181 @@ fn coff_validate_export_sections(
         return Ok(true)
     Ok(true)
 
+struct _CoffResolvedSymIndex:
+    defined_oi: {text: i64}
+    defined_si: {text: i64}
+    defined_rva: {text: i64}
+    defined_dup: {text: bool}
+    abs_val: {text: i64}
+    abs_dup: {text: bool}
+
+fn _coff_build_resolved_sym_index(objects: [CoffObject], rvas: [[i64]]) -> Result<_CoffResolvedSymIndex, text>:
+    var defined_oi: {text: i64} = {}
+    var defined_si: {text: i64} = {}
+    var defined_rva: {text: i64} = {}
+    var defined_dup: {text: bool} = {}
+    var abs_val: {text: i64} = {}
+    var abs_dup: {text: bool} = {}
+    var oi: i64 = 0
+    while oi < objects.len():
+        for candidate in objects[oi].symbols:
+            if candidate.name != "" and candidate.is_external() and
+                    (candidate.is_defined() or candidate.is_absolute()):
+                if candidate.is_absolute():
+                    if abs_val.has(candidate.name):
+                        abs_dup[candidate.name] = true
+                    else:
+                        abs_val[candidate.name] = candidate.value
+                else:
+                    val section_index = candidate.section_number - 1
+                    if section_index < 0 or section_index >= rvas[oi].len() or
+                            rvas[oi][section_index] == 0:
+                        continue
+                    if defined_oi.has(candidate.name):
+                        defined_dup[candidate.name] = true
+                    else:
+                        defined_oi[candidate.name] = oi
+                        defined_si[candidate.name] = section_index
+                        defined_rva[candidate.name] = rvas[oi][section_index] + candidate.value
+        oi = oi + 1
+    Ok(_CoffResolvedSymIndex(
+        defined_oi: defined_oi,
+        defined_si: defined_si,
+        defined_rva: defined_rva,
+        defined_dup: defined_dup,
+        abs_val: abs_val,
+        abs_dup: abs_dup
+    ))
+
+fn _coff_global_symbol_rva_indexed(sym_index: _CoffResolvedSymIndex, name: text) -> Result<i64, text>:
+    if sym_index.defined_dup.has(name):
+        return Err("duplicate external COFF symbol '{name}'")
+    if not sym_index.defined_rva.has(name):
+        return Err("unresolved external COFF symbol '{name}'")
+    Ok(sym_index.defined_rva[name])
+
+fn _coff_global_symbol_address_indexed(sym_index: _CoffResolvedSymIndex,
+        name: text, image_base: i64) -> Result<CoffResolvedAddress, text>:
+    val has_def = sym_index.defined_rva.has(name)
+    val has_abs = sym_index.abs_val.has(name)
+    if not has_def and not has_abs:
+        return Err("unresolved external COFF symbol '{name}'")
+    if sym_index.defined_dup.has(name) or sym_index.abs_dup.has(name) or (has_def and has_abs):
+        return Err("duplicate external COFF symbol '{name}'")
+    if has_abs:
+        return Ok(CoffResolvedAddress(address: sym_index.abs_val[name], absolute: true))
+    Ok(CoffResolvedAddress(address: image_base + sym_index.defined_rva[name], absolute: false))
+
+fn _coff_export_symbol_rvas_indexed(exports: [CoffExportDirective],
+        sym_index: _CoffResolvedSymIndex, import_symbols: {text: i64},
+        common_symbols: {text: i64}, aliases: {text: text},
+        image_base: i64) -> Result<{text: i64}, text>:
+    var result: {text: i64} = {}
+    for exported in exports:
+        var name = exported.internal_name
+        if common_symbols.has(name):
+            result[name] = common_symbols[name]
+            continue
+        if import_symbols.has(name):
+            result[name] = import_symbols[name]
+            continue
+        var address = _coff_global_symbol_address_indexed(sym_index, name, image_base)
+        if address.is_err():
+            val address_error = address.unwrap_err()
+            if not address_error.contains("unresolved external"):
+                return Err(address_error)
+            val alternate = coff_resolve_alternate_name(name, aliases)
+            if alternate.is_err(): return Err(alternate.unwrap_err())
+            val target = alternate.unwrap()
+            if common_symbols.has(target): result[name] = common_symbols[target]
+            elif import_symbols.has(target): result[name] = import_symbols[target]
+            else:
+                address = _coff_global_symbol_address_indexed(sym_index, target, image_base)
+                if address.is_err(): return Err("COFF /EXPORT symbol not found: {name}")
+        if address.is_ok():
+            if address.unwrap().absolute:
+                return Err("COFF /EXPORT cannot target absolute symbol '{name}'")
+            result[name] = address.unwrap().address - image_base
+    Ok(result)
+
+fn _coff_relocation_symbol_address_indexed(objects: [CoffObject], rvas: [[i64]],
+        sym_index: _CoffResolvedSymIndex, object_index: i64,
+        symbol: CoffSymbol, import_symbols: {text: i64},
+        common_symbols: {text: i64}, aliases: {text: text},
+        image_base: i64) -> Result<CoffResolvedAddress, text>:
+    if symbol.is_absolute():
+        return Ok(CoffResolvedAddress(address: symbol.value, absolute: true))
+    # An external symbol whose own COMDAT copy lost selection resolves to the
+    # winning definition elsewhere (e.g. mingw `.refptr.*` in every object).
+    if symbol.is_defined() and not (symbol.is_external() and
+            _coff_symbol_section_removed(object_index, symbol, rvas)):
+        val local = _coff_local_symbol_rva(object_index, symbol, rvas)
+        if local.is_err(): return Err(local.unwrap_err())
+        return Ok(CoffResolvedAddress(
+            address: image_base + local.unwrap(), absolute: false))
+    if not symbol.is_external(): return Err("undefined non-external COFF symbol '{symbol.name}'")
+    if common_symbols.has(symbol.name):
+        return Ok(CoffResolvedAddress(
+            address: image_base + common_symbols[symbol.name], absolute: false))
+    if import_symbols.has(symbol.name):
+        return Ok(CoffResolvedAddress(
+            address: image_base + import_symbols[symbol.name], absolute: false))
+    val primary = _coff_global_symbol_address_indexed(sym_index, symbol.name, image_base)
+    if primary.is_ok(): return primary
+    val primary_error = primary.unwrap_err()
+    if not primary_error.contains("unresolved external"):
+        return Err(primary_error)
+    val resolved_name = coff_symbol_resolution_name(objects[object_index], symbol)
+    if resolved_name.is_err(): return Err(resolved_name.unwrap_err())
+    val alternate = coff_resolve_alternate_name(resolved_name.unwrap(), aliases)
+    if alternate.is_err(): return Err(alternate.unwrap_err())
+    val name = alternate.unwrap()
+    if common_symbols.has(name):
+        return Ok(CoffResolvedAddress(
+            address: image_base + common_symbols[name], absolute: false))
+    if import_symbols.has(name):
+        return Ok(CoffResolvedAddress(
+            address: image_base + import_symbols[name], absolute: false))
+    _coff_global_symbol_address_indexed(sym_index, name, image_base)
+
+fn _coff_symbol_location_indexed(objects: [CoffObject], rvas: [[i64]],
+        sym_index: _CoffResolvedSymIndex, object_index: i64,
+        symbol: CoffSymbol, aliases: {text: text}) -> Result<CoffSymbolLocation, text>:
+    if symbol.is_defined() and not (symbol.is_external() and
+            _coff_symbol_section_removed(object_index, symbol, rvas)):
+        val section_index = symbol.section_number - 1
+        if section_index < 0 or section_index >= rvas[object_index].len() or
+                rvas[object_index][section_index] == 0:
+            return Err("section-relative target '{symbol.name}' is discarded")
+        return Ok(CoffSymbolLocation(object_index: object_index,
+            section_index: section_index,
+            rva: rvas[object_index][section_index] + symbol.value))
+    if not symbol.is_external(): return Err("section-relative target '{symbol.name}' is undefined")
+    if sym_index.abs_val.has(symbol.name):
+        return Err("section-relative relocation cannot target absolute COFF symbol '{symbol.name}'")
+    if sym_index.defined_dup.has(symbol.name):
+        return Err("duplicate external COFF symbol '{symbol.name}'")
+    if sym_index.defined_oi.has(symbol.name):
+        return Ok(CoffSymbolLocation(
+            object_index: sym_index.defined_oi[symbol.name],
+            section_index: sym_index.defined_si[symbol.name],
+            rva: sym_index.defined_rva[symbol.name]))
+    val resolved_name = coff_symbol_resolution_name(objects[object_index], symbol)
+    if resolved_name.is_err(): return Err(resolved_name.unwrap_err())
+    val alternate = coff_resolve_alternate_name(resolved_name.unwrap(), aliases)
+    if alternate.is_err(): return Err(alternate.unwrap_err())
+    val name = alternate.unwrap()
+    if sym_index.abs_val.has(name):
+        return Err("section-relative relocation cannot target absolute COFF symbol '{name}'")
+    if sym_index.defined_dup.has(name):
+        return Err("duplicate external COFF symbol '{name}'")
+    if sym_index.defined_oi.has(name):
+        return Ok(CoffSymbolLocation(
+            object_index: sym_index.defined_oi[name],
+            section_index: sym_index.defined_si[name],
+            rva: sym_index.defined_rva[name]))
+    Err("section-relative target '{name}' is undefined")
+
 fn _coff_global_symbol_rva(objects: [CoffObject], rvas: [[i64]], name: text) -> Result<i64, text>:
     var found = false
     var address: i64 = 0
@@ -1214,6 +1477,14 @@ fn _coff_output_section_base(objects: [CoffObject], layout: _CoffImageLayout,
         return Err("section-relative target has no output section")
     Ok(layout.section_bases[key])
 
+fn _coff_entry_rva_indexed(sym_index: _CoffResolvedSymIndex, requested: text) -> Result<i64, text>:
+    if requested != "auto": return _coff_global_symbol_rva_indexed(sym_index, requested)
+    val candidates: [text] = ["mainCRTStartup", "_start", "main"]
+    for candidate in candidates:
+        val resolved = _coff_global_symbol_rva_indexed(sym_index, candidate)
+        if resolved.is_ok(): return resolved
+    Err("COFF link request has no defined entry symbol (tried mainCRTStartup, _start, main)")
+
 fn _coff_entry_rva(objects: [CoffObject], rvas: [[i64]], requested: text) -> Result<i64, text>:
     if requested != "auto": return _coff_global_symbol_rva(objects, rvas, requested)
     val candidates: [text] = ["mainCRTStartup", "_start", "main"]
@@ -1255,24 +1526,34 @@ fn _coff_validate_symbols(objects: [CoffObject], rvas: [[i64]],
     while oi < objects.len():
         val object = objects[oi]
         val weak_primaries = coff_weak_primary_map(object)
+        var live_relocated_syms: {i64: bool} = {}
+        var all_relocated_syms: {i64: bool} = {}
+        if gc_sections:
+            var si: i64 = 0
+            while si < object.sections.len():
+                if si < rvas[oi].len() and rvas[oi][si] > 0:
+                    for relocation in object.sections[si].relocations:
+                        live_relocated_syms[relocation.symbol_index] = true
+                si = si + 1
+        elif weak_primaries.len() > 0:
+            for section in object.sections:
+                for relocation in section.relocations:
+                    all_relocated_syms[relocation.symbol_index] = true
         for symbol in object.symbols:
             if symbol.name != "" and symbol.is_external() and not symbol.is_defined() and
                     not symbol.is_absolute() and symbol.value == 0:
-                if gc_sections and not _coff_symbol_is_live_relocated(
-                        object, rvas[oi], symbol.table_index):
+                if gc_sections and not live_relocated_syms.has(symbol.table_index):
                     continue
                 val weak_primary: text? = if weak_primaries.has(symbol.table_index):
                     Some(weak_primaries[symbol.table_index])
                 else:
                     None
-                # Relocation scans are per-object linear; only weak fallbacks need one.
                 val relocated = if weak_primary.is_none():
                     false
                 elif gc_sections:
-                    _coff_symbol_is_live_relocated(
-                        object, rvas[oi], symbol.table_index)
+                    live_relocated_syms.has(symbol.table_index)
                 else:
-                    coff_symbol_is_relocated(object, symbol.table_index)
+                    all_relocated_syms.has(symbol.table_index)
                 if weak_primary.is_some() and
                         (definitions.has(weak_primary ?? "") or
                             import_symbols.has(weak_primary ?? "")) and
@@ -1327,10 +1608,15 @@ fn _coff_weak_alias_rows(aliases: {text: text}, roots: [CoffObject],
     for name in aliases.keys(): result[name] = aliases[name]
     var objects = roots
     for member in members: objects = objects.push(member.object)
+    var defined_names: {text: bool} = {}
+    for object in objects:
+        for symbol in object.symbols:
+            if symbol.is_external() and symbol.is_defined():
+                defined_names[symbol.name] = true
     for object in objects:
         for symbol in object.symbols:
             if not coff_is_weak_alias(symbol) or result.has(symbol.name): continue
-            if _coff_root_defines(objects, symbol.name): continue
+            if defined_names.has(symbol.name): continue
             val target = coff_symbol_resolution_name(object, symbol)
             if target.is_err(): return Err(target.unwrap_err())
             result[symbol.name] = target.unwrap()
@@ -1636,6 +1922,12 @@ fn _coff_machine_name(machine: i64) -> text:
 fn _coff_synthetic_absolutes(objects: [CoffObject], machine: i64) -> CoffObject:
     """Absolute zero symbols lld-link always defines so the MSVC CRT load-config
     and enclave tables link without /guard:cf (Driver.cpp addAbsolute rows)."""
+    var defined_names: {text: bool} = {}
+    for object in objects:
+        for symbol in object.symbols:
+            if symbol.name != "" and symbol.is_external() and
+                    (symbol.is_defined() or symbol.is_absolute()):
+                defined_names[symbol.name] = true
     var symbols: [CoffSymbol] = []
     var table_index: i64 = 0
     for base_name in ["__guard_fids_count", "__guard_fids_table", "__guard_flags",
@@ -1643,13 +1935,7 @@ fn _coff_synthetic_absolutes(objects: [CoffObject], machine: i64) -> CoffObject:
             "__guard_longjmp_table", "__enclave_config", "__guard_eh_cont_count",
             "__guard_eh_cont_table"]:
         val name = _coff_decorate(machine, base_name)
-        var defined = false
-        for object in objects:
-            for symbol in object.symbols:
-                if symbol.name == name and symbol.is_external() and
-                        (symbol.is_defined() or symbol.is_absolute()):
-                    defined = true
-        if defined: continue
+        if defined_names.has(name): continue
         symbols = symbols.push(CoffSymbol(name: name, value: 0, section_number: -1,
             symbol_type: 0, storage_class: COFF_STORAGE_CLASS_EXTERNAL,
             auxiliary_count: 0, table_index: table_index, weak_default_index: -1,
@@ -1678,6 +1964,15 @@ fn _coff_synthetic_mingw_lists(objects: [CoffObject], machine: i64) -> CoffObjec
     `__CTOR_LIST__`/`__DTOR_LIST__` head a `-1 ... 0` pointer table built
     from `.ctors`/`.dtors` input, and `__RUNTIME_PSEUDO_RELOC_LIST__`/`_END__`
     bracket the (empty — no auto-import) pseudo-relocation list."""
+    var defined_or_abs: {text: bool} = {}
+    var referenced_ext: {text: bool} = {}
+    for object in objects:
+        for symbol in object.symbols:
+            if symbol.name != "" and symbol.is_external():
+                if symbol.is_defined() or symbol.is_absolute():
+                    defined_or_abs[symbol.name] = true
+                else:
+                    referenced_ext[symbol.name] = true
     var sections: [CoffSection] = []
     var symbols: [CoffSymbol] = []
     # IMAGE_SCN_CNT_INITIALIZED_DATA | MEM_READ | MEM_WRITE | ALIGN_8BYTES
@@ -1688,7 +1983,7 @@ fn _coff_synthetic_mingw_lists(objects: [CoffObject], machine: i64) -> CoffObjec
     for table in [".ctors", ".dtors"]:
         val list_name = _coff_decorate(machine,
             if table == ".ctors": "__CTOR_LIST__" else: "__DTOR_LIST__")
-        if not _coff_symbol_referenced_undefined(objects, list_name): continue
+        if defined_or_abs.has(list_name) or not referenced_ext.has(list_name): continue
         var head: [u8] = []
         for _ in 0..pointer_size: head = head.push(0xff)
         sections = sections.push(_coff_synthetic_section("{table}$A", head, table_flags))
@@ -1701,7 +1996,7 @@ fn _coff_synthetic_mingw_lists(objects: [CoffObject], machine: i64) -> CoffObjec
     val pseudo_names: [text] = [_coff_decorate(machine, "__RUNTIME_PSEUDO_RELOC_LIST__"),
         _coff_decorate(machine, "__RUNTIME_PSEUDO_RELOC_LIST_END__")]
     for name in pseudo_names:
-        if _coff_symbol_referenced_undefined(objects, name): pseudo_needed = true
+        if not defined_or_abs.has(name) and referenced_ext.has(name): pseudo_needed = true
     if pseudo_needed:
         # IMAGE_SCN_CNT_INITIALIZED_DATA | MEM_READ | ALIGN_4BYTES, one 4-byte
         # anchor so the empty list has a real RVA inside `.rdata`.
@@ -1745,43 +2040,34 @@ fn _coff_link_retained(request: CoffLinkRequest,
     val exports_result = _coff_merge_exports(prepared.exports, command_exports)
     if exports_result.is_err(): return Err(exports_result.unwrap_err())
     val exports = exports_result.unwrap()
+    var retained_present: {text: bool} = {}
+    var defined_present: {text: bool} = {}
+    for object in objects:
+        for symbol in object.symbols:
+            if symbol.name != "" and symbol.is_external():
+                if symbol.is_defined():
+                    defined_present[symbol.name] = true
+                    retained_present[symbol.name] = true
+                elif symbol.is_absolute() or (symbol.section_number == 0 and symbol.value > 0):
+                    retained_present[symbol.name] = true
+    for import_object in selected.imports:
+        retained_present[import_object.public_name] = true
+        retained_present[import_object.iat_symbol()] = true
     for name in closure_roots:
         if name == "": continue
-        var found = false
-        for object in objects:
-            for symbol in object.symbols:
-                if symbol.name == name and symbol.is_external() and
-                        (symbol.is_defined() or symbol.is_absolute() or
-                         (symbol.section_number == 0 and symbol.value > 0)):
-                    found = true
-        for import_object in selected.imports:
-            if import_object.public_name == name or import_object.iat_symbol() == name:
-                found = true
+        var found = retained_present.has(name)
         if not found:
             val alternate = coff_resolve_alternate_name(name, aliases)
             if alternate.is_err(): return Err(alternate.unwrap_err())
-            val target = alternate.unwrap()
-            for object in objects:
-                for symbol in object.symbols:
-                    if symbol.name == target and symbol.is_external() and
-                            (symbol.is_defined() or symbol.is_absolute() or
-                             (symbol.section_number == 0 and symbol.value > 0)):
-                        found = true
-            for import_object in selected.imports:
-                if import_object.public_name == target or import_object.iat_symbol() == target:
-                    found = true
+            found = retained_present.has(alternate.unwrap())
         if not found: return Err("retained COFF symbol not found: {name}")
 
     var gc_roots = closure_roots
     if request.entry == "auto":
         var auto_root = ""
         for candidate in ["mainCRTStartup", "_start", "main"]:
-            if auto_root != "": continue
-            for object in objects:
-                for symbol in object.symbols:
-                    if symbol.name == candidate and symbol.is_external() and
-                            symbol.is_defined():
-                        auto_root = candidate
+            if auto_root == "" and defined_present.has(candidate):
+                auto_root = candidate
         if auto_root != "" and not gc_roots.contains(auto_root):
             gc_roots = gc_roots.push(auto_root)
     elif not gc_roots.contains(request.entry):
@@ -1815,16 +2101,18 @@ fn _coff_link_retained(request: CoffLinkRequest,
         import_idata_rva + pe_align_up(import_image.idata_data.len(), policy.section_alignment)
     else:
         import_base_rva
-    val export_symbols = _coff_export_symbol_rvas(exports, objects, rvas,
+    val sym_index = _coff_build_resolved_sym_index(objects, rvas)?
+    val export_symbols = _coff_export_symbol_rvas_indexed(exports, sym_index,
         import_image.symbol_rvas, common_layout.symbol_rvas, aliases,
         image_base)
     if export_symbols.is_err(): return Err(export_symbols.unwrap_err())
     val export_image = pe_build_amd64_exports(
         exports, export_symbols.unwrap(), export_base_rva, "simple.exe")
     if export_image.is_err(): return Err(export_image.unwrap_err())
-    val entry = _coff_entry_rva(objects, rvas, request.entry)
+    val entry = _coff_entry_rva_indexed(sym_index, request.entry)
     if entry.is_err(): return Err(entry.unwrap_err())
     var output_sections: [PeImageSection] = []
+    var emitted_icf: {text: PeImageSection} = {}
     var base_relocation_rvas: [i64] = []
     var oi: i64 = 0
     while oi < objects.len():
@@ -1852,8 +2140,8 @@ fn _coff_link_retained(request: CoffLinkRequest,
                          relocation.relocation_type == COFF_REL_ARM64_SECREL_LOW12L):
                     if relocation_symbol.is_absolute():
                         return Err("section-relative relocation cannot target absolute COFF symbol '{relocation_symbol.name}'")
-                    val location = _coff_symbol_location(
-                        objects, rvas, oi, relocation_symbol, aliases)
+                    val location = _coff_symbol_location_indexed(
+                        objects, rvas, sym_index, oi, relocation_symbol, aliases)
                     if location.is_err(): return Err(location.unwrap_err())
                     val target = location.unwrap()
                     val target_section_rva = _coff_output_section_base(objects, layout, target)
@@ -1883,7 +2171,7 @@ fn _coff_link_retained(request: CoffLinkRequest,
                     return Err("section-relative relocation cannot target absolute COFF symbol '{relocation_symbol.name}'")
                 if machine != COFF_MACHINE_ARM64 and
                         relocation.relocation_type == COFF_REL_AMD64_SECTION:
-                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol, aliases)
+                    val location = _coff_symbol_location_indexed(objects, rvas, sym_index, oi, relocation_symbol, aliases)
                     if location.is_err(): return Err(location.unwrap_err())
                     val section_index = _coff_output_section_index(objects, layout, location.unwrap())
                     if section_index.is_err(): return Err(section_index.unwrap_err())
@@ -1897,7 +2185,7 @@ fn _coff_link_retained(request: CoffLinkRequest,
                     continue
                 if machine != COFF_MACHINE_ARM64 and
                         relocation.relocation_type == COFF_REL_AMD64_SECREL:
-                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol, aliases)
+                    val location = _coff_symbol_location_indexed(objects, rvas, sym_index, oi, relocation_symbol, aliases)
                     if location.is_err(): return Err(location.unwrap_err())
                     val target = location.unwrap()
                     val target_section_rva = _coff_output_section_base(objects, layout, target)
@@ -1913,7 +2201,7 @@ fn _coff_link_retained(request: CoffLinkRequest,
                     continue
                 if machine == COFF_MACHINE_AMD64 and
                         relocation.relocation_type == COFF_REL_AMD64_SECREL7:
-                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol, aliases)
+                    val location = _coff_symbol_location_indexed(objects, rvas, sym_index, oi, relocation_symbol, aliases)
                     if location.is_err(): return Err(location.unwrap_err())
                     val target = location.unwrap()
                     val target_section_rva = _coff_output_section_base(objects, layout, target)
@@ -1929,8 +2217,8 @@ fn _coff_link_retained(request: CoffLinkRequest,
                     if result.is_err(): return Err(result.unwrap_err())
                     patched = result.unwrap()
                     continue
-                val symbol_address_result = _coff_relocation_symbol_address(
-                    objects, rvas, oi, relocation_symbol,
+                val symbol_address_result = _coff_relocation_symbol_address_indexed(
+                    objects, rvas, sym_index, oi, relocation_symbol,
                     import_image.symbol_rvas, common_layout.symbol_rvas, aliases,
                     image_base)
                 if symbol_address_result.is_err(): return Err(symbol_address_result.unwrap_err())
@@ -1989,24 +2277,27 @@ fn _coff_link_retained(request: CoffLinkRequest,
             val output_name = _coff_output_section_name(section.name)
             if output_name.is_err(): return Err(output_name.unwrap_err())
             var folded_duplicate = false
+            val icf_key = "{rvas[oi][si]}|{output_name.unwrap()}"
             if (icf_sections and
-                    (section.characteristics & COFF_SECTION_LNK_COMDAT) != 0):
-                for emitted in output_sections:
-                    if (emitted.virtual_address == rvas[oi][si] and
-                            emitted.name == output_name.unwrap()):
-                        if (emitted.virtual_size != logical_size or
-                                emitted.data != patched or
-                                emitted.characteristics != section.characteristics):
-                            return Err("COFF ICF produced non-identical folded sections")
-                        folded_duplicate = true
+                    (section.characteristics & COFF_SECTION_LNK_COMDAT) != 0 and
+                    emitted_icf.has(icf_key)):
+                val emitted = emitted_icf[icf_key]
+                if (emitted.virtual_size != logical_size or
+                        emitted.data != patched or
+                        emitted.characteristics != section.characteristics):
+                    return Err("COFF ICF produced non-identical folded sections")
+                folded_duplicate = true
             if folded_duplicate:
                 si = si + 1
                 continue
             for relocation_rva in section_base_relocations:
                 base_relocation_rvas = base_relocation_rvas.push(relocation_rva)
-            output_sections = output_sections.push(PeImageSection(name: output_name.unwrap(),
+            val emitted_section = PeImageSection(name: output_name.unwrap(),
                 virtual_address: rvas[oi][si], virtual_size: logical_size,
-                data: patched, characteristics: section.characteristics))
+                data: patched, characteristics: section.characteristics)
+            output_sections = output_sections.push(emitted_section)
+            if icf_sections:
+                emitted_icf[icf_key] = emitted_section
             si = si + 1
         oi = oi + 1
     if common_layout.size > 0:
@@ -2036,7 +2327,7 @@ fn _coff_link_retained(request: CoffLinkRequest,
     for section in output_sections:
         if section.name == ".tls": has_tls_data = true
     val tls_name = _coff_decorate(machine, "_tls_used")
-    val tls_directory = _coff_global_symbol_rva(objects, rvas, tls_name)
+    val tls_directory = _coff_global_symbol_rva_indexed(sym_index, tls_name)
     if tls_directory.is_ok():
         val attached = coff_attach_tls_directory_sized(
             output_sections, tls_directory.unwrap(),
@@ -2045,7 +2336,7 @@ fn _coff_link_retained(request: CoffLinkRequest,
         output_sections = attached.unwrap()
     elif has_tls_data:
         return Err("COFF TLS data requires a defined {tls_name} directory symbol")
-    val load_config = _coff_global_symbol_rva(objects, rvas, _coff_decorate(machine, "_load_config_used"))
+    val load_config = _coff_global_symbol_rva_indexed(sym_index, _coff_decorate(machine, "_load_config_used"))
     if load_config.is_ok():
         val attached = coff_attach_amd64_load_config(
             output_sections, load_config.unwrap())
