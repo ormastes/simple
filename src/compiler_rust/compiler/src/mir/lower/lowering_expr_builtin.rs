@@ -786,6 +786,7 @@ impl<'a> MirLowerer<'a> {
             "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "dprint"
         ) {
             let mut boxed_arg_regs = Vec::new();
+            let mut fresh_print_strings = Vec::new();
             for arg in args {
                 let arg_reg = self.lower_expr(arg)?;
                 if let Some(rendered) = self.emit_struct_to_string(arg_reg, arg.ty)? {
@@ -815,6 +816,7 @@ impl<'a> MirLowerer<'a> {
                         });
                         stringified
                     })?;
+                    fresh_print_strings.push(stringified);
                     boxed_arg_regs.push(stringified);
                     continue;
                 }
@@ -857,6 +859,7 @@ impl<'a> MirLowerer<'a> {
                         });
                         stringified
                     })?;
+                    fresh_print_strings.push(stringified);
                     boxed_arg_regs.push(stringified);
                     continue;
                 }
@@ -873,6 +876,7 @@ impl<'a> MirLowerer<'a> {
                                 });
                                 stringified
                             })?;
+                            fresh_print_strings.push(stringified);
                             boxed_arg_regs.push(stringified);
                             continue;
                         }
@@ -934,10 +938,14 @@ impl<'a> MirLowerer<'a> {
                     };
                     boxed_arg_regs.push(boxed);
                 } else {
+                    if super::array_move::is_fresh_string_expr(arg) {
+                        fresh_print_strings.push(arg_reg);
+                    }
                     boxed_arg_regs.push(arg_reg);
                 }
             }
             let target = CallTarget::from_name(name);
+            let drop_print_temps = self.block_array_release && !fresh_print_strings.is_empty();
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -946,6 +954,14 @@ impl<'a> MirLowerer<'a> {
                     target,
                     args: boxed_arg_regs,
                 });
+                if drop_print_temps {
+                    for temp in fresh_print_strings {
+                        block.instructions.push(MirInst::Drop {
+                            value: temp,
+                            ty: TypeId::STRING,
+                        });
+                    }
+                }
                 dest
             });
         }
@@ -955,6 +971,19 @@ impl<'a> MirLowerer<'a> {
         for arg in args {
             arg_regs.push(self.lower_expr(arg)?);
         }
+
+        let fresh_string_args: Vec<VReg> = if self.block_array_release
+            && matches!(
+                name,
+                "rt_string_concat" | "rt_value_to_string" | "rt_value_format_string"
+            ) {
+            args.iter()
+                .zip(arg_regs.iter())
+                .filter_map(|(arg, reg)| super::array_move::is_fresh_string_expr(arg).then_some(*reg))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Create a call to the builtin function
         let target = CallTarget::from_name(name);
@@ -966,6 +995,12 @@ impl<'a> MirLowerer<'a> {
                 target,
                 args: arg_regs,
             });
+            for reg in fresh_string_args {
+                block.instructions.push(MirInst::Drop {
+                    value: reg,
+                    ty: TypeId::STRING,
+                });
+            }
             dest
         })
     }

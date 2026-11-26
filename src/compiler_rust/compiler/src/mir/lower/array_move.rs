@@ -1057,6 +1057,125 @@ fn is_module_init_function(name: &str) -> bool {
     name.starts_with("__module_init") || name.starts_with("__dyninit_part_")
 }
 
+trait StringReadScan {
+    fn local_ty(&self, idx: usize) -> TypeId;
+    fn mark_bad(&mut self, idx: usize);
+    fn visit_expr(&mut self, e: &HirExpr);
+}
+
+fn is_pure_string_scalar_method(method: &str, arg_count: usize) -> bool {
+    match method {
+        "len" | "char_count" | "byte_len" | "is_empty" | "parse_int" | "parse_i32"
+        | "parse_i64" | "parse_float" | "parse_f64" | "to_int" | "to_i64" | "to_f64"
+        | "is_digit" | "is_numeric" => arg_count == 0,
+        "starts_with" | "ends_with" | "contains" | "find" | "index_of" | "rfind"
+        | "last_index_of" | "char_code_at" | "byte_at" => arg_count == 1,
+        _ => false,
+    }
+}
+
+fn is_pure_string_read_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "print"
+            | "println"
+            | "eprint"
+            | "eprintln"
+            | "print_raw"
+            | "eprint_raw"
+            | "dprint"
+            | "rt_print_value"
+            | "rt_println_value"
+            | "rt_print_str"
+            | "rt_println_str"
+            | "rt_eprint_value"
+            | "rt_eprintln_value"
+            | "rt_eprint_str"
+            | "rt_eprintln_str"
+            | "rt_string_concat"
+            | "rt_value_to_string"
+            | "rt_term_write"
+    )
+}
+
+fn allow_typed_string_local<S: StringReadScan>(scan: &mut S, e: &HirExpr) {
+    if let HirExprKind::Local(idx) = &e.kind {
+        if e.ty == TypeId::STRING && scan.local_ty(*idx) == TypeId::STRING {
+            return;
+        }
+    }
+    scan.visit_expr(e);
+}
+
+fn scan_pure_string_consumer<S: StringReadScan>(scan: &mut S, e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } if receiver.ty == TypeId::STRING && is_pure_string_scalar_method(method.as_str(), args.len()) => {
+            if let HirExprKind::Local(idx) = &receiver.kind {
+                if scan.local_ty(*idx) != TypeId::STRING {
+                    scan.mark_bad(*idx);
+                }
+            } else {
+                scan.visit_expr(receiver);
+            }
+            for arg in args {
+                allow_typed_string_local(scan, arg);
+            }
+            true
+        }
+        HirExprKind::Binary { op, left, right }
+            if left.ty == TypeId::STRING
+                && right.ty == TypeId::STRING
+                && (matches!(
+                    op,
+                    crate::hir::BinOp::Eq
+                        | crate::hir::BinOp::NotEq
+                        | crate::hir::BinOp::Lt
+                        | crate::hir::BinOp::LtEq
+                        | crate::hir::BinOp::Gt
+                        | crate::hir::BinOp::GtEq
+                ) || (*op == crate::hir::BinOp::Add && e.ty == TypeId::STRING)) =>
+        {
+            allow_typed_string_local(scan, left);
+            allow_typed_string_local(scan, right);
+            true
+        }
+        HirExprKind::BuiltinCall { name, args } if is_pure_string_read_builtin(name.as_str()) => {
+            for arg in args {
+                allow_typed_string_local(scan, arg);
+            }
+            true
+        }
+        HirExprKind::BuiltinCall { name, args } if name == "rt_value_format_string" && !args.is_empty() => {
+            allow_typed_string_local(scan, &args[0]);
+            for arg in &args[1..] {
+                scan.visit_expr(arg);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn stmts_have_defer(stmts: &[HirStmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        HirStmt::Defer { .. } => true,
+        HirStmt::If {
+            then_block,
+            else_block,
+            ..
+        } => stmts_have_defer(then_block) || else_block.as_deref().is_some_and(stmts_have_defer),
+        HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::For { body, .. } => {
+            stmts_have_defer(body)
+        }
+        _ => stmt_direct_exprs(s).into_iter().any(expr_has_block),
+    })
+}
+
 /// Allowlist scan: every `Local` mention that is not one of the three allowed
 /// shapes lands in `bad`.
 struct ReleaseScan<'x, 'a> {
@@ -1064,6 +1183,18 @@ struct ReleaseScan<'x, 'a> {
     bad: HashSet<usize>,
     /// Locals whose (single) `Let` initializer is a fresh literal or a place.
     init_ok: HashSet<usize>,
+}
+
+impl StringReadScan for ReleaseScan<'_, '_> {
+    fn local_ty(&self, idx: usize) -> TypeId {
+        self.a.local_ty(idx)
+    }
+    fn mark_bad(&mut self, idx: usize) {
+        self.bad.insert(idx);
+    }
+    fn visit_expr(&mut self, e: &HirExpr) {
+        self.expr(e);
+    }
 }
 
 impl ReleaseScan<'_, '_> {
@@ -1189,6 +1320,9 @@ impl ReleaseScan<'_, '_> {
     }
 
     fn expr(&mut self, e: &HirExpr) {
+        if scan_pure_string_consumer(self, e) {
+            return;
+        }
         match &e.kind {
             HirExprKind::Local(idx) => {
                 self.bad.insert(*idx);
@@ -1346,6 +1480,18 @@ impl Analysis<'_> {
             a: &'a Analysis<'a>,
             bad: HashSet<usize>,
             init_ok: HashSet<usize>,
+            has_defer: bool,
+        }
+        impl StringReadScan for StringOverwriteScan<'_> {
+            fn local_ty(&self, idx: usize) -> TypeId {
+                self.a.local_ty(idx)
+            }
+            fn mark_bad(&mut self, idx: usize) {
+                self.bad.insert(idx);
+            }
+            fn visit_expr(&mut self, e: &HirExpr) {
+                self.expr(e);
+            }
         }
         impl StringOverwriteScan<'_> {
             fn is_fresh_or_lit(e: &HirExpr) -> bool {
@@ -1357,12 +1503,13 @@ impl Analysis<'_> {
                 }
                 self.expr(e);
             }
-            fn stmts(&mut self, stmts: &[HirStmt]) {
-                for s in stmts {
-                    self.stmt(s);
+            fn stmts(&mut self, stmts: &[HirStmt], is_tail: bool) {
+                let last = stmts.len().saturating_sub(1);
+                for (i, s) in stmts.iter().enumerate() {
+                    self.stmt(s, is_tail && i == last);
                 }
             }
-            fn stmt(&mut self, stmt: &HirStmt) {
+            fn stmt(&mut self, stmt: &HirStmt, is_tail: bool) {
                 match stmt {
                     HirStmt::Let { local_index, value, .. } => {
                         let slot_ty = self.a.local_ty(*local_index);
@@ -1382,9 +1529,9 @@ impl Analysis<'_> {
                             if self.a.local_ty(*idx) == TypeId::STRING
                                 && target.ty == TypeId::STRING
                                 && Self::is_fresh_or_lit(value)
-                                && !expr_mentions_local(value, *idx)
+                                && !expr_has_block(value)
                             {
-                                // Safe overwriting assignment.
+                                // Safe overwriting assignment (including self-concats like `s = s + x`).
                             } else {
                                 self.bad.insert(*idx);
                             }
@@ -1400,9 +1547,9 @@ impl Analysis<'_> {
                         ..
                     } => {
                         self.expr(condition);
-                        self.stmts(then_block);
+                        self.stmts(then_block, is_tail);
                         if let Some(b) = else_block {
-                            self.stmts(b);
+                            self.stmts(b, is_tail);
                         }
                     }
                     HirStmt::While {
@@ -1415,9 +1562,9 @@ impl Analysis<'_> {
                             self.expr(&c.condition);
                         }
                         self.expr(condition);
-                        self.stmts(body);
+                        self.stmts(body, false);
                     }
-                    HirStmt::Loop { body, .. } | HirStmt::Defer { body } => self.stmts(body),
+                    HirStmt::Loop { body, .. } | HirStmt::Defer { body } => self.stmts(body, false),
                     HirStmt::For {
                         pattern_local,
                         iterable,
@@ -1432,7 +1579,20 @@ impl Analysis<'_> {
                             self.bad.insert(*idx);
                         }
                         self.expr(iterable);
-                        self.stmts(body);
+                        self.stmts(body, false);
+                    }
+                    HirStmt::Return(Some(e))
+                        if !self.has_defer && matches!(e.kind, HirExprKind::Local(_)) && e.ty == TypeId::STRING =>
+                    {
+                        // Returning the final value does not alias any previously overwritten string.
+                    }
+                    HirStmt::Expr(e)
+                        if is_tail
+                            && !self.has_defer
+                            && matches!(e.kind, HirExprKind::Local(_))
+                            && e.ty == TypeId::STRING =>
+                    {
+                        // Function tail expression return does not alias any previously overwritten string.
                     }
                     _ => {
                         for e in stmt_direct_exprs(stmt) {
@@ -1442,6 +1602,9 @@ impl Analysis<'_> {
                 }
             }
             fn expr(&mut self, e: &HirExpr) {
+                if scan_pure_string_consumer(self, e) {
+                    return;
+                }
                 match &e.kind {
                     HirExprKind::Local(idx) => {
                         self.bad.insert(*idx);
@@ -1501,7 +1664,7 @@ impl Analysis<'_> {
                         self.expr(body);
                     }
                     HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => {
-                        self.stmts(stmts);
+                        self.stmts(stmts, false);
                     }
                     _ => {
                         let mut children = Vec::new();
@@ -1517,8 +1680,9 @@ impl Analysis<'_> {
             a: self,
             bad: HashSet::new(),
             init_ok: HashSet::new(),
+            has_defer: stmts_have_defer(&func.body),
         };
-        scan.stmts(&func.body);
+        scan.stmts(&func.body, true);
         for idx in scan.init_ok {
             if idx >= self.nparams
                 && !scan.bad.contains(&idx)

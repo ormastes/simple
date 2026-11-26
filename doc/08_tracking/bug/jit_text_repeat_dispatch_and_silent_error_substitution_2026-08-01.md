@@ -1,9 +1,7 @@
 # JIT text-method dispatch gap silently substitutes the string `error`
 
 - **ID:** jit_text_repeat_dispatch_and_silent_error_substitution_2026-08-01
-- **Status:** partially fixed -- 49 of 51 sibling methods wired; **2 remain**
-  (`parse_i64`, `ptr`), both blocked on a decision rather than on transcription.
-  See the batch 5 section at the end for why.
+- **Status:** resolved -- 51/51 wired including `parse_i64` and `ptr`; silent `SPECIAL_ERROR` substitution replaced by exit 70 in `error_handling.rs`; JIT and runtime regression tests verified 2026-11-26 (BF-3).
 - **Severity:** critical — silent, zero-exit data corruption that can reach files on disk
 - **Engines affected:** Cranelift JIT (default engine). Tree-walking interpreter is correct.
 - **Measured against:** origin `main` tip `5ca84bcefe5`, built in an isolated scratch
@@ -749,3 +747,10 @@ and JIT value comparisons were not re-run (seed rebuilds are out of scope for
 this lane, and `bin/simple test` is repo-wide blocked at this HEAD by the
 `@representation_boundary` seed rejection). The interpreter-side negative-count
 and loud-`not found` behaviors verified in earlier batches were not re-probed.
+
+## Executed Verification (2026-11-26, BF-3)
+
+Verified the wired Cranelift JIT dispatch and `error_handling.rs` loud-exit behavior directly with compiled tests (instead of code-inspection only):
+
+- `cargo test -p simple-compiler -j 2 --test jit_text_and_worklist_parity`: `bug4_text_repeat_parse_ptr_and_helpers_in_jit` passed via `lower_to_mir_jit` + `JitCompiler::new_static()`, exercising `" ".repeat(4)`, `"x".repeat(-2)`, `"42".parse_i64() ?? -1`, `"bad".parse_i64() ?? -99`, `unsafe: "hi".ptr()`, `capitalize()`, `is_digit()`, `pad_left()`, `substr(1, 3)` / `substr(2)`, `substring(1, 4)`, `partition("=")`, `sorted()`, and `char_count()`.
+- `cargo test -p simple-runtime -j 2 --features runtime-symbol-table error_handling`: `6 passed; 0 failed; 1497 filtered out` (confirming `not_found_exit_code_is_ex_software` and message diagnostics).
