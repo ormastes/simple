@@ -84,3 +84,12 @@ self-hosted binary, Windows):
 All 5 previously-failing examples (`--help` text, `--log-mode=json`,
 `--progress=dot`, invalid-mode exit code 1, JSON error envelope) now pass.
 Status: resolved; no further product decision needed.
+
+## Verification 2026-11-26 (BF-5 lane, `origin/release/1.0.0`)
+
+Re-verified on Windows using `wa3_shared_bin\simple.exe` (`89b32c2e80d`, `SIMPLE_LIB=C:\dev\wt\bf-5-app-mcp-cli\src`, `--mode=interpreter`):
+- `test/01_unit/app/dashboard/dashboard_cli_dispatch_spec.spl`: `5/5` passed (`outcome=OK`)
+- `test/01_unit/app/dashboard/dashboard_cli_log_mode_spec.spl`: `4/4` passed (`outcome=OK`)
+- `test/02_integration/app/dashboard_log_modes_spec.spl`: `5/5` passed (`outcome=OK`)
+
+Status: `FIXED`.
