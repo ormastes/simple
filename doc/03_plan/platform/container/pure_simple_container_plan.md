@@ -133,7 +133,9 @@ pub fn pure_container_evidence_from_qualify_v1(qualify: SosixContainQualifyResul
 
     Field mapping is the table in architecture §7. `base_fully_linked` is false
     here. `evidence_revision` = `pure:` + sha256 of `qualify.evidence_digest`,
-    `memory_digest` and `roots_digest`; it is `pure:unaffirmed` when
+    `memory_digest` and `roots_digest`; it is empty (so any constrained
+    requirement fails `capability-evidence-missing`) when `qualify.reason` is
+    non-empty or
     `qualify.evidence_digest` is empty.
   - Acceptance adds: a deny canary with `control` other than `allow` fails; each
     evidence field follows only its listed canaries.

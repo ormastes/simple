@@ -46,3 +46,9 @@ Increment 4 (pure-Simple Windows backend), the Windows Docker process-isolation
 lane, Lane D, AppContainer confinement and other-host items are in
 `doc/03_plan/platform/container/simple_container_remaining_work.md`
 (todo rows 468-475 in `doc/08_tracking/todo/todo_db.sdn`).
+
+## Pure-Simple backend contracts (lane P0)
+`std.common.contracts.sosix.containment_v1` (request/limits/support units, fail-closed
+`sosix_contain_request_reason_v1`) and `std.common.contracts.container.pure_backend_v1`
+(`pure_container_capability_report_v1`: support + measured evidence -> capability report).
+Design: `doc/04_architecture/platform/container/pure_simple_container.md` §4.1, §6.
