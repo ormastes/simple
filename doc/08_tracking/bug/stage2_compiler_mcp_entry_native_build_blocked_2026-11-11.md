@@ -65,3 +65,12 @@ independent places:
   not import the mcp app modules and therefore dodged both defects)
 - `stage3_macos_full_graph_hir_sigsegv_2026_09_21` (P0, sibling macOS
   whole-program crash lane)
+
+## Verification 2026-11-26 (BF-5 lane, `origin/release/1.0.0` at `fc31db2cc8d`)
+
+Source inspection and targeted interpreter specs (`SIMPLE_LIB=C:\dev\wt\bf-5-app-mcp-cli\src`, `C:\Users\user\AppData\Local\Temp\wa3_shared_bin\simple.exe --mode=interpreter`) confirm both underlying defects have source fixes landed on `release/1.0.0`:
+
+1. **Per-file sharded cold-HIR route (`cold-hir-lowered-module-missing`):** `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:411-477` selects `"held-subset"` via `cold_hir_receipt_capture_scope_v1` and calls `cold_hir_typed_receipts_from_reader_owned_held_sources_v1`. Targeted unit spec `test/01_unit/compiler/cache/cold_hir_unit_subset_capture_spec.spl` passed (`10/10`).
+2. **Whole-program `byte_len()` MIR lowering / `main_lazy_source_tools.spl`:** `src/app/mcp/main_lazy_source_tools.spl:12,29` now use `str_len` (`std.common.string_core`) instead of `.byte_len()`, and `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3500-3541,4067-4079` lowers proven `text` `byte_len()` calls to `rt_string_len`. Targeted specs `test/01_unit/app/mcp/source_open_contract_spec.spl` (`13/13`), `test/01_unit/compiler/50.mir/byte_at_untyped_call_to_i64_spec.spl` (`11/11`), and `test/01_unit/app/compiler_entrypoint/inventory_split_line_byte_len_spec.spl` (`2/2`) all passed.
+
+**Remaining blocker (status stays `open`):** End-to-end `native-build` of `src/app/mcp/main.spl` and `src/app/simple_lsp_mcp/main.spl` remains blocked in this lane — only the Windows Rust seed (`wa3_shared_bin/simple.exe`, build commit `89b32c2e80d`) is available on this host, `native-build` is unrunnable without a bootstrapped Stage 2/3 pure-Simple compiler, and `src/compiler/**` was left untouched per BF-5 lane ownership.

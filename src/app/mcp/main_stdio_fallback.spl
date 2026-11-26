@@ -1,0 +1,64 @@
+# Interpreter/JIT fallback stdin readers for src/app/mcp/main.spl.
+#
+# Compiled native binaries link C-runtime rt_stdin_read_line_text and
+# rt_stdin_read_chars_text directly. The Rust seed interpreter and JIT do not
+# register those symbols, so when rt_is_interpreter_runtime() or
+# rt_is_jit_runtime() is true, main.spl routes through these byte-level
+# readers backed by rt_stdin_read_byte and strict UTF-8 decoding.
+
+use std.common.encoding.external_text.{bytes_to_text_checked}
+
+@unsafe(reason: "Runtime kind detection FFI for MCP stdio interpreter fallback", capabilities: [ffi])
+extern fn rt_is_interpreter_runtime() -> bool
+@unsafe(reason: "Runtime kind detection FFI for MCP stdio JIT fallback", capabilities: [ffi])
+extern fn rt_is_jit_runtime() -> bool
+@unsafe(reason: "Byte-level stdin reader FFI used only in interpreter/JIT fallback", capabilities: [ffi])
+extern fn rt_stdin_read_byte() -> i64
+
+@allow(primitive_api)  # reason: Runtime predicate returns primitive bool across stdin transport boundary
+pub fn mcp_needs_stdin_fallback() -> bool:
+    """True under the Rust seed interpreter or JIT where rt_stdin_read_*_text is absent."""
+    var is_fallback = false
+    unsafe(capabilities: [ffi]):
+        is_fallback = rt_is_interpreter_runtime() or rt_is_jit_runtime()
+    is_fallback
+
+@allow(primitive_api)  # reason: Line framing reader returns primitive text directly to MCP JSON-RPC loop
+pub fn mcp_fallback_read_line() -> text:
+    """Read one byte-delimited header or JSONL line ending in LF or EOF."""
+    var raw: [u8] = []
+    while true:
+        var b: i64 = -1
+        unsafe(capabilities: [ffi]):
+            b = rt_stdin_read_byte()
+        if b < 0:
+            break
+        raw.push(b as u8)
+        if b == 10:
+            break
+    if raw.len() == 0:
+        return ""
+    match bytes_to_text_checked(raw):
+        Ok(value): value
+        Err(_): ""
+
+@allow(primitive_api)  # reason: Content-Length reader takes primitive byte count and returns primitive text payload
+pub fn mcp_fallback_read_chars(count: i64) -> text:
+    """Read up to `count` raw bytes for a Content-Length framed payload."""
+    if count <= 0:
+        return ""
+    var raw: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        var b: i64 = -1
+        unsafe(capabilities: [ffi]):
+            b = rt_stdin_read_byte()
+        if b < 0:
+            break
+        raw.push(b as u8)
+        i = i + 1
+    if raw.len() == 0:
+        return ""
+    match bytes_to_text_checked(raw):
+        Ok(value): value
+        Err(_): ""
