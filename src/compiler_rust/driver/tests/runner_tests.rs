@@ -1,5 +1,3 @@
-#![cfg(target_arch = "x86_64")]
-
 use assert_cmd::Command;
 use predicates::str::contains;
 use simple_driver::dependency_cache::{analyze_source_str, BuildCache, DepInfo};
@@ -246,7 +244,12 @@ fn standalone_smf_cli_executes_interpolated_helper_in_fresh_process() {
 }
 
 #[test]
-fn standalone_smf_rejects_required_interpreter_fallback() {
+fn file_backed_smf_with_required_interpreter_fallback_embeds_entry_snapshot() {
+    // A FILE-backed SMF no longer refuses interpreter-only functions: it
+    // embeds an `.interp_snapshot` section carrying the pinned entry text
+    // (contract pinned by
+    // pipeline::execution::tests::file_backed_smf_with_interp_fallback_embeds_snapshot_section).
+    // In-memory / target SMF stays fail-closed — see the next test.
     let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("fallback.spl");
     let smf_path = dir.path().join("fallback.smf");
@@ -256,19 +259,16 @@ fn standalone_smf_rejects_required_interpreter_fallback() {
     )
     .unwrap();
 
-    let error = Runner::new()
+    Runner::new()
         .compile_file(&src_path, &smf_path)
-        .expect_err("standalone SMF must not serialize interpreter calls");
+        .expect("file-backed SMF with an interpreter fallback must compile");
 
+    let bytes = fs::read(&smf_path).expect("file-backed SMF artifact must exist");
+    let entry = b"fn check(opt: i64?)";
     assert!(
-        error.contains("cannot compile to standalone SMF"),
-        "unexpected error: {error}"
+        bytes.windows(entry.len()).any(|window| window == entry),
+        "entry text must travel with the artifact"
     );
-    assert!(
-        error.contains("check") && error.contains("TryOperator"),
-        "unexpected error: {error}"
-    );
-    assert!(!smf_path.exists(), "rejected compilation must not leave an artifact");
 }
 
 #[test]
@@ -292,6 +292,22 @@ fn target_smf_rejects_required_interpreter_fallback_before_codegen() {
         let error = Runner::new()
             .compile_to_smf_for_target(source, &smf_path, target)
             .expect_err("target SMF must reject interpreter fallback before codegen");
+
+        // Without the `llvm` feature, 32-bit targets are refused even earlier
+        // (pipeline/execution.rs: "32-bit targets require the LLVM backend"),
+        // which is still a fail-closed rejection with no artifact.
+        let is_32bit = target.arch.is_32bit() && !target.is_wasm();
+        if is_32bit && !cfg!(feature = "llvm") {
+            assert!(
+                error.contains("32-bit targets require the LLVM backend"),
+                "{descriptor}: {error}"
+            );
+            assert!(
+                !smf_path.exists(),
+                "{descriptor}: rejected compilation left an artifact"
+            );
+            continue;
+        }
 
         assert!(
             error.contains("cannot compile to standalone SMF"),

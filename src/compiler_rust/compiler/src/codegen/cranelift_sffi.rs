@@ -2482,19 +2482,26 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     );
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 #[path = "cranelift_stack_probe_tests.rs"]
 mod stack_probe_tests;
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod tests {
     use super::*;
+
+    // JIT modules must match the host ISA (build_jit_isa_and_triple refuses
+    // cross targets); AOT tests below keep their explicit x86_64 target.
+    #[cfg(target_arch = "x86_64")]
+    const JIT_HOST_TARGET: i64 = CL_TARGET_X86_64;
+    #[cfg(target_arch = "aarch64")]
+    const JIT_HOST_TARGET: i64 = CL_TARGET_AARCH64;
 
     #[test]
     fn test_create_and_free_module() {
         unsafe {
             let name = "test_module";
-            let handle = rt_cranelift_new_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
+            let handle = rt_cranelift_new_module(name.as_ptr() as i64, name.len() as i64, JIT_HOST_TARGET);
             assert!(handle > 0);
             rt_cranelift_free_module(handle);
         }
@@ -2515,7 +2522,7 @@ mod tests {
         unsafe {
             // Create module
             let mod_name = "test_build";
-            let module = rt_cranelift_new_module(mod_name.as_ptr() as i64, mod_name.len() as i64, CL_TARGET_X86_64);
+            let module = rt_cranelift_new_module(mod_name.as_ptr() as i64, mod_name.len() as i64, JIT_HOST_TARGET);
             assert!(module > 0);
 
             // Create signature: () -> i64
@@ -2991,7 +2998,7 @@ mod tests {
     fn test_string_data_constant_roundtrip() {
         unsafe {
             let mod_name = "test_str_const";
-            let module = rt_cranelift_new_module(mod_name.as_ptr() as i64, mod_name.len() as i64, CL_TARGET_X86_64);
+            let module = rt_cranelift_new_module(mod_name.as_ptr() as i64, mod_name.len() as i64, JIT_HOST_TARGET);
             assert!(module > 0);
 
             let content = b"hello";
@@ -3050,7 +3057,7 @@ mod tests {
         unsafe {
             let module_name = "test_mutable_global";
             let module =
-                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, CL_TARGET_X86_64);
+                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, JIT_HOST_TARGET);
             assert!(module > 0);
 
             let data_name = "counter";
@@ -3186,7 +3193,7 @@ mod tests {
 
             let module_name = "test_global_addr_v2";
             let module =
-                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, CL_TARGET_X86_64);
+                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, JIT_HOST_TARGET);
             assert!(module > 0);
             let data_name = "aligned_counter";
             let data = rt_cranelift_declare_global_data_v2(
@@ -3231,7 +3238,7 @@ mod tests {
         unsafe {
             let module_name = "test_global_addr_v2_invalid";
             let module =
-                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, CL_TARGET_X86_64);
+                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, JIT_HOST_TARGET);
             let name = "invalid";
             assert_eq!(
                 rt_cranelift_declare_global_data_v2(

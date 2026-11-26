@@ -25,6 +25,7 @@ fn test_cranelift_jit_typed_dict_membership_present_and_missing_scalar_keys() {
     assert_eq!(em.execute("boolean_keys", &[]).expect("boolean membership"), 1);
 }
 
+// Tracks: jit_dict_f64_key_get_membership_aarch64_2026-11-26 (red on aarch64: get/has with an f64 key)
 #[test]
 fn test_cranelift_jit_typed_dict_float_literal_key_compatibility() {
     let mir = source_to_mir(

@@ -996,7 +996,7 @@ fn jit_fallback_is_strict_for(strict: bool, strict_all: bool) -> bool {
     strict || strict_all
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 #[path = "jit_tests.rs"]
 mod tests;
 

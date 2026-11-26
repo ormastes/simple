@@ -149,7 +149,7 @@ fn write_error(buffer: *mut u8, capacity: usize, error: &str) {
     write_output(buffer, capacity, error);
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
