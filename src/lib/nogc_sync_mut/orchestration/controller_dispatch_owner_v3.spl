@@ -18,7 +18,7 @@ use std.common.contracts.orchestration.controller_dispatch_request_v2.*
 use std.common.contracts.orchestration.host_controller_status_v3.*
 use std.common.contracts.orchestration.host_service_operation_v6.*
 use std.common.contracts.orchestration.host_service_operation_reply_v6.*
-use std.common.contracts.orchestration.host_control_operation_v6.host_control_sub_decode_v6
+use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_PANE_SUBS_V6, host_control_sub_decode_v6}
 use std.common.contracts.orchestration.host_prepare_request_v1.*
 use std.common.contracts.orchestration.host_prepare_response_v1.host_prepare_response_decode_v1
 use std.common.contracts.orchestration.host_execute_request_v2.*
@@ -77,6 +77,8 @@ class ControllerDispatchStateV3:
     var outcome: text = "not-sent"
     var error: text = ""
     var remote_started: bool = false
+    # The live pane carrier retains only its in-memory request and reply.
+    var live_pane_exchange: bool = false
     # milestone_0030 C3: the Host operation id of a REMOTE-mode run (no packet is bound in that mode).
     var remote_op: text = ""
 
@@ -204,8 +206,9 @@ fn dispatch_send_v3(original: ControllerDispatchStateV3, action: text, payload: 
     if request.is_err(): return dispatch_fail_v3(owner, request.unwrap_err())
     val source = host_service_operation_encode_v6(request.unwrap())
     if source.is_err(): return dispatch_fail_v3(owner, source.unwrap_err())
-    val archived = dispatch_archive_v3(owner, source.unwrap())
-    if archived.is_err(): return dispatch_fail_v3(owner, archived.unwrap_err())
+    if not owner.live_pane_exchange:
+        val archived = dispatch_archive_v3(owner, source.unwrap())
+        if archived.is_err(): return dispatch_fail_v3(owner, archived.unwrap_err())
     val turn = host_service_auth_exchange_begin_v6(owner.reader.unwrap(), request.unwrap())
     owner.exchange = turn.owner
     owner.request = Some(request.unwrap())
@@ -386,7 +389,13 @@ fn dispatch_state_host_action_send_v3(original: ControllerDispatchStateV3, paylo
     val sub = host_control_sub_decode_v6(payload)
     if sub.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, sub.unwrap_err()))
     owner.response = ""
-    if not sub.unwrap().sub.ends_with("-inspect"):
+    owner.live_pane_exchange = HOST_AGENT_PANE_SUBS_V6.contains(sub.unwrap().sub)
+    if owner.live_pane_exchange:
+        # A claim can be consumed, and a read can drain bytes before its reply.
+        # Keep this exchange transient and send it once.
+        owner.remote_started = true
+        owner.outcome = "unknown"
+    elif not sub.unwrap().sub.ends_with("-inspect"):
         val store = owner.root.unwrap().workload_v3()
         if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
         val key = controller_dispatch_host_effect_key_v3(owner.remote_op, sub.unwrap().sub)
@@ -613,11 +622,16 @@ fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOpe
     var owner = original
     val encoded = host_service_operation_reply_encode_v6(reply)
     if encoded.is_err(): return dispatch_fail_v3(owner, encoded.unwrap_err())
-    val saved = dispatch_archive_v3(owner, encoded.unwrap())
-    if saved.is_err(): return dispatch_fail_v3(owner, saved.unwrap_err())
-    if reply.payload != "":
-        val inner = dispatch_archive_v3(owner, reply.payload)
-        if inner.is_err(): return dispatch_fail_v3(owner, inner.unwrap_err())
+    if owner.live_pane_exchange:
+        # The pane operation is one bounded turn. No progress polling or
+        # implicit resubmission can recover bytes consumed by a lost read.
+        if reply.pending: return dispatch_fail_v3(owner, "dispatch-pane-reply-pending")
+    else:
+        val saved = dispatch_archive_v3(owner, encoded.unwrap())
+        if saved.is_err(): return dispatch_fail_v3(owner, saved.unwrap_err())
+        if reply.payload != "":
+            val inner = dispatch_archive_v3(owner, reply.payload)
+            if inner.is_err(): return dispatch_fail_v3(owner, inner.unwrap_err())
     # Preserve exact authenticated pending DATA independently of local cleanup.
     if reply.pending:
         owner.response = encoded.unwrap()

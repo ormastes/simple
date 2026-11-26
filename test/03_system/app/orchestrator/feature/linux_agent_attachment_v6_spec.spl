@@ -6,6 +6,9 @@ use std.common.sdn.value.SdnValue
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.container.primary_attach_v1.host_agent_pane_binding_decode_v4
+use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneStreamRequestV6, HostAgentPaneStreamReceiptV6,
+    host_agent_pane_stream_request_encode_v6, host_agent_pane_stream_receipt_decode_v6}
 use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_encode_v6}
 use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOperationRequestV6, host_service_operation_request_digest_v6}
 use std.common.contracts.orchestration.host_service_operation_reply_v6.HostServiceOperationReplyV6
@@ -20,6 +23,7 @@ use test.fixtures.orchestration.host_authenticated_route_fixture_v6.{route_fixtu
 struct LinuxAgentControlFixtureV6:
     route: Dict<text, text>
     operation_id: text
+    binding_uid: text
     attach: text
     invoke: text
     detach: text
@@ -35,13 +39,14 @@ fn attachment_fixture_load_v6() -> Result<LinuxAgentControlFixtureV6, text>:
     val invoke = attachment_fixture_read_v6("SIMPLE_LINUX_ATTACH_V6_INVOKE", 2097152)?
     val detach = attachment_fixture_read_v6("SIMPLE_LINUX_ATTACH_V6_DETACH", 1048576)?
     val attached = host_agent_attach_request_decode_v4(attach)?
+    val binding = host_agent_pane_binding_decode_v4(attached.pane_binding)?
     val invoked = host_agent_invoke_request_decode_v4(invoke)?
     val detached = host_agent_detach_request_decode_v4(detach)?
     val operation = attached.operation_id
     if (invoked.operation_id != operation or detached.operation_id != operation or
             detached.association_digest != attached.association_digest or detached.attach_digest != sha256_text(attach)):
         return Err("Linux V6 attachment fixture packet binding")
-    Ok(LinuxAgentControlFixtureV6(route, operation, attach, invoke, detach))
+    Ok(LinuxAgentControlFixtureV6(route, operation, binding.binding_uid, attach, invoke, detach))
 
 fn attachment_control_v6(incarnation: text, scope: text, operation: text, sub: text,
         frame: text) -> Result<HostServiceOperationReplyV6, text>:
@@ -90,6 +95,71 @@ fn attachment_observe_until_v6(incarnation: text, scope: text, fixture: LinuxAge
         polls = polls + 1
     Err("Linux V6 attachment terminal observation deadline")
 
+fn attachment_pane_receipt_v6(reply: HostServiceOperationReplyV6, operation: text,
+        request: HostAgentPaneStreamRequestV6) -> Result<HostAgentPaneStreamReceiptV6, text>:
+    if reply.pending or reply.exit_code != 0 or reply.error != "":
+        return Err("Linux V6 pane request refused: " + reply.error)
+    val receipt = host_agent_pane_stream_receipt_decode_v6(reply.payload)?
+    if (receipt.operation_id != operation or receipt.binding_uid != request.binding_uid or
+            receipt.attach_digest != request.attach_digest or receipt.read_id != request.read_id or
+            receipt.epoch < 0 or (request.read_id > 0 and receipt.epoch != request.epoch) or
+            receipt.payload_digest != sha256_text(receipt.payload)):
+        return Err("Linux V6 pane receipt identity or content digest mismatch")
+    Ok(receipt)
+
+fn attachment_pane_retry_v6(reply: HostServiceOperationReplyV6, original: HostServiceOperationReplyV6) -> bool:
+    not reply.pending and reply.exit_code == 0 and reply.error == "" and reply.payload == original.payload
+
+fn attachment_pane_refused_v6(reply: HostServiceOperationReplyV6, reason: text) -> bool:
+    not reply.pending and reply.exit_code == 2 and reply.error == reason and reply.payload == ""
+
+fn attachment_pane_trial_v6(incarnation: text, scope: text, fixture: LinuxAgentControlFixtureV6,
+        other_operation: text) -> Result<bool, text>:
+    val operation = fixture.operation_id
+    val binding = fixture.binding_uid
+    val digest = sha256_text(fixture.attach)
+    step("Claim the signed pane twice and require the same stream epoch and receipt")
+    val claim = HostAgentPaneStreamRequestV6(binding, digest, 0, 0)
+    val claim_frame = host_agent_pane_stream_request_encode_v6(claim)
+    val claimed = attachment_control_v6(incarnation, scope, operation, "agent-pane-claim", claim_frame)?
+    val claim_receipt = attachment_pane_receipt_v6(claimed, operation, claim)?
+    val reclaimed = attachment_control_v6(incarnation, scope, operation, "agent-pane-claim", claim_frame)?
+    if not attachment_pane_retry_v6(reclaimed, claimed):
+        return Err("Linux V6 pane claim retry changed the receipt")
+
+    step("Refuse mismatched operation and binding IDs and a read that skips the cursor")
+    val first = HostAgentPaneStreamRequestV6(binding, digest, claim_receipt.epoch, 1)
+    val first_frame = host_agent_pane_stream_request_encode_v6(first)
+    val wrong_operation = attachment_control_v6(incarnation, scope, other_operation, "agent-pane-read", first_frame)?
+    val other_binding = if binding == "sspec-different-pane": "sspec-another-pane" else: "sspec-different-pane"
+    val wrong_binding_frame = host_agent_pane_stream_request_encode_v6(HostAgentPaneStreamRequestV6(other_binding, digest, claim_receipt.epoch, 1))
+    val wrong_binding = attachment_control_v6(incarnation, scope, operation, "agent-pane-read", wrong_binding_frame)?
+    if not attachment_pane_refused_v6(wrong_operation, "runtime-agent-pane-operation-mismatch"):
+        return Err("Linux V6 pane preflight did not refuse the wrong operation")
+    if not attachment_pane_refused_v6(wrong_binding, "attach-binding-mismatch"):
+        return Err("Linux V6 pane preflight did not refuse the wrong binding")
+    val next = HostAgentPaneStreamRequestV6(binding, digest, claim_receipt.epoch, 2)
+    val next_frame = host_agent_pane_stream_request_encode_v6(next)
+    val future = attachment_control_v6(incarnation, scope, operation, "agent-pane-read", next_frame)?
+    if not attachment_pane_refused_v6(future, "runtime-agent-pane-read-out-of-order"):
+        return Err("Linux V6 pane preflight did not refuse the future read ID")
+
+    step("Read from the installed pane and retry the latest read with the same receipt")
+    val read = attachment_control_v6(incarnation, scope, operation, "agent-pane-read", first_frame)?
+    val _first_receipt = attachment_pane_receipt_v6(read, operation, first)?
+    val repeated = attachment_control_v6(incarnation, scope, operation, "agent-pane-read", first_frame)?
+    if not attachment_pane_retry_v6(repeated, read): return Err("Linux V6 duplicate pane read changed the receipt")
+
+    step("Advance the pane read and require an explicit gap when replaying an older receipt")
+    val advanced = attachment_control_v6(incarnation, scope, operation, "agent-pane-read", next_frame)?
+    val _next_receipt = attachment_pane_receipt_v6(advanced, operation, next)?
+    val gap = attachment_control_v6(incarnation, scope, operation, "agent-pane-read", first_frame)?
+    if not attachment_pane_refused_v6(gap, "runtime-agent-pane-replay-gap"):
+        return Err("Linux V6 older pane read did not report a replay gap")
+    val retained = attachment_control_v6(incarnation, scope, operation, "agent-pane-read", next_frame)?
+    if not attachment_pane_retry_v6(retained, advanced): return Err("Linux V6 replay gap changed the latest receipt")
+    Ok(true)
+
 fn attachment_trial_v6(fixture: LinuxAgentControlFixtureV6) -> Result<bool, text>:
     val incarnation = route_open_v6(fixture.route)?
     val status = route_status_v6(fixture.route, incarnation)?
@@ -113,6 +183,7 @@ fn attachment_trial_v6(fixture: LinuxAgentControlFixtureV6) -> Result<bool, text
     val ready = attachment_observe_until_v6(incarnation, scope, fixture, false)?
     if not [SdnValue.String("ready"), SdnValue.String("adopted")].contains(ready["attachStage"]):
         return Err("Linux V6 terminal authority lacks a held ready attachment")
+    val _pane = attachment_pane_trial_v6(incarnation, scope, fixture, other)?
     step("Detach through the separately signed request and require exact attachment return")
     val _detached = attachment_report_v6(attachment_control_v6(incarnation, scope, operation, "agent-detach", fixture.detach)?, operation)?
     val returned = attachment_observe_until_v6(incarnation, scope, fixture, true)?
@@ -122,7 +193,7 @@ fn attachment_trial_v6(fixture: LinuxAgentControlFixtureV6) -> Result<bool, text
     Ok(true)
 
 describe "Authenticated V6 signed Linux agent attachment":
-    it "attaches and detaches the held exact agent using the installed smux owner":
+    it "attaches, reads, and detaches the held exact agent using the installed smux owner":
         val fixture = attachment_fixture_load_v6()
         if fixture.is_err():
             fail(fixture.unwrap_err())

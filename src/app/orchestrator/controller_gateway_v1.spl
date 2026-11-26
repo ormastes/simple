@@ -17,8 +17,12 @@ use app.llm_caret.orchestrator_client.{CaretOrchestratorRequestV1, caret_orchest
 use app.llm_caret.orchestrator_execution_client_v2.{CaretExecutionRequestV2, caret_execution_decode_v2}
 use app.orchestrator.host_identity_exchange_v1.{host_identity_gateway_v1, host_identity_exchange_response_v1}
 use app.orchestrator.host_identity_public_v1.host_identity_public_parse_v1
-use app.orchestrator.host_action_command_v1.host_action_agent_gateway_v1
-use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_decode_v6}
+use app.orchestrator.host_action_command_v1.{host_action_agent_gateway_v1, host_action_pane_refusal_code_v1}
+use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_PANE_SUBS_V6, HostControlSubRequestV6,
+    host_control_sub_decode_v6}
+use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneStreamRequestV6,
+    host_agent_pane_stream_request_decode_v6, host_agent_pane_stream_request_matches_v6,
+    host_agent_pane_stream_receipt_decode_v6, host_agent_pane_stream_receipt_matches_v6}
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attach_request_decode_v4,
     host_agent_detach_request_decode_v4}
 use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
@@ -66,9 +70,57 @@ fn gateway_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text
         case SdnValue.String(value): Ok(value)
         case _: Err("controller-gateway-text:" + key)
 
-pub fn controller_gateway_actions_v1() -> [text]:
+fn gateway_existing_actions_v1() -> [text]:
     ["submit", "inspect", "cancel", "dispatch", "resume-execution", "inspect-execution", "identity-register",
         "identity-server", "agent-attachment", "agent-invoke"]
+
+pub fn controller_gateway_actions_v1() -> [text]:
+    gateway_existing_actions_v1() + HOST_AGENT_PANE_SUBS_V6
+
+fn gateway_pane_request_v1(request: ControllerGatewayRequestV1) -> Result<HostAgentPaneStreamRequestV6, text>:
+    if request.ns != "" or request.name != "" or request.source_digest != "":
+        return Err("controller-gateway-agent-pane-fields")
+    val sub = host_control_sub_decode_v6(request.source)?
+    if sub.sub != request.action: return Err("controller-gateway-agent-pane-sub")
+    val pane = host_agent_pane_stream_request_decode_v6(sub.frame)?
+    if not host_agent_pane_stream_request_matches_v6(sub.sub, pane):
+        return Err("controller-gateway-agent-pane-request")
+    Ok(pane)
+
+fn gateway_pane_response_v1(request: ControllerGatewayRequestV1, response: text) -> Result<text, text>:
+    val pane = gateway_pane_request_v1(request)?
+    val receipt = host_agent_pane_stream_receipt_decode_v6(response)?
+    if not host_agent_pane_stream_receipt_matches_v6(request.request_uid, pane, receipt):
+        return Err("controller-gateway-agent-pane-receipt-mismatch")
+    Ok(response)
+
+fn gateway_pane_refusal_v1(request: ControllerGatewayRequestV1, response: text) -> Result<text, text>:
+    val fields = gateway_fields_v1(response, 4096)?
+    gateway_keys_v1(fields, ["version", "kind", "state", "operationId", "record", "recordDigest", "detail"])?
+    if gateway_text_v1(fields, "kind")? != request.action or gateway_text_v1(fields, "state")? != "host-refused" or
+            gateway_text_v1(fields, "operationId")? != request.request_uid or gateway_text_v1(fields, "record")? != "" or
+            gateway_text_v1(fields, "recordDigest")? != "" or not host_action_pane_refusal_code_v1(gateway_text_v1(fields, "detail")?):
+        return Err("controller-gateway-agent-pane-refusal-mismatch")
+    val canonical = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if canonical != response: return Err("controller-gateway-agent-pane-refusal-noncanonical")
+    Ok(canonical)
+
+# A pinned remote gateway's nonzero pane frames still need schema and subject
+# validation before any detail reaches the terminal-facing caller.
+pub fn controller_gateway_nonzero_reply_v1(request_source: text, exit_code: i64,
+        response: text) -> OrchestratorValidationReplyV1:
+    val request = controller_gateway_request_decode_v1(request_source)
+    if request.is_ok():
+        val exact = request.unwrap()
+        if not HOST_AGENT_PANE_SUBS_V6.contains(exact.action):
+            return OrchestratorValidationReplyV1(exit_code: exit_code, output: response)
+        if exit_code == 1:
+            val checked = gateway_pane_refusal_v1(exact, response)
+            if checked.is_ok():
+                return OrchestratorValidationReplyV1(exit_code: 1, output: checked.unwrap())
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("server-command-error"),
+        "code": SdnValue.String("server-pane-outcome-unconfirmed"), "reconciliationRequired": SdnValue.Bool(true)}
+    OrchestratorValidationReplyV1(exit_code: 2, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
 
 fn gateway_attachment_sub_v1(request: ControllerGatewayRequestV1) -> Result<HostControlSubRequestV6, text>:
     if request.ns != "" or request.name != "" or request.source_digest != "":
@@ -181,7 +233,7 @@ pub fn controller_gateway_config_decode_v1(source: text) -> Result<ControllerGat
     val values = match fields["allowedActions"]:
         case SdnValue.Array(items): items
         case _: return Err("controller-gateway-actions")
-    val supported = controller_gateway_actions_v1()
+    val supported = gateway_existing_actions_v1() + ["agent-pane"]
     if values.len() == 0 or values.len() > supported.len(): return Err("controller-gateway-actions")
     var actions: [text] = []
     for value in values:
@@ -199,10 +251,11 @@ pub fn controller_gateway_config_decode_v1(source: text) -> Result<ControllerGat
                 not host_path_is_absolute(server_public_key_path): return Err("controller-gateway-identity-profile")
     val dispatch_root = gateway_text_v1(fields, "dispatchRoot")?
     val dispatch_digest = gateway_text_v1(fields, "dispatchConfigDigest")?
-    if actions.contains("agent-attachment") or actions.contains("agent-invoke"):
+    if actions.contains("agent-attachment") or actions.contains("agent-invoke") or actions.contains("agent-pane"):
         if not host_path_is_absolute(dispatch_root) or dispatch_root.byte_len() > 4096 or
                 dispatch_root.contains("\0") or dispatch_root.contains("\n") or dispatch_root.contains("\r") or
                 not builder_digest_valid_v1(dispatch_digest):
+            if actions.contains("agent-pane"): return Err("controller-gateway-agent-pane-profile")
             return Err(if actions.contains("agent-attachment"): "controller-gateway-attachment-profile"
                 else: "controller-gateway-agent-invoke-profile")
     Ok(ControllerGatewayConfigV1(state_root: root, controller_id: controller, allowed_actions: actions,
@@ -244,6 +297,8 @@ pub fn controller_gateway_request_decode_v1(source: text) -> Result<ControllerGa
         gateway_attachment_sub_v1(request)?
     elif request.action == "agent-invoke":
         gateway_invoke_request_check_v1(request)?
+    elif HOST_AGENT_PANE_SUBS_V6.contains(request.action):
+        val _pane = gateway_pane_request_v1(request)?
     else:
         if request.source != "" or request.ns != "" or request.name != "": return Err("controller-gateway-unused-fields")
         if request.action == "cancel":
@@ -272,7 +327,8 @@ pub fn controller_gateway_authorize_v1(config: ControllerGatewayConfigV1,
             header.operation_id != request.request_uid or header.payload_bytes != source.bytes().len() or
             header.exit_code != 0 or header.handoff_metadata != "": return Err("controller-gateway-frame-correlation")
     if request.controller_id != config.controller_id: return Err("controller-gateway-controller-mismatch")
-    if not config.allowed_actions.contains(request.action): return Err("controller-gateway-action-denied")
+    val grant = if HOST_AGENT_PANE_SUBS_V6.contains(request.action): "agent-pane" else: request.action
+    if not config.allowed_actions.contains(grant): return Err("controller-gateway-action-denied")
     Ok(request)
 
 pub fn controller_gateway_dispatch_v1(config: ControllerGatewayConfigV1,
@@ -282,15 +338,14 @@ pub fn controller_gateway_dispatch_v1(config: ControllerGatewayConfigV1,
         if request.name != config.server_name: return Err("controller-gateway-server-name-mismatch")
         return Ok(host_identity_gateway_v1(request.action, config.controller_id, request.request_uid,
             config.server_name, config.identity_store_root, config.server_public_key_path, request.source))
-    if ["agent-attachment", "agent-invoke"].contains(request.action):
+    if ["agent-attachment", "agent-invoke"].contains(request.action) or HOST_AGENT_PANE_SUBS_V6.contains(request.action):
         var reply = host_action_agent_gateway_v1(request.action, config.dispatch_root, config.dispatch_config_digest,
             config.controller_id, request.request_uid, request.source)
         if reply.exit_code == 0:
-            val checked = if request.action == "agent-invoke": gateway_invoke_response_v1(request, reply.output)
-                else: gateway_attachment_response_v1(request, reply.output)
+            val checked = gateway_agent_response_v1(request, reply.output)
             if checked.is_err():
                 reply.exit_code = 2
-                val effect = if request.action == "agent-invoke": "agent-invoke" else: "attachment"
+                val effect = if request.action == "agent-attachment": "attachment" else: request.action
                 reply.output = "controller-gateway-" + effect + "-report-unconfirmed\n"
             else:
                 reply.output = checked.unwrap()
@@ -304,12 +359,18 @@ pub fn controller_gateway_dispatch_v1(config: ControllerGatewayConfigV1,
         return Ok(orchestrator_execution_input_command_v2(args, Some(request.source)))
     Ok(orchestrator_local_input_command_v1(args, Some(request.source)))
 
+fn gateway_agent_response_v1(request: ControllerGatewayRequestV1, response: text) -> Result<text, text>:
+    if request.action == "agent-attachment": return gateway_attachment_response_v1(request, response)
+    if request.action == "agent-invoke": return gateway_invoke_response_v1(request, response)
+    gateway_pane_response_v1(request, response)
+
 # Fixed paths satisfy the existing decode-only API's local request shape;
 # these calls never execute a process or access those paths.
 pub fn controller_gateway_response_v1(request_source: text, response: text) -> Result<text, text>:
     val request = controller_gateway_request_decode_v1(request_source)?
     if request.action == "agent-attachment": return gateway_attachment_response_v1(request, response)
     if request.action == "agent-invoke": return gateway_invoke_response_v1(request, response)
+    if HOST_AGENT_PANE_SUBS_V6.contains(request.action): return gateway_pane_response_v1(request, response)
     if request.action == "identity-register" or request.action == "identity-server":
         val checked = host_identity_exchange_response_v1(request.action, request.controller_id, request.request_uid, request.name, response)?
         val fields = gateway_fields_v1(response, 16384)?

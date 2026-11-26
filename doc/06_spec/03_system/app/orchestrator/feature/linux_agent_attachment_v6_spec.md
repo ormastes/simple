@@ -10,6 +10,21 @@ The signed attach plan must bind the exact runtime and real smux pane.
 Keep the approval, helper grants, epochs and deadlines valid for the entire
 trial.
 
+**Fixture provisioning is blocked on the V6 listener.** The pane must be
+created in the process-local smux registry of the same `host-authenticated-service`
+instance that handles the attach and read requests. The configured owner
+command `smux --request 127.0.0.1:PORT TOKEN create-runtime-target-v3 NAME`
+can create a vacant pane and report its service incarnation, session, window,
+pane and epoch. That command belongs to the configured runtime-owner listener.
+The authenticated V6 listener rejects that protocol and provides no equivalent
+pane creation action. A second listener owns a separate registry, so its pane
+cannot satisfy this fixture. Begin signing the attach and detach frames only
+after the installed V6 owner can allocate and report its own vacant pane.
+Sign the pane binding with the retained Linux Host's continuity ID and native
+epoch generation. The V6 pane check uses the Host continuity ID to verify the
+signed binding against the local pane registry. The authenticated request
+envelope uses the separate listener incarnation published by the ready reader.
+
 Provide the six-field pinned ready-reader fixture in
 `SIMPLE_LINUX_ATTACH_V6_READY`. Its fields are `setupPath`, `setupDigest`,
 `hostDeploymentRoot`, `hostAuthorityDigest`, `expectedScopeDigest` and
@@ -19,11 +34,24 @@ Provide the six-field pinned ready-reader fixture in
 The invoke frame must be the one already retained for the held agent. The
 detach frame binds the exact attachment digest.
 
-The case refuses an authenticated request carrying another operation ID,
-confirms unchanged attachment state, admits the signed attachment, and drives
-the real agent with its immutable invoke frame. It requires live terminal
-authority for the exact attachment. The separately signed detach must return
-the same attachment with its detach digest and without terminal authority.
-The test closes its client owners. A failed trial can leave held Host state
-for the installed owner to reconcile. Pane input/output requires a separate
-attachment data-path trial.
+1. Refuse an authenticated attach request carrying another operation ID and
+   confirm unchanged attachment state. Admit the signed attachment and drive
+   the real agent with its immutable invoke frame until the exact attachment
+   has live terminal authority.
+2. Claim the signed smux pane over the authenticated V6 route. Repeat the claim
+   and require byte-identical receipts. Take the stream epoch from the claim
+   receipt, including epoch zero when the native pane starts there.
+3. Submit read 1 with the wrong operation and with the wrong binding, then
+   submit read 2 ahead of the cursor. Require the specific refusal for each
+   request, then read successfully with the signed operation and binding at
+   read ID 1. Decode the receipt and check operation,
+   binding, attachment digest, epoch, read ID and payload digest. The native
+   read may contain no stdout bytes. Retrying read 1 returns an identical receipt.
+4. Complete read 2 and verify its receipt with the same stream identity.
+   Replaying read 1 must report `runtime-agent-pane-replay-gap`. Retry read 2
+   and require the original receipt again.
+5. Detach using the separately signed request. Require the same attachment to
+   return with its detach digest and with terminal authority removed. Close
+   the client exchange and ready reader.
+
+A failed trial can leave held Host state for the installed owner to reconcile.

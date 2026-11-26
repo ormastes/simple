@@ -15,7 +15,11 @@ A failed scenario names the moved contract: the sub table, canonical bytes, the 
 use std.spec.{describe, it, expect, fail}
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, HOST_AGENT_CONTROL_SUBS_V6,
-    host_control_sub_domain_action_v6, host_control_sub_encode_v6, host_control_sub_decode_v6}
+    HOST_AGENT_PANE_SUBS_V6, host_control_sub_domain_action_v6, host_control_sub_encode_v6, host_control_sub_decode_v6}
+use std.common.contracts.orchestration.host_agent_pane_stream_v6.*
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
 use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOperationRequestV6,
     host_service_operation_validate_v6, host_service_operation_request_digest_v6}
 use std.common.contracts.orchestration.host_service_operation_reply_v6.{HostServiceOperationReplyV6,
@@ -47,8 +51,11 @@ describe "host-control sub request (milestone_0046)":
         expect(HOST_AGENT_CONTROL_SUBS_V6).to_equal(["agent-invoke", "agent-cancel", "agent-attach", "agent-detach", "agent-inspect"])
         for sub in HOST_AGENT_CONTROL_SUBS_V6:
             expect(host_control_sub_domain_action_v6(sub).unwrap()).to_equal("host-" + sub)
-        step("Keep pane data, remote-build and service handoff outside this control family")
-        for sub in ["open", "remote-build-open", "service-handoff", "agent-pane-read", "agent-pane-write", "", "helper-abandon "]:
+        step("Permit authenticated pane claim and read while preserving the closed input and geometry boundary")
+        expect(HOST_AGENT_PANE_SUBS_V6).to_equal(["agent-pane-claim", "agent-pane-read"])
+        for sub in HOST_AGENT_PANE_SUBS_V6:
+            expect(host_control_sub_domain_action_v6(sub).unwrap()).to_equal("host-" + sub)
+        for sub in ["open", "remote-build-open", "service-handoff", "agent-pane-write", "agent-pane-resize", "", "helper-abandon "]:
             expect(host_control_sub_domain_action_v6(sub).is_err()).to_equal(true)
 
     it "round-trips canonical bytes and refuses non-canonical or unknown input":
@@ -121,3 +128,39 @@ describe "smux host-control route (milestone_0046)":
         expect(route).to_contain("operation_reply_v6(turn.owner, retained")
         val original = control_fn_body_v6(source, "pub fn smux_host_continuation_begin_constrained_v6(")
         expect(original).to_contain("retain_agent_attach_state_v6(state, request, turn.exit_code)")
+
+describe "Authenticated V6 agent pane frames":
+    it "uses the issued zero epoch and validates canonical claim and read cursors":
+        val digest = "a".repeat(64)
+        val claim = HostAgentPaneStreamRequestV6("pane_1", digest, 0, 0)
+        val read = HostAgentPaneStreamRequestV6("pane_1", digest, 0, 1)
+        val bad = HostAgentPaneStreamRequestV6("pane_1", digest, 1, 0)
+        val claim_frame = host_agent_pane_stream_request_encode_v6(claim)
+        val read_frame = host_agent_pane_stream_request_encode_v6(read)
+        expect(host_agent_pane_stream_request_matches_v6("agent-pane-claim",
+            host_agent_pane_stream_request_decode_v6(claim_frame).unwrap())).to_equal(true)
+        expect(host_agent_pane_stream_request_matches_v6("agent-pane-read",
+            host_agent_pane_stream_request_decode_v6(read_frame).unwrap())).to_equal(true)
+        expect(host_agent_pane_stream_request_matches_v6("agent-pane-read", claim)).to_equal(false)
+        expect(host_agent_pane_stream_request_decode_v6(host_agent_pane_stream_request_encode_v6(bad)).is_err()).to_equal(true)
+        expect(host_agent_pane_stream_request_decode_v6(read_frame + " ").is_err()).to_equal(true)
+
+    it "correlates the native bytes and rejects forged payloads and out-of-range byte values":
+        val digest = "b".repeat(64)
+        val request = HostAgentPaneStreamRequestV6("pane_1", digest, 0, 1)
+        val chunk: Dict<text, SdnValue> = {"stream": SdnValue.String("stdout"),
+            "bytes": SdnValue.Array([SdnValue.Int(0), SdnValue.Int(128), SdnValue.Int(255)])}
+        val read: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-read"),
+            "eof": SdnValue.Bool(false), "chunks": SdnValue.Array([SdnValue.Dict(chunk)])}
+        val payload = sdn_encode_canonical(SdnValue.Dict(read))
+        val receipt = HostAgentPaneStreamReceiptV6("run_1", "pane_1", digest, 0, 1, payload, sha256_text(payload))
+        val reply = host_agent_pane_stream_receipt_decode_v6(host_agent_pane_stream_receipt_encode_v6(receipt)).unwrap()
+        expect(host_agent_pane_stream_receipt_matches_v6("run_1", request, reply)).to_equal(true)
+        expect(host_agent_pane_stream_receipt_matches_v6("run_2", request, reply)).to_equal(false)
+        val corrupted = payload.replace("255", "256")
+        val forged = HostAgentPaneStreamReceiptV6("run_1", "pane_1", digest, 0, 1, corrupted, receipt.payload_digest)
+        expect(host_agent_pane_stream_receipt_decode_v6(host_agent_pane_stream_receipt_encode_v6(forged)).unwrap_err()).to_equal(
+            "host-agent-pane-stream-receipt-digest")
+        val malformed = HostAgentPaneStreamReceiptV6("run_1", "pane_1", digest, 0, 1, corrupted, sha256_text(corrupted))
+        expect(host_agent_pane_stream_receipt_decode_v6(host_agent_pane_stream_receipt_encode_v6(malformed)).unwrap_err()).to_equal(
+            "host-agent-pane-stream-read-byte")

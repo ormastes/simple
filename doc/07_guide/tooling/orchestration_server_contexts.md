@@ -231,6 +231,28 @@ Allow `agent-invoke` separately to advance a signed agent run using its
 original invocation frame and those same dispatch pins. Each request runs
 one Host progression step and returns the typed V4 agent observation.
 
+Add `agent-pane` to `allowedActions` to permit the separate
+`agent-pane-claim` and `agent-pane-read` requests through those dispatch pins.
+The Host verifies the current signed attach, exact run, and registered smux pane
+on every request, including a retry. Use this permission only for a controller
+account authorized to read agent terminal output.
+
+### Read an attached agent pane
+
+Send `agent-pane-claim` with `epoch: 0` and `readId: 0` after
+`agent-inspect` reports verified terminal authority. The binding UID comes
+from the signed attach frame. `attachDigest` is the SHA-256 digest of that
+exact frame. The pane must already exist in the Host's smux registry.
+
+Use the receipt's exact epoch, including zero, for reads. Start at
+`readId: 1` and advance only after accepting the previous receipt. Each
+receipt holds one bounded native read, which can contain no bytes or report
+EOF. Retry an uncertain read with identical input and the same ID. The
+running owner retains its latest read only. An older ID produces a replay
+gap, and an owner restart can lose read receipts. Terminal output is transient
+in the controller. This route provides explicit read requests. The interactive
+Caret terminal, input, and resize use separate control paths.
+
 ## Request document and ownership
 
 Every request contains all eight fields, including empty unused fields:
@@ -258,6 +280,7 @@ must appear in `allowedActions`.
 | `resume-execution` | Signed execution packet text in `source`; other operation data empty. |
 | `agent-attachment` | Canonical `host-control-sub` in `source` for `agent-inspect`, `agent-attach`, or `agent-detach`. The inspect frame is the exact Host operation ID. Attach and detach carry their respective signed V4 frames. `requestUid` equals that same Host operation ID and other operation data is empty. |
 | `agent-invoke` | Canonical `host-control-sub` in `source` for `agent-invoke`, carrying the original canonical V4 invocation frame for the exact `requestUid`. Other operation data is empty. |
+| `agent-pane-claim` and `agent-pane-read` | Canonical `host-control-sub` in `source`, with the same action as the sub and a canonical `host-agent-pane-stream-request` as its frame. `requestUid` is the exact Host run. The frame contains `bindingUid`, `attachDigest`, `epoch` and `readId`. Other operation data is empty. |
 | `inspect-execution` | Empty operation data. |
 
 Submit, inspect and cancel reuse the controller journal owners. Submission

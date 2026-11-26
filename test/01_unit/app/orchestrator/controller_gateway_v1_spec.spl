@@ -7,6 +7,15 @@ use app.orchestrator.server_command_v1.{orchestrator_server_ssh_begin_v1,
     orchestrator_server_ssh_begin_file_v1, orchestrator_server_ssh_step_v1}
 use std.common.config_core.server_context_types_v1.{ResolvedServerV1, ServerRecordV1}
 use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_encode_v6}
+use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneStreamRequestV6,
+    HostAgentPaneStreamReceiptV6, host_agent_pane_stream_request_encode_v6, host_agent_pane_stream_receipt_encode_v6}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use app.orchestrator.host_action_command_v1.host_action_pane_refusal_v1
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_operation_request_digest_v6
+use std.common.contracts.orchestration.host_service_operation_reply_v6.{HostServiceOperationReplyV6,
+    host_service_operation_reply_encode_v6}
 use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.{controller_dispatch_host_effect_key_v3,
     controller_dispatch_host_action_key_v3}
 use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostAgentInvokeRequestV4,
@@ -26,6 +35,13 @@ fn gateway_invoke_fixture_v1(run_id: text) -> ControllerGatewayRequestV1:
     request.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "agent-invoke", frame: invoke)).unwrap()
     request
 
+fn gateway_pane_fixture_v1(action: text, read_id: i64) -> ControllerGatewayRequestV1:
+    var request = gateway_request_v1(action)
+    val pane = HostAgentPaneStreamRequestV6(binding_uid: "pane-a", attach_digest: "a".repeat(64), epoch: 0, read_id: read_id)
+    val frame = host_agent_pane_stream_request_encode_v6(pane)
+    request.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: action, frame: frame)).unwrap()
+    request
+
 fn gateway_ssh_selection_v1(transport: text) -> ResolvedServerV1:
     ResolvedServerV1(consumer: "caret", context: "work", source: "shared",
         record: ServerRecordV1(name: "build", transport: transport, host: "build.example.test", port: 22,
@@ -33,6 +49,83 @@ fn gateway_ssh_selection_v1(transport: text) -> ResolvedServerV1:
             remote_executable: "/opt/simple/bin/simple"))
 
 describe "Typed selected-server controller boundary":
+    it "requires a separate installed pane grant and rejects swapping claim and read":
+        val profile = "version: 1\nstateRoot: /private/controller\ncontrollerId: controller-a\nallowedActions: [agent-pane]\n"
+        expect(controller_gateway_config_decode_v1(profile).unwrap_err()).to_equal("controller-gateway-agent-pane-profile")
+        val pinned = profile + "dispatchRoot: /private/dispatch\ndispatchConfigDigest: \"" + "a".repeat(64) + "\"\n"
+        val config = controller_gateway_config_decode_v1(pinned).unwrap()
+        for action in ["agent-pane-claim", "agent-pane-read"]:
+            val read_id = if action == "agent-pane-read": 1 else: 0
+            val request = gateway_pane_fixture_v1(action, read_id)
+            val source = controller_gateway_request_encode_v1(request).unwrap()
+            val header = controller_gateway_header_v1(source).unwrap()
+            expect(controller_gateway_authorize_v1(config, header, source).unwrap().request_uid).to_equal("request-a")
+            expect(controller_gateway_authorize_v1(gateway_config_v1(["agent-attachment", "agent-invoke"]), header, source).unwrap_err()).to_equal("controller-gateway-action-denied")
+            expect(controller_gateway_config_decode_v1(pinned.replace("[agent-pane]", "[" + action + "]")).is_err()).to_equal(true)
+        var swapped = gateway_pane_fixture_v1("agent-pane-claim", 0)
+        swapped.action = "agent-pane-read"
+        expect(controller_gateway_request_encode_v1(swapped).unwrap_err()).to_equal("controller-gateway-agent-pane-sub")
+        expect(controller_gateway_request_encode_v1(gateway_pane_fixture_v1("agent-pane-read", 0)).is_err()).to_equal(true)
+
+    it "correlates the exact pane run, attachment, binding, epoch, read ID, and bytes":
+        val request = gateway_pane_fixture_v1("agent-pane-read", 1)
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val chunk: Dict<text, SdnValue> = {"stream": SdnValue.String("stdout"),
+            "bytes": SdnValue.Array([SdnValue.Int(0), SdnValue.Int(255)])}
+        val report: Dict<text, SdnValue> = {"kind": SdnValue.String("host-agent-pane-read"), "version": SdnValue.Int(4),
+            "eof": SdnValue.Bool(false), "chunks": SdnValue.Array([SdnValue.Dict(chunk)])}
+        val payload = sdn_encode_canonical(SdnValue.Dict(report))
+        val exact = HostAgentPaneStreamReceiptV6(operation_id: "request-a", binding_uid: "pane-a",
+            attach_digest: "a".repeat(64), epoch: 0, read_id: 1, payload: payload, payload_digest: sha256_text(payload))
+        val receipt = host_agent_pane_stream_receipt_encode_v6(exact)
+        expect(controller_gateway_response_v1(source, receipt).unwrap()).to_equal(receipt)
+        for changed in [receipt.replace("request-a", "other-run"), receipt.replace("pane-a", "pane-b"),
+                receipt.replace("a".repeat(64), "b".repeat(64))]:
+            expect(controller_gateway_response_v1(source, changed).unwrap_err()).to_equal("controller-gateway-agent-pane-receipt-mismatch")
+        var stale = exact
+        stale.epoch = 1
+        expect(controller_gateway_response_v1(source, host_agent_pane_stream_receipt_encode_v6(stale)).is_err()).to_equal(true)
+        stale.epoch = 0
+        stale.read_id = 2
+        expect(controller_gateway_response_v1(source, host_agent_pane_stream_receipt_encode_v6(stale)).is_err()).to_equal(true)
+        stale.read_id = 1
+        stale.payload = payload.replace("255", "254")
+        expect(controller_gateway_response_v1(source, host_agent_pane_stream_receipt_encode_v6(stale)).is_err()).to_equal(true)
+
+    it "carries closed cursor refusals through the gateway without raw Host detail":
+        val request = gateway_pane_fixture_v1("agent-pane-read", 1)
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val digest = host_service_operation_request_digest_v6(request.request_uid, request.source).unwrap()
+        for code in ["runtime-agent-pane-replay-gap", "runtime-agent-pane-read-out-of-order"]:
+            var host = HostServiceOperationReplyV6(action: "host-control", service_incarnation: "b".repeat(32),
+                operation_id: request.request_uid, scope_digest: "c".repeat(64), request_digest: digest,
+                pending: false, exit_code: 2, payload: "", error: code)
+            val refused = host_service_operation_reply_encode_v6(host).unwrap()
+            expect(host_action_pane_refusal_v1(refused, request.request_uid, request.source).unwrap()).to_equal(code)
+            expect(host_action_pane_refusal_v1(refused, request.request_uid, request.source + " ").is_err()).to_equal(true)
+            host.payload = "raw-pane-byte-record"
+            val contaminated = host_service_operation_reply_encode_v6(host).unwrap()
+            expect(host_action_pane_refusal_v1(contaminated, request.request_uid, request.source).is_err()).to_equal(true)
+            val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String(request.action),
+                "state": SdnValue.String("host-refused"), "operationId": SdnValue.String(request.request_uid),
+                "record": SdnValue.String(""), "recordDigest": SdnValue.String(""), "detail": SdnValue.String(code)}
+            val carrier = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+            val confirmed = controller_gateway_nonzero_reply_v1(source, 1, carrier)
+            expect(confirmed.exit_code).to_equal(1)
+            expect(confirmed.output).to_equal(carrier)
+            val foreign = controller_gateway_nonzero_reply_v1(source, 1, carrier.replace("request-a", "request-b"))
+            expect(foreign.exit_code).to_equal(2)
+            val unknown = controller_gateway_nonzero_reply_v1(source, 2, "raw-pane-byte-record")
+            expect(unknown.exit_code).to_equal(2)
+            expect(unknown.output).to_contain("server-pane-outcome-unconfirmed")
+            expect(unknown.output.contains("raw-pane-byte-record")).to_equal(false)
+
+    it "keeps non-pane remote failure framing unchanged":
+        val source = controller_gateway_request_encode_v1(gateway_request_v1("inspect")).unwrap()
+        val error = controller_gateway_nonzero_reply_v1(source, 17, "legacy controller refusal")
+        expect(error.exit_code).to_equal(17)
+        expect(error.output).to_equal("legacy controller refusal")
+
     it "requires separately installed dispatch pins for the opt-in attachment gateway":
         val profile = "version: 1\nstateRoot: /private/controller\ncontrollerId: controller-a\nallowedActions: [agent-attachment]\n"
         expect(controller_gateway_config_decode_v1(profile).unwrap_err()).to_equal("controller-gateway-attachment-profile")

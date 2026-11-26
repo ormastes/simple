@@ -73,7 +73,7 @@ describe "controller dispatch host-action mode (milestone_0046)":
         expect(begin.contains("packet")).to_equal(false)
 
     it "archives every signed effect (abandons and retention-release) create-only before it is sent and refuses different bytes":
-        step("Identical bytes may be resent (the Host is idempotent on the same proof); every non-inspect sub is archived")
+        step("Durable signed control effects retain their exact proof before transport")
         # @req M0050-REVIEW-B-03 (lane A finding: retention-release was sent without the archive; only `-abandon` matched)
         var effects: [text] = []
         for name in HOST_CONTROL_SUBS_V6:
@@ -91,6 +91,28 @@ describe "controller dispatch host-action mode (milestone_0046)":
         expect(send.contains("readback.unwrap() != payload")).to_equal(true)
         expect(send.contains("dispatch-host-action-archive-conflict")).to_equal(true)
         expect(controller_dispatch_host_action_key_v3("abandon_1")).to_equal("controller-host-action-v1/" + sha256_text("abandon_1") + ".sdn")
+
+    it "carries pane turns outside both regular journal sides and refuses automatic progress":
+        val source = ha_dispatch_source_v3()
+        val control = ha_fn_body_v3(source, "fn dispatch_state_host_action_send_v3(")
+        expect(control).to_contain("owner.live_pane_exchange = HOST_AGENT_PANE_SUBS_V6.contains(sub.unwrap().sub)")
+        val transient_at = control.index_of("if owner.live_pane_exchange:")
+        val durable_at = control.index_of("elif not sub.unwrap().sub.ends_with(\"-inspect\"):")
+        val effect_at = control.index_of("distributed_operation_journal_publish_v3(")
+        expect(transient_at >= 0 and durable_at > transient_at and effect_at > durable_at).to_equal(true)
+        val send = ha_fn_body_v3(source, "fn dispatch_send_v3(")
+        val request_gate = send.index_of("if not owner.live_pane_exchange:")
+        val request_archive = send.index_of("dispatch_archive_v3(")
+        val request_transport = send.index_of("host_service_auth_exchange_begin_v6(")
+        expect(request_gate >= 0 and request_archive > request_gate and request_transport > request_archive).to_equal(true)
+        val accept = ha_fn_body_v3(source, "fn dispatch_accept_v3(")
+        val reply_gate = accept.index_of("if owner.live_pane_exchange:")
+        val pending_refusal = accept.index_of("dispatch-pane-reply-pending")
+        val envelope_archive = accept.index_of("dispatch_archive_v3(owner, encoded.unwrap())")
+        val payload_archive = accept.index_of("dispatch_archive_v3(owner, reply.payload)")
+        val progress = accept.index_of("dispatch_send_v3(owner, \"progress\", \"\")")
+        expect(reply_gate >= 0 and pending_refusal > reply_gate and envelope_archive > pending_refusal and
+            payload_archive > envelope_archive and progress > payload_archive).to_equal(true)
 
     it "hands a Host refusal of a control frame to the caller and settles nothing from Host text":
         val accept = ha_fn_body_v3(ha_dispatch_source_v3(), "fn dispatch_accept_v3(")
