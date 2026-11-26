@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (P2)
+- Status: RESOLVED (2026-11-26 — BF-4 fix reconciles Rust BDD outcome with `.spl` body instead of pre-marking pending/skip)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - Found: 2026-08-07, while landing WP-9 (skip governance,
   `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`)
@@ -140,3 +140,18 @@ stands: delete the arm once the self-hosted binary is the default tool.
 Not executable on this lane; resumes if/when the seed is next rebuilt for
 another reason and an owner picks option (a) or (b) from the 2026-08-07
 "Suggested owner" section.
+
+## 2026-11-26 BF-4 (work/bf-4-rust-interp-semantics-20261126, release/1.0.0) — RESOLVED
+
+On `release/1.0.0`, `interpreter_call/bdd.rs` already deferred `pending` / `pending_it` / `skip` / `skip_it` / `skip_context` when `functions.contains_key(name)` (`return Ok(None)`), **however** correctness and scoping bugs remained:
+1. `bdd.rs` still set `BDD_PENDING_IN_IT`, `BDD_SKIP_IN_IT`, or `record_describe_level_skip` *before* the `.spl` body ran (and `it` checked `BDD_SKIP_IN_IT` before `result: Err`), so under `SIMPLE_SAFETY_PROFILE=critical`, rejected `pending`/`skip`/`skip_it` calls (and arity/runtime errors) were still silently reported as skipped/passed (`0 failures`) instead of failing.
+2. `spec.spl::skip` checked `_case_depth.len() > 0` to distinguish in-case skips from `_run_test("skipped")`-gated describe skips, which missed Rust `bdd.rs` `it` blocks.
+3. Tracking only by bare name (`functions.contains_key(name)`) hijacked user-defined `pending`/`pending_it`/`skip` functions, lexically shadowed locals, and non-`std.spec` stdlib definitions; `skip_it`/`skip_context` inside `it` double-counted `BDD_TOTALS.1`; and `_case_depth` restoration was manual rather than RAII-guarded.
+
+Fix in `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` (`begin_spec_dsl_def` / `finish_spec_dsl_def`, `CaseDepthGuard`, `BDD_FAILED_RECORDED_IN_IT`, and `eval_bdd_builtin`) and `src/compiler_rust/compiler/src/interpreter_call/mod.rs` (`evaluate_identifier_user_call`):
+- Keep `eval_bdd_builtin`'s `"pending" | "pending_it"` fallback only when neither `env.get(name)` nor `functions.contains_key(name)` resolves the name.
+- Activate `begin_spec_dsl_def` / `finish_spec_dsl_def` only in `evaluate_identifier_user_call` (Priorities 4, 4.9, and 5) when `!env.is_local(name)` and the resolved `FunctionDef` owner (`FUNCTION_MODULE_OWNER` via `std_spec_outcome_owner`) belongs to `std.spec` (`lib/{nogc_sync_mut,gc_async_mut,nogc_async_mut}/spec{,/__init__,/dsl}.spl` or `lib/std/src/spec/{dsl,__init__}.spl`), excluding `spec/decorators.spl`, user functions, nested functions, and lexical closures.
+- Manage `std.spec._case_depth` via an RAII `CaseDepthGuard` (`Drop`) that mutates/restores only stores already containing `_case_depth`.
+- Snapshot only the resolved `std.spec` owner's globals (`current_test_errors`, `test_errors`, `test_failed`, `BDD_TOTALS.1`), propagate `.spl` errors, deduplicate `BDD_TOTALS.1` in `it` via `BDD_FAILED_RECORDED_IN_IT` when `std.spec` (`skip_it`/`skip_context`) already called `rt_bdd_record_result(0)`, fail rejected calls, and mark pending/skip only when unrejected.
+
+Verified via `bf4_interpreter_bugs` (`bug2_pending_and_skip_execute_spl_body_and_honor_governance` covering `pending_inside_it_not_pass_spec.spl`, `pending_runtime_accounting_spec.spl`, `skip_governance_probe_spec.spl`, `skip_governance_spec.spl`, `critical` rejections, and `moderate` skips; `bug2_user_and_shadowed_pending_skip_not_hijacked_and_no_double_count` covering user `pending`/`pending_it`/`skip`, `env`-shadowed closures, nested `fn`, `parser_contextual_keywords_simple_spec.spl`, `rt_bdd_failed_total() == 1` for in-`it` `skip_it`/`skip_context` under `critical`, and `_case_depth` restoration) and `--lib interpreter_call::`.

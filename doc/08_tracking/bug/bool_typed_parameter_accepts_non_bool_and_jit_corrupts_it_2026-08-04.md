@@ -336,3 +336,16 @@ regression spec `test/01_unit/compiler/95.interp/interpreter/bool_param_literal_
 call-argument checker (as this doc's 2026-08-10 re-investigation concluded);
 native (compile --native) gate shares the HIR lowering path but awaits an
 admitted producer for end-to-end proof. Seed-smoke evidence only.
+
+## 2026-11-26 BF-4 (work/bf-4-rust-interp-semantics-20261126, release/1.0.0) — FIXED (interpreter literal call paths enforced)
+
+Remaining gaps found and fixed in the Rust seed interpreter (`src/compiler_rust/compiler/src/`):
+
+- `interpreter_call/core/arg_binding.rs`: `bind_args_with_values_named` (used by overloaded calls `FUNCTION_OVERLOADS`, owned-receiver methods, and write-back calls) previously omitted `reject_bool_literal_args`; now enforced on both the positional fast path and the general named/default binding path, plus exported `reject_bool_literal_args_with_self` and `reject_bool_literal_args_for_slice`.
+- `interpreter_call/mod.rs`: extracted `eval_and_exec_static_overload` across both `Expr::FieldAccess` and `Expr::Path` static-method/impl/class-overload call sites (`Gate.make(...)`, `Gate::make(...)`, `ImplGate::make(...)`, `OvGate::make(...)`), rejecting non-bool literals before argument evaluation when a single matching-name static method exists and before callee execution for multi-candidate overload selection.
+- `interpreter_method/mod.rs` (`try_exec_ufcs_method` and `Map.new` static overload) and `interpreter_method/special/objects.rs` (`exec_static_method_candidates`): enforced `reject_bool_literal_args_for_slice`.
+- `interpreter_helpers/method_dispatch.rs` & `patterns.rs`: `call_method_on_value_with_args` now carries `arg_exprs: Option<&[Argument]>` from statement-level chained `MethodCall` dispatch and routes `Value::Object` (class/local-impl/`GLOBAL_IMPL_METHODS`), `Value::Enum` (impl/enum methods), `Value::ClassInstance`, and built-in `TRAIT_IMPLS` / `BLANKET_IMPL_METHODS` calls through shared `exec_method_with_values_and_self_checked` (`reject_bool_literal_args_with_self`), alongside UFCS.
+
+Covered by targeted debug cargo tests (`bf4_interpreter_bugs`: `bug1_rejects_literal_non_bool_across_all_call_paths` exercising direct/named, overloaded/named, immutable & `me` methods, static `Gate.make` & `Expr::Path` `Gate::make`/`ImplGate::make`/`OvGate::make`, direct UFCS, and statement-chained `patterns.rs -> method_dispatch.rs` `Object`/`Enum`/`Enum impl`/`TRAIT_IMPLS`/UFCS calls; `bug1_preserves_bool_and_presence_query_contract` verifying `true`/`false`/`.?` acceptance on regular, path static, enum, and trait calls plus pre-eval non-side-effect rejection on single-candidate `Gate::make(42, fail_if_eval())`; plus `bool_parameter_literal_admission`, `--lib interpreter_call::`, `--lib interpreter_helpers::method_dispatch`, and `--lib interpreter_method::`). Note: `Value::ClassInstance` and `BLANKET_IMPL_METHODS` arms share `exec_method_with_values_and_self_checked` by inspection rather than dedicated Simple fixtures.
+
+Note on remaining scope: `val x: i64 = 42; takes_bool(x)` (typed non-bool local/param identifiers) intentionally remains outside the runtime tree-walk interpreter because `opt.?` still passes payload values via `present_value_as_bool_arg` and `Env` does not enforce static variable types (`bool_param_rejects_non_bool_spec.spl` covers the HM checker).

@@ -237,7 +237,7 @@ pub(crate) use interpreter_eval::initialize_extern_functions;
 mod interpreter_method;
 use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_update};
 pub(crate) use interpreter_method::{
-    evaluate_call_args, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,
+    eval_bdd_matcher_on_values, evaluate_call_args, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,
     exec_resolved_method_with_self_owned_values, resolve_object_method, ResolvedMethod, shared_text_is_ascii, text_cp_len,
 };
 pub(crate) use interpreter_method::{lookup_class_method_index, lookup_impl_method_index};

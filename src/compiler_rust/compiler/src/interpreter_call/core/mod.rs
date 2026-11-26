@@ -33,7 +33,10 @@ pub(crate) mod aop_advice;
 pub(crate) mod aop_runtime;
 
 // Re-export public interface for backward compatibility
-pub(crate) use arg_binding::{bind_args, bind_args_with_injected, bind_args_with_values, name_callee, bind_args_with_values_named};
+pub(crate) use arg_binding::{
+    bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named, name_callee,
+    reject_bool_literal_args_for_slice, reject_bool_literal_args_with_self,
+};
 pub(crate) use arg_eval::{eval_arg, eval_arg_int};
 pub(crate) use class_instantiation::{instantiate_class, noinit_named_type_default};
 pub(crate) use function_exec::{
