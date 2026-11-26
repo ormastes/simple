@@ -1,6 +1,6 @@
 # BUG: engine2d embedded-surface WM example asserts a chrome stream the product no longer emits
 
-Status: OPEN (2026-11-26), split from
+Status: VERIFIED 2026-11-26, split from
 `engine2d_strict_vulkan_evidence_fails_after_shared_session_example_2026-08-19`
 (whose named Vulkan mechanism is verified fixed on Linux aarch64).
 Where: `test/02_integration/rendering/engine2d_embedded_surface_spec.spl`,
@@ -52,3 +52,34 @@ content-win emb=14,68 112x44: win-content-invalid rect (fail-closed placeholder)
 The fresh-device composition in the same example already passes on device:
 `readback_source=device_readback backend_handle=1 rendered=17 skipped=0`,
 pixels byte-equal to the CPU oracle.
+
+## Fix 2026-11-26 (oracles re-derived from the chrome draw-stream source)
+
+Source of truth is `src/lib/common/ui/window_scene_draw_ir.spl`: with no theme
+snapshot installed it emits the documented no-package stream (shadow rect
+first, plain body); with a snapshot installed (both production bootstraps
+install fluid_light) it emits the themed stream (`win-body` first with hit
+rect and computed style, color from `theme_draw_ir_surface_command_color`,
+28px `win-titlebar`). The content rect rule is `(x+4, y+32, w-8, h-36)`, so
+the canonical 120x80 window has a 112x44 content frame at (14,68), not 120x52.
+
+- The WM example now resets the chrome theme (it is process-global) and pins
+  the no-package stream: shadow first in `chrome.window_shadow`, body 120x80
+  in `chrome.host_window_body`, 112x44 content frame, plus frame evidence:
+  every pixel of content rows 68..93 green (the taskbar-clock text command,
+  box (108,90) 36x12, inks rows 94..102 at x 108..125; confirmed from the
+  draw stream), zero magenta placeholder pixels.
+- Alpha oracle: Engine2D stores straight-alpha ARGB, so a transparent child
+  cleared by a 0x33FF0000 rect reads 0x33FF0000 (NVIDIA GB10 and llvmpipe,
+  device_readback); on an opaque black parent CPU/NVIDIA/llvmpipe all read
+  0xFF330000. The old 0x33330000 oracle was premultiplied.
+- New example "composites the themed WM window that production bootstraps
+  install" pins the fluid_light themed stream and its CPU composition.
+- Spec `engine2d_embedded_surface_spec.spl`: WM example red -> 11/11 (10 + new) on NVIDIA GB10 and
+  on llvmpipe (VK_ICD_FILENAMES=lvp_icd.json), both measured on the committed
+  file. The pass count alone does not prove the device ran (the Err arm is
+  permissive); device proof is the probe: plain stream `device_readback`,
+  skipped=0, rendered=17, pixels == CPU on both NVIDIA GB10 and llvmpipe.
+- The themed stream's strict fresh-device arm is red and filed as
+  `engine2d_fresh_device_preflight_rejects_themed_wm_chrome_2026-11-26` (handover spec
+  `engine2d_themed_wm_fresh_device_spec.spl`, @tag:in-development).
