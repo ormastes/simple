@@ -13,7 +13,7 @@ use std.common.encoding.sfnt_kern.{sfnt_line_metric_units_ascent_descent_px}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height, centred_line_device_dy, text_line_frac_dy}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height, centred_line_device_dy, text_line_frac_dy, text_device_content_area}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans, chrome_checkable_spans, chrome_select_arrow_spans, chrome_resizer_spans, chrome_frame_spans}
 use std.gc_async_mut.gpu.browser_engine.media_control_chrome.{chrome_audio_control_spans, chrome_video_control_spans}
@@ -475,15 +475,21 @@ fn _html_draw_ir_codepoint_advances(txt: text, cp_advances: [i32]) -> [i32]:
 # `device-y-offset`, which `draw_ir_composition_at_device_scale` adds to the
 # scaled y and strips. At k == 1 both tables are empty: the command is untouched.
 fn _html_draw_ir_text_with_device_dy(command: DrawIrCommand, boxes: LayoutResult, i: i32, line_i: i32) -> DrawIrCommand:
+    _html_draw_ir_add_device_dy(command, _html_draw_ir_text_device_dy(boxes, i, line_i))
+
+# The device-y-offset text run `i`'s line `line_i` is painted with.
+fn _html_draw_ir_text_device_dy(boxes: LayoutResult, i: i32, line_i: i32) -> i32:
     val table = if line_i == 0: boxes.device_dy else: boxes.device_dy_rest
     val base = if i < 0 or i >= table.len(): 0 else: table[i]
     # Lines 2..n of a fractional line-height run at their exact device tops.
-    val dy = base + (if line_i > 0 and layout_device_scale() > 1: text_line_frac_dy(boxes.line_y_steps, i, line_i) else: 0)
+    base + (if line_i > 0 and layout_device_scale() > 1: text_line_frac_dy(boxes.line_y_steps, i, line_i) else: 0)
+
+fn _html_draw_ir_add_device_dy(command: DrawIrCommand, dy: i32) -> DrawIrCommand:
     if dy == 0:
         return command
     var out = command
     var style = command.computed_style
-    # A shaped run may already carry its own baseline offset: the two add.
+    # A command may already carry its own offset (a shaped run's baseline): the two add.
     var prior = 0
     var kept: [DrawIrStyleProp] = []
     for prop in style:  # cpu-lane-loop-ok: one pass over THIS command's style props
@@ -1129,12 +1135,41 @@ fn _html_draw_ir_inline_fragment_boxes(
             advances, txt, starts[k], ends[k], style_text_advance(tst), style_space_advance(tst)
         )
         val rect = draw_ir_rect_bounds(fx, fy, fw, area_h)
-        out.push(draw_ir_box_with_style(
+        out.push(_html_draw_ir_inline_box_device(draw_ir_box_with_style(
             box.component_id + "_frag{k}", fx, fy, fw, area_h, box.color,
             rect, rect, rect, box.clip_rect, box.computed_style
-        ))
+        ), styles[i], boxes, run, k))
         k = k + 1
     out
+
+# At device scale k > 1 the box of a plain inline element over its sole text
+# run `run` is, on line `line_i`, that run's DEVICE content area
+# (`text_device_content_area`): Chrome 159, 15px Liberation Sans at k=4, rows
+# 5..71 of a 19.5 px line (67 rows from the device baseline less 54), not k x
+# the CSS box (4..71). Placed from the run's own device offset on that line.
+fn _html_draw_ir_inline_box_device(box: DrawIrCommand, st: Style, boxes: LayoutResult, run: i32, line_i: i32) -> DrawIrCommand:
+    val k = layout_device_scale()
+    if k <= 1 or run < 0:
+        return box
+    val area = text_device_content_area(st, k)
+    if area.len() != 2:
+        return box
+    var out = _html_draw_ir_add_device_dy(box, _html_draw_ir_text_device_dy(boxes, run, line_i) + area[0])
+    val extra_h = area[1] - k * box.height
+    if extra_h != 0:
+        var style = out.computed_style
+        style.push(draw_ir_style_prop("device-extra-height", extra_h.to_text()))
+        out.computed_style = style
+    out
+
+# The same for an element whose run did not wrap: `box` is its one box.
+fn _html_draw_ir_inline_element_box(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32, box: DrawIrCommand) -> DrawIrCommand:
+    if layout_device_scale() <= 1:
+        return box
+    val st = styles[i]
+    if st.pad_t != 0 or st.pad_b != 0 or st.border_t != 0 or st.border_b != 0:
+        return box
+    _html_draw_ir_inline_box_device(box, st, boxes, inline_sole_text_run(nodes, styles, i), 0)
 
 fn _html_draw_ir_image_index(
     image_index: Dict<text, i32>, image_uri: text

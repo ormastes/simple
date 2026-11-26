@@ -4805,3 +4805,31 @@ At k=1, paint applies the table in `_html_draw_ir_k1_snapped_boxes` (renamed fro
 - **Fix.** The name is added to `is_inline_lowered_byte_accessor` (`codegen/instr/calls.rs`).
 - **Checks.** `jit_hoisted_u8_read_slot_layout.rs::hoisted_u8_loop_runtime_calls_resolve_without_dlsym` is the Rust test. The `check-chrome-catalog-pixel-diff.shs --selftest` 1 Mpx fixture runs with `SIMPLE_JIT_STRICT=1` and a 30 s bound.
 - **Trap.** If a 4x compare suddenly takes minutes, grep its stderr for `jit-fallback` before suspecting the differ.
+## 2026-11-26 — device line fraction below taller lines; inline element line tops and device box (lineheight3)
+
+Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
+
+- **At k > 1 Chrome's line boxes are device LayoutUnits.** A 22px/1.3 span
+  line at k=4 is 114.39 device px, not 114. `align_inline_line_device_dy`
+  truncated the descent to whole device px, so the 0.39 was lost on every
+  such line and the block cursor drifted 1 row per two taller lines. It now
+  keeps the descent in milli device px and returns the milli excess; the
+  caller divides by k for `height_frac_milli`. `line_h_sub_px_milli` is the
+  k = 1 path only now (at k > 1 the device fraction already covers it).
+- **A span wrapping the block's only run is a sole run.** The sole-run branch
+  at the end of `align_inline_line_baselines` required `nodes[0]` to be the
+  `#text`; a `<span>` over the run (`inline_sole_text_run`) wraps exactly like
+  the run, so it now records line steps on the run inside it. Without it the
+  span's lines, text and the block stepped 19 px instead of 19.5 at 1x too.
+- **Inline element box at k > 1 = device content area** (`text_device_content_area`):
+  from the run's device text top plus (painter ascent - device face ascent),
+  A + D of the device face tall (15px Liberation Sans at k=4: 67 rows, k x CSS
+  gave 68 from one row higher). Applied to wrapped fragments
+  (`_html_draw_ir_inline_fragment_boxes`) and unwrapped elements
+  (`_html_draw_ir_inline_element_box`); boxes with vertical padding/border keep k x CSS.
+- **Measure tops with Chrome's own rects, not pixels alone.** `--dump-dom` with
+  a script writing `Range.getClientRects()` and `getBoundingClientRect()` tops
+  at `--force-device-scale-factor=4` gave 115.6953 for the third div, which
+  pinned the 462.78 device row the cursor had to reach.
+- **Trap:** a fixture copied from another spec can differ in its last block's
+  font; take every oracle from the capture of the exact page the spec renders.
