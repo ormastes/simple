@@ -865,17 +865,12 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
     path_text != ""
 
 fn _driver_line_end(content: text, start: i64) -> i64:
-    """Return the exclusive end of one source line without splitting the file:
-    the index of the next newline at or after `start`, else `content.len()`.
+    """Return the exclusive byte end of one source line without splitting the file:
+    the byte index of the next newline at or after `start`, else `content.byte_len()`.
 
-    A forward `byte_at` scan, allocation-free and linear over the whole file.
-    It replaces `content.index_of("\n", start)`, which Stage-2-built native code
-    lowered as a full extern-ABI copy of `content` per call (once per line, so
-    O(bytes x lines) memory on large generated sources).
-    History: the index_of form also needed a negative-miss guard, because
-    rt_text_find returns a raw -1 rather than nil (2026-09-25, >8 GB loop on a
-    final unterminated line); the byte scan returns `content.len()` directly."""
-    # @workaround bug=text_method_arg_copied_through_extern_abi_per_call_2026-10-25 reason=stage2_index_of_copies_content_per_line
+    Allocation-free forward `byte_at` scan in byte space so callers using
+    `content.byte_len()` and `_driver_byte_to_char_advance_v1` stay aligned on
+    multi-byte UTF-8 inputs across both native and seed-interpreter lanes."""
     var i = start
     val n = content.byte_len()
     while i < n:
@@ -2526,20 +2521,13 @@ fn _driver_resolve_entry_import_untimed(module_path: text, entry_dir: text) -> t
         if _g_resolved_entry_import_cache.contains_key(cache_key):
             return _g_resolved_entry_import_cache[cache_key]
     val owned = _driver_resolver_scratch_begin_v1()
-    # (defect 2). Natively the answer can be a raw char* borrowed from a
-    # scratch-owned string (measured in Stage 3: 4 of 400 returns); promotion
-    # cannot retain a borrowed pointer, so the path dangled after scope end
-    # and reached `[explicit-source] rejected non-spl path=<garbage>`. The
-    # concat makes an owned tagged text that promotion does retain. Remove
-    # once test/fixtures/native_transient_scope_raw_text_escape passes.
-    # @workaround bug=stage3_selfbuild_raw_text_strict_extern_2026-11-18
-    val resolved = _driver_resolve_entry_import_scratch_v1(module_path, entry_dir) + ""
+    val resolved = _driver_resolve_entry_import_scratch_v1(module_path, entry_dir)
     _driver_resolver_scratch_end_text_v1(owned, resolved)
     if persistent_outer and owned and transient_array_scope_state_v1() == 0 and cache_key != "":
         if resolved != "" or snap == "":
             if _g_resolved_entry_import_cache.len() >= DRIVER_ENTRY_SCAN_CACHE_MAX_ENTRIES_V1:
                 _g_resolved_entry_import_cache = {}
-            _g_resolved_entry_import_cache[cache_key] = resolved + ""
+            _g_resolved_entry_import_cache[cache_key] = resolved
     resolved
 
 fn _driver_resolve_entry_import_scratch_v1(module_path: text, entry_dir: text) -> text:
