@@ -1,0 +1,75 @@
+use std.spec.*
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+
+class MockAdapterCfg:
+    name: text
+    features: [text] = []
+
+fn share_ok<T>(v: T) -> bool:
+    true
+
+fn apply_share<T>(v: T, cb: fn(T) -> bool) -> bool:
+    cb(v)
+
+struct MockPendingOpt:
+    opt: i64?
+
+fn resolve_pending(holder: MockPendingOpt, allow_fallback: bool) -> Result<i64, text>:
+    val chosen = if val v = holder.opt:
+        v
+    else:
+        if not allow_fallback:
+            return Err("none")
+        99
+    Ok(chosen)
+
+fn multiline_kind_name(kind: i64) -> text:
+    val out = if kind == 0: "added"
+        elif kind == 1: "modified"
+        else: "deleted"
+    out
+
+fn widen_u8_bytes(bytes: [u8]) -> [i64]:
+    [for b in bytes: b as i64]
+
+describe "wa_batch_f8 lowering regressions":
+    it "supports defaulted class array fields cleanly":
+        val cfg = MockAdapterCfg(name: "cl")
+        expect(cfg.features.len()).to_equal(0)
+
+    it "handles comprehensions over u8 byte slices":
+        val bytes: [u8] = [65u8, 66u8]
+        val widened: [i64] = widen_u8_bytes(bytes)
+        expect(widened.len()).to_equal(2)
+        expect(widened[0]).to_equal(65)
+        expect(widened[1]).to_equal(66)
+
+    it "parses multiline if-elif-else expressions":
+        expect(multiline_kind_name(0)).to_equal("added")
+        expect(multiline_kind_name(1)).to_equal("modified")
+        expect(multiline_kind_name(2)).to_equal("deleted")
+
+    it "transports text inside if-val dict.get bindings":
+        var d: Dict<i64, text> = {}
+        d[7] = "hello"
+        var out = ""
+        if val s = d.get(7):
+            out = "{s}!"
+        expect(out).to_equal("hello!")
+
+    it "passes generic functions as function values":
+        expect(apply_share(12, share_ok)).to_equal(true)
+
+    it "handles if-val with returning else-branch inside valued expressions":
+        val ok_res = resolve_pending(MockPendingOpt(opt: None), true)
+        val ok_v = match ok_res:
+            case Ok(v): v
+            case Err(_): -1
+        expect(ok_v).to_equal(99)
+
+    it "constructs Future static factory helpers directly":
+        val ready = Future<i64>.from_value(42)
+        val pend = Future<text?>.pending()
+        expect(ready.is_ready()).to_equal(true)
+        expect(pend.is_ready()).to_equal(false)

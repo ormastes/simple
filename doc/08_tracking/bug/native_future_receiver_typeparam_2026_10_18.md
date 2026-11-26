@@ -251,3 +251,18 @@ Status for `FileThreadPool.exec` (`Future<i64>`) remains OPEN (`50.mir` erased
 generic `T` vs raw `I64` enum-payload ABI mismatch). Workaround in
 `src/lib/nogc_async_mut/io/file.spl:235` is KEPT with updated reason and
 pinned by `test/01_unit/lib/nogc_async_mut/io/wa_src_lane6_file_future_spec.spl`.
+
+## Root cause and fix for `Future<T>` scalar `i64`/`f64` payloads (2026-11-26)
+
+Reproduced natively on uniform P3 (`D:\t\p3-inc\simple.exe` `native-build --backend llvm`):
+- `Future<i64>.from_value(37)` -> `296` (`37 << 3`), `Future.from_value(37)` -> `296`, `poll_unwrap(Future<i64>.from_value(37).poll())` -> `296`, `complete(37)` -> `296`, `map(\x: x + 1)` -> `2376`, `Future<i64>.from_value(9000000000)` -> `72000000000`.
+- `Future<f64>.from_value(2.5)` -> denormal garbage (`1.31e-308`, `rt_value_float` heap pointer bitcast directly to `double`).
+- Concrete `Future<i64>(state: [], poll_result: Poll.Ready(37))` -> `37`.
+
+Root cause in `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` + `mir_lowering_stmts.spl`:
+Generic classes with non-`Dict<K, T>` fields (`Future<T>{poll_result: Poll<T>}`, `Cell<T>`, `Box<T>`) store and decode `T` payloads raw/bitcast (`module_lowering.spl:2631-2638`). Only `#erased-dict-class` methods opt into `rt_value_int_wide` via `__erased_scalar_slot__`. Because `Future` declares `from_value(value: T)` (`static fn`) and `complete(value: T)` inline inside `class Future<T>`, `resolved_call_hir_param_types` published `[TypeParam("T")]`, causing `lower_method_call_arg` (`mir_lowering_stmts.spl:3306`) to run `box_runtime_value` (`rt_value_int_wide` / `rt_value_float`) on those arguments while `Poll<T>` stored and decoded raw/bitcast words.
+
+Fix in `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`:
+- Added `class_erased_raw_slot_flags_v1`, `mask_class_erased_raw_param_types_v1`, and `adapt_class_erased_raw_operands_v1` across the `InstanceMethod`, `StaticMethod`, and `Unresolved` static/instance method call arms (`sym.generic_param_count == 0` and not `#erased-dict-class`).
+- Class-level `TypeParam` slots now pass integers/bools/records raw, bitcast `f64`/`f32` to `i64` (`bitcast_float_enum_payload`) to match `Poll<f64>` / erased `i64` param ABI, and retain `box_runtime_value` for `nil` and `text`.
+- Retired `@workaround bug=native_future_receiver_typeparam_2026_10_18` in `src/lib/nogc_async_mut/io/file.spl:235` back to `Future.from_value(task())`, updated `test/01_unit/lib/nogc_async_mut/io/wa_src_lane6_file_future_spec.spl`, and added `test/01_unit/compiler/50.mir/generic_future_scalar_payload_spec.spl`. (Note: unannotated `match fut.poll(): case Poll.Ready(v):` remains an HIR pattern-subject annotation requirement.)
