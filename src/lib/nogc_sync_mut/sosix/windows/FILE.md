@@ -14,6 +14,7 @@ TODO(platform-variant-migration): move here — windows_memory_v1.spl.
 - **containment_v1.spl** — SOSIX containment variant: support, start, poll, cancel, collect, qualify, memory-cap evidence.
 - **containment_launch_v1.spl** — job + restricted-token launch core over the process owner (internal).
 - **containment_qualify_v1.spl** — nine-canary qualify op with paired positive controls (internal).
+- **containment_memory_v1.spl** — memory-cap evidence over lane E probe (internal).
 
 ## Child Manifests
 

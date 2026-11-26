@@ -13,11 +13,8 @@ use std.nogc_sync_mut.io_runtime.{env_get, file_read, file_exists, file_copy, pr
 use std.nogc_sync_mut.sosix.containment_types_v1.{SOSIX_CONTAIN_CANARY_PROBE_SHA256_V1}
 use std.nogc_sync_mut.sosix.contained_write_v1.{sosix_fs_grant_contained_write_v1, sosix_fs_grant_contained_read_v1}
 use std.nogc_sync_mut.sosix.windows.containment_launch_v1.{_admit_v1, _lease_of_v1, _reap_v1, _run_to_end_v1, _volume_serial_v1}
-use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_wide_v1, sec_read_ptr_v1, sec_open_process_token_v1, sec_close_handle_v1, sec_token_info_v1, sec_sid_from_text_v1, sec_set_entries_v1, sec_access_entry_v1}
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_wide_v1, sec_read_ptr_v1, sec_open_process_token_v1, sec_close_handle_v1, sec_token_info_v1, SetNamedSecurityInfoW, sec_sid_from_text_v1, sec_set_entries_v1, sec_access_entry_v1}
 
-@abi("system")
-@unsafe(reason: "owned protected DACL written on a path this op created", capabilities: [ffi, raw_ptr])
-extern fn SetNamedSecurityInfoW(name: i64, kind: i32, info: u32, owner: i64, group: i64, dacl: i64, sacl: i64) -> u32
 
 const _EXIT_CODE = 37
 const _GENERIC_ALL = 0x10000000
@@ -70,7 +67,7 @@ fn _run_probe_v1(site: QualifySiteV1, tag: text, mode_args: [text], processes: i
     val request = _request_v1(site, tag, site.program, site.program_digest, _probe_args_v1(site, mode_args), site.scope, processes, site.wall)
     match _admit_v1(request):
         SosixContainAdmissionV1.Started(lease):
-            val receipt = _run_to_end_v1(_lease_of_v1(lease), site.wall)?
+            val receipt = _run_to_end_v1(_lease_of_v1(lease), SosixContainMillisV1(site.wall))?
             Ok(QualifyRunV1(out: file_read(request.stdout_path), exit_code: receipt.exit_code))
         SosixContainAdmissionV1.RejectedBeforeStart(reason): Err(reason)
         SosixContainAdmissionV1.FailedAfterCleanup(reason): Err(reason)
@@ -79,7 +76,7 @@ fn _run_probe_v1(site: QualifySiteV1, tag: text, mode_args: [text], processes: i
 # Value of the first "<key> <value>" line of probe output; "" when absent.
 fn _line_value_v1(out: text, key: text) -> text:
     for line in out.replace("\r", "").split("\n"):
-        if line.starts_with(key + " "): return line[key.len() + 1:].trim()
+        if line.starts_with(key + " "): return line.substring(key.byte_len() + 1, line.byte_len()).trim()
     ""
 
 fn _verdict_v1(value: text) -> text:
@@ -145,7 +142,7 @@ fn _tree_empty_v1(site: QualifySiteV1) -> SosixContainCanaryV1:
                     Err(_reason): break
                 if not children_live: thread_sleep(100)
             val _cancelled = windows_process_cancel_v1(native)
-            val receipt = _run_to_end_v1(native, 15000)
+            val receipt = _run_to_end_v1(native, SosixContainMillisV1(15000))
             if receipt.is_err(): return _canary_v1(SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, "allow", "not-run", "none")
             val observed = if children_live and receipt.unwrap().tree_empty: "allow" else: "deny"
             _canary_v1(SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, "allow", observed, "none")
@@ -163,12 +160,18 @@ fn _other_process_v1(site: QualifySiteV1) -> SosixContainCanaryV1:
             var canary = _canary_v1(id, "deny", "not-run", "not-run")
             match windows_process_poll_v1(native):
                 Ok(observed):
-                    val ran = _run_probe_v1(site, "procopen", ["procopen", observed.pid.to_string(), site.ping], 0)
-                    if ran.is_ok():
-                        val out = ran.unwrap().out
-                        canary = _canary_v1(id, "deny", _verdict_v1(_line_value_v1(out, "TARGET")), _verdict_v1(_line_value_v1(out, "CONTROL")))
+                    if not observed.terminal:
+                        val ran = _run_probe_v1(site, "procopen", ["procopen", observed.pid.to_string(), site.ping], 0)
+                        # A victim that was not alive before and after the probe proves nothing.
+                        var still_alive = false
+                        match windows_process_poll_v1(native):
+                            Ok(after): still_alive = not after.terminal
+                            Err(_after_reason): pass
+                        if ran.is_ok() and still_alive:
+                            val out = ran.unwrap().out
+                            canary = _canary_v1(id, "deny", _verdict_v1(_line_value_v1(out, "TARGET")), _verdict_v1(_line_value_v1(out, "CONTROL")))
                 Err(_reason): pass
-            val _reaped = _reap_v1(native)
+            val _reaped = _reap_v1(native).value
             canary
         _: _canary_v1(id, "deny", "not-run", "not-run")
 
@@ -208,7 +211,7 @@ fn _force_user_only_v1(path: text) -> text:
     reason
 
 fn _other_scope_v1(scope: text) -> text:
-    if scope.len() > 62: return scope[0:62] + "-b"
+    if scope.byte_len() > 62: return scope.substring(0, 62) + "-b"
     scope + "-b"
 
 # Creates the directories and the linked base file; "" or a refusal reason.
@@ -252,7 +255,7 @@ fn _qualify_v1(request: SosixContainQualifyRequestV1) -> SosixContainQualifyResu
     if script_digest == "" or script_digest != SOSIX_CONTAIN_CANARY_PROBE_SHA256_V1:
         return _refused_v1("containment-qualify-probe-digest-mismatch")
     if windows_process_file_digest_v1(request.probe_program) != request.probe_digest:
-        return _refused_v1("containment-qualify-program-digest-mismatch")
+        return _refused_v1("containment-qualify-probe-digest-mismatch")
     val root = env_get("SystemRoot").replace("\\", "/")
     val profile = env_get("USERPROFILE").replace("\\", "/")
     if root == "" or profile == "": return _refused_v1("containment-qualify-environment-missing")
