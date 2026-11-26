@@ -141,6 +141,11 @@ impl HirLowering:
                 if self.binding_joined_result(joined) and hir_const_type_settled(joined):
                     return joined
                 return unknown
+            case HirExprKind.MatchCase(_, _):
+                val joined_match: HirType = self.binding_branch_join(source_kind, span)
+                if not binding_type_is_unknown(joined_match) and hir_const_type_settled(joined_match):
+                    return joined_match
+                return unknown
             case HirExprKind.Field(field_base, field_name, _):
                 if field_name == "ok" or field_name == "err":
                     val base_ty = self.binding_kind_type(field_base.kind, span)
@@ -165,10 +170,10 @@ impl HirLowering:
             return declared_return
         if val instantiated_direct = self.instantiated_direct_call_return_kind(source_kind):
             return instantiated_direct
-        if val method_return = hir_binding_method_call_return_kind(source_kind, self.symbols):
-            return method_return
         if val instantiated_return = self.instantiated_method_call_return_kind(source_kind):
             return instantiated_return
+        if val method_return = hir_binding_method_call_return_kind(source_kind, self.symbols):
+            return method_return
         unknown
 
     # Branch-tail / payload type for the `if` join (`type_` is read only when
@@ -202,7 +207,7 @@ impl HirLowering:
                 return HirType(kind: HirTypeKind.Str, span: span)
             case HirExprKind.BoolLit(_):
                 return HirType(kind: HirTypeKind.Bool, span: span)
-            case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _):
+            case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _) | HirExprKind.MatchCase(_, _):
                 return self.binding_branch_join(tail_kind, span)
             case HirExprKind.Field(field_base, field_name, _):
                 val field_type: HirType = self.binding_field_type(field_base.kind, field_name, span)
@@ -288,11 +293,58 @@ impl HirLowering:
             case _:
                 self.lambda_param_hint = HirType(kind: HirTypeKind.Error, span: arg_value.span)
 
+    fn binding_expr_diverges(expr_kind: HirExprKind) -> bool:
+        val bare_kind = hir_binding_transparent_kind(expr_kind)
+        match bare_kind:
+            case HirExprKind.Return(_) | HirExprKind.Break(_, _) | HirExprKind.Continue(_) | HirExprKind.Throw(_): true
+            case HirExprKind.Block(inner_block): self.binding_block_diverges(inner_block)
+            case _: false
+
+    fn binding_block_diverges(block: HirBlock) -> bool:
+        if block.has:
+            return self.binding_expr_diverges(block.value.kind)
+        if block.stmts.len() == 0:
+            return false
+        val last_stmt: HirStmt = block.stmts[block.stmts.len() - 1]
+        match last_stmt.kind:
+            case HirStmtKind.Expr(last_expr):
+                return self.binding_expr_diverges(last_expr.kind)
+            case _: false
+
     # Join of every branch tail of an `if` / `if-elif` with an else branch
-    # (unknown when there is no else or a branch has no value).
+    # or non-diverging `match` arms (unknown when there is no else or a
+    # non-diverging branch has no value).
     fn binding_branch_join(if_kind: HirExprKind, span: Span) -> HirType:
         val unknown = HirType(kind: HirTypeKind.Error, span: span)
         match if_kind:
+            case HirExprKind.MatchCase(_, arms):
+                if arms.len() == 0:
+                    return unknown
+                var has_value_arm = false
+                var joined_match: HirType = unknown
+                for arm_raw in arms:
+                    val arm: HirMatchArm = arm_raw
+                    val arm_body: HirBlock = arm.body
+                    if self.binding_block_diverges(arm_body):
+                        continue
+                    if not arm_body.has:
+                        return unknown
+                    var arm_declared: HirType = unknown
+                    if arm_body.value.has_type_:
+                        arm_declared = arm_body.value.type_
+                    val arm_type: HirType = self.binding_block_value_type(arm_body.value.kind, arm_declared, span)
+                    if binding_type_is_unknown(arm_type):
+                        return unknown
+                    if not has_value_arm:
+                        joined_match = arm_type
+                        has_value_arm = true
+                    else:
+                        joined_match = self.binding_join_type(arm_type, joined_match, span)
+                        if binding_type_is_unknown(joined_match):
+                            return unknown
+                if has_value_arm:
+                    return joined_match
+                return unknown
             case HirExprKind.If(_, then_, else_):
                 val else_opt: HirBlock? = else_
                 if val else_block = else_opt:

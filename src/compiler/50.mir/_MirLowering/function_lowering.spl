@@ -941,14 +941,15 @@ impl MirLowering:
                                         self.array_element_struct_syms[local.id] = if elem_cls_key != "": elem_cls_key else: self.struct_value_provenance_key(element)
                             case _:
                                 ()
-                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
-                    # An Any (or erased generic `T`) parameter arrives as a
-                    # tagged RuntimeValue: every caller boxes into the slot
-                    # (the `Any | TypeParam` arms of lower_call). Keep that representation
-                    # fact after its MIR type erases to i64 so comparison,
-                    # rendering and scalar-slot consumers decode instead of
-                    # treating the tag bits as a raw scalar.
+                case HirTypeKind.Any:
+                    # An Any parameter arrives as a tagged RuntimeValue: every
+                    # caller boxes into the slot.
                     self.mark_runtime_value_local(local.id)
+                case HirTypeKind.TypeParam(_, _):
+                    # Free/Dict-erased `T` parameters arrive boxed, whereas
+                    # non-Dict class-erased containers receive raw/bitcast words.
+                    if not self.is_class_erased_container_fn_v1(fn_.is_method, fn_.symbol):
+                        self.mark_runtime_value_local(local.id)
                 case Isolated(inner):
                     # WP-F0 (resource ownership unblock, 2026-08-06): an
                     # iso-wrapped struct param (`x: iso S`) has type
@@ -1258,11 +1259,14 @@ impl MirLowering:
                         if val narrowed_tail = self.option_payload_for_plain_sink(returned_tail_local, tail_optional_hir):
                             returned_tail_local = narrowed_tail
                 match tail_return_type.kind:
-                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
-                        # `-> Any` and `-> T` (erased generic) share the tagged
-                        # ABI boundary. A raw scalar tail must be boxed before
-                        # the caller records the result as a RuntimeValue local.
+                    case HirTypeKind.Any:
                         returned_tail_local = self.box_runtime_value(tail_local)
+                    case HirTypeKind.TypeParam(_, _):
+                        # `-> Any` and free/Dict-erased `-> T` share the tagged
+                        # ABI boundary; non-Dict class-erased containers return
+                        # raw/bitcast `T` words directly.
+                        if not self.is_class_erased_container_fn_v1(fn_.is_method, fn_.symbol):
+                            returned_tail_local = self.box_runtime_value(tail_local)
                     case HirTypeKind.Optional(_):
                         # `-> T?` implicit tail: the same canonical-handle
                         # promotion the explicit `return` path applies

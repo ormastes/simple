@@ -240,3 +240,15 @@ workaround stays. A `Result<T, E>` read (`Store.get`) was traced balanced: one
    `AttrI64StoreV1` as an optional non-generic concrete `i64` store without the
    `@workaround` marker). Updated `wa_src_lane4_workaround_audit_spec.spl`,
    `attribute_layouts_spec.spl`, and `generic_method_erased_i64_boundary_spec.spl`.
+
+## WA-P3 Addendum: Bare `-> T`, Field/Param Bitcast Coherence, and Unannotated `.poll()` (2026-11-26)
+
+- **Scope Item 2 (`Bag<T>.take -> T` on `#erased-dict-class`)**:
+  - Removed the `#erased-ret-veto` short-circuit in `erased_method_param_types_v1` and `instantiate_method_return_hir_v1` (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`), and decoded `#erased-dict-class` bare `-> T` call results once via `decode_runtime_value` in `coerce_erased_bare_method_result_v1` while keeping non-Dict class-erased containers raw/bitcast.
+- **Generic Class Field Store/Read and `CellF<f64>` / `Box<f64>`**:
+  - `src/compiler/50.mir/_MirLowering/function_lowering.spl` and `expr_dispatch.spl` (`lower_return_expr`): skip `mark_runtime_value_local` on bare `TypeParam` parameters and `box_runtime_value` on bare `TypeParam` returns inside non-Dict/non-array/non-slice bare-`T`/`T?`-field class-erased containers (`is_class_erased_container_fn_v1`), keeping raw/bitcast `i64`/`f64` coherent with `Box.put`/`Cell.set`/`c.v = ...`.
+  - `src/compiler/50.mir/_MirLowering/module_lowering.spl` (`register_local_generic_method_params_v1`): populate parameter defaults for single-module `lower_module` generic methods so `CellF<f64>.set(2.5)` bitcasts even without `register_fn_prescan`.
+  - `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`, `mir_lowering_stmts.spl`, and `switch_operators_calls.spl`: recover cross-module `provider_method_row_keys` return signatures (`semantic_call_hir_return_type_v1`), mark non-Dict `Optional(TypeParam)` returns and field reads with `native_trait_concrete_option_locals`, adapt concrete `SetField` / `StructConstruct` bare `TypeParam` field writes (`adapt_class_erased_field_store_v1`), and prevent argumentless/erased `Named(_, [])` or `TypeParam` locals/expressions from shadowing concrete `Named(sym, [...])` receiver types.
+- **Related `20.hir` Unannotated Enum-Match Owner Propagation**:
+  - Updated `src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl`, `expression_core.spl`, and `statements.spl` for unannotated `val fut = Future.from_value(task()); match fut.poll(): case Poll.Ready(v):`, chained `match Future.from_value(task()).poll():`, and unannotated `match` bindings (`TaskPollResult.Ready(outcome)`).
+- **Note on out-of-scope backend behavior (`60.mir_opt`/`70.backend`)**: an `f64` `BinOp` temporary live across a later branching call gets slotted by `ssa_alloca_transform_blocks` with a fresh local ID absent from `fn_.locals`, causing `get_local_type` to fall back to `i64`; kept out of scope for this `50.mir` fix.

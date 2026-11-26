@@ -2681,10 +2681,7 @@ impl MirLowering:
         a generic-class method's bare `T` params were invisible to the caller
         and arrived raw while the erased body's readers decode. Publish which
         params are bare `T` ('1' per slot, receiver first) so the call site
-        can encode them. A method returning bare `T` or `[T]` (anything other
-        than `Result<T, E>` or `T?`) vetoes its whole class: its tail re-boxes
-        the decoded word unless the caller decodes it, so an encoded argument
-        would read back x8."""
+        can encode them."""
         var owner = ""
         var class_marker = ""
         if val owner_info = module_symbols.get_symbol_raw(fn_symbol.id):
@@ -2692,12 +2689,6 @@ impl MirLowering:
             val owner_parts = owner.split(".")
             class_marker = (owner_info.defining_module ?? "") + "|" + owner_parts[owner_parts.len() - 1] + "#erased-dict-class"
         if owner == "": return
-        var returns_bare_t = false
-        match fn_return_type.kind:
-            case HirTypeKind.Result(_, _) | HirTypeKind.Optional(_): ()
-            case _: returns_bare_t = self.hir_type_mentions_type_param_v1(fn_return_type, module_symbols)
-        if returns_bare_t:
-            bootstrap_fn_ret_err_shape_register(owner + "#erased-ret-veto", "1")
         if (bootstrap_fn_ret_err_shape_lookup(class_marker) ?? "") != "1":
             return
         var erased_flags = ""
@@ -2713,6 +2704,29 @@ impl MirLowering:
             bootstrap_fn_ret_err_shape_register(mir_method_erased_params_key_v1(call_name), erased_flags)
             bootstrap_fn_ret_err_shape_register(mir_method_erased_params_key_v1(dotted), erased_flags)
             bootstrap_fn_ret_err_shape_register(mir_method_erased_params_key_v1(dotted.replace("-", "_")), erased_flags)
+
+    me register_local_generic_method_params_v1(module_name: text, module_symbols: SymbolTable, func: HirFunction, call_name: text):
+        if not func.is_method or func.is_static:
+            return
+        var has_type_param = false
+        for p in func.params:
+            if self.hir_type_mentions_type_param_v1(p.type_, module_symbols):
+                has_type_param = true
+        if not has_type_param:
+            return
+        val default_owner = mir_layout_canonical_module_name(module_name)
+        var sym_name = func.name
+        if val sym = module_symbols.get_symbol_raw(func.symbol.id):
+            sym_name = sym.name
+        bootstrap_fn_param_defaults_register(sym_name, func.params, default_owner)
+        val sym_dotted = sym_name.replace("::", ".")
+        if sym_dotted != sym_name:
+            bootstrap_fn_param_defaults_register(sym_dotted, func.params, default_owner)
+        if call_name != "" and call_name != sym_name:
+            bootstrap_fn_param_defaults_register(call_name, func.params, default_owner)
+            val call_dotted = call_name.replace("::", ".")
+            if call_dotted != call_name:
+                bootstrap_fn_param_defaults_register(call_dotted, func.params, default_owner)
 
     me register_builtin_enum_seeds():
         """Register the built-in Result/Option variant and runtime-identity
@@ -3342,6 +3356,7 @@ impl MirLowering:
             function_names.push(provider_call_name)
             if func.is_method and not func.is_static:
                 self.register_erased_method_params_v1(module.symbols, func.symbol, provider_call_name, func.params, func.return_type)
+                self.register_local_generic_method_params_v1(module.name, module.symbols, func, provider_call_name)
         self.current_function_names = function_names
         mir_section_profile_mark("p3_links", module.name)
         # Cross-module prescans keep the first definition. The module being
