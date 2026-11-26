@@ -4919,10 +4919,20 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
   shifted by 66 rows on both sides; that block has the same extra top row at 63, outside
   its own background, so a per-block ink probe misses it. It is raster phase, pinned as AC-10/AC-11 in the in-development
   `glyph_vertical_raster_phase_chrome159_spec.spl` (raster lane).
-- Open, in-development: k=4 span backgrounds use Chrome's device content area
-  (`inline_box_device_content_area_chrome159_spec.spl`, 150..221). Pinned by
+- k=4 span backgrounds use Chrome's device content area (green since #11895, see the
+  2026-11-26 span device content area section). Pinned by
   `inline_element_used_font_line_box_chrome159_spec.spl` (5/5 head, 0/5 base).
 - Perf (k=4, 3 alternated rounds, seed1126b, interpreter): intl / stack / html flat, md5
   equal. The span page wall is 26.00 -> 25.97 s (doc 22531 -> 23580 ms because the run is
   now shaped, paint 2366 -> 1327 ms) and RSS 1958 -> 1125 MB, because the Noto Sans SC face
   is never loaded for an Arabic run.
+
+## 2026-11-26 — span background at device scale (span device content area lane)
+
+- `inline_box_device_content_area_chrome159_spec.spl` is green on origin `269d1b561bb`
+  with no code change: the lineheight3 lane (#11895) made k=4 span backgrounds the
+  device content area (Liberation Sans 64 px: 58 + 14 = 72 rows from the device
+  baseline). Chrome 159: Arabic span 150..221, Devanagari 256..327, Latin
+  `Hx <span>Hxgl</span>` 121..192 (now AC-2). Tag removed.
+- Trap: check an in-development spec on current origin before starting a fix lane;
+  a neighbouring lane can close it.
