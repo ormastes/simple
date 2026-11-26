@@ -1,0 +1,61 @@
+# Regression spec: test_runner sidecar locking, parent directory creation,
+# handle type correctness, and unique async capture filenames.
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, dir_remove_all, file_exists, file_read, file_unlock, getpid, time_now_unix_micros}
+use std.test_runner.test_db_lock.{TestDbFileLock}
+use std.test_runner.test_db_io.{read_db_file, write_db_file_locked, update_db_file}
+use std.test_runner.test_runner_db.{acquire_file_lock, atomic_update_file_test_db}
+use std.test_runner.test_runner_async.{create_temp_files, cleanup_temp_files}
+
+describe "test_runner sidecar lock and temp file uniqueness":
+    it "locks a sidecar .lock file so reads and atomic writes work while locked":
+        val root = "build/test_tmp/tr_lock_reg_{getpid()}_{time_now_unix_micros()}"
+        val _mk = dir_create_all(root)
+        val db_path = "{root}/nested/test_db.sdn"
+
+        expect(write_db_file_locked(db_path, "first\n").is_ok()).to_equal(true)
+        expect(file_exists("{db_path}.lock")).to_equal(true)
+        expect(update_db_file(db_path, fn(c: text) -> text: c + "second\n").is_ok()).to_equal(true)
+        expect(file_read(db_path)).to_equal("first\nsecond\n")
+
+        val lock_opt = TestDbFileLock.acquire(db_path, 5)
+        expect(lock_opt.is_some()).to_equal(true)
+        var lock: TestDbFileLock = lock_opt
+        expect(lock.is_valid()).to_equal(true)
+        # Reading the data file while its sidecar lock is held must still work
+        match read_db_file(db_path):
+            case Ok(content): expect(content).to_equal("first\nsecond\n")
+            case Err(err): fail("read_db_file failed while sidecar locked: {err}")
+        expect(lock.release()).to_equal(true)
+        val _rm = dir_remove_all(root)
+
+    it "creates missing parents in acquire_file_lock and appends sealed test run rows":
+        val root = "build/test_tmp/tr_runs_reg_{getpid()}_{time_now_unix_micros()}"
+        val runs_path = "{root}/deep/dir/test_db_runs.sdn"
+        match acquire_file_lock(runs_path, 5):
+            case Ok(handle):
+                expect(handle >= 0).to_equal(true)
+                expect(file_exists("{runs_path}.lock")).to_equal(true)
+                expect(file_unlock(handle)).to_equal(true)
+            case Err(err):
+                fail("acquire_file_lock failed: {err}")
+
+        val r1 = atomic_update_file_test_db(runs_path, 1, "10", "20", 3, 2, 1, 0)
+        expect(r1.is_ok()).to_equal(true)
+        val r2 = atomic_update_file_test_db(runs_path, 2, "21", "30", 5, 5, 0, 0)
+        expect(r2.is_ok()).to_equal(true)
+        val body = file_read(runs_path)
+        expect(body).to_contain("1, \"10\", \"20\"")
+        expect(body).to_contain("2, \"21\", \"30\"")
+        val _rm = dir_remove_all(root)
+
+    it "produces distinct temp capture filenames across rapid calls and cleans them up":
+        val (out1, err1) = create_temp_files("sample_spec.spl")
+        val (out2, err2) = create_temp_files("sample_spec.spl")
+        expect(out1 == out2).to_equal(false)
+        expect(err1 == err2).to_equal(false)
+        cleanup_temp_files(out1, err1)
+        cleanup_temp_files(out2, err2)
+        expect(file_exists(out1)).to_equal(false)
+        expect(file_exists(out2)).to_equal(false)

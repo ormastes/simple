@@ -4,6 +4,8 @@
 
 use std.test_runner.test_runner_types.{TestRunResult}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_lock, file_unlock}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.common.path_pure.{path_dirname}
 use std.nogc_sync_mut.database.csm_seal.{csm_write_sealed}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.log.{debug}
@@ -61,12 +63,12 @@ fn atomic_update_file_test_db(
     if _is_debug_enabled():
         debug("test", "Writing to {path}")
     # Acquire lock
-    val lock_path_result = acquire_file_lock(path: path, timeout_secs: 10)
-    val lock_path = match lock_path_result:
+    val lock_handle_result = acquire_file_lock(path: path, timeout_secs: 10)
+    val lock_handle = match lock_handle_result:
         Ok(value):
             value
-        Err(_e):
-            return Err("Failed to acquire lock")
+        Err(reason):
+            return Err(reason)
 
     # Read existing content
     var content = ""
@@ -94,19 +96,23 @@ fn atomic_update_file_test_db(
     val success = csm_write_sealed(path, new_content)
 
     # Release lock
-    file_unlock(lock_path)
+    file_unlock(lock_handle)
 
     if success:
         return Ok(())
     else:
         return Err("Failed to write file")
 
-# Acquire file lock with timeout
-fn acquire_file_lock(path: text, timeout_secs: i64) -> Result<str, str>:
-    # Note: file_lock returns Result, we just pass it through
-    # In the future when try-catch is implemented, we can add error handling here
-    val lock_path = file_lock(path, timeout_secs)
-    Ok(lock_path)
+# Acquire sidecar file lock with timeout, creating missing parent directories.
+fn acquire_file_lock(path: text, timeout_secs: i64) -> Result<i64, text>:
+    val parent = path_dirname(path)
+    if parent != "" and parent != ".":
+        dir_create_all(parent)
+    val lock_path = "{path}.lock"
+    val handle = file_lock(lock_path, timeout_secs)
+    if handle < 0:
+        return Err("Failed to acquire lock for {path} within {timeout_secs}s")
+    Ok(handle)
 
 fn micros_to_iso(micros: i64) -> text:
     # Simple approximation - just use the unix timestamp

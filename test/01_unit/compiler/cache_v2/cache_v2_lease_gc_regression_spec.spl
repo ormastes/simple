@@ -1,0 +1,141 @@
+# Regression tests for cache_v2 lease, GC, admission, disk cache bound, and CAS batch transactions.
+
+use std.spec.*
+use compiler.driver.cache.lease.lease.{
+    CacheLease, lease_acquire, lease_release, lease_read, lease_heartbeat,
+    lease_is_reclaimable, lease_list_active, lease_reclaim_stale, lease_dir,
+    lease_serialize
+}
+use compiler.driver.cache.gc.fast_gc.{move_to_trash, gc_expire_tmp, gc_expire_quarantine, gc_delete_trash}
+use compiler.driver.cache.gc.admission.{admission_check}
+use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_source_record_v1}
+use compiler.driver.cache.metadata.cache_limits.{CacheLimits, CacheRetentionLimitsV1}
+use compiler.driver.cache.cas_batch_transaction.{cas_batch_begin_v1, cas_batch_abort_v1}
+use std.io_runtime.{dir_create_all, dir_exists, dir_remove_all, file_write, file_exists, getpid, time_now_unix_micros}
+
+fn reg_root(label: text) -> text:
+    "build/test_tmp/cache_v2_reg_{label}_{getpid()}_{time_now_unix_micros()}"
+
+fn reg_limits(max_bytes: i64) -> CacheLimits:
+    CacheLimits(
+        max_bytes: max_bytes,
+        high_watermark: 0.90,
+        low_watermark: 0.75,
+        min_free_ratio: 0.05,
+        hard_limit_ratio: 1.05,
+        tmp_hours: 24,
+        quarantine_days: 7,
+    )
+
+describe "cache_v2 lease and GC regressions":
+    it "issues unique lease ids on back-to-back acquires and ignores temp/subdir noise":
+        val root = reg_root("lease_uniq")
+        val _mk = dir_create_all(lease_dir(root))
+        val l1 = lease_acquire(root, ["m1"], ["a1"]).unwrap()
+        val l2 = lease_acquire(root, ["m2"], ["a2"]).unwrap()
+        expect(l1.lease_id == l2.lease_id).to_equal(false)
+
+        # Staging temp files and subdirectories inside leases/ must not panic or pollute active roots
+        val _tmp = file_write("{lease_dir(root)}/{l1.lease_id}.tmp.123.0", "staging")
+        val _sub = dir_create_all("{lease_dir(root)}/nested_dir")
+        val active = lease_list_active(root)
+        expect(active.len()).to_equal(2)
+
+        expect(lease_heartbeat(root, l1.lease_id)).to_equal(true)
+        val updated = lease_read(root, l1.lease_id).unwrap()
+        expect(updated.heartbeat_generation).to_equal(1)
+
+        expect(lease_release(root, l1.lease_id)).to_equal(true)
+        expect(lease_release(root, l1.lease_id)).to_equal(true)
+        expect(lease_heartbeat(root, l1.lease_id)).to_equal(false)
+        expect(lease_release(root, l2.lease_id)).to_equal(true)
+        val _rm = dir_remove_all(root)
+
+    it "reclaims invalid non-positive pid leases without false live checks":
+        val root = reg_root("lease_pid")
+        val _mk = dir_create_all(lease_dir(root))
+        val bad_zero = CacheLease(
+            lease_id: "bad-pid-zero",
+            process_id: 0,
+            created_at: 9999999999999,
+            heartbeat_generation: 0,
+            referenced_manifests: [],
+            referenced_artifacts: [],
+        )
+        val bad_neg = CacheLease(
+            lease_id: "bad-pid-neg",
+            process_id: -1,
+            created_at: 9999999999999,
+            heartbeat_generation: 0,
+            referenced_manifests: [],
+            referenced_artifacts: [],
+        )
+        expect(lease_is_reclaimable(bad_zero, 0)).to_equal(true)
+        expect(lease_is_reclaimable(bad_neg, 0)).to_equal(true)
+        val _w0 = file_write("{lease_dir(root)}/{bad_zero.lease_id}", lease_serialize(bad_zero))
+        val _w1 = file_write("{lease_dir(root)}/{bad_neg.lease_id}", lease_serialize(bad_neg))
+        expect(lease_reclaim_stale(root)).to_equal(2)
+        expect(lease_list_active(root).len()).to_equal(0)
+        val _rm = dir_remove_all(root)
+
+    it "cleans tmp, quarantine, and trash safely including sanitized filenames":
+        val root = reg_root("gc_clean")
+        val _mk_tmp = dir_create_all("{root}/tmp/nested")
+        val _mk_q = dir_create_all("{root}/quarantine/nested")
+        val _wt = file_write("{root}/tmp/stale.tmp", "tmpdata")
+        val _wq = file_write("{root}/quarantine/stale.q", "qdata")
+        val _wm = file_write("{root}/victim_file", "victim")
+
+        expect(gc_expire_tmp(root, -1)).to_equal(1)
+        expect(file_exists("{root}/tmp/stale.tmp")).to_equal(false)
+        expect(gc_expire_quarantine(root, -1)).to_equal(1)
+        expect(file_exists("{root}/quarantine/stale.q")).to_equal(false)
+
+        expect(move_to_trash(root, "{root}/victim_file")).to_equal(true)
+        expect(file_exists("{root}/victim_file")).to_equal(false)
+        expect(gc_delete_trash(root)).to_equal(1)
+        expect(gc_delete_trash(root)).to_equal(0)
+        val _rm = dir_remove_all(root)
+
+    it "rejects non-positive admission max_bytes and clamps negative write_bytes":
+        val root = reg_root("admit")
+        val _mk = dir_create_all(root)
+        val zero_res = admission_check(root, reg_limits(0), 10)
+        expect(zero_res.admitted).to_equal(false)
+        expect(zero_res.reason).to_equal("over_hard_limit")
+        val ok_res = admission_check(root, reg_limits(10000), -50)
+        expect(ok_res.admitted).to_equal(true)
+        val _rm = dir_remove_all(root)
+
+    it "generates distinct cas batch tx ids and removes tx directory on abort":
+        val root = reg_root("cas_batch")
+        val t1 = cas_batch_begin_v1(root, "", "scc-a", ["pkg-1"]).unwrap()
+        val t2 = cas_batch_begin_v1(root, "", "scc-a", ["pkg-1"]).unwrap()
+        expect(t1.transaction_id == t2.transaction_id).to_equal(false)
+        val tx1_dir = "{root}/batch-v1/transactions/{t1.transaction_id}"
+        expect(dir_exists(tx1_dir)).to_equal(true)
+        expect(cas_batch_abort_v1(t1).is_ok()).to_equal(true)
+        expect(dir_exists(tx1_dir)).to_equal(false)
+        expect(cas_batch_abort_v1(t2).is_ok()).to_equal(true)
+        val _rm = dir_remove_all(root)
+
+    it "updates per-source disk cache index safely under sidecar lock":
+        val root = reg_root("dcb")
+        val _mk = dir_create_all(root)
+        val limits = CacheRetentionLimitsV1(
+            memory_max_bytes: 1024,
+            storage_max_bytes: 1000000,
+            max_branches: 4,
+            kept_branches: ["main"],
+            versions_per_source: 2,
+            per_source_max_disk_bytes: 1000000,
+            per_source_max_memory_bytes: 1024,
+        )
+        for name in ["e1.hir", "e2.hir", "e3.hir"]:
+            val _w = file_write("{root}/{name}", "data")
+            val _r = disk_cache_source_record_v1(root, "mod-x", name, limits)
+        expect(file_exists("{root}/e1.hir")).to_equal(false)
+        expect(file_exists("{root}/e2.hir")).to_equal(true)
+        expect(file_exists("{root}/e3.hir")).to_equal(true)
+        expect(file_exists("{root}/.by-source/mod-x.idx.lock")).to_equal(true)
+        val _rm = dir_remove_all(root)
