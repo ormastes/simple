@@ -47,3 +47,13 @@ Newly found gaps: 13 windows-only `_*_v1` sosix containment helpers exported via
 (13 x 4 = 52). They are underscore-prefixed intra-package helpers, so arguably
 not public API; recorded in the baseline deliberately with a comment naming this
 bug rather than special-casing `_` names.
+
+## Known limits (Fable review, 2026-11-27)
+
+These forms are not counted yet. No variant directory uses them today, so they are latent, not live:
+- `export use m.{u, v}` without `as`.
+- A multi-line `export use m.{` brace list.
+- A blank line inside a continued `export` list: it ends the list.
+- `export {j, k}`.
+
+Also: about 200 same-class `api:` gaps are still red and not baselined. The 52 `_*_v1` rows are the only frozen `api:` rows. A follow-up should either exempt `_`-prefixed names or treat every `api:` row the same way.
