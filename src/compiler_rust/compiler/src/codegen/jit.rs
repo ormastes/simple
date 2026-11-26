@@ -70,6 +70,14 @@ impl JitCompiler {
 
         // Register runtime SFFI symbols from the provider
         register_seed_jit_runtime_symbols(&mut builder, &seed_jit_runtime_symbol_table(provider.as_ref()));
+        // Then every elf_utils name, at the address `jit_import_resolves` vouched
+        // for. Without this a seed linked without --export-dynamic spliced calls
+        // to the 81 elf_utils-only externs (rt_cranelift_*, spl_cranelift_*_v2, ...)
+        // through the interpreter. Only the seed's own JIT gets it:
+        // cranelift_sffi modules keep their runtime-table-only import contract.
+        builder.symbol_lookup_fn(Box::new(|name| {
+            crate::elf_utils::resolve_runtime_symbol(name).map(|addr| addr as *const u8)
+        }));
         #[cfg(windows)]
         builder.symbol_lookup_fn(Box::new(|name| dlsym_lookup(name)));
 
@@ -950,22 +958,28 @@ pub fn compiler_owned_symbol_resolves(name: &str) -> bool {
 
 /// True if a `Linkage::Import` symbol named `name` will resolve to a real
 /// address at JIT finalize time — i.e. it is registered by
-/// [`seed_jit_runtime_symbol_table`] or is `dlsym`-resolvable in the current
-/// process. This must match what `JitCompiler::with_provider` actually hands to
-/// `JITBuilder`: checking `provider`/`elf_utils` for a name absent from
-/// `RUNTIME_SYMBOL_NAMES` caused `rt_process_run_bounded_bytes` to pass both
-/// `exec_core`'s hybrid bridge and `unresolved_imports_called` while still
-/// finalizing to a NULL GOT slot and SIGSEGV'ing on Windows.
+/// [`seed_jit_runtime_symbol_table`], bound by `with_provider`'s elf_utils
+/// lookup fn, or is `dlsym`-resolvable in the current process. This must match
+/// what `JitCompiler::with_provider` actually hands to `JITBuilder`: accepting
+/// an elf_utils name the builder did not bind made `rt_process_run_bounded_bytes`
+/// finalize to a NULL GOT slot and SIGSEGV on Windows (b52cbe7a2b7); the lookup
+/// fn now binds every elf_utils name, so accepting them is truthful again.
 pub fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
+    jit_import_resolves_without_dlsym(provider, name) || dlsym_resolves(name)
+}
+
+/// [`jit_import_resolves`] minus the `dlsym` leg: what resolves even in a seed
+/// linked without `--export-dynamic` (a `RUSTFLAGS` env override drops the
+/// `.cargo/config.toml` rustflags that add it).
+pub fn jit_import_resolves_without_dlsym(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
     if compiler_owned_symbol(name).is_some() {
         return true;
     }
-    if simple_native_loader::RUNTIME_SYMBOL_NAMES.contains(&name)
-        && (provider.get_symbol(name).is_some() || crate::elf_utils::resolve_runtime_symbol(name).is_some())
-    {
-        return true;
-    }
-    dlsym_resolves(name)
+    // `with_provider` binds RUNTIME_SYMBOL_NAMES entries from the provider and
+    // every other import through its elf_utils lookup fn, so both legs here are
+    // exactly what JITBuilder resolves at finalize.
+    (simple_native_loader::RUNTIME_SYMBOL_NAMES.contains(&name) && provider.get_symbol(name).is_some())
+        || crate::elf_utils::resolve_runtime_symbol(name).is_some()
 }
 
 /// Whether a JIT fallback must fail the current process. `STRICT_ALL` is the

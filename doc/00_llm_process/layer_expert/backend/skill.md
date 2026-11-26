@@ -414,3 +414,12 @@ reads a boxed float as an int
   `[T].min()` links. Selfcheck: `src/runtime/test/rt_array_min_selfcheck.c`.
 - Open: a float passed to an int-typed user parameter/return disagrees across engines
   ([bug](../../../08_tracking/bug/float_passed_to_int_typed_param_or_return_engines_disagree_2026-11-24.md)).
+
+## 2026-11-26 — seed JIT binds every elf_utils name (jit-runtime-symbol-names lane)
+
+- **Fix.** `JitCompiler::with_provider` adds an elf_utils `symbol_lookup_fn`, and `jit_import_resolves_without_dlsym` accepts every name that `elf_utils::resolve_runtime_symbol` defines. The import check now passes exactly the names the builder binds.
+- **Names affected.** Before this, 81 declared `.spl` externs passed the check only through `dlsym`: 76 `rt_cranelift_*`, 3 `spl_cranelift_*_v2`, `spl_backend_plugin_run_v1` and `doctest_read_file`. On a seed without exported symbols, every call to one of them was spliced through the interpreter (`hybrid-interp-splice`).
+- **Trap: `RUSTFLAGS` drops the dynamic exports.** Setting `RUSTFLAGS` in the env replaces the `.cargo/config.toml` rustflags, which carry `--export-dynamic`. An interactive-shell build (`RUSTFLAGS=-C link-arg=-fuse-ld=mold`) therefore has 0 dynamic symbols. Check with `nm -D --defined-only <seed> | grep -c ' T '`.
+- **Scope.** The `cranelift_sffi` JIT modules keep their runtime-table-only contract: `register_seed_jit_runtime_symbols` is unchanged.
+- **Test.** `elf_utils::tests::declared_externs_with_a_runtime_definition_resolve_for_the_jit_without_dlsym`.
+- **Open.** The web catalog still splices 67 externs on both seeds. None of them is an elf_utils name: they are `rt_opengl_*`, `rt_oneapi_*`, `rt_intel_engine2d_*`, `rt_webgpu_*`, `rt_font_*`, `rt_fb_*`, `rt_bytes_alloc`, `spl_str_ptr`, `rt_text_count_codepoints_cached` and `rt_engine2d_blend_*`.

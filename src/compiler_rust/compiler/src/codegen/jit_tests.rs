@@ -672,13 +672,17 @@ fn test_jit_import_resolves_agrees_with_seed_symbol_table_and_registers_bounded_
         super::jit_import_resolves(provider.as_ref(), "rt_process_run_bounded_bytes"),
         "rt_process_run_bounded_bytes must resolve for JIT"
     );
-    // An elf_utils symbol absent from RUNTIME_SYMBOL_NAMES (and not a compiler-owned
-    // or dlsym-exported symbol) is NOT registered in JITBuilder by with_provider, so
-    // jit_import_resolves must NOT report it as resolvable.
-    if !super::dlsym_resolves("rt_cranelift_new_module") {
+    // An elf_utils symbol absent from RUNTIME_SYMBOL_NAMES is bound by
+    // with_provider's elf_utils lookup fn, so it resolves without dlsym; a name
+    // that nothing defines still does not.
+    assert!(
+        super::jit_import_resolves_without_dlsym(provider.as_ref(), "rt_cranelift_new_module"),
+        "elf_utils-only symbol must resolve through with_provider's lookup fn"
+    );
+    if !super::dlsym_resolves("rt_definitely_not_a_runtime_symbol_jitsyms") {
         assert!(
-            !super::jit_import_resolves(provider.as_ref(), "rt_cranelift_new_module"),
-            "symbol absent from RUNTIME_SYMBOL_NAMES must not claim JIT resolvability via elf_utils"
+            !super::jit_import_resolves(provider.as_ref(), "rt_definitely_not_a_runtime_symbol_jitsyms"),
+            "an undefined symbol must not claim JIT resolvability"
         );
     }
 }
