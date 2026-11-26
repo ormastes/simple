@@ -1,7 +1,7 @@
 # pure_runtime_v1: same-id race deletes the other run's view; unknown outcome reported as phase error
 
 - Found: Fable final review of pure-Simple lane P4, 2026-11-26.
-- Status: fixed 2026-11-27 (race, unknown outcome, create exclusivity, loser journal). Only the half-created-view test gap remains.
+- Status: fixed 2026-11-27 (race, unknown outcome, create exclusivity, loser journal, cross-state_root attempt root, half-created teardown spec).
 - File: `src/lib/nogc_sync_mut/container/pure_runtime_v1.spl`.
 
 ## 1. Same-id race (data loss)
@@ -26,6 +26,6 @@ Expected: allow the lifecycle edges into the outcome-unknown state and report `t
   - Effect: two same-id creates that both pass the check either share one view, or one fails with a non-`view-exists` reason and tears down the winner's view.
   - Fix: an exclusive mkdir (SOSIX `dir_create` that fails on exists), or an ownership nonce in the view journal.
 - **Loser's journal over-claims. FIXED 2026-11-27.** `_after_create_refused_v1` now also rebuilds the session journal with empty `owned_paths` on `view-exists`, so the loser's journal (still `destroyed`, status `rejected`) no longer names the winner's view dir or the attempt root. Spec: the view-exists loser asserts both are absent from its `owned_paths`.
-- **Untested path.** A failure after `dir_create_all(view_dir)` (a truly half-created view) has no spec.
+- **Untested path. CLOSED 2026-11-27.** Every file `_sv_create_with` writes after the claim (`journal.sdn`, `upper/`, `view.sdn`) lives INSIDE the claimed `view_dir`, so a spec cannot pre-create a blocker there, and quota/id/store are validated before the mkdir. No failure after the claim can be forced through `storage_view_v1_create` without product changes. The spec instead builds the real on-disk state of such a failure (an empty claimed `view_dir` and a partial attempt root, no view) and runs `_fail_prepare_v1` over it: both dirs are removed and the id runs again.
 - **Fixed 2026-11-27:** `_prepare_v1` also refuses a `view_dir` that is a regular file, so that case no longer reaches create and leaks the loser's own attempt root.
-- **Still open:** a racer with the same `view_root` but a different `state_root`, if admission allows it, would still blank an attempt root it created. This is fail-closed: it leaves a permanent `attempt-exists`, with no data loss.
+- **Cross-state_root racer. FIXED 2026-11-27.** Admission can allow it: `evidence.roots_digest` binds evidence to one (state_root, view_root) pair, so two runs with the same id and `view_root` but different `state_root` can each hold valid evidence. The loser's `view-exists` then blanked an attempt root it had created, leaking it with a permanent `attempt-exists`. Fix: `_prepare_v1` now claims the attempt root with an exclusive `dir_create_new` (existing -> `attempt-exists`, nothing touched), so after the claim it is provably this run's, and `_after_create_refused_v1` keeps it owned (journal and teardown) while still disowning only the winner's `view_dir`. This replaces a created-by-me flag, which the exclusive claim makes redundant. Specs: loser with its own attempt root removes it and leaves the winner's view and attempt intact; a second run on a claimed attempt root is refused without touching it.
