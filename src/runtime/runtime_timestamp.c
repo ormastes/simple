@@ -11,6 +11,13 @@ extern int64_t rt_time_now_nanos(void);
 
 #if defined(_MSC_VER)
 #define RT_TIME_THREAD_LOCAL __declspec(thread)
+#elif defined(SIMPLE_RUNTIME_DYNAMIC_TLS)
+/* The Rust runtime crate also ships as a dlopen'ed GPU provider DSO. An
+ * initial-exec variable marks that DSO DF_STATIC_TLS, so glibc must fit its
+ * WHOLE TLS block (~72 KiB with the Rust thread-locals) into the static-TLS
+ * surplus and dlopen fails with "cannot allocate memory in static TLS block".
+ * The core-C/Stage4 archive keeps initial-exec (no __tls_get_addr import). */
+#define RT_TIME_THREAD_LOCAL _Thread_local
 #else
 #define RT_TIME_THREAD_LOCAL _Thread_local __attribute__((tls_model("initial-exec")))
 #endif

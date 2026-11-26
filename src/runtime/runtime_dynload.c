@@ -13,6 +13,8 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #if defined(__linux__)
@@ -76,6 +78,12 @@ typedef struct SimpleGpuProviderState {
     const SimpleGpuProviderAbiV1 *api;
     int authenticated;
     SimpleGpuProviderPhaseV1 phase;
+    /* Thread that set LOADING; meaningful only while phase == LOADING. */
+#ifdef _WIN32
+    DWORD loader_thread;
+#else
+    pthread_t loader_thread;
+#endif
 } SimpleGpuProviderState;
 
 typedef struct SimpleGpuCallPinV1 {
@@ -116,6 +124,41 @@ static void simple_gpu_lock(void) {
 static void simple_gpu_unlock(void) {
     atomic_flag_clear_explicit(&simple_gpu_provider_lock, memory_order_release);
 }
+
+#ifdef _WIN32
+static void simple_gpu_mark_loader(SimpleGpuProviderState *state) {
+    state->loader_thread = GetCurrentThreadId();
+}
+static int simple_gpu_is_loader(const SimpleGpuProviderState *state) {
+    return state->loader_thread == GetCurrentThreadId();
+}
+static void simple_gpu_yield(void) { SwitchToThread(); }
+#else
+static void simple_gpu_mark_loader(SimpleGpuProviderState *state) {
+    state->loader_thread = pthread_self();
+}
+static int simple_gpu_is_loader(const SimpleGpuProviderState *state) {
+    return pthread_equal(state->loader_thread, pthread_self());
+}
+static void simple_gpu_yield(void) { sched_yield(); }
+
+/* A fork child has only the forking thread: a load another thread had in
+ * flight can never finish there, and the lock may be held by a thread that
+ * no longer exists. Release the lock and fail any in-flight load so the
+ * child's callers see "unavailable" instead of waiting forever. */
+static void simple_gpu_atfork_child(void) {
+    size_t i;
+    atomic_flag_clear_explicit(&simple_gpu_provider_lock, memory_order_release);
+    for (i = 0; i < sizeof(simple_gpu_providers) / sizeof(simple_gpu_providers[0]); i++) {
+        if (simple_gpu_providers[i].phase == SIMPLE_GPU_PROVIDER_LOADING_V1)
+            simple_gpu_providers[i].phase = SIMPLE_GPU_PROVIDER_FAILED_V1;
+    }
+}
+
+__attribute__((constructor)) static void simple_gpu_register_atfork(void) {
+    (void)pthread_atfork(NULL, NULL, simple_gpu_atfork_child);
+}
+#endif
 
 #if defined(__linux__)
 /* dlopen caches loaded objects by pathname even after a caller closes its
@@ -424,6 +467,20 @@ static int simple_gpu_load_v1(SimpleGpuProviderState *state) {
     int snapshot_fd = -1;
 
     simple_gpu_lock();
+    /* A concurrent first call must not report "unavailable" while another
+     * thread is still loading: yield and re-check the lock-guarded phase until
+     * the loader publishes ACTIVE or a terminal state. A re-entrant call from
+     * the loader itself (e.g. a provider constructor calling back) cannot wait
+     * on itself, so it reports "unavailable" as before. */
+    while (state->phase == SIMPLE_GPU_PROVIDER_LOADING_V1) {
+        if (simple_gpu_is_loader(state)) {
+            simple_gpu_unlock();
+            return 0;
+        }
+        simple_gpu_unlock();
+        simple_gpu_yield();
+        simple_gpu_lock();
+    }
     if (state->phase == SIMPLE_GPU_PROVIDER_ACTIVE_V1) {
         simple_gpu_unlock();
         return 1;
@@ -433,6 +490,7 @@ static int simple_gpu_load_v1(SimpleGpuProviderState *state) {
         return 0;
     }
     state->phase = SIMPLE_GPU_PROVIDER_LOADING_V1;
+    simple_gpu_mark_loader(state);
     simple_gpu_unlock();
 
     path = getenv(state->path_env);
@@ -1719,6 +1777,137 @@ int64_t rt_cuda_launch_kernel_ex(int64_t module, const uint8_t *func_name_ptr, u
         shared_bytes, stream, args_ptr);
     simple_gpu_call_release_v1(&pin);
     return result;
+}
+
+/* Device query, context, memory, module, launch and f64-kernel surface: the
+ * rest of `src/lib/nogc_sync_mut/cuda/sffi.spl`. Same contract as E2 above —
+ * symbol names and ABI match cuda_runtime.rs 1:1, and the unavailable values
+ * are the Rust `not(feature = "cuda")` twins' (-3, except device_compute_
+ * capability/device_identity 0 and device_name "No CUDA"). Without these a
+ * native program that queries a device does not link
+ * (native_c_runtime_missing_cuda_provider_forwarders_2026-11-22). */
+#define GPU_CALL5(ret, name, bit, provider_name, unavailable, t1, t2, t3, t4, t5) \
+    ret name(t1 a1, t2 a2, t3 a3, t4 a4, t5 a5) { typedef ret (*Fn)(t1,t2,t3,t4,t5); SimpleGpuCallPinV1 pin; ret result; \
+        if (!simple_gpu_call_acquire_v1(bit, provider_name, &pin)) return unavailable; \
+        result = ((Fn)pin.symbol)(a1,a2,a3,a4,a5); simple_gpu_call_release_v1(&pin); return result; }
+GPU_CALL1(int64_t, rt_cuda_device_get, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_get", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_device_compute_capability, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_compute_capability", 0, int64_t)
+GPU_CALL1(int64_t, rt_cuda_device_identity, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_identity", 0, int64_t)
+GPU_CALL1(int64_t, rt_cuda_ctx_create, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_create", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_ctx_set_current, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_set_current", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_ctx_destroy, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_destroy", -3, int64_t)
+GPU_CALL0(int64_t, rt_cuda_ctx_synchronize, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ctx_synchronize", -3)
+GPU_CALL1(int64_t, rt_cuda_mem_free, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_mem_free", -3, int64_t)
+GPU_CALL3(int64_t, rt_cuda_memcpy_htod, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_htod", -3, int64_t, int64_t, int64_t)
+GPU_CALL3(int64_t, rt_cuda_memcpy_dtod, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_dtod", -3, int64_t, int64_t, int64_t)
+GPU_CALL3(int64_t, rt_cuda_memset, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memset", -3, int64_t, int64_t, int64_t)
+GPU_CALL5(int64_t, rt_cuda_f64_binary_op, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_binary_op", -3, int64_t, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL3(int64_t, rt_cuda_f64_sum, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_sum", -3, int64_t, int64_t, int64_t)
+GPU_CALL4(int64_t, rt_cuda_f64_minmax, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_minmax", -3, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL5(int64_t, rt_cuda_f64_sum_axis, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_sum_axis", -3, int64_t, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL4(int64_t, rt_cuda_f64_scalar_div, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_scalar_div", -3, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL5(int64_t, rt_cuda_f64_slice_1d, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_slice_1d", -3, int64_t, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL2(int64_t, rt_cuda_module_load_data_bytes, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load_data_bytes", -3, int64_t, int64_t)
+GPU_CALL1(int64_t, rt_cuda_module_unload, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_unload", -3, int64_t)
+GPU_CALL0(int64_t, rt_cuda_sync, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_sync", -3)
+/* A Simple `text` argument is (bytes, byte length), as in launch_kernel_ex. */
+GPU_CALL2(int64_t, rt_cuda_module_load, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load", -3, const uint8_t *, uint64_t)
+GPU_CALL2(int64_t, rt_cuda_module_load_data, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load_data", -3, const uint8_t *, uint64_t)
+#undef GPU_CALL5
+
+int64_t rt_cuda_f64_slice_2d(int64_t dst, int64_t src, int64_t source_cols,
+                             int64_t row_start, int64_t row_step, int64_t row_count,
+                             int64_t col_start, int64_t col_step, int64_t col_count) {
+    typedef int64_t (*Fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
+                          int64_t, int64_t, int64_t, int64_t);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_slice_2d", &pin))
+        return -3;
+    result = ((Fn)pin.symbol)(dst, src, source_cols, row_start, row_step, row_count,
+        col_start, col_step, col_count);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
+/* The provider's name pointer is provider-owned and may be unmapped once the
+ * pin is released (unload/reload), so copy it while pinned into a per-thread
+ * runtime-owned buffer. Valid until this thread's next call; 256 bytes is
+ * cuDeviceGetName's buffer in cuda_runtime.rs. */
+#if defined(_MSC_VER)
+#define SIMPLE_GPU_THREAD_LOCAL __declspec(thread)
+#else
+#define SIMPLE_GPU_THREAD_LOCAL _Thread_local
+#endif
+const char *rt_cuda_device_name(int64_t device) {
+    typedef const char *(*Fn)(int64_t);
+    static SIMPLE_GPU_THREAD_LOCAL char name_copy[256];
+    SimpleGpuCallPinV1 pin;
+    const char *name;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_device_name", &pin))
+        return "No CUDA";
+    name = ((Fn)pin.symbol)(device);
+    if (name) {
+        strncpy(name_copy, name, sizeof(name_copy) - 1);
+        name_copy[sizeof(name_copy) - 1] = '\0';
+    } else {
+        name_copy[0] = '\0';
+    }
+    simple_gpu_call_release_v1(&pin);
+    return name ? name_copy : "No CUDA";
+}
+#undef SIMPLE_GPU_THREAD_LOCAL
+
+/* `func_name: text` is (bytes, byte length), exactly as launch_kernel_ex. */
+int64_t rt_cuda_launch_kernel(int64_t module, const uint8_t *func_name_ptr, uint64_t func_name_len,
+                              int64_t grid_x, int64_t grid_y, int64_t grid_z,
+                              int64_t block_x, int64_t block_y, int64_t block_z,
+                              int64_t args_ptr) {
+    typedef int64_t (*Fn)(int64_t, const uint8_t *, uint64_t, int64_t, int64_t,
+                          int64_t, int64_t, int64_t, int64_t, int64_t);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_launch_kernel", &pin))
+        return -3;
+    result = ((Fn)pin.symbol)(module, func_name_ptr, func_name_len,
+        grid_x, grid_y, grid_z, block_x, block_y, block_z, args_ptr);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
+int64_t rt_cuda_launch_kernel_name(int64_t module, int64_t func_name_ptr, int64_t func_name_len,
+                                   int64_t grid_x, int64_t grid_y, int64_t grid_z,
+                                   int64_t block_x, int64_t block_y, int64_t block_z,
+                                   int64_t args_ptr) {
+    typedef int64_t (*Fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
+                          int64_t, int64_t, int64_t, int64_t, int64_t);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_launch_kernel_name", &pin))
+        return -3;
+    result = ((Fn)pin.symbol)(module, func_name_ptr, func_name_len,
+        grid_x, grid_y, grid_z, block_x, block_y, block_z, args_ptr);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
+/* Pure code -> name table, identical to cuda_runtime.rs's (it needs no
+ * driver), so it answers the same with or without a provider. */
+const char *rt_cuda_get_error_string(int64_t error_code) {
+    switch (error_code) {
+    case 0: return "CUDA_SUCCESS";
+    case -1: return "CUDA_ERROR_INVALID_VALUE";
+    case -2: return "CUDA_ERROR_OUT_OF_MEMORY";
+    case -3: return "CUDA_ERROR_NOT_INITIALIZED";
+    case -100: return "CUDA_ERROR_NO_DEVICE";
+    case -200: return "CUDA_ERROR_INVALID_IMAGE";
+    case -218: return "CUDA_ERROR_INVALID_PTX";
+    case -301: return "CUDA_ERROR_FILE_NOT_FOUND";
+    case -500: return "CUDA_ERROR_NOT_FOUND";
+    case -700: return "CUDA_ERROR_ILLEGAL_ADDRESS";
+    case -701: return "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES";
+    default: return "CUDA_ERROR_UNKNOWN";
+    }
 }
 
 GPU_CALL0(int64_t, rt_vulkan_is_available, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_provider_is_available", 0)
