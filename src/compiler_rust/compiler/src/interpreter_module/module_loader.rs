@@ -401,6 +401,17 @@ fn group_import_names(target: &ImportTarget) -> Option<Vec<String>> {
     }
 }
 
+/// Names an export list makes visible to importers: an `a as b` entry publishes
+/// only `b`; the source name `a` stays the source module's own symbol.
+fn published_target_names(target: &ImportTarget) -> Vec<String> {
+    match target {
+        ImportTarget::Single(name) => vec![name.clone()],
+        ImportTarget::Aliased { alias, .. } => vec![alias.clone()],
+        ImportTarget::Group(items) => items.iter().flat_map(published_target_names).collect(),
+        ImportTarget::Glob => Vec::new(),
+    }
+}
+
 fn export_target_names(target: &ImportTarget) -> Vec<String> {
     match target {
         ImportTarget::Single(name) => vec![name.clone()],
@@ -934,7 +945,7 @@ fn collect_provided_names(
     for item in items {
         match item {
             Node::ExportUseStmt(export_stmt) => {
-                for name in export_target_names(&export_stmt.target) {
+                for name in published_target_names(&export_stmt.target) {
                     provided.insert(name);
                 }
             }
@@ -1112,24 +1123,22 @@ fn private_import_is_baselined(module_path: &Path, name: &str) -> bool {
     }
 }
 
-/// Report braced `use` names the resolved module does not provide.
-///
-/// Reports only; the loader still registers the module's whole surface.
-fn warn_unprovided_use_names(
+/// Reject braced `use` names the resolved module does not provide. The loader
+/// registers the module's whole surface, so an unprovided name would otherwise
+/// resolve to whatever OTHER co-compiled module defines it (wrong owner,
+/// seed_export_use_as_alias_binds_wrong_owner_2026-11-26).
+fn check_unprovided_use_names(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
     module_path: &Path,
     module_label: &str,
     provided: &ProvidedNames,
-) {
-    if !use_list_warnings_enabled() {
-        return;
-    }
+) -> Result<(), CompileError> {
     let Some(provided) = provided.as_ref() else {
-        return; // opaque surface — not checkable
+        return Ok(()); // opaque surface - not checkable
     };
     let Some(requested) = requested_group_import_names(use_stmt) else {
-        return; // not a `{...}` group import
+        return Ok(()); // not a `{...}` group import
     };
     for name in requested {
         if provided.contains(&name) {
@@ -1138,14 +1147,12 @@ fn warn_unprovided_use_names(
         let importer = current_file
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
-        if use_warning_seen(format!("{}\u{1}{}\u{1}{}", module_path.display(), name, importer)) {
-            continue;
-        }
-        eprintln!(
-            "[use-warning] '{name}' is named in `use {module_label}.{{...}}` but module '{}' does not provide it (imported from {importer})",
+        return Err(CompileError::semantic(format!(
+            "`{name}` is named in `use {module_label}.{{...}}` but module `{module_label}` ({}) does not provide it (imported from {importer}); import it from the module that defines it",
             module_path.display()
-        );
+        )));
     }
+    Ok(())
 }
 
 /// Validate that imported function effects are compatible with importer's capabilities.
@@ -1404,7 +1411,12 @@ pub fn load_and_merge_module(
                 decrement_load_depth();
                 return Err(e);
             }
-            warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
+            if let Err(e) = check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided) {
+                clear_partial_module_exports(&module_path);
+                unmark_module_loading(&module_path);
+                decrement_load_depth();
+                return Err(e);
+            }
         }
 
         // Merge cached definitions (classes, functions, enums) into caller's HashMaps.
@@ -1824,7 +1836,12 @@ pub fn load_and_merge_module(
         decrement_load_depth();
         return Err(e);
     }
-    warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names);
+    if let Err(e) = check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names) {
+        clear_partial_module_exports(&module_path);
+        unmark_module_loading(&module_path);
+        decrement_load_depth();
+        return Err(e);
+    }
 
     // Cache the full module exports for future use
     cache_module_export_table(&module_path, Arc::clone(&exports));
@@ -3505,5 +3522,27 @@ mod private_call_visibility_tests {
         for no in ["src/app/contest/a.spl", "tests/a.spl", "src/test_runner/a.spl", "atest/a.spl", "test", "/r/test"] {
             assert!(!is_test_caller(no), "{no}");
         }
+    }
+
+    fn facade_provided(src: &str) -> super::ProvidedNames {
+        let parsed = Parser::new(src).parse().expect("fixture");
+        super::collect_provided_names(
+            &parsed.items,
+            &std::sync::Arc::new(crate::value::ModuleTable::leaf(Default::default())),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+    }
+
+    #[test]
+    fn aliased_reexport_does_not_provide_the_source_name() {
+        let provided = facade_provided("export use owner_a.{is_dir as fa_is_dir}\n");
+        let u = use_of("use facade.{is_dir}\n");
+        let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("facade.spl"), "facade", &provided);
+        let msg = format!("{:?}", r.expect_err("unprovided name must be rejected"));
+        assert!(msg.contains("is_dir") && msg.contains("facade"), "{msg}");
+        let ok = use_of("use facade.{fa_is_dir}\n");
+        assert!(super::check_unprovided_use_names(&ok, None, std::path::Path::new("facade.spl"), "facade", &provided).is_ok());
     }
 }

@@ -31,3 +31,15 @@ An `as` alias resolves to exactly the named owner symbol, whether or not another
   and `storage/storage_view_v1.spl` import the unaliased `is_dir`/`dir_*` names from `fs_v1`. A selective import of a
   name the module does NOT export silently binds another co-compiled `is_dir` (owner_b in the fixture) instead of
   failing; that leniency is the only wrong-owner behaviour found. Re-file with the failing tree if it recurs.
+
+## Root cause and fix (2026-11-26, same lane)
+Root cause: `collect_provided_names` (`interpreter_module/module_loader.rs`) built a module's provided surface from
+`export_target_names`, which for `export use a.{x as y}` lists BOTH `x` and `y`. A facade therefore "provided" `x`,
+and `use facade.{x}` passed the use-list check; the loader registers whole surfaces, so `x` then resolved to
+whichever co-compiled module defined it (the wrong owner). The check was also warning-only (`[use-warning]`).
+Fix: new `published_target_names` (alias only) feeds the provided set, and `check_unprovided_use_names` makes an
+unprovided braced `use` name a hard semantic error naming module and symbol (cache-hit and fresh-load paths).
+Evidence on `simple-local-20261126c.exe`: `test/fixtures/export_alias_owner/unexported_import.spl` now errors
+(old seed printed `bound=owner_b`); Rust unit test `aliased_reexport_does_not_provide_the_source_name`;
+specs: alias spec 2/2, pure container 18/18, containment_v1 19/19, plus 5 broad specs green. No in-tree site
+relied on the fallback in the specs run.
