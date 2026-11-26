@@ -256,9 +256,9 @@ Phase 2 native memory/confinement providers (Docker on Windows per owner engine 
 Module `src/lib/nogc_sync_mut/io/windows_memory_cap_probe_v1.spl` (no new FFI; wraps `windows_process_owner` start-with-memory / poll / peak-before-collect / collect). Non-Windows hosts return `Err("unsupported-host")`.
 
 - Units: `WindowsJobMemoryBytesV1: i64`, `WindowsProbeExitCodeV1: i64`, `WindowsProbeFlagV1: bool`, `WindowsProbeTimeoutMsV1: i64`.
-- `windows_memory_cap_probe_run_v1(WindowsMemoryCapProbeRequestV1) -> Result<WindowsMemoryCapObservationV1, text>` (observation also carries `program` for the evidence digest).
-- `windows_memory_cap_verdict_v1(under, over, baseline) -> WindowsMemoryCapVerdictV1` (`Enforced | NotEnforced(text) | Inconclusive(text)`).
-- `windows_container_capability_report_v1(verdict, under, over, provider_version) -> ContainerCapabilityReportV1`: `memory_hard_limit` + `job-commit` accounting and `evidence_revision = "job-commit:<sha256>"` only when Enforced; otherwise accounting empty and `evidence_revision = "unaffirmed:<sha256>"`. limit_update/reclaim always false.
+- `windows_memory_cap_probe_run_v1(WindowsMemoryCapProbeRequestV1) -> Result<WindowsMemoryCapObservationV1, text>` (observation also carries `program`, `args` and `program_digest` for the evidence digest).
+- `windows_memory_cap_verdict_v1(under, over, baseline) -> WindowsMemoryCapVerdictV1` (Enforced also requires baseline.peak > cap and identical program/program_digest across all three runs, and baseline args equal to the over-cap args; `Enforced | NotEnforced(text) | Inconclusive(text)`).
+- `windows_container_capability_report_v1(under, over, baseline, provider_version) -> ContainerCapabilityReportV1`: `memory_hard_limit` + `job-commit` accounting and `evidence_revision = "job-commit:<sha256>"` (digest over length-prefixed program/digest/args/timed_out of all three observations plus caps, peaks, exit codes and over stdout) only when Enforced; otherwise accounting empty and `evidence_revision = "unaffirmed:<sha256>"`. limit_update/reclaim always false.
 
 Measured 2026-11-26 (Windows 11, child `simple-local-20261125.exe run test/fixtures/container/alloc_mb.spl <N MiB>`): idle peak 175067136; cap 276824064 (264 MiB, must be 4096-aligned or owner readback fails); under N=48 peak 208805888 exit 0; over N=256 peak 310333440 exit 3221226505 (0xC0000409), no marker; uncapped baseline N=256 peak 444280832 exit 0. Verdict Enforced.
 
