@@ -506,6 +506,9 @@ struct ProvidedSet {
     extra: std::collections::HashSet<String>,
     /// Top-level `fn`s declared without `pub` and not re-exported.
     private_fns: std::collections::HashSet<String>,
+    /// Module text is host-gated (`@when(`/`@cfg(`): its other-host items were
+    /// stripped, so the unprovided check is skipped; the private rule still runs.
+    host_gated: bool,
 }
 
 impl ProvidedSet {
@@ -931,6 +934,7 @@ fn collect_provided_names(
     module_functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     module_classes: &HashMap<String, Arc<ClassDef>>,
     module_enums: &Enums,
+    host_gated: bool,
 ) -> ProvidedNames {
     if module_surface_is_opaque(items) {
         return None;
@@ -974,6 +978,7 @@ fn collect_provided_names(
         exports: Arc::clone(exports),
         extra: provided,
         private_fns: private_top_level_fn_names(items),
+        host_gated,
     }))
 }
 
@@ -1135,10 +1140,6 @@ fn private_import_is_baselined(module_path: &Path, name: &str) -> bool {
     }
 }
 
-/// Reject braced `use` names the resolved module does not provide. The loader
-/// registers the module's whole surface, so an unprovided name would otherwise
-/// resolve to whatever OTHER co-compiled module defines it (wrong owner,
-/// seed_export_use_as_alias_binds_wrong_owner_2026-11-26).
 /// Message tail of every unprovided-use rejection; nested-load error arms key on it
 /// so the rejection propagates instead of degrading to an empty module dict.
 pub(crate) const UNPROVIDED_USE_MARKER: &str = "does not provide it (imported from";
@@ -1153,6 +1154,10 @@ fn source_is_host_gated(src: &str) -> bool {
     src.lines().any(|l| l.starts_with("@when(") || l.starts_with("@cfg("))
 }
 
+/// Reject braced `use` names the resolved module does not provide. The loader
+/// registers the module's whole surface, so an unprovided name would otherwise
+/// resolve to whatever OTHER co-compiled module defines it (wrong owner,
+/// seed_export_use_as_alias_binds_wrong_owner_2026-11-26).
 fn check_unprovided_use_names(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
@@ -1163,6 +1168,9 @@ fn check_unprovided_use_names(
     let Some(provided) = provided.as_ref() else {
         return Ok(()); // opaque surface - not checkable
     };
+    if provided.host_gated {
+        return Ok(()); // host-gated surface is incomplete on this host
+    }
     let Some(requested) = requested_group_import_names(use_stmt) else {
         return Ok(()); // not a `{...}` group import
     };
@@ -1846,11 +1854,14 @@ pub fn load_and_merge_module(
     // A host-gated module (`@when(os=...)` / `@cfg(...)`) has its other-host
     // items stripped before this point, so its surface here is only THIS
     // host's; checking against it would reject valid cross-host imports.
-    let provided_names = if source_is_host_gated(&raw) {
-        None
-    } else {
-        collect_provided_names(&filtered_items, &exports, &module_functions, &module_classes, &module_enums)
-    };
+    let provided_names = collect_provided_names(
+        &filtered_items,
+        &exports,
+        &module_functions,
+        &module_classes,
+        &module_enums,
+        source_is_host_gated(&raw),
+    );
     record_provided_names(&module_path, provided_names.clone());
     if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names) {
         // Release the loading mark exactly like the evaluation-error arm above.
@@ -3571,6 +3582,7 @@ mod private_call_visibility_tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            false,
         )
     }
 

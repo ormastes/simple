@@ -864,9 +864,11 @@ fn process_export_stmt(
         bare_exports.push(names_to_export);
     } else {
         // Re-export: export X, Y from module
-        if let Ok((source_dict, source_owner)) =
-            load_export_source(export_stmt, module_path, global_functions, global_classes, global_enums)
-        {
+        let loaded = match load_export_source(export_stmt, module_path, global_functions, global_classes, global_enums) {
+            Err(e) if super::super::module_loader::is_unprovided_use_error(&e) => return Err(e),
+            other => other,
+        };
+        if let Ok((source_dict, source_owner)) = loaded {
             let source_exports = module_table_for(&source_dict);
             match &export_stmt.target {
                 ImportTarget::Single(name) => {
