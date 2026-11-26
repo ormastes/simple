@@ -1,0 +1,262 @@
+# Typed boundary origin facts over HIR (RB-ORIGIN, option B, lane 1).
+#
+# A SIDE TABLE keyed by HIR expression id — no field is added to HirExpr.
+# Field names match the text-level `BoundOriginFact`
+# (compiler.semantics.lint.bound_origin_facts), which stays the reference:
+# line_num, function, subject, origin, boundary, with origin one of
+# extern_decl/param/literal/extern_return/cast/copy/call/expr.
+#
+# HIR expression id: HirExpr carries no id, so the id of a binding's init
+# expression is its source byte offset (`span.start`), unique per expression
+# within one file. Facts with no init expression (params, extern decls) use
+# `hir_decl_expr_id(symbol)`, a negative id derived from the symbol id, so the
+# two key spaces never collide.
+#
+# Beyond the text-level facts, the table resolves `root_origin` by following
+# `copy` bindings through HIR symbol ids, so `val b = a` after `val a = raw`
+# reports raw's origin — the text scan can only say `copy`.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_operators.{HirUnaryOp}
+
+# Field types mirror the text-level BoundOriginFact reference row.
+@allow(primitive_api)
+pub struct ValueSemanticOrigin:
+    line_num: i64
+    function: text
+    subject: text
+    origin: text
+    boundary: bool
+    # Key of this row in HirOriginTable.by_expr.
+    expr_id: i64
+    # HIR symbol bound by this fact (param, let, or extern fn).
+    symbol_id: i64
+    # `origin`, or for a `copy` the origin at the end of the copy chain.
+    root_origin: text
+
+@allow(primitive_api)
+pub struct BoundaryPermit:
+    # One per function declared `@unsafe(capabilities: [ffi, ...])`.
+    line_num: i64
+    function: text
+    boundary: bool
+    reason: text
+    capabilities: [text]
+
+pub struct HirOriginTable:
+    # HIR expression id -> fact.
+    by_expr: Dict<i64, ValueSemanticOrigin>
+    # Expression ids in fill order (source order within a function).
+    order: [i64]
+    permits: [BoundaryPermit]
+
+@allow(primitive_api)
+pub fn hir_decl_expr_id(symbol_id: i64) -> i64:
+    -1 - symbol_id
+
+pub fn hir_origin_table_facts(table: HirOriginTable) -> [ValueSemanticOrigin]:
+    var out: [ValueSemanticOrigin] = []
+    for id in table.order:
+        if val f = table.by_expr.get(id):
+            out.push(f)
+    out
+
+struct _HotFill:
+    hir: HirModule
+    externs: Dict<i64, bool>
+    # symbol id -> resolved root origin, for copy-chain resolution
+    sym_root: Dict<i64, text>
+    by_expr: Dict<i64, ValueSemanticOrigin>
+    order: [i64]
+    # hidden tuple-destructure temps, by symbol id
+    tuple_tmp: Dict<i64, ValueSemanticOrigin>
+
+fn _hot_name(hir: HirModule, id: i64) -> text:
+    if val s = hir.symbols.symbols.get(id):
+        return s.name
+    ""
+
+fn _hot_has_ffi(caps: [text]) -> bool:
+    for c in caps:
+        if c == "ffi":
+            return true
+    false
+
+fn _hot_callee_symbol(callee: HirExpr) -> i64:
+    match callee.kind:
+        case HirExprKind.NamedVar(symbol, _):
+            symbol.id
+        case HirExprKind.Var(symbol):
+            symbol.id
+        case _:
+            -1
+
+fn _hot_var_symbol(e: HirExpr) -> i64:
+    _hot_callee_symbol(e)
+
+fn _hot_numeric_lit(e: HirExpr) -> bool:
+    match e.kind:
+        case HirExprKind.IntLit(_, _):
+            true
+        case HirExprKind.FloatLit(_, _):
+            true
+        case _:
+            false
+
+# HirStmt.span is not populated for Let, so a row takes its line from the
+# init expression, which starts on the binding line.
+fn _hot_origin(st: _HotFill, e: HirExpr) -> text:
+    match e.kind:
+        case HirExprKind.IntLit(_, _):
+            "literal"
+        case HirExprKind.FloatLit(_, _):
+            "literal"
+        case HirExprKind.StringLit(_, _):
+            "literal"
+        case HirExprKind.BoolLit(_):
+            "literal"
+        case HirExprKind.CharLit(_):
+            "literal"
+        case HirExprKind.NilLit:
+            "literal"
+        case HirExprKind.Unary(op, operand):
+            if op == HirUnaryOp.Neg and _hot_numeric_lit(operand):
+                return "literal"
+            "expr"
+        case HirExprKind.Call(callee, _, _):
+            if st.externs.contains_key(_hot_callee_symbol(callee)):
+                return "extern_return"
+            "call"
+        case HirExprKind.MethodCall(_, _, _, _):
+            "call"
+        case HirExprKind.StaticCall(_, _, _, _):
+            "call"
+        case HirExprKind.Cast(_, _):
+            "cast"
+        case HirExprKind.NamedVar(_, _):
+            "copy"
+        case HirExprKind.Var(_):
+            "copy"
+        case _:
+            "expr"
+
+fn _hot_push(st: _HotFill, f: ValueSemanticOrigin) -> _HotFill:
+    var by_expr = st.by_expr
+    var order = st.order
+    if not by_expr.contains_key(f.expr_id):
+        order.push(f.expr_id)
+    by_expr[f.expr_id] = f
+    var sym_root = st.sym_root
+    sym_root[f.symbol_id] = f.root_origin
+    _HotFill(hir: st.hir, externs: st.externs, sym_root: sym_root, by_expr: by_expr, order: order, tuple_tmp: st.tuple_tmp)
+
+fn _hot_let(st: _HotFill, fn_name: text, boundary: bool, line: i64, symbol: i64, init: HirExpr) -> _HotFill:
+    val name = _hot_name(st.hir, symbol)
+    var origin = _hot_origin(st, init)
+    var row_line = line
+    # `val (x, y) = rhs` lowers to a hidden `__tuple_destr*` temp bound to rhs,
+    # then `x = temp[0]`, ...: the temp gets no row, its names inherit its origin.
+    match init.kind:
+        case HirExprKind.TupleIndex(base, _):
+            if val t = st.tuple_tmp.get(_hot_var_symbol(base)):
+                origin = t.origin
+                row_line = t.line_num
+        case HirExprKind.Index(base, _):
+            if val t = st.tuple_tmp.get(_hot_var_symbol(base)):
+                origin = t.origin
+                row_line = t.line_num
+        case _:
+            ()
+    var root = origin
+    if origin == "copy":
+        val src = _hot_var_symbol(init)
+        if val r = st.sym_root.get(src):
+            root = r
+    var expr_id = init.span.start
+    if st.by_expr.contains_key(expr_id):
+        expr_id = hir_decl_expr_id(symbol)
+    val row = ValueSemanticOrigin(line_num: row_line, function: fn_name, subject: name, origin: origin, boundary: boundary, expr_id: expr_id, symbol_id: symbol, root_origin: root)
+    if name.starts_with("__tuple_destr"):
+        var tuple_tmp = st.tuple_tmp
+        tuple_tmp[symbol] = row
+        return _HotFill(hir: st.hir, externs: st.externs, sym_root: st.sym_root, by_expr: st.by_expr, order: st.order, tuple_tmp: tuple_tmp)
+    _hot_push(st, row)
+
+fn _hot_block(st0: _HotFill, fn_name: text, boundary: bool, block: HirBlock) -> _HotFill:
+    var st = st0
+    for stmt in block.stmts:
+        match stmt.kind:
+            case HirStmtKind.Let(symbol, _, init):
+                st = _hot_expr(st, fn_name, boundary, init)
+                st = _hot_let(st, fn_name, boundary, init.span.line, symbol.id, init)
+            case HirStmtKind.Expr(e):
+                st = _hot_expr(st, fn_name, boundary, e)
+            case HirStmtKind.Block(b):
+                st = _hot_block(st, fn_name, boundary, b)
+            case _:
+                ()
+    if block.has:
+        st = _hot_expr(st, fn_name, boundary, block.value)
+    st
+
+# Descends only into nested blocks; bindings live in statements.
+fn _hot_expr(st0: _HotFill, fn_name: text, boundary: bool, e: HirExpr) -> _HotFill:
+    var st = st0
+    match e.kind:
+        case HirExprKind.If(_, then_, else_):
+            st = _hot_block(st, fn_name, boundary, then_)
+            if val eb = else_:
+                st = _hot_block(st, fn_name, boundary, eb)
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                st = _hot_block(st, fn_name, boundary, arm.then_)
+            if val eb = else_:
+                st = _hot_block(st, fn_name, boundary, eb)
+        case HirExprKind.Loop(body, _):
+            st = _hot_block(st, fn_name, boundary, body)
+        case HirExprKind.While(_, body, _):
+            st = _hot_block(st, fn_name, boundary, body)
+        case HirExprKind.For(_, _, body, _):
+            st = _hot_block(st, fn_name, boundary, body)
+        case HirExprKind.Block(b):
+            st = _hot_block(st, fn_name, boundary, b)
+        case HirExprKind.UnsafeBlock(b):
+            st = _hot_block(st, fn_name, boundary, b)
+        case _:
+            ()
+    st
+
+# Fill the origin side table for one lowered file (semantics phase).
+pub fn hir_origin_table_for_module(hir: HirModule) -> HirOriginTable:
+    var externs: Dict<i64, bool> = {}
+    var fns: [HirFunction] = []
+    for f in hir.functions.values():
+        fns.push(f)
+        if f.is_extern:
+            externs[f.symbol.id] = true
+    # Source order, so copy chains resolve against earlier bindings.
+    var i = 1
+    while i < fns.len():
+        var j = i
+        while j > 0 and fns[j - 1].span.start > fns[j].span.start:
+            val tmp = fns[j - 1]
+            fns[j - 1] = fns[j]
+            fns[j] = tmp
+            j = j - 1
+        i = i + 1
+    var st = _HotFill(hir: hir, externs: externs, sym_root: {}, by_expr: {}, order: [], tuple_tmp: {})
+    var permits: [BoundaryPermit] = []
+    for f in fns:
+        if f.is_extern:
+            st = _hot_push(st, ValueSemanticOrigin(line_num: f.span.line, function: "", subject: f.name, origin: "extern_decl", boundary: false, expr_id: hir_decl_expr_id(f.symbol.id), symbol_id: f.symbol.id, root_origin: "extern_decl"))
+            continue
+        val boundary = _hot_has_ffi(f.unsafe_caps)
+        if boundary:
+            permits.push(BoundaryPermit(line_num: f.span.line, function: f.name, boundary: true, reason: f.unsafe_reason, capabilities: f.unsafe_caps))
+        for p in f.params:
+            if p.name == "self":
+                continue
+            st = _hot_push(st, ValueSemanticOrigin(line_num: f.span.line, function: f.name, subject: p.name, origin: "param", boundary: boundary, expr_id: hir_decl_expr_id(p.symbol.id), symbol_id: p.symbol.id, root_origin: "param"))
+        st = _hot_block(st, f.name, boundary, f.body)
+    HirOriginTable(by_expr: st.by_expr, order: st.order, permits: permits)
