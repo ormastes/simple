@@ -3,6 +3,7 @@
 - **id:** orphaned_part_files_never_imported_2026-09-18
 - **status:** PARTIAL 2026-11-09: four more deleted (_scratch_ed/main.spl, the two gc_sync_mut/tls/_TlsUtilities facades, _initramfs_pack/archive.spl) with their baseline rows; `_CliCompile/native_build.spl` stays baselined because three specs read it as source (stage4_smoke_gate_spec, native_build_cache_plumbing_spec, fs_extern_optional_spec); `verifier_transactions.spl` is now imported by umbrella_admission.spl so it is no longer an orphan. `_initramfs_pack/support.spl` is now dead too (not flagged by the ratchet).
 - **status:** 2026-11-25 correction + cleanup: the 2026-11-09 archive.spl deletion had not landed — the file was still in the tree. Re-verified with exact module-path scans over src, test and config: nothing imports `os.port._initramfs_pack.archive` (the parent's `export use os.port._initramfs_pack.support.*` covers support only), so archive.spl is deleted again here. The "support.spl is now dead too" note above is WRONG for the current tree: `src/os/port/initramfs_pack.spl:35` re-exports it (`export use os.port._initramfs_pack.support.*`), so support.spl is live and stays. Parent and support parse clean after the deletion. Remaining: `_CliCompile/native_build.spl` stays intentionally baselined (three specs read it as source).
+- **status:** 2026-11-27 FIXED (work/bug-orphan-part-gate-20261127): gate PASS, 301 part-files, 0 new, 0 baselined. See "2026-11-27" below.
 - **severity:** P2 — dead source is cheap on its own, but it silently absorbs fixes,
   diverges from the live copy, and reads as authoritative to anyone grepping
 - **found:** 2026-09-18, while closing
@@ -211,3 +212,34 @@ assertion that the file is NOT in the CLI closure, which stays true).
 - Remaining items reported by `check-orphan-part-files.shs`:
   - 14 false positives under `src/compiler/60.mir_opt/mir_opt/**` and `src/compiler/70.backend/backend/**` because `scripts/check/check-orphan-part-files.shs` (`module_path_of()`) does not collapse repeated `NN.name/name` prefixes (outside W2-1 `src/compiler/**` code scope).
   - 2 non-compiler part-files in `src/lib/gc_async_mut/tls/_TlsUtilities/` (`hex_encoding.spl`, `text_ops.spl`), outside W2-1 `src/compiler/**` ownership and left untouched.
+
+## 2026-11-27: gate false positives fixed; last four dead shims deleted
+
+On `release/1.0.0` the gate failed with 17 "new" orphans. 14 of them were false
+positives. The module resolver accepts a collapsed `NN.tier/tier/` layer
+(`src/compiler/00.common/module_path_naming.spl`), so
+`compiler.backend._MirToLlvm.core_codegen` imports
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`. The gate derived
+only the doubled `compiler.backend.backend.*` spelling. The same applies to
+`mir_opt`, `backend.native` and `_VhdlProcess`. `module_path_of` now also
+emits the collapsed spelling. New selftest fixture 3b failed before the change
+and passes after it.
+
+`_Items/module_tldr_registration.spl` was wired upstream (`items.spl:20`)
+during this run.
+
+The remaining four were a dead shim chain. Each
+`gc_async_mut/tls/_TlsUtilities/{hex_encoding,text_ops}.spl` re-exported the
+`nogc_async_mut` part, which re-exported the `nogc_sync_mut` part. Both parents'
+`utilities.spl` already re-export `std.nogc_sync_mut.tls.utilities` directly,
+and nothing else imports either shim. All four are deleted, the same reasoning
+as the 2026-11-09 `gc_sync_mut` deletions. The facades still resolve:
+`bytes_to_hex`, `hex_len` and `hex_to_i64` through `std.gc_async_mut.tls.utilities`
+and `std.nogc_async_mut.tls.utilities` give the same values as before.
+
+Result: `PASS — 301 part-file(s) checked, 0 new orphan(s), 0 stale baseline entr(ies) (0 baselined)`.
+
+Found on the way and filed separately:
+`seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27`. The JIT gives
+`bytes_to_hex([1u8, 255u8])` = `0100`, while the interpreter gives `01ff`. It
+reproduces identically on an untouched origin tree.
