@@ -25,13 +25,8 @@ use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
 use std.nogc_sync_mut.storage.storage_view_v1.{StorageViewV1, ViewBytesV1, ViewFlagV1, storage_view_v1_create, storage_view_v1_destroy}
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1, immutable_store_v1_root_head}
 use std.nogc_sync_mut.storage.rootfs_materialize_v1.{rootfs_materialize_v1, rootfs_dematerialize_v1}
-use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir, dir_is_real_no_follow}
-use std.nogc_sync_mut.io.file_ops.{file_hardlink, file_read_regular_no_follow_bounded}
-use std.nogc_sync_mut.io_runtime.{file_write, file_delete, getpid}
-# ponytail: the dir, file, io_runtime and std.platform imports in this block are direct, because no SOSIX
-# facade exists for directories, hard links or host identity yet (named gap). Also accepted by design: the
-# reader ACE the read grant puts on store objects survives teardown.
-use std.platform.{host_os, host_arch}
+use std.nogc_sync_mut.sosix.fs_v1.{is_dir, dir_create_all, dir_remove_all, dir_is_real_no_follow, sosix_fs_read_regular_bounded, sosix_fs_hardlink, sosix_fs_write_file, sosix_fs_delete_file, sosix_fs_getpid, sosix_fs_host_os, sosix_fs_host_arch}
+# Accepted by design: the reader ACE the read grant puts on store objects survives teardown.
 
 const _QUALIFY_SCOPE = "pure-container-qualify"
 const _QUALIFY_WALL_MS = 120000
@@ -364,7 +359,7 @@ fn _prepare_v1(spec: PureContainerSpecV1) -> PurePreparedV1:
 
 fn _exec_stopped_v1(session: PureContainerSessionV1, life: PureLifecycleV1, status: text, reason: text,
         exit_code: SosixContainExitCodeV1, peak: SosixContainBytesV1) -> PureExecV1:
-    val stdout = match file_read_regular_no_follow_bounded(session.stdout_path, _STDOUT_MAX_BYTES):
+    val stdout = match sosix_fs_read_regular_bounded(session.stdout_path, _STDOUT_MAX_BYTES):
         Ok(value): value
         Err(_reason): ""
     PureExecV1(status: status, reason: reason, stdout: stdout, exit_code: exit_code, peak_memory: peak,
@@ -485,7 +480,7 @@ fn _run_of_v1(status: text, reason: text, session: PureContainerSessionV1, life:
 pub fn pure_container_qualify_v1(request: PureContainerQualifyV1) -> PureContainerEvidenceV1:
     val roots = _roots_digest_v1(request.state_root, request.view_root)
     val state_root = _root_text_v1(request.state_root)
-    val tag = getpid().to_string() + "-" + sosix_time_now_monotonic_ms().to_string()
+    val tag = sosix_fs_getpid().to_string() + "-" + sosix_time_now_monotonic_ms().to_string()
     val work = state_root + "/qualify-" + tag
     val no_memory = ContainerCapabilityFlagV1(false)
     var result = SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "qualify-roots-invalid")
@@ -512,7 +507,7 @@ pub fn pure_container_qualify_v1(request: PureContainerQualifyV1) -> PureContain
         # Only a directory this call created is removed; an existing one was refused above.
         if owned:
             val _removed = dir_remove_all(work)
-    pure_container_evidence_from_qualify_v1(result, memory_enforced, memory_digest, host_os(), host_arch(), host_os(),
+    pure_container_evidence_from_qualify_v1(result, memory_enforced, memory_digest, sosix_fs_host_os(), sosix_fs_host_arch(), sosix_fs_host_os(),
         PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, roots)
 
 # Hard links need one volume, so evidence is only valid for roots on the scratch's
@@ -523,10 +518,10 @@ fn _same_volume_v1(work: text, view_root: text, tag: text) -> bool:
     val source = work + "/volume-probe.txt"
     val link = view_root + "/.pure-volume-probe-" + tag
     var same = false
-    if file_write(source, "volume-probe"):
-        same = file_hardlink(source, link)
-        val _unlinked = file_delete(link)
-        val _deleted = file_delete(source)
+    if sosix_fs_write_file(source, "volume-probe"):
+        same = sosix_fs_hardlink(source, link)
+        val _unlinked = sosix_fs_delete_file(link)
+        val _deleted = sosix_fs_delete_file(source)
     same
 
 pub fn pure_container_run_v1(spec: PureContainerSpecV1) -> PureContainerRunV1:
