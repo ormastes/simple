@@ -1,7 +1,8 @@
 """Flat cache directories are swept oldest-first past their byte cap."""
 
 use std.spec.*
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes, disk_bound_mark_used, disk_bound_sweep, disk_bound_keep_newest_dirs, disk_bound_keep_newest_prefix_dirs, disk_bound_dir_is_idle, disk_bound_mark_dir_used}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes, disk_bound_mark_used, disk_bound_sweep, disk_bound_keep_newest_dirs, disk_bound_keep_newest_prefix_dirs, disk_bound_dir_is_idle, disk_bound_mark_dir_used, disk_bound_reap_orphans_at, disk_bound_measure_and_reap_v1}
+use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
 use app.cli.native_build_parse_closure_owner.{
     native_build_parse_closure_retire_request_v1,
     native_build_parse_closure_teardown_env_v1,
@@ -254,3 +255,54 @@ describe "disk bound":
         expect(dir_exists(req_unset)).to_equal(false)
         expect(env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "").to_equal("")
         dir_remove_all(root)
+
+    it "cleans dangling .used markers even when disk_bound_enforce is under cap":
+        val dir = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_used_undercap"
+        dir_create(dir, true)
+        file_write(dir + "/live.o", "0123456789")
+        disk_bound_mark_used(dir, dir + "/live.o")
+        disk_bound_mark_used(dir, dir + "/gone.o")
+        expect(disk_bound_enforce(dir, 1000)).to_equal(0)
+        expect(file_exists(dir + "/.used/live.o")).to_equal(true)
+        expect(file_exists(dir + "/.used/gone.o")).to_equal(false)
+        dir_remove_all(dir)
+
+    it "reaps aged .tmp and candidate-* orphans without touching fresh in-flight files":
+        val dir = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_reap_orphans"
+        dir_create(dir, true)
+        file_write(dir + "/stale.artifact.123.tmp", "123456")
+        file_write(dir + "/candidate-456.receipt", "123456")
+        file_write(dir + "/keep.artifact", "0123456789")
+        val now_s = time_now_seconds()
+        expect(disk_bound_reap_orphans_at(dir, now_s, 3600, 86400)).to_equal(0)
+        expect(file_exists(dir + "/stale.artifact.123.tmp")).to_equal(true)
+        expect(file_exists(dir + "/candidate-456.receipt")).to_equal(true)
+        expect(disk_bound_reap_orphans_at(dir, now_s + 7200, 3600, 86400)).to_equal(1)
+        expect(file_exists(dir + "/stale.artifact.123.tmp")).to_equal(false)
+        expect(file_exists(dir + "/candidate-456.receipt")).to_equal(true)
+        expect(disk_bound_reap_orphans_at(dir, now_s + 90000, 3600, 86400)).to_equal(1)
+        expect(file_exists(dir + "/candidate-456.receipt")).to_equal(false)
+        expect(file_exists(dir + "/keep.artifact")).to_equal(true)
+        dir_remove_all(dir)
+
+    it "ignores active shard ledgers and peak records during byte counting and sweeps":
+        val dir = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_hir_ledgers"
+        dir_create(dir + "/queue-100-0", true)
+        dir_create(dir + "/mir-queue-100-0", true)
+        dir_create(dir + "/closure-request-1-2", true)
+        file_write(dir + "/a.hir", "0123456789")
+        file_write(dir + "/b.hir", "0123456789")
+        file_write(dir + "/queue-100-0/inventory", "01234567890123456789")
+        file_write(dir + "/mir-queue-100-0/mod.claim", "01234567890123456789")
+        file_write(dir + "/closure-request-1-2/request.v1", "01234567890123456789")
+        file_write(dir + "/hir-shard.abc.peak_kib", "1234567890")
+        file_write(dir + "/mir-run-latest", dir + "/mir-queue-100-0")
+        expect(disk_bound_dir_bytes(dir)).to_equal(20)
+        expect(disk_bound_measure_and_reap_v1(dir)).to_equal(20)
+        expect(disk_bound_sweep(dir, 10)).to_equal(1)
+        expect(file_exists(dir + "/queue-100-0/inventory")).to_equal(true)
+        expect(file_exists(dir + "/mir-queue-100-0/mod.claim")).to_equal(true)
+        expect(file_exists(dir + "/closure-request-1-2/request.v1")).to_equal(true)
+        expect(file_exists(dir + "/hir-shard.abc.peak_kib")).to_equal(true)
+        expect(file_exists(dir + "/mir-run-latest")).to_equal(true)
+        dir_remove_all(dir)

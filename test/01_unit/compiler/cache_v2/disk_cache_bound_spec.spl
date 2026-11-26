@@ -4,6 +4,7 @@ use std.spec.*
 use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_source_record_v1,
     disk_cache_sweep_v1, disk_cache_admit_v1, disk_cache_dir_bytes_v1}
 use compiler.driver.cache.metadata.cache_limits.{CacheRetentionLimitsV1}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_used}
 use std.io_runtime.{dir_remove_all, getpid, time_now_unix_micros, file_write, file_exists, dir_create}
 
 fn bound_limits(versions: i64, per_source_bytes: i64, storage: i64) -> CacheRetentionLimitsV1:
@@ -57,4 +58,17 @@ describe "disk cache bounds":
         val refused = disk_cache_admit_v1(dir, 1000, 60, limits)
         expect(refused.admitted).to_equal(false)
         expect(refused.reason).to_equal("over_hard_limit")
+        dir_remove_all(dir)
+
+    it "forgets .used markers when per-source eviction deletes an old entry":
+        val dir = bound_dir("forget_used")
+        val limits = bound_limits(1, 1000000, 1000000)
+        file_write(dir + "/v1.hir", "xxxx")
+        disk_bound_mark_used(dir, dir + "/v1.hir")
+        disk_cache_source_record_v1(dir, "src-x", "v1.hir", limits)
+        expect(file_exists(dir + "/.used/v1.hir")).to_equal(true)
+        file_write(dir + "/v2.hir", "xxxx")
+        expect(disk_cache_source_record_v1(dir, "src-x", "v2.hir", limits)).to_equal(1)
+        expect(file_exists(dir + "/v1.hir")).to_equal(false)
+        expect(file_exists(dir + "/.used/v1.hir")).to_equal(false)
         dir_remove_all(dir)

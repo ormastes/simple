@@ -42,13 +42,17 @@ use compiler.frontend.cache_dir_evict.{
     CacheTreeEvictRequestV1,
     _CacheDirEvictPlan,
     cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap,
-    cache_dir_evict_tree_to_cap_v1, _cache_dir_evict_to_cap_at
+    cache_dir_evict_tree_to_cap_v1, cache_dir_reap_stale_tmp_v1,
+    cache_dir_evict_frontend_to_cap_v1,
+    _cache_dir_evict_to_cap_at, _cache_dir_evict_frontend_to_cap_at
 }
 use compiler.frontend.frontend_parse_cache.{
     frontend_parse_cache_enabled,
     frontend_parse_cache_load,
     frontend_parse_cache_scope,
-    frontend_parse_cache_store
+    frontend_parse_cache_store,
+    frontend_parse_cache_store_unit_conflicts,
+    frontend_parse_cache_load_unit_conflicts
 }
 
 val SCRATCH: text = "/tmp/simple-cache-evict-spec-{getpid()}"
@@ -212,5 +216,49 @@ describe("cache dir default + eviction", fn():
         assert_false(file_exists(tree_dir + "/aa/first.spab.seal"), "sharded .spab.seal sidecar removed")
         assert_false(file_exists(tree_dir + "/bb/orphan.spab.seal"), "sharded orphan .spab.seal reaped")
         assert_true(file_exists(tree_dir + "/bb/inflight.spab.tmp"), "in-flight .tmp never touched")
+    )
+
+    it("enforces a combined byte cap across flat .fpc and sharded .spab entries", fn():
+        val fe_dir = SCRATCH + "/combined-fe"
+        val spab_dir = fe_dir + "/artifacts/v1/xxh3/aa"
+        val _d = dir_create_all(spab_dir)
+        val _w1 = file_write_exact(fe_dir + "/old1.fpc", "01234567890123456789")
+        val _w2 = file_write_exact(spab_dir + "/old2.spab", "01234567890123456789")
+        val _w3 = file_write_exact(spab_dir + "/old2.spab.seal", "0123456789")
+        val _w4 = file_write_exact(fe_dir + "/old1.u006", "conflict")
+        val removed = _cache_dir_evict_frontend_to_cap_at(fe_dir, 25, 4102444800)
+        assert_true(removed >= 1, "combined sweep evicts across .fpc and .spab")
+        val rem = (if file_exists(fe_dir + "/old1.fpc"): 20 else: 0) + (if file_exists(spab_dir + "/old2.spab"): 30 else: 0)
+        assert_true(rem <= 25, "remaining frontend bytes fit within shared cap")
+        assert_true(file_exists(fe_dir + "/old1.u006"), "u006 preserved when artifacts/v1 exists")
+    )
+
+    it("cleans .u006 sidecars on pure .fpc eviction and deletes cleared .u006 files", fn():
+        val fpc_only = SCRATCH + "/pure-fpc-u006"
+        val _d = dir_create_all(fpc_only)
+        val _w1 = file_write_exact(fpc_only + "/k1.fpc", "01234567890123456789")
+        val _w2 = file_write_exact(fpc_only + "/k1.u006", "conflict")
+        val _w3 = file_write_exact(fpc_only + "/orphan.u006", "stale")
+        assert_equal(_cache_dir_evict_to_cap_at(fpc_only, ".fpc", 5, 4102444800), 1, "evicts k1.fpc")
+        assert_false(file_exists(fpc_only + "/k1.u006"), "evicted .fpc removes .u006 sidecar")
+        assert_false(file_exists(fpc_only + "/orphan.u006"), "aged orphan .u006 reaped")
+
+        val _scope = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "u006-delete-scope")
+        val _root = env_set("SIMPLE_FRONTEND_CACHE_DIR", fpc_only)
+        assert_true(frontend_parse_cache_store_unit_conflicts("k2", ["SPL-UNIT-006 test"]), "writes non-empty .u006")
+        assert_true(file_exists(fpc_only + "/k2.u006"), "k2.u006 created")
+        assert_true(frontend_parse_cache_store_unit_conflicts("k2", []), "clears .u006 on clean parse")
+        assert_false(file_exists(fpc_only + "/k2.u006"), "empty .u006 file removed instead of zero-byte residue")
+        assert_equal(frontend_parse_cache_load_unit_conflicts("k2").len(), 0, "cleared .u006 loads empty")
+    )
+
+    it("reaps aged .tmp files in sharded tree via cache_dir_reap_stale_tmp_v1", fn():
+        val tree_dir = SCRATCH + "/reap-tree/artifacts/v1/xxh3/cc"
+        val _d = dir_create_all(tree_dir)
+        val _w1 = file_write_exact(tree_dir + "/crashed.spab.tmp", "partial")
+        assert_equal(cache_dir_reap_stale_tmp_v1(SCRATCH + "/reap-tree"), 0, "fresh .tmp preserved on wall clock")
+        assert_true(file_exists(tree_dir + "/crashed.spab.tmp"), "fresh .tmp survives")
+        assert_equal(cache_dir_reap_stale_tmp_v1(SCRATCH + "/reap-tree", 4102444800), 1, "aged .tmp reaped")
+        assert_false(file_exists(tree_dir + "/crashed.spab.tmp"), "aged .tmp deleted")
     )
 )
