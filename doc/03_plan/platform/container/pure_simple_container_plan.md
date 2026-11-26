@@ -388,12 +388,11 @@ Each default is what the lanes assume. Default, owner may override.
    increment 1.** `isolation_kind` plus the SOSIX refusal is fail-closed today.
    R2 adds the fields when a caller needs to require one without the other.
 
-## Resume state (2026-11-26, after Fable review round 3)
+## Status (2026-11-26)
 
-- Round 3 applied: qualify result is the single producer of evidence (nine
-  canaries, positive controls, pinned probe); evidence bound to its roots;
-  reader ACE and reparse-point rules stated.
-- Signature changes against running lanes are listed under P0 and P1. P3 is
-  unchanged.
-- Landed outside this plan: lane E #11914, lane C #11901, remaining-work docs
-  #11909. Open: re-review of these two docs, then push and land.
+- Design reviewed by Fable over four rounds; final verdict LAND.
+- Landed: S0 shared extraction (#11924), seed advapi32/token/SID/ACL externs
+  for P1 (#11925; specs needing them run on a seed built from that commit),
+  inc-3 lane E memory cap (#11914).
+- In flight: P0 contract, P1 identity + grants, P3 rootfs, Windows Docker
+  live lane. P2 and P4 start after P0/P1/P3 land.
