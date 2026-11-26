@@ -7,6 +7,11 @@ use std.common.contracts.sosix.containment_v1.{SosixContainBytesV1, SosixContain
     SosixContainLimitsV1, SosixContainRequestV1, SosixContainSupportV1,
     SosixContainLeaseV1, SosixContainSlotV1, SosixContainAdmissionV1,
     sosix_contain_request_reason_v1, sosix_contain_support_none_v1,
+    SosixContainCanaryV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1,
+    sosix_contain_canaries_pass_v1, sosix_contain_qualify_request_reason_v1,
+    SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1,
+    SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1,
+    SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1,
     SOSIX_CONTAIN_IDENTITY_INHERIT_V1, SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1,
     SOSIX_CONTAIN_NETWORK_HOST_V1, SOSIX_CONTAIN_NETWORK_NONE_V1}
 
@@ -249,3 +254,92 @@ describe "SosixContainAdmissionV1":
             FailedAfterCleanup(reason): reason
             Unknown(reason): reason
         expect(rlabel).to_equal("no-child")
+
+fn _canary(id: text, expected: text, observed: text) -> SosixContainCanaryV1:
+    SosixContainCanaryV1(id: id, expected: expected, observed: observed)
+
+fn _all_canaries() -> [SosixContainCanaryV1]:
+    [_canary(SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, "allow", "allow"),
+        _canary(SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1, "allow", "allow"),
+        _canary(SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, "deny", "deny"),
+        _canary(SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1, "deny", "deny"),
+        _canary(SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, "deny", "deny"),
+        _canary(SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1, "deny", "deny")]
+
+fn _result(canaries: [SosixContainCanaryV1], reason: text) -> SosixContainQualifyResultV1:
+    SosixContainQualifyResultV1(canaries: canaries, evidence_digest: "a".repeat(64), reason: reason)
+
+describe "sosix_contain_canaries_pass_v1":
+    it "passes when all six ids are present once and observed equals expected":
+        expect(sosix_contain_canaries_pass_v1(_result(_all_canaries(), "")).value).to_equal(true)
+
+    it "fails on an empty canary list":
+        expect(sosix_contain_canaries_pass_v1(_result([], "")).value).to_equal(false)
+
+    it "fails on a non-empty reason even with all canaries as expected":
+        expect(sosix_contain_canaries_pass_v1(_result(_all_canaries(), "containment-qualify-unimplemented-linux")).value)
+            .to_equal(false)
+
+    it "fails when any one of the six ids is missing":
+        var i = 0
+        while i < 6:
+            var kept: [SosixContainCanaryV1] = []
+            var j = 0
+            for c in _all_canaries():
+                if j != i: kept.push(c)
+                j = j + 1
+            expect(sosix_contain_canaries_pass_v1(_result(kept, "")).value).to_equal(false)
+            i = i + 1
+
+    it "fails on a duplicated id even when the count is six":
+        var list = _all_canaries()
+        list[5] = _canary(SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, "allow", "allow")
+        expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+
+    it "fails when any canary observed differs from expected":
+        var i = 0
+        while i < 6:
+            var list = _all_canaries()
+            val c = list[i]
+            list[i] = _canary(c.id, c.expected, if c.expected == "allow": "deny" else: "allow")
+            expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+            i = i + 1
+
+    it "fails a not-run canary":
+        var list = _all_canaries()
+        list[2] = _canary(SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, "deny", "not-run")
+        expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+
+    it "fails when a result flips the fixed expectation to match a bad observation":
+        var list = _all_canaries()
+        list[2] = _canary(SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, "allow", "allow")
+        expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+
+    it "fails an unknown id":
+        var list = _all_canaries()
+        list[0] = _canary("made-up", "allow", "allow")
+        expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+
+describe "sosix_contain_qualify_request_reason_v1":
+    it "admits a valid qualify request and refuses invalid ones":
+        val ok = SosixContainQualifyRequestV1(probe_program: "probe.exe", probe_digest: "a".repeat(64),
+            work_dir: "work", scope: "c1", wall: SosixContainMillisV1(1000))
+        expect(sosix_contain_qualify_request_reason_v1(ok)).to_equal("")
+        var a = ok
+        a.probe_digest = ""
+        expect(sosix_contain_qualify_request_reason_v1(a)).to_equal("containment-request-invalid")
+        var b = ok
+        b.probe_digest = "A".repeat(64)
+        expect(sosix_contain_qualify_request_reason_v1(b)).to_equal("containment-request-invalid")
+        var c = ok
+        c.scope = "Bad Scope"
+        expect(sosix_contain_qualify_request_reason_v1(c)).to_equal("containment-request-invalid")
+        var d = ok
+        d.scope = ""
+        expect(sosix_contain_qualify_request_reason_v1(d)).to_equal("containment-request-invalid")
+        var e = ok
+        e.wall = SosixContainMillisV1(-1)
+        expect(sosix_contain_qualify_request_reason_v1(e)).to_equal("containment-request-invalid")
+        var g = ok
+        g.work_dir = ""
+        expect(sosix_contain_qualify_request_reason_v1(g)).to_equal("containment-request-invalid")

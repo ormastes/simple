@@ -49,7 +49,7 @@ pub struct SosixContainSupportV1:
     process_limit: SosixContainFlagV1
     cpu_rate_limit: SosixContainFlagV1
     kill_all_descendants: SosixContainFlagV1
-    write_confinement: SosixContainFlagV1
+    write_confinement: SosixContainFlagV1   # mechanism implemented; static, not a measured result
     read_confinement: SosixContainFlagV1
     network_isolation: SosixContainFlagV1
     pid_isolation: SosixContainFlagV1
@@ -67,6 +67,30 @@ pub struct SosixContainPollV1:
 
 pub struct SosixContainLeaseV1:
     slot: SosixContainSlotV1
+
+pub struct SosixContainCanaryV1:
+    id: text
+    expected: text                     # "allow" | "deny"
+    observed: text                     # "allow" | "deny" | "not-run"
+
+pub struct SosixContainQualifyRequestV1:
+    probe_program: text                # canary executable (performs one attempt, prints the outcome)
+    probe_digest: text
+    work_dir: text                     # empty scratch directory the op owns for the run
+    scope: text
+    wall: SosixContainMillisV1
+
+pub struct SosixContainQualifyResultV1:
+    canaries: [SosixContainCanaryV1]   # every planned canary, in plan order
+    evidence_digest: text              # "" when nothing ran
+    reason: text                       # "" = ran to completion
+
+pub const SOSIX_CONTAIN_CANARY_OWN_WRITE_V1 = "own-dir-write"            # allow
+pub const SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1 = "lower-read-exec"    # allow
+pub const SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1 = "lower-overwrite"        # deny
+pub const SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1 = "user-private-write"   # deny
+pub const SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1 = "other-scope-write"     # deny
+pub const SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1 = "other-scope-process-open"   # deny
 
 pub enum SosixContainAdmissionV1:
     Started(lease: SosixContainLeaseV1)
@@ -163,6 +187,46 @@ pub fn sosix_contain_request_reason_v1(request: SosixContainRequestV1,
         return "containment-deadline-unsupported"
     ""
 
+# The planned canaries and their fixed expectations (architecture 4.3).
+fn _contain_canary_expected_v1(id: text) -> text:
+    if id == SOSIX_CONTAIN_CANARY_OWN_WRITE_V1 or id == SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1:
+        return "allow"
+    if id == SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1 or id == SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1 or
+            id == SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1 or
+            id == SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1:
+        return "deny"
+    ""
+
+fn _contain_canary_count_v1(canaries: [SosixContainCanaryV1], id: text) -> i64:
+    var count = 0
+    for canary in canaries:
+        if canary.id == id: count = count + 1
+    count
+
+# "" = admissible qualify request; same digest and scope rules as a launch
+# request. A qualify run always uses a scope, so an empty scope is invalid.
+pub fn sosix_contain_qualify_request_reason_v1(request: SosixContainQualifyRequestV1) -> text:
+    if request.probe_program == "" or request.work_dir == "": return "containment-request-invalid"
+    if not _contain_digest_ok_v1(request.probe_digest): return "containment-request-invalid"
+    if not _contain_scope_ok_v1(request.scope): return "containment-request-invalid"
+    if request.wall.value < 0: return "containment-request-invalid"
+    ""
+
+# Fail closed: true only when the run completed (empty reason) and every
+# planned id is present exactly once with the fixed expectation and
+# observed == expected. Unknown ids, not-run and duplicates fail.
+pub fn sosix_contain_canaries_pass_v1(result: SosixContainQualifyResultV1) -> SosixContainFlagV1:
+    if result.reason != "" or result.canaries.len() != 6: return SosixContainFlagV1(false)
+    for id in [SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1,
+            SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1,
+            SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1]:
+        if _contain_canary_count_v1(result.canaries, id) != 1: return SosixContainFlagV1(false)
+    for canary in result.canaries:
+        val expected = _contain_canary_expected_v1(canary.id)
+        if expected == "" or canary.expected != expected or canary.observed != expected:
+            return SosixContainFlagV1(false)
+    SosixContainFlagV1(true)
+
 export SosixContainBytesV1, SosixContainCountV1, SosixContainCpuRateV1
 export SosixContainMillisV1, SosixContainExitCodeV1, SosixContainSlotV1, SosixContainFlagV1
 export SosixContainLimitsV1, SosixContainRequestV1, SosixContainSupportV1
@@ -170,3 +234,8 @@ export SosixContainPollV1, SosixContainLeaseV1, SosixContainAdmissionV1
 export sosix_contain_request_reason_v1, sosix_contain_support_none_v1
 export SOSIX_CONTAIN_IDENTITY_INHERIT_V1, SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
 export SOSIX_CONTAIN_NETWORK_HOST_V1, SOSIX_CONTAIN_NETWORK_NONE_V1
+export SosixContainCanaryV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1
+export sosix_contain_canaries_pass_v1, sosix_contain_qualify_request_reason_v1
+export SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1
+export SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1
+export SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1
