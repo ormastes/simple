@@ -1,0 +1,78 @@
+"""
+## Purpose and audience
+RB-DIAG-01 CLI leg for SPL-MATCH-001: `simple lint` (in-process engine
+`lint_cli_source`) reports a `match` over a locally declared enum that is
+missing variants and has no `_` arm. The detector is shared with the LSP pass
+(`compiler.tools.fix.rules.impl_.lint_match_exhaustive`), so the bad fixture
+yields the same ID on the same line on the CLI, the LSP, and the interpreter
+warning (`non_exhaustive_match_message`). Severity is resolved from
+`config/policy/diagnostic_policy.sdn` (warn by default, deny under robust).
+Audience: diagnostics, lint, and LSP maintainers.
+"""
+# @cover src/compiler/90.tools/fix/rules/impl_/lint_match_exhaustive.spl
+# @cover src/compiler/90.tools/lint/_LintMain/lint_checks.spl
+# @cover src/app/cli/query_lint_checks.spl
+# @req REQ-DIAG-POLICY-002
+
+use std.spec.*
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.common.diagnostics.diagnostic_rule_policy.{load_diagnostic_policy_text, diagnostic_policy_default_path, lint_level_name_for_rule_level}
+use compiler.tools.lint.main.{Linter, LintRunResult, lint_cli_source}
+use compiler.tools.lint._LintMain.config_and_model.{LintLevel, lint_policy_code_for_rule}
+use app.cli.query_lint.{_qlint_collect_lint_diagnostics_json}
+use std.nogc_sync_mut.lsp.handlers.diagnostics.{_parse_compiler_json_diagnostic}
+use compiler.core.interpreter.eval_tables.{non_exhaustive_match_message}
+
+val BAD = "test/01_unit/compiler/diagnostics/fixtures/interpreter_policy_parity_fixture.spl"
+val GOOD = "test/01_unit/compiler/diagnostics/fixtures/cli_match_exhaustive_good_fixture.spl"
+
+fn cli_level_name(level: LintLevel) -> text:
+    if level == LintLevel.Deny: "deny" else: if level == LintLevel.Warn: "warn" else: "allow"
+
+# "<policy id>@<line>:<level>" for every CLI finding in the match family.
+fn cli_match(path: text, src: text) -> [text]:
+    var out: [text] = []
+    for r in lint_cli_source(Linter.new(), path, src):
+        val id = lint_policy_code_for_rule(r.lint.code)
+        if id == "SPL-MATCH-001":
+            out.push("{id}@{r.line}:{cli_level_name(r.lint.level)}")
+    out
+
+fn lsp_match(path: text) -> [text]:
+    var out: [text] = []
+    for raw in _qlint_collect_lint_diagnostics_json(path, file_read_text(path)).1:
+        match _parse_compiler_json_diagnostic(raw):
+            Some(d):
+                val c: text = d["code"] ?? ""
+                if lint_policy_code_for_rule(c) == "SPL-MATCH-001":
+                    val line0: i64 = d["range"]["start"]["line"]
+                    out.push("SPL-MATCH-001@{line0 + 1}")
+            _: pass_do_nothing
+    out
+
+fn policy_level(mode: text) -> text:
+    match load_diagnostic_policy_text(file_read_text(diagnostic_policy_default_path())):
+        Ok(snapshot):
+            lint_level_name_for_rule_level(snapshot.baseline_level(snapshot.slot_of("SPL-MATCH-001"), mode))
+        Err(err):
+            panic("shipped diagnostic policy failed to load: " + err)
+
+# @manual_section: cli_match_exhaustive_parity
+describe "RB-DIAG-01: CLI lint reports SPL-MATCH-001 like the interpreter and LSP":
+    """One fixture, one ID, one line, on all three surfaces."""
+
+    it "bad fixture: CLI, LSP, and interpreter agree on SPL-MATCH-001 at line 7":
+        val src = file_read_text(BAD)
+        expect(cli_match(BAD, src)).to_equal(["SPL-MATCH-001@7:{policy_level("default")}"])
+        expect(lsp_match(BAD)).to_equal(["SPL-MATCH-001@7"])
+        val interp = non_exhaustive_match_message("Color", ["Blue"])
+        expect(interp.ends_with(" [policy: SPL-MATCH-001]")).to_be(true)
+
+    it "good fixture: no SPL-MATCH-001 on the CLI or the LSP":
+        expect(cli_match(GOOD, file_read_text(GOOD))).to_equal([])
+        expect(lsp_match(GOOD)).to_equal([])
+
+    it "severity follows diagnostic_policy.sdn: robust profile denies":
+        expect(policy_level("robust")).to_equal("deny")
+        val src = "@lint_profile(robust)\n" + file_read_text(BAD)
+        expect(cli_match(BAD, src)).to_equal(["SPL-MATCH-001@8:deny"])
