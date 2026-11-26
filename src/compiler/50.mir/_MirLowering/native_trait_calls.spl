@@ -1,4 +1,5 @@
-use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering, MirMutRefArgWriteback}
+use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_types.*
 use compiler.mir.mir_instructions.*
@@ -31,10 +32,11 @@ impl MirLowering:
             self.error_fatal("native trait argument count mismatch: {owner}::{name}", Some(receiver.span))
             return LocalId(id: -1)
         val receiver_local = self.lower_expr(receiver)
-        var locals: [LocalId] = []
+        var operands_by_slot: [MirOperand] = []
         var assigned: [bool] = []
+        var mut_writebacks: [MirMutRefArgWriteback] = []
         for argument in arguments:
-            locals.push(LocalId(id: -1))
+            operands_by_slot.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
             assigned.push(false)
         var positional_index = 0
         # Evaluate in source order, then arrange the already-evaluated values
@@ -49,40 +51,49 @@ impl MirLowering:
                     candidate = candidate + 1
             else:
                 positional_index = positional_index + 1
-            if index < 0 or index >= locals.len():
+            if index < 0 or index >= operands_by_slot.len():
                 self.error_fatal("unknown native trait argument: {owner}::{name}", Some(argument.span))
                 return LocalId(id: -1)
             if assigned[index]:
                 self.error_fatal("duplicate native trait argument: {owner}::{name}", Some(argument.span))
                 return LocalId(id: -1)
             val expected = slot.params[index + 1]
-            var local = self.lower_expr(argument.value)
-            local = self.coerce_native_trait_object(local, argument.value, expected)
-            match expected.kind:
-                case HirTypeKind.Optional(_):
-                    local = self.ensure_option_handle(local, expected)
-                case HirTypeKind.Int(width, _):
-                    if width < 64:
-                        val actual = self.local_mir_type_of(local)
-                        if val actual_type = actual:
-                            if actual_type.kind == MirTypeKind.I64 or actual_type.kind == MirTypeKind.U64:
-                                val narrowed_type = self.lower_type(expected)
-                                var builder = self.builder
-                                local = builder.emit_cast(mir_operand_copy(local), narrowed_type)
-                                self.builder = builder
-                case _: ()
-            locals[index] = local
-            assigned[index] = true
+            val prep = self.prepare_mut_ref_primitive_expr_v1(argument.value, expected, None)
+            if prep.matched:
+                operands_by_slot[index] = prep.operand
+                if prep.has_writeback:
+                    mut_writebacks = mut_writebacks.push(prep.writeback)
+                assigned[index] = true
+            else:
+                var local = self.lower_expr(argument.value)
+                local = self.coerce_native_trait_object(local, argument.value, expected)
+                match expected.kind:
+                    case HirTypeKind.Optional(_):
+                        local = self.ensure_option_handle(local, expected)
+                    case HirTypeKind.Int(width, _):
+                        if width < 64:
+                            val actual = self.local_mir_type_of(local)
+                            if val actual_type = actual:
+                                if actual_type.kind == MirTypeKind.I64 or actual_type.kind == MirTypeKind.U64:
+                                    val narrowed_type = self.lower_type(expected)
+                                    var builder = self.builder
+                                    local = builder.emit_cast(mir_operand_copy(local), narrowed_type)
+                                    self.builder = builder
+                    case _: ()
+                operands_by_slot[index] = mir_operand_copy(local)
+                assigned[index] = true
         var operands: [MirOperand] = []
         var index = 0
-        while index < locals.len():
+        while index < operands_by_slot.len():
             if not assigned[index]:
                 self.error_fatal("missing native trait argument: {owner}::{name}", Some(receiver.span))
                 return LocalId(id: -1)
-            operands.push(mir_operand_copy(locals[index]))
+            operands.push(operands_by_slot[index])
             index = index + 1
         val result = self.emit_native_trait_slot_call(receiver_local, owner, name, operands)
-        if val local = result:
+        self.emit_mut_ref_primitive_writebacks_v1(mut_writebacks)
+        if result.?:
+            val local = result.unwrap()
             # declared_result differs from result only for a bootstrap-erased
             # `-> X?` / `-> [T]` / `-> Record` (an i64 handle or pointer word
             # either way): mark it as what it is, or `if val v = o.m()` tests

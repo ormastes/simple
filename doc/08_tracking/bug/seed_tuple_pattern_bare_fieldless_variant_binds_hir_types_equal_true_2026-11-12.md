@@ -154,3 +154,15 @@ Fixture: `test/fixtures/compiler/tuple_pattern_bare_payload_variant_binds_native
 tree-walk interpreter still treats a bare payload-variant name in a slot as a
 variant test (`interpreter_patterns.rs`), so it disagrees with both compilers
 there.
+
+
+## Addendum 2026-11-27 (lane work/w2-1-compiler-hir-mir-20261127)
+
+- Verified host Rust seed JIT (`simple.exe run`) passes both native tuple-pattern fixtures directly:
+  - `test/fixtures/compiler/tuple_pattern_bare_unit_variant_native.spl` -> `tuple_pattern_bare_unit_variant: ok` (exit `0`).
+  - `test/fixtures/compiler/tuple_pattern_bare_payload_variant_binds_native.spl` -> `tuple_pattern_bare_payload_variant_binds: ok` (exit `0`).
+  - (Standalone `simple.exe compile --native` exited `1` in this sparse worktree because `core-C runtime source root was not found`.)
+- Verified `hir_types_equal` / `types_equal` HIR specs in `--mode=interpreter`:
+  - `test/01_unit/compiler/hir/hir_type_structural_equality_spec.spl` (`8/8` passed, `0` failed).
+  - `test/01_unit/compiler/hir/hir_types_equal_int_width_spec.spl` (`4/4` passed, `0` failed).
+- Prior Rust seed fix (`#8497`, `type_equality.spl` untouched) and Stage 2 runs recorded above are already present; updated bug shard status from `open` to `fixed` with `bug_investigation_logs` evidence.

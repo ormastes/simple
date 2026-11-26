@@ -113,3 +113,11 @@ Real parser/HIR/MIR/codec regression is authored at
 UNRUN until an executable containing the changed compiler is available. Merely
 compiling changed target sources with the old P2 does not change its own importer
 or MIR implementation. Bug remains fixing; no runtime qualification is claimed.
+
+
+## Addendum 2026-11-27 (lane work/w2-1-compiler-hir-mir-20261127)
+
+- Re-verified in `--mode=interpreter` on this branch after `declared_param_types_v1` landed on `release/1.0.0`:
+  - `test/01_unit/compiler/hir/imported_declared_param_metadata_spec.spl`: `8/8` passed (`0` failed).
+  - `test/01_unit/compiler/mir/imported_untyped_callable_abi_params_spec.spl`: `8/8` passed (`0` failed).
+- Updated bug shard status from `fixing` to `fix-implemented-verification-pending` (`stage 2/3` native rebuild and runtime verification remain pending on a full bootstrap target).

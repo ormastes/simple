@@ -30,7 +30,11 @@ use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.value_access.{compiler_value_discriminant}
-use compiler.mir.mir_lowering_types.{MirLowering, MirError, marker_map_without, text_map_without}
+use compiler.mir.mir_lowering_types.{MirLowering, MirError, marker_map_without, text_map_without,
+    MirMutRefArgWriteback, MirMutRefArgPrepared, MirMethodCallOperands}
+use compiler.mir.call_argument_slots_v1.{mir_call_argument_slots_v1}
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.mir._MirLowering.resident_default_global_owner.*
 use compiler.frontend.resource_registry.{resource_is_declared}
 use compiler.mir.mir_types.{LocalId, LocalKind, MirLocal, mir_type_probe_text}  # explicit: a glob is not an import-origin for surface projection
 use std.common.mcdc.model.{McdcSyntheticDecisionKeyV1, mcdc_authored_path_v1, mcdc_runtime_decision_id_v1, mcdc_synthetic_runtime_decision_id_v1, mcdc_path_in_instrumentation_scope}
@@ -54,7 +58,55 @@ pub fn mir_ownership_return_operand(local: LocalId, source_type: HirType,
         return mir_operand_move(local)
     mir_operand_copy(local)
 
+fn mir_mut_ref_primitive_inner_v1(param_type: HirType) -> HirType?:
+    """Return the primitive pointee when `param_type` is `x: mut <primitive>`."""
+    match param_type.kind:
+        case HirTypeKind.Ref(ref_inner, true):
+            match ref_inner.kind:
+                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                    return Some(ref_inner)
+                case _: ()
+        case _: ()
+    None
+
+fn _mir_mut_ref_noop_writeback(span: Span) -> MirMutRefArgWriteback:
+    MirMutRefArgWriteback(
+        slot: LocalId(id: -1),
+        inner_mir_type: MirType.i64(),
+        place_kind: 0,
+        symbol_id: -1,
+        base_local: LocalId(id: -1),
+        index_local: LocalId(id: -1),
+        field_idx: -1,
+        target_span: span
+    )
+
+struct MirNamedCallPlanV1:
+    explicit_slots: [i64]
+    explicit_arity: i64
+    source_kind: i64
+    matched_key: text
+    default_params: [HirParam]
+
 impl MirLowering:
+    fn mir_hir_expr_is_admitted_literal_default_v1(expr: HirExpr) -> bool:
+        """Return true when a bootstrap-lane default expression needs no resident relocation."""
+        match expr.kind:
+            case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.FloatLexeme(_, _) |
+                 HirExprKind.BoolLit(_) | HirExprKind.CharLit(_) | HirExprKind.NilLit | HirExprKind.UnitLit:
+                true
+            case HirExprKind.StringLit(_, interpolations):
+                interpolations.len() == 0
+            case HirExprKind.ArrayLit(elements, _):
+                elements.len() == 0
+            case _:
+                false
+
+    fn mir_hir_expr_is_error_default_v1(expr: HirExpr) -> bool:
+        """Return true when a parameter default expression is the placeholder Error node."""
+        match expr.kind:
+            case HirExprKind.Error: true
+            case _: false
     me report_unknown_statement(discriminant: i64, span: Span):
         """Keep recovery diagnostic collection while blocking incomplete MIR."""
         self.error_fatal("E-MIR-STMT-Unknown: MIR lowering has no arm for this statement kind (discriminant {discriminant}); the statement would otherwise be silently dropped", Some(span))
@@ -3384,27 +3436,591 @@ impl MirLowering:
                 arg_local = self.option_non_scalar_payload_argument_v1(arg.value, arg_local, declared_param_type)
         arg_local
 
+    me prepare_mut_ref_primitive_expr_v1(expr: HirExpr, param_type: HirType, prelowered_local: LocalId?) -> MirMutRefArgPrepared:
+        """Prepare stack-slot carrier and writeback metadata for `mut <primitive>`."""
+        val inner_opt = mir_mut_ref_primitive_inner_v1(param_type)
+        if not inner_opt.?:
+            return MirMutRefArgPrepared(
+                matched: false,
+                slot: LocalId(id: -1),
+                inner_mir_type: MirType.i64(),
+                operand: MirOperand(kind: MirOperandKind.Copy(LocalId(id: -1))),
+                has_writeback: false,
+                writeback: _mir_mut_ref_noop_writeback(expr.span)
+            )
+        val ref_inner: HirType = inner_opt.unwrap()
+        val inner_mir_type = self.lower_type(ref_inner)
+        var b_alloc = self.builder
+        val slot = b_alloc.emit_entry_alloc(inner_mir_type)
+        self.builder = b_alloc
+        var has_wb = false
+        var wb = _mir_mut_ref_noop_writeback(expr.span)
+        var handled_init = false
+        match expr.kind:
+            case HirExprKind.NamedVar(sym, _) | HirExprKind.Var(sym):
+                val sym_id = mir_stmt_symbol_id_value(sym)
+                if sym_id >= 0:
+                    var init_local = LocalId(id: -1)
+                    if prelowered_local.?:
+                        init_local = prelowered_local.unwrap()
+                    else:
+                        init_local = self.lower_expr_for_slot(expr, ref_inner)
+                    var b_var = self.builder
+                    b_var.emit_store(mir_operand_copy(slot), mir_operand_copy(init_local))
+                    self.builder = b_var
+                    has_wb = true
+                    wb = MirMutRefArgWriteback(
+                        slot: slot,
+                        inner_mir_type: inner_mir_type,
+                        place_kind: 1,
+                        symbol_id: sym_id,
+                        base_local: LocalId(id: -1),
+                        index_local: LocalId(id: -1),
+                        field_idx: -1,
+                        target_span: expr.span
+                    )
+                    handled_init = true
+            case HirExprKind.Field(base, field_name, resolved):
+                if prelowered_local == None:
+                    val base_local = self.option_record_receiver_payload_v1(base, self.lower_expr(base))
+                    val bitfield_sym = self.bitfield_type_sym_for(base, base_local)
+                    val is_bitfield = bitfield_sym >= 0 and self.bitfield_map.contains(bitfield_sym)
+                    if not is_bitfield:
+                        val field_idx = self.resolve_field_index(base, base_local, field_name, resolved)
+                        var b_field = self.builder
+                        val init_local = b_field.emit_get_field(mir_operand_copy(base_local), field_idx, inner_mir_type)
+                        b_field.emit_store(mir_operand_copy(slot), mir_operand_copy(init_local))
+                        self.builder = b_field
+                        has_wb = true
+                        wb = MirMutRefArgWriteback(
+                            slot: slot,
+                            inner_mir_type: inner_mir_type,
+                            place_kind: 2,
+                            symbol_id: -1,
+                            base_local: base_local,
+                            index_local: LocalId(id: -1),
+                            field_idx: field_idx,
+                            target_span: expr.span
+                        )
+                        handled_init = true
+            case HirExprKind.Index(base, index):
+                if prelowered_local == None:
+                    var base_local = self.lower_expr(base)
+                    if val coll = self.optional_collection_receiver_payload_v1(base, base_local):
+                        base_local = coll
+                    if self.local_is_runtime_dict(base_local):
+                        val dict_key = self.lower_dict_key(index, Some(base))
+                        val dict_get_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_dict_get"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                        ), call_origin: MirCallOrigin.Runtime)
+                        var b_dget = self.builder
+                        val dict_res = b_dget.emit_call(dict_get_op, [mir_operand_copy(base_local), mir_operand_copy(dict_key)], MirType.i64())
+                        self.builder = b_dget
+                        if val dict_raw = dict_res:
+                            val init_local = self.decode_runtime_value(dict_raw, inner_mir_type)
+                            var b_dstore = self.builder
+                            b_dstore.emit_store(mir_operand_copy(slot), mir_operand_copy(init_local))
+                            self.builder = b_dstore
+                            has_wb = true
+                            wb = MirMutRefArgWriteback(
+                                slot: slot,
+                                inner_mir_type: inner_mir_type,
+                                place_kind: 4,
+                                symbol_id: -1,
+                                base_local: base_local,
+                                index_local: dict_key,
+                                field_idx: -1,
+                                target_span: expr.span
+                            )
+                            handled_init = true
+                    elif self.writeback_index_base_is_tuple(base_local, base):
+                        val idx_local = self.lower_expr(index)
+                        var b_tup = self.builder
+                        val elem_ptr = b_tup.emit_gep(
+                            mir_operand_copy(base_local),
+                            [mir_operand_copy(idx_local)],
+                            MirType.ptr(inner_mir_type, false)
+                        )
+                        val init_local = b_tup.emit_load(mir_operand_copy(elem_ptr), inner_mir_type)
+                        b_tup.emit_store(mir_operand_copy(slot), mir_operand_copy(init_local))
+                        self.builder = b_tup
+                        has_wb = true
+                        wb = MirMutRefArgWriteback(
+                            slot: slot,
+                            inner_mir_type: inner_mir_type,
+                            place_kind: 5,
+                            symbol_id: -1,
+                            base_local: base_local,
+                            index_local: idx_local,
+                            field_idx: -1,
+                            target_span: expr.span
+                        )
+                        handled_init = true
+                    else:
+                        val idx_local = self.lower_expr(index)
+                        val bootstrap_arr = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
+                        if self.local_is_runtime_array(base_local) or bootstrap_arr:
+                            val use_typed_u8 = match inner_mir_type.kind:
+                                case MirTypeKind.U8: true
+                                case _: false
+                            if not use_typed_u8:
+                                self.emit_bounds_check_for_index(base.type_, base_local, idx_local)
+                            val getter_name = if use_typed_u8: "rt_bytes_u8_at" else: "rt_array_get"
+                            val array_get_op = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str(getter_name),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(inner_mir_type, false), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                            ), call_origin: MirCallOrigin.Runtime)
+                            var b_aget = self.builder
+                            val array_res = b_aget.emit_call(array_get_op, [mir_operand_copy(base_local), mir_operand_copy(idx_local)], MirType.i64())
+                            self.builder = b_aget
+                            if val array_raw = array_res:
+                                var init_local = LocalId(id: -1)
+                                if use_typed_u8:
+                                    var b_u8 = self.builder
+                                    val cast_u8 = b_u8.emit_cast(mir_operand_copy(array_raw), inner_mir_type)
+                                    self.builder = b_u8
+                                    init_local = cast_u8
+                                else:
+                                    init_local = self.decode_runtime_value(array_raw, inner_mir_type)
+                                var b_astore = self.builder
+                                b_astore.emit_store(mir_operand_copy(slot), mir_operand_copy(init_local))
+                                self.builder = b_astore
+                                has_wb = true
+                                wb = MirMutRefArgWriteback(
+                                    slot: slot,
+                                    inner_mir_type: inner_mir_type,
+                                    place_kind: 3,
+                                    symbol_id: -1,
+                                    base_local: base_local,
+                                    index_local: idx_local,
+                                    field_idx: -1,
+                                    target_span: expr.span
+                                )
+                                handled_init = true
+                        else:
+                            self.emit_bounds_check_for_index(base.type_, base_local, idx_local)
+                            var b_gep = self.builder
+                            val elem_ptr = b_gep.emit_gep(
+                                mir_operand_copy(base_local),
+                                [mir_operand_copy(idx_local)],
+                                MirType.ptr(inner_mir_type, false)
+                            )
+                            val init_local = b_gep.emit_load(mir_operand_copy(elem_ptr), inner_mir_type)
+                            b_gep.emit_store(mir_operand_copy(slot), mir_operand_copy(init_local))
+                            self.builder = b_gep
+                            has_wb = true
+                            wb = MirMutRefArgWriteback(
+                                slot: slot,
+                                inner_mir_type: inner_mir_type,
+                                place_kind: 5,
+                                symbol_id: -1,
+                                base_local: base_local,
+                                index_local: idx_local,
+                                field_idx: -1,
+                                target_span: expr.span
+                            )
+                            handled_init = true
+            case _: ()
+        if not handled_init:
+            var init_local = LocalId(id: -1)
+            if prelowered_local.?:
+                init_local = prelowered_local.unwrap()
+            else:
+                init_local = self.lower_expr_for_slot(expr, ref_inner)
+            var b_rval = self.builder
+            b_rval.emit_store(mir_operand_copy(slot), mir_operand_copy(init_local))
+            self.builder = b_rval
+        MirMutRefArgPrepared(
+            matched: true,
+            slot: slot,
+            inner_mir_type: inner_mir_type,
+            operand: mir_operand_copy(slot),
+            has_writeback: has_wb,
+            writeback: wb
+        )
+
+    me emit_mut_ref_primitive_writebacks_v1(writebacks: [MirMutRefArgWriteback]):
+        """Load updated primitive values from call-site stack slots and write back."""
+        for wb in writebacks:
+            var b_load = self.builder
+            val updated = b_load.emit_load(mir_operand_copy(wb.slot), wb.inner_mir_type)
+            self.builder = b_load
+            if wb.place_kind == 1:
+                self.lower_assign_var(wb.symbol_id, None, updated, wb.target_span, HirExprKind.UnitLit)
+            elif wb.place_kind == 2:
+                var b_field = self.builder
+                b_field.emit_set_field(mir_operand_copy(wb.base_local), wb.field_idx, mir_operand_copy(updated))
+                self.builder = b_field
+            elif wb.place_kind == 3:
+                self.note_container_elem_type(wb.base_local, updated)
+                val boxed = self.box_runtime_value(updated)
+                val set_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_array_set"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(MirType.i64(), false), MirType.i64(), MirType.i64()], return_type: MirType.unit(), is_variadic: false)))
+                ), call_origin: MirCallOrigin.Runtime)
+                var b_aset = self.builder
+                b_aset.emit_call(set_op, [mir_operand_copy(wb.base_local), mir_operand_copy(wb.index_local), mir_operand_copy(boxed)], MirType.unit())
+                self.builder = b_aset
+            elif wb.place_kind == 4:
+                val boxed = self.box_runtime_value(updated)
+                val set_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_dict_set"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ), call_origin: MirCallOrigin.Runtime)
+                var b_dset = self.builder
+                b_dset.emit_call(set_op, [mir_operand_copy(wb.base_local), mir_operand_copy(wb.index_local), mir_operand_copy(boxed)], MirType.i64())
+                self.builder = b_dset
+            elif wb.place_kind == 5:
+                var b_gep = self.builder
+                val elem_ptr = b_gep.emit_gep(
+                    mir_operand_copy(wb.base_local),
+                    [mir_operand_copy(wb.index_local)],
+                    MirType.ptr(wb.inner_mir_type, false)
+                )
+                b_gep.emit_store(mir_operand_copy(elem_ptr), mir_operand_copy(updated))
+                self.builder = b_gep
+
+    me _push_callable_key_variants_v1(lookup_keys: [text], raw_key: text) -> [text]:
+        if raw_key == "":
+            return lookup_keys
+        var keys = lookup_keys
+        if not keys.contains(raw_key):
+            keys.push(raw_key)
+        val dotted = raw_key.replace("::", ".")
+        if dotted != raw_key and not keys.contains(dotted):
+            keys.push(dotted)
+        val sanitized = dotted.replace("-", "_")
+        if sanitized != dotted and not keys.contains(sanitized):
+            keys.push(sanitized)
+        keys
+
+    me _callable_lookup_keys_for_named_args_v1(callee_symbol: SymbolId, primary_override: text = "") -> [text]:
+        if callee_symbol.id < 0:
+            if primary_override != "":
+                return [primary_override]
+            return []
+        var lookup_keys: [text] = []
+        var deferred_bare: [text] = []
+        if primary_override != "":
+            if primary_override.contains(".") or primary_override.contains("::"):
+                lookup_keys = self._push_callable_key_variants_v1(lookup_keys, primary_override)
+            else:
+                deferred_bare.push(primary_override)
+        val primary_key = self.provider_callable_symbol_name(callee_symbol, "")
+        if primary_key != "":
+            if primary_key.contains(".") or primary_key.contains("::"):
+                lookup_keys = self._push_callable_key_variants_v1(lookup_keys, primary_key)
+            elif not deferred_bare.contains(primary_key):
+                deferred_bare.push(primary_key)
+        if val sym = self.symbols.get_symbol_raw(callee_symbol.id):
+            val owner_mod = sym.defining_module ?? ""
+            if owner_mod != "" and sym.name != "":
+                val qualified_key = mir_provider_callable_identity(owner_mod, sym.name)
+                if qualified_key.contains(".") or qualified_key.contains("::"):
+                    lookup_keys = self._push_callable_key_variants_v1(lookup_keys, qualified_key)
+            if sym.name != "":
+                if sym.name.contains(".") or sym.name.contains("::"):
+                    lookup_keys = self._push_callable_key_variants_v1(lookup_keys, sym.name)
+                elif not deferred_bare.contains(sym.name):
+                    deferred_bare.push(sym.name)
+        for bare_key in deferred_bare:
+            lookup_keys = self._push_callable_key_variants_v1(lookup_keys, bare_key)
+        lookup_keys
+
+    me _resolve_module_fn_named_call_plan_v1(callee_symbol_id: i64, param_offset: i64, callee_label: text, arg_names: [text]) -> Result<MirNamedCallPlanV1, text>:
+        val mod_params = self.module_fn_params[callee_symbol_id]
+        if mod_params.len() < param_offset:
+            return Err("named call lacks declared parameter slots: {callee_label}")
+        var mod_names: [text] = []
+        var mod_defaults: [bool] = []
+        var mi = param_offset
+        while mi < mod_params.len():
+            val mp = mod_params[mi]
+            mod_names.push(mp.name)
+            mod_defaults.push(mp.has_default)
+            mi = mi + 1
+        val mod_slots = mir_call_argument_slots_v1(mod_names, mod_defaults, arg_names)?
+        var ei = 0
+        while ei < mod_names.len():
+            if not mod_slots.contains(ei):
+                val omitted = mod_params[ei + param_offset]
+                if not omitted.has_default or self.mir_hir_expr_is_error_default_v1(omitted.default):
+                    return Err("named default requires admitted declaration scope: {callee_label}.{omitted.name}")
+            ei = ei + 1
+        Ok(MirNamedCallPlanV1(
+            explicit_slots: mod_slots,
+            explicit_arity: mod_names.len(),
+            source_kind: 4,
+            matched_key: callee_label,
+            default_params: mod_params
+        ))
+
+    me _resolve_callable_named_call_plan_v1(callee_symbol: SymbolId, param_offset: i64, args: [HirCallArg]) -> Result<MirNamedCallPlanV1, text>:
+        if callee_symbol.id < 0:
+            return Ok(MirNamedCallPlanV1(
+                explicit_slots: [],
+                explicit_arity: args.len(),
+                source_kind: 0,
+                matched_key: "",
+                default_params: []
+            ))
+        val lookup_keys = self._callable_lookup_keys_for_named_args_v1(callee_symbol)
+        val callee_label = if lookup_keys.len() > 0: lookup_keys[0] else: "symbol#{callee_symbol.id}"
+        var arg_names: [text] = []
+        for arg in args:
+            arg_names.push(if arg.has_name: arg.name else: "")
+        if self.declaration_repository != None:
+            var first_ambiguous_key = ""
+            for key in lookup_keys:
+                if self.declaration_parameter_defaults_ambiguous.has(key):
+                    if first_ambiguous_key == "":
+                        first_ambiguous_key = key
+                    continue
+                if self.declaration_parameter_defaults.has(key):
+                    val decl = self.declaration_parameter_defaults[key]
+                    if decl.function.params.len() < param_offset:
+                        return Err("named call lacks declared parameter slots: {key}")
+                    var decl_names: [text] = []
+                    var decl_defaults: [bool] = []
+                    var di = param_offset
+                    while di < decl.function.params.len():
+                        val dp = decl.function.params[di]
+                        decl_names.push(dp.name)
+                        decl_defaults.push(dp.has_default)
+                        di = di + 1
+                    val decl_slots = mir_call_argument_slots_v1(decl_names, decl_defaults, arg_names)?
+                    return Ok(MirNamedCallPlanV1(
+                        explicit_slots: decl_slots,
+                        explicit_arity: decl_names.len(),
+                        source_kind: 1,
+                        matched_key: key,
+                        default_params: []
+                    ))
+            if self.module_fn_params.has(callee_symbol.id):
+                return self._resolve_module_fn_named_call_plan_v1(callee_symbol.id, param_offset, callee_label, arg_names)
+            val missing_label = if first_ambiguous_key != "": first_ambiguous_key else: callee_label
+            return Err("named call lacks unique declaration metadata: {missing_label}")
+        if self.module_fn_params.has(callee_symbol.id):
+            return self._resolve_module_fn_named_call_plan_v1(callee_symbol.id, param_offset, callee_label, arg_names)
+        for key in lookup_keys:
+            if val params = bootstrap_fn_param_defaults_lookup(key):
+                if params.len() < param_offset:
+                    return Err("named call lacks declared parameter slots: {key}")
+                var boot_names: [text] = []
+                var boot_defaults: [bool] = []
+                var bi = param_offset
+                while bi < params.len():
+                    val bp = params[bi]
+                    boot_names.push(bp.name)
+                    boot_defaults.push(bp.has_default)
+                    bi = bi + 1
+                val boot_slots = mir_call_argument_slots_v1(boot_names, boot_defaults, arg_names)?
+                var ei = 0
+                while ei < boot_names.len():
+                    if not boot_slots.contains(ei):
+                        val omitted = params[ei + param_offset]
+                        if not omitted.has_default or not self.mir_hir_expr_is_admitted_literal_default_v1(omitted.default):
+                            return Err("named default requires admitted declaration scope: {key}.{omitted.name}")
+                    ei = ei + 1
+                return Ok(MirNamedCallPlanV1(
+                    explicit_slots: boot_slots,
+                    explicit_arity: boot_names.len(),
+                    source_kind: 2,
+                    matched_key: key,
+                    default_params: params
+                ))
+        for key in lookup_keys:
+            if self.surface_fn_param_rows_v1.has(key) and not self.surface_fn_param_ambig_v1.has(key):
+                val encoded = self.surface_fn_param_rows_v1[key]
+                val shape_parts = encoded.split("|")
+                var surf_full_names: [text] = []
+                var surf_full_defaults: [bool] = []
+                if shape_parts[0] != "":
+                    for sp_name in shape_parts[0].split(","):
+                        surf_full_names.push(sp_name)
+                if shape_parts.len() > 1:
+                    val flags_text = shape_parts[1]
+                    var flag_i = 0
+                    while flag_i < flags_text.byte_len():
+                        surf_full_defaults.push(flags_text.substring(flag_i, flag_i + 1) == "1")
+                        flag_i = flag_i + 1
+                if surf_full_defaults.len() == surf_full_names.len() and surf_full_names.len() >= param_offset:
+                    var surf_names: [text] = []
+                    var surf_defaults: [bool] = []
+                    var si = param_offset
+                    while si < surf_full_names.len():
+                        surf_names.push(surf_full_names[si])
+                        surf_defaults.push(surf_full_defaults[si])
+                        si = si + 1
+                    val surf_slots = mir_call_argument_slots_v1(surf_names, surf_defaults, arg_names)?
+                    var ei = 0
+                    while ei < surf_names.len():
+                        if not surf_slots.contains(ei):
+                            return Err("named default requires admitted declaration scope: {key}.{surf_names[ei]}")
+                        ei = ei + 1
+                    return Ok(MirNamedCallPlanV1(
+                        explicit_slots: surf_slots,
+                        explicit_arity: surf_names.len(),
+                        source_kind: 3,
+                        matched_key: key,
+                        default_params: []
+                    ))
+        Err("named call lacks bootstrap parameter metadata: {callee_label}")
+
+    me lower_explicit_call_args_with_writebacks_v1(initial_operands: [MirOperand], args: [HirCallArg], param_types: [HirType], param_offset: i64, callee_symbol: SymbolId = SymbolId(id: -1)) -> MirMethodCallOperands:
+        var operands: [MirOperand] = initial_operands
+        var writebacks: [MirMutRefArgWriteback] = []
+        var has_named = false
+        for arg in args:
+            if arg.has_name:
+                has_named = true
+                break
+        if not has_named:
+            var explicit_index = 0
+            for arg in args:
+                val param_index = explicit_index + param_offset
+                var handled_mut_ref = false
+                if param_index >= 0 and param_index < param_types.len():
+                    val prep = self.prepare_mut_ref_primitive_expr_v1(arg.value, param_types[param_index], None)
+                    if prep.matched:
+                        operands = operands.push(prep.operand)
+                        if prep.has_writeback:
+                            writebacks = writebacks.push(prep.writeback)
+                        handled_mut_ref = true
+                if not handled_mut_ref:
+                    val arg_local: LocalId = self.lower_method_call_arg(arg, param_types, param_index)
+                    operands = operands.push(mir_operand_copy(arg_local))
+                explicit_index = explicit_index + 1
+            return MirMethodCallOperands(operands: operands, writebacks: writebacks)
+        # Keep Any/TypeParam named-call refusal exact unless bound slot table owns Any ABI.
+        var has_any_or_tp = false
+        for param_type in param_types:
+            match param_type.kind:
+                case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
+                    has_any_or_tp = true
+                case _: ()
+        if has_any_or_tp:
+            for arg in args:
+                if arg.has_name:
+                    self.error_fatal("named argument to Any-bearing method requires declared parameter binding", Some(arg.span))
+                    var b_err = self.builder
+                    val dummy = b_err.emit_const_int(0)
+                    self.builder = b_err
+                    for _a in args:
+                        operands = operands.push(mir_operand_copy(dummy))
+                    return MirMethodCallOperands(operands: operands, writebacks: [])
+        var plan = MirNamedCallPlanV1(explicit_slots: [], explicit_arity: args.len(), source_kind: 0, matched_key: "", default_params: [])
+        match self._resolve_callable_named_call_plan_v1(callee_symbol, param_offset, args):
+            case Ok(resolved_plan):
+                plan = resolved_plan
+            case Err(reason):
+                self.error_fatal(reason, Some(args[0].span))
+                var b_err = self.builder
+                val dummy = b_err.emit_const_int(0)
+                self.builder = b_err
+                for _a in args:
+                    operands = operands.push(mir_operand_copy(dummy))
+                return MirMethodCallOperands(operands: operands, writebacks: [])
+        val use_source_order = plan.source_kind == 0
+        var supplied_by_slot: Dict<i64, MirOperand> = {}
+        var supplied_in_source_order: [MirOperand] = []
+        var explicit_index = 0
+        for arg in args:
+            val target_slot = if use_source_order: explicit_index else: plan.explicit_slots[explicit_index]
+            val param_index = target_slot + param_offset
+            var lowered_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
+            var handled_mut_ref = false
+            if param_index >= 0 and param_index < param_types.len():
+                val prep = self.prepare_mut_ref_primitive_expr_v1(arg.value, param_types[param_index], None)
+                if prep.matched:
+                    lowered_op = prep.operand
+                    if prep.has_writeback:
+                        writebacks = writebacks.push(prep.writeback)
+                    handled_mut_ref = true
+            if not handled_mut_ref:
+                val positional_view = HirCallArg(has_name: false, name: "", value: arg.value, span: arg.span)
+                val arg_local: LocalId = self.lower_method_call_arg(positional_view, param_types, param_index)
+                lowered_op = mir_operand_copy(arg_local)
+            supplied_by_slot[target_slot] = lowered_op
+            supplied_in_source_order = supplied_in_source_order.push(lowered_op)
+            explicit_index = explicit_index + 1
+        var needs_defaults = false
+        var check_slot = 0
+        while check_slot < plan.explicit_arity:
+            if not supplied_by_slot.has(check_slot):
+                needs_defaults = true
+                break
+            check_slot = check_slot + 1
+        if needs_defaults:
+            if plan.source_kind == 1:
+                var all_supplied: [MirOperand] = initial_operands
+                for op in supplied_in_source_order:
+                    all_supplied = all_supplied.push(op)
+                var all_slots: [i64] = []
+                var pi = 0
+                while pi < param_offset:
+                    all_slots.push(pi)
+                    pi = pi + 1
+                for es in plan.explicit_slots:
+                    all_slots.push(es + param_offset)
+                if all_supplied.len() == all_slots.len():
+                    match self.complete_declaration_call_args_v1(plan.matched_key, all_supplied, all_slots):
+                        case Ok(completed):
+                            return MirMethodCallOperands(operands: completed, writebacks: writebacks)
+                        case Err(reason):
+                            self.error_fatal(reason, Some(args[0].span))
+                            var b_err = self.builder
+                            val dummy = b_err.emit_const_int(0)
+                            self.builder = b_err
+                            return MirMethodCallOperands(operands: [dummy], writebacks: [])
+                self.error_fatal("named call with omitted parameter default requires matching receiver operands", Some(args[0].span))
+                return MirMethodCallOperands(operands: operands, writebacks: [])
+            if plan.source_kind != 2 and plan.source_kind != 4:
+                self.error_fatal("named default requires admitted declaration scope: {plan.matched_key}", Some(args[0].span))
+                return MirMethodCallOperands(operands: operands, writebacks: [])
+            var slot = 0
+            while slot < plan.explicit_arity:
+                if supplied_by_slot.has(slot):
+                    operands = operands.push(supplied_by_slot[slot])
+                elif (slot + param_offset) < plan.default_params.len():
+                    val dp = plan.default_params[slot + param_offset]
+                    val default_expr = if plan.source_kind == 2:
+                        self.bind_resident_default_global_v1(plan.matched_key, dp.default)
+                    else:
+                        dp.default
+                    var d_local = self.lower_expr_for_slot(default_expr, dp.type_)
+                    match dp.type_.kind:
+                        case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
+                            d_local = self.box_runtime_value(d_local)
+                        case _: ()
+                    operands = operands.push(mir_operand_copy(d_local))
+                else:
+                    self.error_fatal("named call with omitted parameter default requires declaration metadata", Some(args[0].span))
+                slot = slot + 1
+        else:
+            var slot = 0
+            while slot < plan.explicit_arity:
+                operands = operands.push(supplied_by_slot[slot])
+                slot = slot + 1
+        MirMethodCallOperands(operands: operands, writebacks: writebacks)
+
+    me lower_receiver_and_args_with_writebacks_v1(receiver: HirExpr, args: [HirCallArg], param_types: [HirType], callee_symbol: SymbolId = SymbolId(id: -1)) -> MirMethodCallOperands:
+        val receiver_local: LocalId = self.lower_expr(receiver)
+        var initial_operands: [MirOperand] = []
+        initial_operands = initial_operands.push(mir_operand_copy(receiver_local))
+        val prev_hir_bindings = erased_callback_hir_bindings_swap_v1(
+            self.method_receiver_erased_hir_bindings_v1(receiver_local, Some(receiver), param_types))
+        val call_pack = self.lower_explicit_call_args_with_writebacks_v1(initial_operands, args, param_types, 1, callee_symbol)
+        val _restored_hir_bindings = erased_callback_hir_bindings_swap_v1(prev_hir_bindings)
+        call_pack
+
     me lower_receiver_and_args(receiver: HirExpr, args: [HirCallArg], param_types: [HirType]) -> [MirOperand]:
         """Lower receiver and arguments for method calls. `param_types` is the
         callee's declared parameter list with the receiver at index 0 (empty
         when the callee is not known here)."""
-        val receiver_local: LocalId = self.lower_expr(receiver)
-        # Keep the implicit receiver insertion as an explicit push. The
-        # self-hosted Stage 3 compiler has miscompiled the one-element generic
-        # array literal above for zero-explicit-argument calls, leaving an
-        # empty MIR argument vector. The native call then reuses the previous
-        # return register as `self` (cross-architecture receiver loss).
-        var arg_operands: [MirOperand] = []
-        arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
-        val prev_hir_bindings = erased_callback_hir_bindings_swap_v1(
-            self.method_receiver_erased_hir_bindings_v1(receiver_local, Some(receiver), param_types))
-        var explicit_index = 0
-        for arg in args:
-            val arg_local: LocalId = self.lower_method_call_arg(arg, param_types, explicit_index + 1)
-            arg_operands = arg_operands.push(mir_operand_copy(arg_local))
-            explicit_index = explicit_index + 1
-        val _restored_hir_bindings = erased_callback_hir_bindings_swap_v1(prev_hir_bindings)
-        arg_operands
+        val call_pack = self.lower_receiver_and_args_with_writebacks_v1(receiver, args, param_types)
+        call_pack.operands
 
     me lower_compound_combine(current: LocalId, op: HirAssignOp, rhs: LocalId, type_: MirType) -> LocalId:
         """Read-modify-write core of `place <op>= rhs`.

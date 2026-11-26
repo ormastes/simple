@@ -200,3 +200,14 @@ specs named here read `native_build.spl`; the other seven (and
 live file this change does not touch (`git grep "_CliCompile/native_build.spl"`
 outside `doc/` now hits only `pipeline/native_project/tests.rs:365`, a negative
 assertion that the file is NOT in the CLI closure, which stays true).
+
+
+## Addendum 2026-11-27 (lane work/w2-1-compiler-hir-mir-20261127)
+
+- Audited `sh scripts/check/check-orphan-part-files.shs` within compiler ownership (`src/compiler/**`):
+  - Repaired `src/compiler/20.hir/hir_lowering/_Items/module_tldr_registration.spl` by removing writes to the nonexistent `self.symbols.admitted_function_abis` field (avoiding changes to `SymbolTable` / `BF-CODEC`-owned `src/compiler/20.hir/generated/hir_codec.spl`) while preserving `while dots < owner.len()` so `scripts/check/text_len_bounded_byte_scan_baseline.txt` stays non-stale.
+  - Wired `export use compiler.hir.hir_lowering._Items.module_tldr_registration.*` into `src/compiler/20.hir/hir_lowering/items.spl`.
+  - Added `test/01_unit/compiler/hir/module_tldr_registration_spec.spl` (`1/1` passed in `--mode=interpreter`).
+- Remaining items reported by `check-orphan-part-files.shs`:
+  - 14 false positives under `src/compiler/60.mir_opt/mir_opt/**` and `src/compiler/70.backend/backend/**` because `scripts/check/check-orphan-part-files.shs` (`module_path_of()`) does not collapse repeated `NN.name/name` prefixes (outside W2-1 `src/compiler/**` code scope).
+  - 2 non-compiler part-files in `src/lib/gc_async_mut/tls/_TlsUtilities/` (`hex_encoding.spl`, `text_ops.spl`), outside W2-1 `src/compiler/**` ownership and left untouched.

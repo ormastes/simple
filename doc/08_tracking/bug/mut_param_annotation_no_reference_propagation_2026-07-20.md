@@ -80,3 +80,15 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/parser_type_
 ```
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter was probed.
+
+
+## Addendum 2026-11-27 (lane work/w2-1-compiler-hir-mir-20261127)
+
+- Completed pure-Simple `50.mir` by-reference primitive `mut T` argument passing and writeback:
+  - Replaced raw `MirInstKind.Ref` identity aliasing (which lowered to value copies / invalid scalar-as-pointer loads) with entry stack-slot allocation (`prepare_mut_ref_primitive_expr_v1`) and post-call store-back (`emit_mut_ref_primitive_writebacks_v1`, `MirMutRefArgWriteback`, `MirMutRefArgPrepared`, `MirMethodCallOperands`) in `src/compiler/50.mir/mir_lowering_types.spl` and `src/compiler/50.mir/mir_lowering_stmts.spl`.
+  - Wired writeback preparation and post-call stores into direct and typed function-value calls (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`), instance/trait/static/UFCS method calls (`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`), and function-field calls (`src/compiler/50.mir/_MirLoweringExpr/function_field_call.spl`), covering locals (`NamedVar`/`Var`), field places, index places (dict/tuple/array/`u8`/GEP), and rvalues.
+- Verified with `simple.exe test --mode=interpreter`:
+  - `test/01_unit/compiler/50.mir/mut_primitive_param_by_reference_spec.spl`: `22/22` passed (MIR alloc/load/store, direct calls, early-return store-back, instance/static/UFCS/trait/devirtualized calls, named args including indirect/function-field/omitted defaults/specificity-ordered decl lookup/same-module prescan priority and fail-closed controls, field/index/nested `mut` forwarding, LLVM IR `alloca` + `ptr` signature check, `mir_verify_module` 0 findings, and controls).
+  - `test/01_unit/compiler/20.hir/mut_type_param_reference_propagation_spec.spl`: `5/5` passed.
+  - `test/01_unit/compiler/mir_opt/ssa_alloca_borrow_spec.spl`: `3/3` passed.
+- Status set to `fix-implemented-verification-pending`: Rust seed interpreter (`src/compiler_rust/`, out of compiler lane scope) still binds `mut` primitives by value, and Stage 2/3 native rebuild + execution remain pending.
