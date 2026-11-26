@@ -28,7 +28,7 @@ pub(crate) use module_loader::{
     capture_env_with_origin, check_private_call_visibility, closure_created_in_test, is_fn_visible_to,
     is_private_fn_of,
     owner_written_in_test,
-    register_module_private_fns,
+    register_module_private_fns, check_unprovided_use_in_resolved_module,
     stamp_closure_origin,
     private_call_caller,
     ClosureOriginGuard,

@@ -337,6 +337,16 @@ fn sibling_might_define_requested_names(path: &Path, requested_names: &[String])
     }
 }
 
+fn pattern_bound_names(pattern: &simple_parser::ast::Pattern, out: &mut Vec<String>) {
+    use simple_parser::ast::Pattern;
+    match pattern {
+        Pattern::Identifier(n) | Pattern::MutIdentifier(n) | Pattern::MoveIdentifier(n) => out.push(n.clone()),
+        Pattern::Typed { pattern, .. } => pattern_bound_names(pattern, out),
+        Pattern::Tuple(ps) | Pattern::Array(ps) => ps.iter().for_each(|p| pattern_bound_names(p, out)),
+        _ => {}
+    }
+}
+
 fn locally_defined_names(items: &[Node]) -> Vec<String> {
     let mut names = Vec::new();
     for item in items {
@@ -371,11 +381,8 @@ fn locally_defined_names(items: &[Node]) -> Vec<String> {
             Node::Const(c) => names.push(c.name.clone()),
             Node::Static(s) => names.push(s.name.clone()),
 
-            Node::Let(stmt) => {
-                if let simple_parser::ast::Pattern::Identifier(name) = &stmt.pattern {
-                    names.push(name.clone());
-                }
-            }
+            // `val X: T = ..` is `Pattern::Typed`; `val (a, b) = ..` binds several names.
+            Node::Let(stmt) => pattern_bound_names(&stmt.pattern, &mut names),
             _ => {}
         }
     }
@@ -1219,6 +1226,57 @@ fn check_unprovided_use_names(
         )));
     }
     Ok(())
+}
+
+/// HIR/JIT-lane twin of the interpreter's unprovided-use check: the JIT import
+/// loader never runs `load_and_merge_module`, so the same rule, message and
+/// strict/warn outcome run here against the resolved module's parsed surface.
+/// The exports table is empty (nothing is evaluated), so names the module
+/// re-exposes through its own non-glob `use` lines are added explicitly, and
+/// any shape whose surface cannot be enumerated statically is left unchecked.
+pub(crate) fn check_unprovided_use_in_resolved_module(
+    use_stmt: &UseStmt,
+    importer: &Path,
+    resolved: &Path,
+) -> Result<(), CompileError> {
+    if requested_group_import_names(use_stmt).is_none()
+        || resolved.file_name().is_some_and(|n| n == "__init__.spl")
+    {
+        return Ok(()); // not a braced group, or a package surface merged from siblings
+    }
+    // Fail safe: the JIT resolver and the interpreter's resolver pick roots
+    // differently (e.g. `std.sffi.dynamic` from a nogc_sync_mut importer is a
+    // different file on each lane). Check only when both lanes agree on the file;
+    // otherwise this lane's surface is not the one the program actually uses.
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    match super::path_resolution::resolve_module_path(&use_stmt.path.segments, importer.parent().unwrap_or(Path::new("."))) {
+        Ok(p) if canon(&p) == canon(resolved) => {}
+        _ => return Ok(()),
+    }
+    let super::module_cache::SharedSource::Parsed { source, ast: Ok(ast) } = super::module_cache::shared_source(resolved)
+    else {
+        return Ok(());
+    };
+    let items = &ast.items;
+    let mut enums: Enums = HashMap::new();
+    for item in items {
+        if let Node::Enum(e) = item {
+            enums.insert(e.name.clone(), Arc::new(e.clone()));
+        }
+    }
+    let incomplete = source_is_host_gated(&source)
+        || items.iter().any(|i| matches!(i, Node::MultiUse(_) | Node::CommonUseStmt(_)));
+    let exports: Arc<ModuleTable> = Arc::new(ModuleTable::leaf(Default::default()));
+    let mut provided = collect_provided_names(items, &exports, &HashMap::new(), &HashMap::new(), &enums, incomplete);
+    if let Some(set) = provided.as_mut().and_then(Arc::get_mut) {
+        for item in items {
+            if let Node::UseStmt(u) = item {
+                set.extra.extend(published_target_names(&u.target));
+            }
+        }
+    }
+    let label = use_stmt.path.segments.join(".");
+    unprovided_use_outcome(check_unprovided_use_names(use_stmt, Some(importer), resolved, &label, &provided))
 }
 
 /// Validate that imported function effects are compatible with importer's capabilities.
@@ -3638,6 +3696,16 @@ mod private_call_visibility_tests {
             "pub unit TokV1: i64\ntrait Tr:\n    fn t() -> i64\ntype Al = i64\nconst K = 1\nstatic S = 2\n",
         );
         for name in ["TokV1", "Tr", "Al", "K", "S"] {
+            let u = use_of(&format!("use m.{{{name}}}\n"));
+            let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided);
+            assert!(r.is_ok(), "{name}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn typed_and_destructured_top_level_val_is_provided() {
+        let provided = facade_provided("pub val LIMIT_A: i64 = 7\nval (pa, pb) = (1, 2)\nval mut_plain = 3\n");
+        for name in ["LIMIT_A", "pa", "pb", "mut_plain"] {
             let u = use_of(&format!("use m.{{{name}}}\n"));
             let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided);
             assert!(r.is_ok(), "{name}: {r:?}");
