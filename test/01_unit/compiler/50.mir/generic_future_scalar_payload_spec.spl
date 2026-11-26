@@ -1,0 +1,119 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, generics
+#
+# Regression for doc/08_tracking/bug/native_future_receiver_typeparam_2026_10_18.md:
+# Generic classes with non-Dict fields (e.g. Future<T>{poll_result: Poll<T>})
+# store and read scalar payloads raw/bitcast across Poll<T>. Static factories
+# and inline methods on generic classes (Future.from_value, Future.complete)
+# must pass class-level TypeParam arguments raw (or bitcast for f64/f32) rather
+# than boxing them via rt_value_int_wide / rt_value_float. Shape-level
+# (HIR -> MIR -> LLVM text).
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val MODULE = "gfsp_probe"
+
+val PRELUDE = "enum Poll<T>:\n" +
+    "    Ready(T)\n" +
+    "    Pending\n" +
+    "\n" +
+    "class Future<T>:\n" +
+    "    poll_result: Poll<T>\n" +
+    "    static fn from_value(value: T) -> Future<T>:\n" +
+    "        Future(poll_result: Poll.Ready(value))\n" +
+    "    static fn pending() -> Future<T>:\n" +
+    "        Future(poll_result: Poll.Pending)\n" +
+    "    fn poll() -> Poll<T>:\n" +
+    "        self.poll_result\n" +
+    "    me complete(value: T) -> bool:\n" +
+    "        val cur: Poll<T> = self.poll_result\n" +
+    "        match cur:\n" +
+    "            case Poll.Ready(_): false\n" +
+    "            case Poll.Pending:\n" +
+    "                self.poll_result = Poll.Ready(value)\n" +
+    "                true\n" +
+    "\n"
+
+struct FutureShaped:
+    ir: text
+    errors: [text]
+
+fn lower_future_ir(body: text) -> FutureShaped:
+    val src = PRELUDE + body
+    val file = "testdata/gfsp_probe.spl"
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parse_full_frontend(src, file, MODULE, Logger(level: 0)))
+    var errors: [text] = []
+    for e in hl.errors:
+        errors.push("hir: " + e.message)
+    val m: HirModule = hir
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        errors.push("mir: " + e.message)
+    val ir = MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
+    FutureShaped(ir: ir, errors: errors)
+
+fn future_fn_body(ir: text, fn_name: text) -> [text]:
+    var out: [text] = []
+    var inside = false
+    for line in ir.split("\n"):
+        val l: text = line
+        if l.starts_with("define ") and (l.contains("." + fn_name + "(") or l.contains("@" + fn_name + "(")):
+            inside = true
+        if inside:
+            out = out.push(l)
+            if l.len() == 1:
+                inside = false
+    out
+
+fn future_count_calls(lines: [text], callee: text) -> i64:
+    var n = 0
+    for line in lines:
+        val l: text = line
+        if l.contains("call ") and l.contains("@" + callee + "("):
+            n = n + 1
+    n
+
+val PROBE_I64 = "fn probe_i64(v: i64) -> i64:\n" +
+    "    val f1 = Future<i64>.from_value(v)\n" +
+    "    val f2 = Future.from_value(v)\n" +
+    "    var f3 = Future<i64>.pending()\n" +
+    "    val _ok = f3.complete(v)\n" +
+    "    val s1: Poll<i64> = f1.poll()\n" +
+    "    match s1:\n" +
+    "        case Poll.Ready(x): x\n" +
+    "        case Poll.Pending: -1\n"
+
+val PROBE_F64 = "fn probe_f64(v: f64) -> f64:\n" +
+    "    val f1 = Future<f64>.from_value(v)\n" +
+    "    var f2 = Future<f64>.pending()\n" +
+    "    val _ok = f2.complete(v)\n" +
+    "    val s1: Poll<f64> = f1.poll()\n" +
+    "    match s1:\n" +
+    "        case Poll.Ready(x): x\n" +
+    "        case Poll.Pending: -1.0\n"
+
+describe "Future<T> static/instance TypeParam arguments pass unboxed across the erased boundary":
+    it "passes i64 arguments raw without rt_value_int_wide for from_value and complete":
+        val s = lower_future_ir(PROBE_I64)
+        expect(s.errors.len()).to_equal(0)
+        expect(future_count_calls(future_fn_body(s.ir, "probe_i64"), "rt_value_int_wide")).to_equal(0)
+
+    it "passes f64 arguments via i64 bitcast without rt_value_float for from_value and complete":
+        val s = lower_future_ir(PROBE_F64)
+        expect(s.errors.len()).to_equal(0)
+        val body = future_fn_body(s.ir, "probe_f64")
+        expect(future_count_calls(body, "rt_value_float")).to_equal(0)
+        expect(body.join("\n")).to_contain("bitcast double")

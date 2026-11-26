@@ -53,6 +53,23 @@ use compiler.common.value_access.{compiler_value_discriminant}
 fn _sffi_method_hir_type_discriminant<T>(value: T) -> i64:
     compiler_value_discriminant<T>(value)
 
+fn mask_class_erased_raw_param_types_v1(param_types: [HirType], raw_flags: [bool]) -> [HirType]:
+    """Mask class-generic TypeParam slots to Error before lower_method_call_arg
+    so generic-class methods/statics pass scalar payloads raw (matching concrete
+    fields/enums) instead of rt_value_int_wide / rt_value_float boxing them."""
+    if raw_flags.len() == 0:
+        return param_types
+    var masked: [HirType] = []
+    var i = 0
+    while i < param_types.len():
+        val p: HirType = param_types[i]
+        if i < raw_flags.len() and raw_flags[i]:
+            masked.push(HirType(kind: HirTypeKind.Error, span: p.span))
+        else:
+            masked.push(p)
+        i = i + 1
+    masked
+
 # Cached MIR method-call trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_mc_trace_state: i64 = -1
 var mir_mc_trace_generation: i64 = -1
@@ -5492,17 +5509,20 @@ impl MirLowering:
                 var method_param_types = self.resolved_call_hir_param_types(method_id)
                 if method_param_types.len() == 0:
                     method_param_types = self.erased_method_param_types_v1(method_id, args)
+                val raw_generic_flags = self.class_erased_raw_slot_flags_v1(method_id, method_param_types, args, 1)
+                val effective_method_param_types = mask_class_erased_raw_param_types_v1(method_param_types, raw_generic_flags)
                 val arg_operands = if wb_kind != 0:
-                    self.build_args_from_receiver(wb_receiver, args, method_param_types)
+                    self.build_args_from_receiver(wb_receiver, args, effective_method_param_types)
                 else if has_prelowered_method_receiver:
                     # Predicate dispatch may pre-lower a receiver to prove
                     # whether stale resolved owner metadata must yield to
                     # primitive text. Reuse that value for a genuine custom
                     # instance method so a call-expression receiver is never
                     # evaluated twice.
-                    self.build_args_from_receiver(prelowered_method_receiver, args, method_param_types)
+                    self.build_args_from_receiver(prelowered_method_receiver, args, effective_method_param_types)
                 else:
-                    self.lower_receiver_and_args(receiver, args, method_param_types)
+                    self.lower_receiver_and_args(receiver, args, effective_method_param_types)
+                val adapted_arg_operands = self.adapt_class_erased_raw_operands_v1(arg_operands, raw_generic_flags)
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
                 # Pad omitted trailing defaulted params -- this arm calls
@@ -5518,7 +5538,7 @@ impl MirLowering:
                 # included. (An earlier version of this fix stripped the
                 # receiver first, which shifted every index by one and both
                 # broke the arity check and duplicated an already-supplied arg.)
-                val final_instance_args = self.pad_trailing_default_args(method_operand, arg_operands)
+                val final_instance_args = self.pad_trailing_default_args(method_operand, adapted_arg_operands)
                 var b = self.builder
                 val result = b.emit_call(method_operand, final_instance_args, return_type)
                 self.builder = b
@@ -5611,11 +5631,14 @@ impl MirLowering:
                 # A static method has no receiver slot: explicit argument i
                 # is declared parameter i.
                 val static_param_types = self.resolved_call_hir_param_types(method_id)
+                val raw_static_flags = self.class_erased_raw_slot_flags_v1(method_id, static_param_types, args, 0)
+                val effective_static_param_types = mask_class_erased_raw_param_types_v1(static_param_types, raw_static_flags)
                 var static_arg_index = 0
                 for arg in args:
-                    val arg_local = self.lower_method_call_arg(arg, static_param_types, static_arg_index)
+                    val arg_local = self.lower_method_call_arg(arg, effective_static_param_types, static_arg_index)
                     arg_operands = arg_operands.push(mir_operand_copy(arg_local))
                     static_arg_index = static_arg_index + 1
+                arg_operands = self.adapt_class_erased_raw_operands_v1(arg_operands, raw_static_flags)
 
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
@@ -5756,11 +5779,14 @@ impl MirLowering:
                 if val resolved_static_method_id = static_method_id:
                     var static_args: [MirOperand] = []
                     val name_static_param_types = self.resolved_call_hir_param_types(resolved_static_method_id)
+                    val raw_name_static_flags = self.class_erased_raw_slot_flags_v1(resolved_static_method_id, name_static_param_types, args, 0)
+                    val effective_name_static_param_types = mask_class_erased_raw_param_types_v1(name_static_param_types, raw_name_static_flags)
                     var name_static_arg_index = 0
                     for arg in args:
-                        val static_arg = self.lower_method_call_arg(arg, name_static_param_types, name_static_arg_index)
+                        val static_arg = self.lower_method_call_arg(arg, effective_name_static_param_types, name_static_arg_index)
                         static_args.push(mir_operand_copy(static_arg))
                         name_static_arg_index = name_static_arg_index + 1
+                    static_args = self.adapt_class_erased_raw_operands_v1(static_args, raw_name_static_flags)
                     var static_return_type = self.resolved_call_return_type(resolved_static_method_id)
                     self.provider_method_materialize_v1("{static_receiver_name}::{method}")
                     if val static_result_name = self.struct_method_return_names.get("{static_receiver_name}::{method}"):
@@ -5917,11 +5943,14 @@ impl MirLowering:
                             var im_arg_operands: [MirOperand] = []
                             im_arg_operands = im_arg_operands.push(mir_operand_copy(unresolved_receiver_local))
                             val im_param_types = self.resolved_call_hir_param_types(resolved_method_id)
+                            val raw_im_flags = self.class_erased_raw_slot_flags_v1(resolved_method_id, im_param_types, args, 1)
+                            val effective_im_param_types = mask_class_erased_raw_param_types_v1(im_param_types, raw_im_flags)
                             var im_arg_index = 0
                             for arg in args:
-                                val im_arg_local = self.lower_method_call_arg(arg, im_param_types, im_arg_index + 1)
+                                val im_arg_local = self.lower_method_call_arg(arg, effective_im_param_types, im_arg_index + 1)
                                 im_arg_operands = im_arg_operands.push(mir_operand_copy(im_arg_local))
                                 im_arg_index = im_arg_index + 1
+                            im_arg_operands = self.adapt_class_erased_raw_operands_v1(im_arg_operands, raw_im_flags)
                             val im_method_operand = self.symbol_to_operand(resolved_method_id)
                             val im_return_type = self.resolved_call_return_type(resolved_method_id)
                             # Full-array pad, receiver included -- same alignment
@@ -8449,6 +8478,77 @@ impl MirLowering:
         )
 
         result ?? self.builder.new_temp(set_type)
+
+    me class_erased_raw_slot_flags_v1(method_id: SymbolId, param_types: [HirType], args: [HirCallArg], receiver_offset: i64) -> [bool]:
+        """Identify TypeParam parameter slots owned by an enclosing generic class
+        (not method-level type parameters and not #erased-dict-class slots).
+        Such generic classes (e.g. Future<T>, Cell<T>, Box<T>) share raw/bitcast
+        storage with concrete constructors, so their bare-T params must not be
+        rt_value_int_wide / rt_value_float boxed at call sites."""
+        if param_types.len() == 0:
+            return []
+        for arg in args:
+            if arg.has_name:
+                return []
+        if val found_sym = self.symbols.get_symbol_raw(method_id.id):
+            val sym: HirSymbol = found_sym
+            if sym.generic_param_count != 0:
+                return []
+        if self.erased_method_param_types_v1(method_id, args).len() > 0:
+            return []
+        var any_raw = false
+        var flags: [bool] = []
+        var i = 0
+        while i < param_types.len():
+            var is_raw_slot = false
+            if i >= receiver_offset:
+                val param_ty: HirType = param_types[i]
+                match param_ty.kind:
+                    case HirTypeKind.TypeParam(slot_name, _):
+                        if slot_name != "__erased_scalar_slot__":
+                            is_raw_slot = true
+                    case _: ()
+            if is_raw_slot:
+                any_raw = true
+            flags.push(is_raw_slot)
+            i = i + 1
+        if not any_raw:
+            return []
+        flags
+
+    me adapt_class_erased_raw_operands_v1(operands: [MirOperand], raw_flags: [bool]) -> [MirOperand]:
+        """Normalize class-erased TypeParam call operands to the erased i64 carrier
+        without rt_value_int_wide / rt_value_float boxing: bitcast floats so
+        IEEE-754 bits survive the i64 param ABI, box nil/text handles, and keep
+        integers/bools/records raw."""
+        if raw_flags.len() == 0:
+            return operands
+        var out: [MirOperand] = []
+        var i = 0
+        while i < operands.len():
+            var adapted: MirOperand = operands[i]
+            if i < raw_flags.len() and raw_flags[i]:
+                var local = LocalId(id: -1)
+                match adapted.kind:
+                    case MirOperandKind.Copy(l) | MirOperandKind.Move(l):
+                        local = l
+                    case _: ()
+                if local.id >= 0:
+                    if self.nil_locals.contains(local.id) or self.local_is_str(local):
+                        val boxed = self.box_runtime_value(local)
+                        if boxed.id != local.id:
+                            adapted = mir_operand_copy(boxed)
+                    else:
+                        if val present_mt = self.local_mir_type_of(local):
+                            val mt: MirType = present_mt
+                            match mt.kind:
+                                case MirTypeKind.F64 | MirTypeKind.F32:
+                                    val bits = self.bitcast_float_enum_payload(local)
+                                    adapted = mir_operand_copy(bits)
+                                case _: ()
+            out.push(adapted)
+            i = i + 1
+        out
 
     me lower_const_expr(expr: HirExpr) -> MirConstValue?:
         """Retain MIR's literal-only constant API through the shared HIR owner."""
