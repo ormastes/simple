@@ -1,5 +1,10 @@
 # Agent task plan — Simple Container Improvement, increment 1
 
+- Store sweeper and cross-owner follow-ups (Fable review, 2026-11-27):
+  - An unrestorable foreign pin now stays in a tomb marked `keep`, and the call returns `pin-owner-changed-unrestored`. Nothing yet surfaces or reclaims these tombs.
+  - A pin restored as `<id>.r<n>` is not discoverable by its owner, so its refs are retained indefinitely.
+  - There is still no directory sync: after a crash, a record can persist while its object rename does not.
+  - The collect-path sweep spec runs on an uninitialized root, so only the direct `sweep_staging` calls are proven.
 Remaining work after increment 3: `doc/03_plan/platform/container/simple_container_remaining_work.md`.
 
 **Date:** 2026-11-25
@@ -73,10 +78,10 @@ Open (P2, next increment):
 - View create crash follow-ups (Fable review, 2026-11-27):
   - A crash mid journal/meta write leaves a `.simple-atomic-bytes-*/` staging dir that destroy refuses as unknown. This is fail-closed, but the id stays stuck. Fix: accept an empty or payload-only atomic staging dir.
   - Recovery now reaches a same-id create caught between its claim and its journal write. This is acceptable only because destroying an id you do not own is a caller error.
-- release_pin across owners: the owner check reads `pins/<id>/owner` before the rename. A releaser can therefore remove a pin that another owner re-created under the same id after a different releaser's rename. Fix: re-read `<tomb>/pin/owner` after the rename and rename back on mismatch, or use atomic pin creation.
-- Nothing sweeps `staging/`. A crash between rename-aside and delete leaves `staging/pinrel-*/pin` behind, the same class as the leaked `ingest-*` and `publish-*` staging dirs. Fix: an init- or GC-time staging sweeper.
+- release_pin across owners (fixed 2026-11-27): after the rename-aside `_isv1_release_pin_finish` re-reads `<tomb>/pin/owner`; a different owner's pin is renamed back (to `pins/<id>`, or `pins/<id>.r<n>` when the id was re-created, never clobbering) and `pin-owner-changed` is returned. Residual: the owner-b pin is briefly absent from `pins/` between the two renames (GC may miss its refs for that window; a GC concurrent with a cross-owner release); if id is so long that no `.r<n>` name fits and `pins/<id>` is taken, the pin stays in the tombstone and the staging sweeper will eventually delete it.
+- Staging sweeper (done 2026-11-27): non-dry-run `collect` calls `immutable_store_v1_sweep_staging`, removing `staging/{pinrel,ingest,publish}-*` dirs whose directory mtime is >= 3600 s old (conservative; no pid/nonce marker exists, so liveness is unprovable; a single payload write stalling an hour would be lost). Unknown mtime keeps the entry. `init` does not sweep.
 - A GC move-then-restore can make `open` briefly return `missing` on a reused object; a GC that moves the winner mid-publish yields a spurious `publish-winner-unreadable`.- `_ISV1_MAX_REFS` is per call; total refs per pin are unbounded. Base-key refs from lost races over-retain.
-- Staged publishes do not fsync.
+- Staged publishes now `file_sync` the staged file before the no-replace rename (both `_isv1_publish` and `_isv1_publish_text_noreplace`; failure rejects). Open: no directory-sync primitive exists in SOSIX, so the rename itself is not made durable.
 - Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot.
 - DONE (2026-11-27): `substring` is byte-indexed in the interpreter and native (`rt_slice_text_bytes`); an end past the length clamps (no panic), and a bound inside a multi-byte char yields U+FFFD (lossy, not an error), so `substring(n, byte_len())` is safe by itself but `_isv1_unquote`'s one-byte slices silently mangled non-ASCII (a root doc with `name: "ma\u{e9}n"` decoded as ok). `_isv1_doc_decode` now rejects any byte >= 128 up front (`non-ascii`); spec: "rejects a root doc carrying non-ASCII bytes" in `immutable_store_v1_spec.spl` (30 -> 31). Other increment-1 decoders have no `substring(.., byte_len())` on disk/peer input.
 - Pointer-cache write failures are ignored; an unrefreshable pointer bricks a root after 4096 generations (`root-claim-chain-too-long`).

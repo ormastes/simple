@@ -16,7 +16,8 @@ use std.common.storage.object_record_v1.{OBJECT_RECORD_V1_VERSION, DigestAliasV1
 use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_publish_noreplace_raw,
     file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes,
     file_write_bytes, secure_temp_dir_raw, dir_create_all, dir_list, dir_remove_all, is_dir,
-    file_delete, dir_list_optional, rename_path}
+    file_delete, dir_list_optional, rename_path, file_sync, file_modified_time}
+
 use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 use std.nogc_sync_mut.sosix.time.{time_sample_unix_micros_or_failure}
 use std.common.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day}
@@ -64,6 +65,7 @@ val _ISV1_MAX_ALIAS_BYTES: i64 = 512
 val _ISV1_MAX_ROOT_BYTES: i64 = 4194304
 val _ISV1_MAX_REFS: i64 = 16384
 val _ISV1_MAX_ROOT_CLAIM_WALK: i64 = 4096
+val _ISV1_STAGING_MIN_AGE_SECS: i64 = 3600
 
 fn _isv1_is_digit_byte(b: i64) -> bool:
     b >= 48 and b <= 57
@@ -372,6 +374,9 @@ fn _isv1_publish_text_noreplace(root: text, leaf: text, content: text, destinati
     if not file_write_bytes(staged, content.bytes()):
         dir_remove_all(stage)
         return -1
+    if not file_sync(staged):
+        dir_remove_all(stage)
+        return -1
     val published = file_publish_noreplace_raw(staged, destination)
     # The rename may consume the staged file; remove only our private dir,
     # never the winning destination.
@@ -460,6 +465,9 @@ fn _isv1_publish(root: text, key: text, bytes: [u8], algorithm: text, alias_hex:
     if not file_write_bytes(staged_object, bytes):
         dir_remove_all(stage)
         return _isv1_ingest_rejected("staging-write-failed")
+    if not file_sync(staged_object):
+        dir_remove_all(stage)
+        return _isv1_ingest_rejected("staging-sync-failed")
     val staged_back = match file_read_regular_no_follow_bounded_bytes(staged_object, _ISV1_MAX_OBJECT_BYTES):
         case Ok(value): value
         case Err(_):
@@ -883,6 +891,38 @@ pub fn immutable_store_v1_release_pin(root: text, pin_id: text, owner: text) -> 
         if not is_dir(pin_dir):
             return "pin-missing"
         return "pin-remove-failed"
+    _isv1_release_pin_finish(root, pin_id, owner, tomb)
+
+
+# Second half of release, after the rename-aside: re-reads the owner of what was
+# actually moved (the pre-rename check is raceable across owners). A different
+# owner's pin is restored (never clobbering a re-created `pins/<id>`: then it
+# takes a fresh `<id>.r<n>` name) and `pin-owner-changed` is returned; only an
+# own or ownerless pin is deleted.
+fn _isv1_release_pin_finish(root: text, pin_id: text, owner: text, tomb: text) -> text:
+    val moved_owner_path = tomb + "/pin/owner"
+    if file_exists(moved_owner_path):
+        val moved_owner = match file_read_regular_no_follow_bounded(moved_owner_path, 512):
+            case Ok(value): value
+            case Err(_): ""
+        if moved_owner != owner:
+            var restored = false
+            val target = _isv1_pin_path(root, pin_id)
+            if not file_exists(target) and not is_dir(target):
+                restored = rename_path(tomb + "/pin", target)
+            var n: i64 = 1
+            while not restored and n <= 8 and (pin_id.byte_len() + 3) <= 128:
+                val alt = _isv1_pin_path(root, pin_id + ".r{n}")
+                if not file_exists(alt) and not is_dir(alt):
+                    restored = rename_path(tomb + "/pin", alt)
+                n = n + 1
+            if restored:
+                dir_remove_all(tomb)
+                return "pin-owner-changed"
+            # Not restorable: keep the foreign pin in its tomb and mark it so the
+            # staging sweeper never deletes it (GC does not see it there).
+            file_write_bytes(tomb + "/keep", "pin-owner-changed".bytes())
+            return "pin-owner-changed-unrestored"
     # Released: the tombstone is private staging garbage, never read by GC.
     dir_remove_all(tomb)
     ""
@@ -1019,6 +1059,36 @@ fn _isv1_restore_moved(root: text, keys: [text], destinations: [text],
         i = i + 1
     settled
 
+# Removes crash residue under staging/ (`pinrel-*`, `ingest-*`, `publish-*`)
+# whose directory mtime is at least `min_age_secs` old; younger entries may be
+# a live ingest/publish and are kept. An entry whose mtime is unavailable (0)
+# is kept (fail-safe). Collect passes _ISV1_STAGING_MIN_AGE_SECS: an ingest
+# creates its dir and writes within one call, so a dir untouched for an hour
+# is dead unless a single payload write stalls longer than that. Returns the
+# number removed.
+pub fn immutable_store_v1_sweep_staging(root: text, min_age_secs: StoreCountV1) -> StoreCountV1:
+    val staging_root = _isv1_join(root, "staging")
+    val micros = time_sample_unix_micros_or_failure()
+    if micros < 0 or not is_dir(staging_root):
+        return StoreCountV1(0)
+    val now = micros / 1000000
+    var removed: i64 = 0
+    for entry in dir_list(staging_root):
+        val name = entry.trim()
+        if not (name.starts_with("pinrel-") or name.starts_with("ingest-") or name.starts_with("publish-")):
+            continue
+        val path = staging_root + "/" + name
+        if not is_dir(path):
+            continue
+        if file_exists(path + "/keep"):
+            continue
+        val mtime = file_modified_time(path)
+        if mtime <= 0 or now - mtime < min_age_secs.value:
+            continue
+        dir_remove_all(path)
+        removed = removed + 1
+    StoreCountV1(removed)
+
 pub fn immutable_store_v1_collect(root: text, dry_run: StoreFlagV1) -> StoreGcV1:
     if root == "":
         return StoreGcV1(status: "rejected", reason: "store-root-empty", dry_run: dry_run,
@@ -1054,6 +1124,7 @@ pub fn immutable_store_v1_collect(root: text, dry_run: StoreFlagV1) -> StoreGcV1
     unreachable.sort()
     if dry_run.value:
         return StoreGcV1(status: "ok", reason: "", dry_run: StoreFlagV1(true), unreachable: unreachable, moved: StoreCountV1(0))
+    immutable_store_v1_sweep_staging(root, StoreCountV1(_ISV1_STAGING_MIN_AGE_SECS))
     var moved_keys: [text] = []
     var moved_destinations: [text] = []
     var first_error = ""
