@@ -5,8 +5,9 @@ use ieee.std_logic_1164.all;
 --
 -- Mirrors soc_top_rv32_sim: exposes clk/rst directly (no Xilinx PS BD or
 -- STARTUPE3 primitives, which raw GHDL cannot elaborate). The board variant is
--- soc_top_rv64.vhd (Zynq pl_clk0-clocked). The testbenches instantiate THIS
--- entity.
+-- soc_top_rv64.vhd (STARTUPE3 CFGMCLK/2-clocked with BSCANE2 USER4 uart_bscan_log tap;
+-- PS pl_clk0 is dead in JTAG-only bring-up without FSBL). The testbenches
+-- instantiate THIS entity.
 entity soc_top_rv64_sim is
   port (
     clk     : in  std_logic;

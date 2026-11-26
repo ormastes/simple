@@ -10,17 +10,7 @@ extern spl_i64 rt_array_len(spl_i64 array_value);
 extern spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value);
 extern spl_i64 rt_array_data_ptr(spl_i64 collection);
 
-static spl_i64 rt_int(spl_i64 value) {
-    return value << 3;
-}
-
-static spl_i64 rt_index_arg(spl_i64 value) {
-    return value >> 3;
-}
-
-static spl_i64 rt_empty_bytes(void) {
-    return rt_byte_array_new_len(rt_int(0));
-}
+#include "rv64_crypto_array_abi.h"
 
 static spl_u32 rotr32(spl_u32 x, spl_u32 n) {
     return (x >> n) | (x << (32U - n));
@@ -134,7 +124,7 @@ spl_i64 rt_tls13_sha256(spl_i64 data_value) {
         for (i = 0ULL; i < 64ULL; i++) {
             spl_u64 pos = offset + i;
             if (pos < len) {
-                block[i] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(data_value, rt_int((spl_i64)pos))) & 0xffULL);
+                block[i] = (spl_u8)((spl_u64)rt_index_arg(rt_crypto_array_get(data_value, (spl_i64)pos)) & 0xffULL);
             } else if (pos == len) {
                 block[i] = 0x80U;
             } else {
@@ -157,7 +147,7 @@ spl_i64 rt_tls13_sha256(spl_i64 data_value) {
     }
 
     {
-        spl_i64 out = rt_byte_array_new_len(rt_int(32));
+        spl_i64 out = rt_crypto_byte_array_new_len(32);
         spl_i64 *data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
         if (!data) {
             return rt_empty_bytes();

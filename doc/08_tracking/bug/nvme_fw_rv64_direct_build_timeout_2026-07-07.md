@@ -1,6 +1,6 @@
 # NVMe FW RV64 direct build terminates before ELF output
 
-Status: OPEN
+Status: fix-implemented-verification-pending (2026-11-26 BF-7: fail-closed `SIMPLE_BIN` admission check + `--self-test` landed in `fw_rv64/build.shs`; full self-hosted ELF emit + RV64 QEMU boot pending deployed self-hosted `bin/simple` + RV64 QEMU target)
 Date: 2026-07-07
 
 ## Repro
@@ -1932,3 +1932,21 @@ The original architectural timeout remains **OPEN**. Acceptance still requires
 a genuine self-hosted native build followed by the real RV64 boot gate.
 Provider token usage and a comparable cohort ratio are unavailable; no
 performance or compiler-throughput improvement is claimed by this change.
+
+## Fix Implemented 2026-11-26 (BF-7 lane, work/bf-7-riscv32-fpga-20261126)
+
+- **Status:** `fix-implemented-verification-pending`
+- **Script fix landed (`examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs`, `fw_rv64/boot.shs`):**
+  - Enforced fail-closed missing / Rust-seed `SIMPLE_BIN` rejection (exit `127`) matching `require-self-hosted.shs`, deferred `mkdir -p "$LOG_DIR" "$ENTRY_DIR"` until actual build execution so `--status` and `--self-test` leave `build/` clean, anchored `ROOT_DIR` via script path, and guarded POSIX `timeout` against Windows `System32\timeout.exe` in `fw_rv64/boot.shs`.
+  - Added `fw_rv64/build.shs --self-test` verifying RV64 compiler selection rejection and cross-assembler handling.
+- **Host verification evidence (Windows host):**
+  - `sh -n examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs` -> exit `0`.
+  - `sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs --self-test` -> `STATUS: PASS nvme-rv64-build self-test` (exit `0`).
+  - `sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs --self-test` -> `STATUS: PASS nvme-rv64-boot self-test` (exit `0`).
+  - `simple.exe run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl` -> `RV32 NVME FW LOGIC OK` (exit `0`).
+  - `simple.exe test test/01_unit/os/riscv_bf7/riscv_bf7_firmware_and_gates_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed` (`outcome=OK`, exit `0`).
+- **Target verification command (requires deployed self-hosted `bin/simple` + RV64 cross-toolchain + `qemu-system-riscv64`):**
+  ```sh
+  NVME_RV64_SIMPLE_BIN=bin/simple sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs
+  ```

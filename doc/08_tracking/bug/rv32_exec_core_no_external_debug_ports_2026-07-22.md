@@ -3,9 +3,10 @@
 - **Filed:** 2026-07-22 (Lane EE — JTAG hart-into-core integration)
 - **Component:** `examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd`
 - **Severity:** enhancement / cross-lane request (does NOT block the tb gate)
-- **Status:** PARTIALLY RESOLVED (Lane KK, 2026-07-22) — **Gap 3 CLOSED**
-  (full x0..x31 readback + full-width pc via 3 additive ports); Gap 1 (halt
-  port) and Gap 2 (SBA-into-fetch) remain OPEN. See Resolution below.
+- **Status:** fix-implemented-verification-pending — Gap 1 (`clk_en_i`, `halt_i`,
+  `halted_o`), Gap 2 (`dbg_imem_*` R/W SBA ports), and Gap 3 (`dbg_reg_*`/`dbg_pc`)
+  all implemented in `examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd`;
+  awaiting GHDL / OpenOCD+GDB / KV260 hardware verification.
 
 ## Context
 Lane EE integrated the REAL `rv32_exec_core` behind the landed
@@ -84,3 +85,17 @@ Status unchanged: Gap 3 (full x0..x31 + full-width pc readback) is CLOSED;
 Gap 1 (halt/clk-enable port) and Gap 2 (SBA-into-fetch / writable code RAM)
 remain OPEN and require an RTL change plus a hardware debug session. Remains
 blocked on physical hardware.
+
+## Fix Implemented 2026-11-26 (BF-7 lane, work/bf-7-riscv32-fpga-20261126)
+
+- **Status:** `fix-implemented-verification-pending` (Gap 1 + Gap 2 + Gap 3 all implemented; no `.sdn` shard exists for this bug doc)
+- **RTL changes (`examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd`):**
+  - **Gap 1:** Added backward-compatible defaulted `clk_en_i : in std_logic := '1'`, `halt_i : in std_logic := '0'`, and `halted_o : out std_logic`, updating `halted_q` only on `rst = '1'` or at the `S_FETCH` instruction boundary with `clk_en_i = '1'` (so `clk_en_i = '0'` freeze holds `halted_q`, architectural state, and FSM steady).
+  - **Gap 2:** Added backward-compatible defaulted IMEM/SBA debug read-write ports (`dbg_imem_we_i`, `dbg_imem_addr_i`, `dbg_imem_wdata_i`, `dbg_imem_rdata_o`) wired into `rom_a`/`rom_b` gated strictly by `rst = '0' and halted_q = '1' and (halt_i = '1' or clk_en_i = '0')` so DM SBA reads/writes never race with `S_EXEC`/`S_STORE` and the `S_FETCH` resume clock edge (`halt_i = '0' and clk_en_i = '1'`) fetches `pc_idx + 1` cleanly into `rom_b_q`.
+- **Host verification evidence (Windows host):**
+  - `simple.exe test test/01_unit/hardware/riscv_bf7_rtl_and_kv260_contract_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed` (`outcome=OK`, exit `0`), asserting Gap 1 & Gap 2 entity ports, default values, and `rom_a`/`rom_b` SBA write muxing.
+- **Target GHDL/OpenOCD/KV260 verification command:**
+  ```sh
+  ghdl -a examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd
+  sh scripts/fpga/run_native_gdb_hart.shs
+  ```

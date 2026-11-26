@@ -1,0 +1,348 @@
+"""
+# RISC-V Gen2 Stateful Retirement Lineage Contract
+
+Models and validates the single-outstanding architectural retirement-producer
+and synchronous-reset contract connecting Gen2 parcel capture through
+`RiscvRetireRecord` emission across RV32 and RV64 lanes.
+
+Compiler-side RTL emission remains owned by `src/compiler/50.mir/hwir/`; this
+module provides the pure hardware formal/trace contract oracle for unit and
+composed simulation verification without altering VHDL generation.
+"""
+
+use std.hardware.riscv_common.retire.{RiscvRetireRecord}
+
+pub enum RiscvXlen:
+    Rv32
+    Rv64
+
+pub enum SignalLevel:
+    Low
+    High
+
+pub enum ParcelLength:
+    Compressed16
+    Full32
+
+pub enum PrivilegeMode:
+    User
+    Supervisor
+    Machine
+
+pub enum RegWriteEnable:
+    Disabled
+    Enabled
+
+pub enum TrapEvent:
+    None
+    Raised
+
+pub enum LineageFaultStatus:
+    Clear
+    Faulted
+
+pub enum LineageVerdictStatus:
+    Passed
+    Failed
+
+pub enum TraceCoverage:
+    NonVacuous
+    Vacuous
+
+pub struct RetireOrder:
+    value: i64
+
+pub struct InstructionParcel:
+    value: u32
+
+pub struct GuestPc:
+    value: i64
+
+pub struct GprIndex:
+    value: u32
+
+pub struct RegValue:
+    value: i64
+
+pub struct TrapCause:
+    value: i64
+
+pub struct TrapValue:
+    value: i64
+
+pub struct RetireCount:
+    value: i64
+
+pub struct ResetCount:
+    value: i64
+
+pub struct Gen2ParcelCapture:
+    valid: SignalLevel
+    xlen: RiscvXlen
+    privilege: PrivilegeMode
+    original_parcel: InstructionParcel
+    original_length: ParcelLength
+    pc_before: GuestPc
+    dispatch_accept: SignalLevel
+    rst: SignalLevel
+
+pub struct Gen2RetireOutput:
+    valid: SignalLevel
+    order: RetireOrder
+    xlen: RiscvXlen
+    privilege: PrivilegeMode
+    original_instruction: InstructionParcel
+    canonical_instruction: InstructionParcel
+    instruction_length: ParcelLength
+    pc_before: GuestPc
+    pc_after: GuestPc
+    rd: GprIndex
+    rd_write: RegWriteEnable
+    rd_value: RegValue
+    trap: TrapEvent
+    cause: TrapCause
+    tval: TrapValue
+    protocol_fault: LineageFaultStatus
+    rst: SignalLevel
+
+    fn to_retire_record() -> RiscvRetireRecord:
+        RiscvRetireRecord(
+            valid: _signal_is_high(self.valid),
+            order: self.order.value,
+            xlen: _xlen_bits(self.xlen),
+            privilege: _privilege_encoding(self.privilege),
+            original_instruction: self.original_instruction.value,
+            canonical_instruction: self.canonical_instruction.value,
+            instruction_length_bytes: _parcel_bytes(self.instruction_length),
+            pc_before: self.pc_before.value,
+            pc_after: self.pc_after.value,
+            rd: self.rd.value,
+            rd_write: _reg_write_enabled(self.rd_write),
+            rd_value: self.rd_value.value,
+            memory_address: 0,
+            memory_read_mask: 0,
+            memory_write_mask: 0,
+            memory_read_data: 0,
+            memory_write_data: 0,
+            trap: _trap_raised(self.trap),
+            interrupt: false,
+            cause: self.cause.value,
+            tval: self.tval.value
+        )
+
+pub struct Gen2LineageState:
+    xlen: RiscvXlen
+    occupied: SignalLevel
+    faulted: LineageFaultStatus
+    next_order: RetireOrder
+    latched_order: RetireOrder
+    latched_original_instruction: InstructionParcel
+    latched_length: ParcelLength
+    latched_pc_before: GuestPc
+    completed_retires: RetireCount
+    reset_cycles: ResetCount
+
+pub struct Gen2LineageVerdict:
+    status: LineageVerdictStatus
+    checked_retires: RetireCount
+    reset_count: ResetCount
+    coverage: TraceCoverage
+    diagnostic: text
+
+fn _xlen_bits(xlen: RiscvXlen) -> i32:
+    match xlen:
+        Rv32: 32
+        Rv64: 64
+
+fn _signal_is_high(sig: SignalLevel) -> bool:
+    match sig:
+        Low: false
+        High: true
+
+fn _parcel_bytes(length: ParcelLength) -> i32:
+    match length:
+        Compressed16: 2
+        Full32: 4
+
+fn _privilege_encoding(mode: PrivilegeMode) -> u32:
+    match mode:
+        User: 0
+        Supervisor: 1
+        Machine: 3
+
+fn _reg_write_enabled(rw: RegWriteEnable) -> bool:
+    match rw:
+        Disabled: false
+        Enabled: true
+
+fn _trap_raised(trap: TrapEvent) -> bool:
+    match trap:
+        None: false
+        Raised: true
+
+fn _fault_is_active(fault: LineageFaultStatus) -> bool:
+    match fault:
+        Clear: false
+        Faulted: true
+
+fn _coverage_for_retires(retires: RetireCount) -> TraceCoverage:
+    if retires.value < 2:
+        return TraceCoverage.Vacuous
+    TraceCoverage.NonVacuous
+
+pub fn gen2_lineage_init(xlen: RiscvXlen) -> Result<Gen2LineageState, text>:
+    Ok(Gen2LineageState(
+        xlen: xlen,
+        occupied: SignalLevel.Low,
+        faulted: LineageFaultStatus.Clear,
+        next_order: RetireOrder(value: 0),
+        latched_order: RetireOrder(value: 0),
+        latched_original_instruction: InstructionParcel(value: 0),
+        latched_length: ParcelLength.Full32,
+        latched_pc_before: GuestPc(value: 0),
+        completed_retires: RetireCount(value: 0),
+        reset_cycles: ResetCount(value: 0)
+    ))
+
+fn _validate_capture(capture: Gen2ParcelCapture, expected_xlen: RiscvXlen) -> text:
+    if _xlen_bits(capture.xlen) != _xlen_bits(expected_xlen):
+        return "RISCV-GEN2-LINEAGE-E-XLEN-MIX: capture XLEN changed within trace"
+    if not _signal_is_high(capture.valid):
+        return "RISCV-GEN2-LINEAGE-E-INVALID-DISPATCH: dispatch_accept requires capture.valid"
+    val len_bytes = _parcel_bytes(capture.original_length)
+    if len_bytes == 2:
+        if capture.original_parcel.value > 0xFFFF or (capture.original_parcel.value & 0x3) == 0x3:
+            return "RISCV-GEN2-LINEAGE-E-COMPRESSED: two-byte capture must carry a 16-bit non-11 parcel"
+    elif (capture.original_parcel.value & 0x3) != 0x3:
+        return "RISCV-GEN2-LINEAGE-E-FULL32: four-byte capture must carry a 32-bit opcode (bits[1:0]=11)"
+    if (capture.pc_before.value & 1) != 0:
+        return "RISCV-GEN2-LINEAGE-E-ALIGN: capture pc_before must be halfword aligned"
+    ""
+
+fn _validate_retire(state: Gen2LineageState, retire: Gen2RetireOutput) -> text:
+    if _xlen_bits(retire.xlen) != _xlen_bits(state.xlen):
+        return "RISCV-GEN2-LINEAGE-E-XLEN-MIX: retire XLEN changed within trace"
+    if not _signal_is_high(state.occupied):
+        return "RISCV-GEN2-LINEAGE-E-UNCAPTURED-RETIRE: retire_valid emitted without active dispatch_lineage"
+    if retire.order.value != state.latched_order.value:
+        return "RISCV-GEN2-LINEAGE-E-ORDER: retire order diverged from captured dispatch_order"
+    if retire.original_instruction.value != state.latched_original_instruction.value:
+        return "RISCV-GEN2-LINEAGE-E-PARCEL: retire original_instruction diverged from captured parcel"
+    if _parcel_bytes(retire.instruction_length) != _parcel_bytes(state.latched_length):
+        return "RISCV-GEN2-LINEAGE-E-PARCEL-LEN: retire length diverged from captured parcel length"
+    if retire.pc_before.value != state.latched_pc_before.value:
+        return "RISCV-GEN2-LINEAGE-E-PC: retire pc_before diverged from captured parcel PC"
+    retire.to_retire_record().diagnostic()
+
+pub fn gen2_lineage_step(
+    state: Gen2LineageState,
+    capture: Gen2ParcelCapture,
+    retire: Gen2RetireOutput
+) -> Result<Gen2LineageState, text>:
+    val cap_rst = _signal_is_high(capture.rst)
+    val ret_rst = _signal_is_high(retire.rst)
+    if cap_rst != ret_rst:
+        return Err("RISCV-GEN2-LINEAGE-E-RESET-SYNC: parcel capture and retirement producer observed skewed reset")
+    if cap_rst:
+        if _signal_is_high(retire.valid):
+            return Err("RISCV-GEN2-LINEAGE-E-RESET-RETIRE: valid retirement may not assert on synchronous reset")
+        return Ok(Gen2LineageState(
+            xlen: state.xlen,
+            occupied: SignalLevel.Low,
+            faulted: LineageFaultStatus.Clear,
+            next_order: RetireOrder(value: 0),
+            latched_order: RetireOrder(value: 0),
+            latched_original_instruction: InstructionParcel(value: 0),
+            latched_length: ParcelLength.Full32,
+            latched_pc_before: GuestPc(value: 0),
+            completed_retires: state.completed_retires,
+            reset_cycles: ResetCount(value: state.reset_cycles.value + 1)
+        ))
+
+    var next = state
+    if _signal_is_high(retire.valid):
+        val retire_err = _validate_retire(next, retire)
+        if retire_err != "":
+            return Err(retire_err)
+        next.occupied = SignalLevel.Low
+        next.latched_order = RetireOrder(value: 0)
+        next.latched_original_instruction = InstructionParcel(value: 0)
+        next.latched_length = ParcelLength.Full32
+        next.latched_pc_before = GuestPc(value: 0)
+        next.completed_retires = RetireCount(value: next.completed_retires.value + 1)
+
+    if _signal_is_high(capture.dispatch_accept):
+        if _fault_is_active(next.faulted):
+            return Err("RISCV-GEN2-LINEAGE-E-FAULT-ACTIVE: dispatch_accept blocked after terminal order fault")
+        if _signal_is_high(next.occupied):
+            return Err("RISCV-GEN2-LINEAGE-E-DOUBLE-DISPATCH: single-outstanding window rejects overlapping dispatch")
+        val cap_err = _validate_capture(capture, next.xlen)
+        if cap_err != "":
+            return Err(cap_err)
+        next.occupied = SignalLevel.High
+        next.latched_order = next.next_order
+        next.latched_original_instruction = capture.original_parcel
+        next.latched_length = capture.original_length
+        next.latched_pc_before = capture.pc_before
+        if next.next_order.value == 9223372036854775807:
+            next.faulted = LineageFaultStatus.Faulted
+        else:
+            next.next_order = RetireOrder(value: next.next_order.value + 1)
+
+    if _fault_is_active(retire.protocol_fault) != _fault_is_active(next.faulted):
+        return Err("RISCV-GEN2-LINEAGE-E-FAULT-SYNC: protocol_fault output diverged from lineage fault state")
+    Ok(next)
+
+pub fn check_gen2_retire_lineage_trace(
+    xlen: RiscvXlen,
+    captures: [Gen2ParcelCapture],
+    retires: [Gen2RetireOutput]
+) -> Gen2LineageVerdict:
+    if captures.len() != retires.len():
+        return Gen2LineageVerdict(
+            status: LineageVerdictStatus.Failed,
+            checked_retires: RetireCount(value: 0),
+            reset_count: ResetCount(value: 0),
+            coverage: TraceCoverage.Vacuous,
+            diagnostic: "RISCV-GEN2-LINEAGE-E-TRACE-LEN: capture and retire traces differ in length"
+        )
+    var state = match gen2_lineage_init(xlen):
+        Ok(s): s
+        Err(msg):
+            return Gen2LineageVerdict(
+                status: LineageVerdictStatus.Failed,
+                checked_retires: RetireCount(value: 0),
+                reset_count: ResetCount(value: 0),
+                coverage: TraceCoverage.Vacuous,
+                diagnostic: msg
+            )
+    var i = 0
+    while i < captures.len() and i < retires.len():
+        val step_res = gen2_lineage_step(state, captures[i], retires[i])
+        match step_res:
+            Ok(next_state):
+                state = next_state
+            Err(msg):
+                return Gen2LineageVerdict(
+                    status: LineageVerdictStatus.Failed,
+                    checked_retires: state.completed_retires,
+                    reset_count: state.reset_cycles,
+                    coverage: _coverage_for_retires(state.completed_retires),
+                    diagnostic: msg
+                )
+        i = i + 1
+    if state.completed_retires.value < 2:
+        return Gen2LineageVerdict(
+            status: LineageVerdictStatus.Failed,
+            checked_retires: state.completed_retires,
+            reset_count: state.reset_cycles,
+            coverage: TraceCoverage.Vacuous,
+            diagnostic: "RISCV-GEN2-LINEAGE-E-VACUOUS: lineage proof requires at least two retired instructions"
+        )
+    Gen2LineageVerdict(
+        status: LineageVerdictStatus.Passed,
+        checked_retires: state.completed_retires,
+        reset_count: state.reset_cycles,
+        coverage: TraceCoverage.NonVacuous,
+        diagnostic: ""
+    )
