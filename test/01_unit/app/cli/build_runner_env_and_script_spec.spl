@@ -1,0 +1,87 @@
+# Regression coverage for build runner & bootstrap runner bug fixes:
+# - cli_native_build restores modified env vars (including exact absence) on early error returns
+# - scripts/bootstrap/build-phase3-phase4.sh does not swallow --version non-zero exits
+# - scripts/bootstrap/build-phase3-phase4.sh propagates native-build env to Stage 5 tools
+# @cover src/app/io/_CliCompile/compile_targets.spl
+# @cover scripts/bootstrap/build-phase3-phase4.sh
+use std.spec.{describe, it, expect}
+use app.io.cli_compile.{cli_native_build}
+use app.io.env_ops.{env_get, env_set}
+use app.io.process_ops.{process_run}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io_runtime.{env_get_opt, env_remove_process}
+
+describe "cli_native_build environment restoration on early failure":
+    it "restores absent SIMPLE_RUNTIME_OWNER and SIMPLE_NATIVE_BUILD_CLEAN on invalid mode":
+        val prev_owner = env_get("SIMPLE_RUNTIME_OWNER") ?? ""
+        val prev_owner_absent = env_get_opt("SIMPLE_RUNTIME_OWNER").is_none()
+        val prev_clean = env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? ""
+        val prev_clean_absent = env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN").is_none()
+        env_remove_process("SIMPLE_RUNTIME_OWNER")
+        env_remove_process("SIMPLE_NATIVE_BUILD_CLEAN")
+
+        val rc = cli_native_build([
+            "native-build", "--runtime-owner", "simple", "--clean",
+            "--mode=definitely-invalid", "--entry", "src/app/cli/main.spl"
+        ])
+        val owner_absent_after = env_get_opt("SIMPLE_RUNTIME_OWNER").is_none()
+        val clean_absent_after = env_get_opt("SIMPLE_NATIVE_BUILD_CLEAN").is_none()
+
+        if prev_owner_absent: env_remove_process("SIMPLE_RUNTIME_OWNER")
+        else: env_set("SIMPLE_RUNTIME_OWNER", prev_owner)
+        if prev_clean_absent: env_remove_process("SIMPLE_NATIVE_BUILD_CLEAN")
+        else: env_set("SIMPLE_NATIVE_BUILD_CLEAN", prev_clean)
+
+        expect(rc).to_equal(1)
+        expect(owner_absent_after).to_equal(true)
+        expect(clean_absent_after).to_equal(true)
+
+    it "restores prior SIMPLE_RUNTIME_OWNER value on invalid --runtime-bundle failure":
+        val prev_owner = env_get("SIMPLE_RUNTIME_OWNER") ?? ""
+        val prev_owner_absent = env_get_opt("SIMPLE_RUNTIME_OWNER").is_none()
+        env_set("SIMPLE_RUNTIME_OWNER", "c")
+
+        val rc = cli_native_build([
+            "native-build", "--runtime-owner=rust", "--runtime-bundle=rust-hosted",
+            "--entry", "src/app/cli/main.spl"
+        ])
+        val owner_after = env_get("SIMPLE_RUNTIME_OWNER") ?? ""
+
+        if prev_owner_absent: env_remove_process("SIMPLE_RUNTIME_OWNER")
+        else: env_set("SIMPLE_RUNTIME_OWNER", prev_owner)
+
+        expect(rc).to_equal(1)
+        expect(owner_after).to_equal("c")
+
+    it "restores prior SIMPLE_RUNTIME_OWNER value on invalid --log failure":
+        val prev_owner = env_get("SIMPLE_RUNTIME_OWNER") ?? ""
+        val prev_owner_absent = env_get_opt("SIMPLE_RUNTIME_OWNER").is_none()
+        env_set("SIMPLE_RUNTIME_OWNER", "c")
+
+        val rc = cli_native_build([
+            "native-build", "--runtime-owner=rust", "--log=bogus",
+            "--entry", "src/app/cli/main.spl"
+        ])
+        val owner_after = env_get("SIMPLE_RUNTIME_OWNER") ?? ""
+
+        if prev_owner_absent: env_remove_process("SIMPLE_RUNTIME_OWNER")
+        else: env_set("SIMPLE_RUNTIME_OWNER", prev_owner)
+
+        expect(rc).to_equal(2)
+        expect(owner_after).to_equal("c")
+
+describe "build-phase3-phase4.sh exit-code and Stage 5 env propagation":
+    it "captures --version output before grepping so a crashing binary is not masked":
+        val script = file_read("scripts/bootstrap/build-phase3-phase4.sh")
+        expect(script).to_contain("s3_version_out=$(\"$s3_out\" --version) || return $?")
+        expect(script).to_contain("printf '%s\\n' \"$s3_version_out\" | grep -Fq \"simple-bootstrap\" || return $?")
+        expect(script.contains("\"$s3_out\" --version | grep -Fq \"simple-bootstrap\"")).to_equal(false)
+
+    it "propagates target, threads, cache-dir, and compile-mode env into Stage 5 tool builds":
+        val script = file_read("scripts/bootstrap/build-phase3-phase4.sh")
+        expect(script).to_contain("export SIMPLE_NATIVE_BUILD_CACHE_DIR=\"$P4_DIR/tools-cache\"")
+
+    it "fails when a fake Stage 3 binary prints simple-bootstrap on --version and exits 42":
+        val cmd = "tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; printf '#!/bin/sh\\necho simple-bootstrap\\nexit 42\\n' > \"$tmp/fake\"; chmod +x \"$tmp/fake\"; check() { s3_out=$1; s3_version_out=$(\"$s3_out\" --version) || return $?; printf '%s\\n' \"$s3_version_out\" | grep -Fq \"simple-bootstrap\" || return $?; }; check \"$tmp/fake\""
+        val (_, _, exit_code) = process_run("sh", ["-c", cmd])
+        expect(exit_code).to_equal(42)
