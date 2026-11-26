@@ -75,3 +75,9 @@ authority for the later link failure and phase qualification.
 - **Classification:** `ROOT-FIXED+STAGE2-GATED` for `test/fixtures/native/json_comprehension_join/explicit/main.spl:10`.
 - Current `src/compiler` lowers both `original/main.spl` and `typed/main.spl` with `worker.spl` (`Thread.join() -> i64?`) with zero errors (`hir=0 mir=0 llvm=0 void=0`), and Batch E2 (`8b637333082`) retired the `src/` workarounds.
 - Kept `test/fixtures/native/json_comprehension_join/explicit/main.spl` and its `# @workaround` marker untouched because `original/` + `typed/` + `explicit/` form a paired 3-way frozen-seed diagnostic pinned by `test/01_unit/scripts/seed_list_comprehension_join_native_test.shs`.
+
+
+## 2026-11-26 WA-P8 Audit & Verification (`seed_list_comprehension_join_and_empty_native_2026_10_21`)
+
+- **Disposition**: Kept intentionally (`ROOT-FIXED+STAGE2-GATED`) at `test/fixtures/native/json_comprehension_join/explicit/main.spl:10`.
+- **Verification**: Confirmed via `test/01_unit/compiler/wa_p8_test_workarounds_spec.spl` that current `src/compiler` lowers `test/fixtures/native/json_comprehension_join/original/main.spl` + `worker.spl` (`[str(number) for number in [1, 2]].join(",")`) cleanly (`hir=0 mir=0 mirv=0 llvm=0 void=0`) with `rt_array_push` and `@rt_array_join_any` (without empty `[]` or `Thread.join`). `explicit/main.spl` remains pinned as the frozen-seed 3-way passing control tested by `test/01_unit/scripts/seed_list_comprehension_join_native_test.shs` and `test/01_unit/compiler/wa_w2_lane3_fixtures_audit_spec.spl`.

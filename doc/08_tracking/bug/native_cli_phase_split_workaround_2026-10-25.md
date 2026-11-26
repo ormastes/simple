@@ -91,3 +91,14 @@ The test file's hash is unchanged, but no green test was rerun for publication.
 No compiler/runtime rebuild or native memory/Stage-3 qualification is claimed.
 This release PR stays draft until native qualification; fixed P2 remains
 unchanged.
+
+
+## 2026-11-26 WA-P8 Audit & Resolution (`retained_seed_test_loop_binding_2026_10_25`)
+
+- **Disposition**: Retired (`@workaround` removed from `test/01_unit/app/native_build_phase_split_spec.spl`).
+- **Root cause & verification**: The original `for flags in 0..16:` array-coercion failure (`type mismatch: cannot convert array to int` at `flags & 1`) happened in an older retained-gen13 seed binary whose `exec_for` lacked block-local scoping against module globals such as `var flags: [i64] = []` (`src/lib/nogc_sync_mut/rt_hal/boundary.spl:30`), which `71f86bb0e38` restored (`src/compiler_rust/compiler/src/interpreter_control.rs`, tested in `src/compiler_rust/compiler/tests/interpreter_for_loop_local_shadow.rs`; pure-Simple `src/app/interpreter/control/control/loops.spl:53-54` pushes block scope via `interp.env.push_scope()`).
+- **Changes made**:
+  - Removed `# @workaround bug=retained_seed_test_loop_binding_2026_10_25`, the `cli_restore_case_bits` rename, and `[cli-restore-stage]` diagnostic prints added by `3b7a08d526b`, restoring `for flags in 0..16:` and `(flags & 1/2/4/8)` in `test/01_unit/app/native_build_phase_split_spec.spl`.
+  - Updated stale line-29 assertion `expect(parsed.release).to_be(false)` to `expect(parsed.release).to_be(true)` to match `--release` / `--opt-level` decoupling from `4011220818b`.
+  - Added interpreter + HIR/MIR/`mir_verify_module`/LLVM lowering regression coverage for `for flags in 0..16:` shadowing `var flags: [i64]` in `test/01_unit/compiler/wa_p8_test_workarounds_spec.spl`.
+  - Verified (`--mode=interpreter`): `test/01_unit/app/native_build_phase_split_spec.spl` (5/5 pass) and `test/01_unit/compiler/wa_p8_test_workarounds_spec.spl` (4/4 pass). `bug_db.sdn` was left untouched to preserve `.sdn` CRC32 seals.
