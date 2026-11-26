@@ -16,3 +16,9 @@ Found while fixing `test/01_unit/compiler/lint/lint_cli_*_contract_check.spl`
 Workaround applied: each of the 8 contract-check scripts now wraps its body in
 `fn main():` and calls `main()`. Fix needed: handle EXPR_FOR in the flat AST
 bridge at module scope, and accept `_` as a binding at module scope.
+
+## Summary
+- Bug A: module-scope `for` -> flat AST bridge `unhandled expr node kind (tag=16)`.
+- Bug B: module-scope `val _ = ...` -> `expected Ident, got _`.
+- Workaround (both): wrap the script body in `fn main():` plus a trailing `main()`.
+  A separate lane owns the parser fix; remove the wrappers only if that is wanted.
