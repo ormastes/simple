@@ -34,12 +34,18 @@ All evidence below comes from the Rust seed interpreter. It is diagnostic only a
   - #12035: endpoint routing reads only `schema`/`server_config` from a tolerant host file.
   - #12040: the V4 pane binding strict node budget is now 17. It was 16, so every valid binding was refused.
   - #12049: the helper-deadline and gateway-draft node budgets are fixed, and two stale private-import baseline rows are pruned.
-- **The Codex Linux stack** (`work/orchestrator-parallel-compose-20261126` at `de58e1997d6`) is carried as `work/orchestrator-linux-stack-20261126`. On top of it are:
-  - the node-budget fix;
+- **Landed in #12055 (2026-11-27), unqualified:** the Codex Linux stack (`work/orchestrator-parallel-compose-20261126` at `de58e1997d6`). A resumed Codex session must restart from `origin/release/1.0.0`; the lane branches are superseded. The PR also carries:
+  - the V4 node-budget fix;
   - the `remote_pane_view_v1` 35-byte oracle;
-  - the three enrolled-host system specs reporting `pending("BLOCKED: ...")`, which is exit 6, not a failure;
-  - the SSH loopback verdicts in `doc/03_plan/sys_test/server_contexts.md`;
-  - a fix so the smux V6 owner releases `agent_pane_target` on detach or cancel. A stronger-model review found this as a P1: the next run was refused as a conflict.
+  - enrolled-host system specs that now report `pending("BLOCKED: ...")` (exit 6);
+  - the SSH loopback verdicts;
+  - a fix so the smux V6 owner releases `agent_pane_target` on a detach or cancel of the same run (the review's P1).
+- **`primitive_api` ratchet:**
+  - Nine internal-only names are no longer `pub`: `linux_agent_admission_v1`, `linux_agent_prepared_v1`, `linux_agent_execute_wire_v1`, `LinuxAgentAdmissionFactsV1` and `dispatch_service_status_v3`, among others.
+  - Struct-level `@allow(primitive_api)` on `ServerSshTurnV1` and `OrchestratorValidationReplyV1` also covers their older fields, so a primitive field added later to either struct is not ratcheted.
+  - `linux_agent_prepare_wire_v1` and `linux_agent_admitted_invocation_v1` stay `pub` but take values only the now-private entry points produce. Either re-expose the chain for a real consumer or make them private as well.
+- **Each run leaks one smux session:** `remote_pane_target_v6` creates an `agent-pane-<digest>` smux session per run, and nothing kills it on detach or cancel. The owner should decide whether it is released with the run.
+- **Installer acceptance SSpec:** Codex's uncommitted work from `/tmp/simple-orch-install-acceptance-20261126` (a corrupted-signature refusal plus a genuine install retry) landed together with this handoff. Its unset-fixture path is `pending("BLOCKED: ...")`. It needs `SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT`.
 - **Ran locally:**
   - Podman session smoke: 5/5, with the entrypoint fixture image.
   - caret-serve/caret-client loopback: status, crashed, cleanup preview and shutdown.
@@ -50,7 +56,14 @@ All evidence below comes from the Rust seed interpreter. It is diagnostic only a
   - The remote pane target, turn and dispatch paths are asserted by source-text `index_of` only, so they need state-machine unit specs.
   - Provision reports `installed: false` when the install published but cleanup failed. It still fails closed, and a retry reports `Existing`.
 - **Uncapped strict lists** (the owner decides a cap or budget): `remote_run_author_v1` (`expectedTests` + `toolchainInputs` exceed about 227), `storage_view_v1` meta volumes, the `cs_container_lifecycle_v1` host-worktree argv, `caret_session_protocol_v1` crashed records (170 or more), and `wire_envelope_v1` (budget equals the encoder cap, but whether they count the same is unverified).
-- **Still operator-blocked** (needs root): the enrolled `linux-service` Host fixture per `continuation_20261116/verify_queue/linux_fixture_preflight.md`, plus a qualified self-hosted `SIMPLE_BIN`. The self-hosted CLI build was still in its frontend after 5 h.
+- **Blocked rows. Each needs its owner, a prerequisite and the exact resume command:**
+
+| Row | Owner | Prerequisite | Resume |
+| --- | --- | --- | --- |
+| Native runner qualification | Bootstrap owner | Source-matched self-hosted CLI deployed (the 2026-11-26 build was still in its frontend after 5 h) | `sh scripts/bootstrap/bootstrap-from-scratch.sh`, then rerun the specs below with `bin/simple test` |
+| Enrolled Linux Host (provision, startup, V6 attach, installer) | Linux host operator (root) | `/etc/simple/container` profiles, a systemd unit with `Delegate=yes`, protected key and credential stores, the six `SIMPLE_LINUX_PROVISION_ACCEPTANCE_*` variables, `SIMPLE_LINUX_ATTACH_V6_READY`, `SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT`, per `continuation_20261116/verify_queue/linux_fixture_preflight.md` | `bin/simple test test/03_system/app/orchestrator/feature/host_linux_provision_startup_v3_spec.spl` (and `linux_agent_attachment_v6_spec.spl`, `test/03_system/tools/linux_service_native_identity_v3_spec.spl`) |
+| Caret SSH gateway / real remote host | Orchestrator verification | A compiled `simple-orchestrator` peer and the `SIMPLE_CARET_SSH_ACCEPTANCE_*` fixture | `bin/simple test test/03_system/app/orchestrator/feature/caret_configured_ssh_gateway_spec.spl` |
+| Shared-API Linux Podman route (workspace, limits, exec/TTY, cleanup) | Container owner (root) | Installed machine policy under `/etc/simple/container` and `/var/lib/simple/container`; no live spec exists yet (`simple_container_api_v2_spec` and `oci_execution_options_effects_spec` cover only argv and refusals) | Author a live spec through `SimpleContainerApiV2` once the policy is installed |
 
 ## On the release branch
 

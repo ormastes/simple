@@ -1,6 +1,6 @@
 # Actual Linux service identity borrow fixture
 
-Status: AUTHORED_NOT_RUN; source review pending. Three modern registered SOURCE cases; no binary-owned case discovery or execution is claimed. No compiler/spec/docgen/native/provisioning run. Whole service/signing/incarnation and pending-close fault qualification are NOT_COVERED.
+Status: AUTHORED_NOT_RUN; source review pending. Four modern registered SOURCE cases; no binary-owned case discovery or execution is claimed. No compiler/spec/docgen/native/provisioning run. Whole service/signing/incarnation and pending-close fault qualification are NOT_COVERED.
 
 Executable: test/03_system/tools/linux_service_native_identity_v3_spec.spl. Unchanged production identity leaf SHA-256: 3d3414d413ff749bf9810e3fcc82b3b92a751bf8e2980b0b7ccd2b0ec37a54ea.
 
@@ -36,6 +36,44 @@ Actual pending/consumed-close fault producer is unavailable: NOT_RUN/NOT_COVERED
 
 Identity DATA is not enrollment, service scope/incarnation, signing authority or readiness. HOST03/04 receives supporting identity cases only. Actual fork/process/namespace/profile replacement, full signing lifecycle, binary-owned inventory, compiled execution and docgen completeness remain required unexecuted gates. This manual is authored, not generated.
 
+## Case 4 — signed install refusal and exact retry
+
+Status is **AUTHORED_NOT_RUN**. This case shares the genuine machine identity
+setup and cleanup guard used by the other cases. It covers the installer portion
+of HOST-01. Starting a workload and verifying live Host capability remain
+separate tests.
+
+Run on a dedicated fixture Host with the machine setup described above. Set
+`SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT` to a dedicated protected parent
+directory with no service claim for this machine. The directory must contain
+the real `authority-policy.sdn` and the following fixture-only inputs.
+
+| File | Required bytes |
+| --- | --- |
+| `fixture-enrollment.sdn` | Canonical Linux service V3 enrollment binding for this machine and exact parent |
+| `fixture-credential.sdn` | Current signed grant and approval for that binding and policy |
+| `fixture-host-config.sdn` | Host configuration pinned by the binding |
+| `fixture-engine-policy.sdn` | Engine policy pinned by the binding |
+| `fixture-broker-policy.sdn` | Broker policy pinned by the binding |
+| `fixture-agent-helper-template.sdn` | Agent helper template pinned by the binding |
+
+The parent setting opts in to a real install on that fixture. Leaving it unset
+fails the scenario with a BLOCKED diagnostic. A malformed or inaccessible
+configured fixture fails. Use a
+fresh parent for each run because a successful install leaves the durable
+claim and records in place.
+
+1. Open the two actual native owners and the protected parent. Read the signed
+   inputs through bounded protected reads and borrow the actual identity.
+2. Submit the changed signature and require the exact signature refusal with
+   no claim, cleanup carrier, or publication residue.
+3. Submit the original signed request. Retry the same request only after the
+   first writer closes without a diagnostic. Require a duplicate result and
+   byte-identical claim and final root manifest before and after retry.
+4. Close the original readers and native successor. If a writer retains
+   cleanup ownership, preserve it and quarantine the fixture. Preserve the
+   first close diagnostic even if later cleanup releases the resource.
+
 <details>
 <summary>Exact executable SSpec (authored, not run)</summary>
 
@@ -48,6 +86,16 @@ use std.spec.{describe, it, expect, step, fail}
 use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
 use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.*
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.*
+
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_decode_v3
+use std.common.task_runner.distributed_operation_owner_health_v2.OperationHealthLinuxInstallCleanupV1
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.host_enrollment_v1.host_enrollment_credential_decode_v1
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.*
+use std.nogc_sync_mut.orchestration.host_linux_service_install_v3.HostLinuxServiceInstallRequestV3
+use test.fixtures.orchestration.host_linux_service_install_fixture_v3.{
+    HostLinuxServiceInstallFixtureTurnV3, host_linux_service_install_duplicate_fixture_v3,
+    host_linux_service_install_signature_fixture_v3}
 
 struct ServiceIdentityFixturePairV3:
     reader: LinuxMachinePolicyOwnerV1
@@ -175,6 +223,54 @@ fn service_identity_pair_open_v3() -> Option<ServiceIdentityFixturePairV3>:
             owner
     Some(ServiceIdentityFixturePairV3(reader: reader, successor: successor))
 
+var service_install_parents_v3: [LinuxProtectedRootReaderV1] = []
+var service_install_pending_v3: [OperationHealthLinuxInstallCleanupV1] = []
+
+fn service_install_input_v3(parent: LinuxProtectedRootReaderV1,
+        name: text, maximum: i64) -> Result<text, text>:
+    val source = linux_protected_root_reader_read_v1(parent, name, maximum)?
+    if source.is_none(): return Err("missing-installer-fixture-input:" + name)
+    Ok(source.unwrap())
+
+fn service_install_request_v3(parent: LinuxProtectedRootReaderV1) -> Result<HostLinuxServiceInstallRequestV3, text>:
+    val binding = host_linux_service_enrollment_decode_v3(
+        service_install_input_v3(parent, "fixture-enrollment.sdn", 16384)?)?
+    val credential = host_enrollment_credential_decode_v1(
+        service_install_input_v3(parent, "fixture-credential.sdn", 1048576)?)?
+    val configuration = service_install_input_v3(parent, "fixture-host-config.sdn", 1048576)?
+    val engine = service_install_input_v3(parent, "fixture-engine-policy.sdn", 1048576)?
+    val broker = service_install_input_v3(parent, "fixture-broker-policy.sdn", 1048576)?
+    val helper = service_install_input_v3(parent, "fixture-agent-helper-template.sdn", 1048576)?
+    Ok(HostLinuxServiceInstallRequestV3(binding: binding, credential: credential,
+        configuration_bytes: configuration, engine_policy_bytes: engine,
+        broker_policy_bytes: broker, agent_helper_template_bytes: helper))
+
+fn service_install_parent_close_v3(parent: LinuxProtectedRootReaderV1):
+    var latest: Option<LinuxProtectedRootReaderV1> = Some(parent)
+    var diagnostic = ""
+    var completed = false
+    for _ in 0..300:
+        if latest.is_none(): break
+        val closed = linux_protected_root_reader_close_v1(latest.unwrap())
+        latest = closed.owner
+        completed = closed.completed
+        if diagnostic == "" and closed.error != "": diagnostic = closed.error
+    if val owner = latest: service_install_parents_v3.push(owner)
+    if not completed or latest.is_some() or diagnostic != "":
+        val reason = if diagnostic == "": "release-unconfirmed" else: diagnostic
+        service_identity_quarantine_v3("installer-fixture-parent-close:" + reason)
+        fail("installer fixture parent did not close cleanly:" + reason)
+
+fn service_install_check_v3(turn: HostLinuxServiceInstallFixtureTurnV3) -> bool:
+    if val cleanup = turn.pending:
+        service_install_pending_v3.push(cleanup)
+        service_install_parents_v3.push(turn.parent)
+        service_identity_quarantine_v3("installer-fixture-writer-cleanup-pending:" + turn.error)
+    expect(turn.error).to_equal("")
+    expect(turn.pending.is_none()).to_equal(true)
+    expect(turn.checked).to_equal(true)
+    turn.checked and turn.error == "" and turn.pending.is_none()
+
 describe "Genuine Linux native service identity observation borrow":
     it "should report actual independent contexts and reject a closed reader alias [IDENTITY-001/002]":
         step("Require real installed service/proc/manager/cgroup/store provision; missing setup fails")
@@ -266,6 +362,48 @@ describe "Genuine Linux native service identity observation borrow":
             expect(blocked.unwrap_err()).to_equal("service-identity-fixture-prior-pair-unresolved")
         expect(reader_current.is_ok()).to_equal(true)
         expect(successor_current.is_ok()).to_equal(true)
+
+
+    it "should refuse a corrupted signature and retry a genuine install without renewing the claim":
+        # @req HOST-01
+        val root = env_get("SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT")
+        if root == "":
+            fail("BLOCKED: dedicated signed installer fixture parent is unset")
+            return
+        step("Open the original machine identity owners and the dedicated protected fixture parent")
+        val opened_pair = service_identity_pair_open_v3()
+        if opened_pair.is_none(): return
+        val pair = opened_pair.unwrap()
+        val opened = linux_protected_root_reader_open_v1(root)
+        if opened.owner.is_none() or not opened.ready or opened.error != "":
+            if val parent = opened.owner: service_install_parent_close_v3(parent)
+            service_identity_reader_close_v3(pair.reader)
+            service_identity_successor_close_v3(pair.successor)
+            service_identity_pair_finish_v3()
+            fail("dedicated installer fixture parent did not open")
+            return
+        val parent = opened.owner.unwrap()
+        val request = service_install_request_v3(parent)
+        val native = linux_service_native_identity_borrow_v3(pair.reader, pair.successor)
+        var writer_pending = false
+        if request.is_err() or native.is_err():
+            fail("dedicated installer fixture lacks signed inputs or live native identity")
+        else:
+            step("Refuse the changed signature before publishing a claim")
+            val refused = host_linux_service_install_signature_fixture_v3(parent, native.unwrap(), request.unwrap())
+            val refused_checked = service_install_check_v3(refused)
+            writer_pending = refused.pending.is_some()
+            if refused_checked:
+                step("Install the original signed request and compare the claim and root manifest after exact retry")
+                val retried = host_linux_service_install_duplicate_fixture_v3(refused.parent, refused.native, request.unwrap())
+                val retry_checked = service_install_check_v3(retried)
+                writer_pending = retried.pending.is_some()
+        step("Close the original fixture owners once the installer writer has released")
+        if not writer_pending:
+            service_install_parent_close_v3(parent)
+            service_identity_reader_close_v3(pair.reader)
+            service_identity_successor_close_v3(pair.successor)
+            service_identity_pair_finish_v3()
 ```
 
 </details>
