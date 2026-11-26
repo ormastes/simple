@@ -1953,6 +1953,12 @@ RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
             }
             return value;
         }
+        if ((e->enum_id == 0u || e->enum_id == 2u) && e->discriminant == 0u) return e->payload;
+        if ((e->enum_id == 0u || e->enum_id == 2u) && e->discriminant == 1u) {
+            serial_puts("\r\n[TRAP] rt_unwrap_or_trap: .unwrap() called on Err\r\n");
+            rt_qemu_exit_failure();
+            for (;;) { __asm__ volatile("wfi"); }
+        }
         if (e->discriminant == ok_hash) return e->payload;
         if (e->discriminant == err_hash) {
             serial_puts("\r\n[TRAP] rt_unwrap_or_trap: .unwrap() called on Err\r\n");

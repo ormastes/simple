@@ -7,14 +7,15 @@ Covers the three WA-S9 `@workaround` dispositions:
    `interpreter_calls.spl` matches `Value.String` directly in `BuiltinTag.Print`
    and `BuiltinTag.Println` without constructing a `Value.String("")` probe or
    calling `rt_enum_payload`.
-2. `riscv64_interp_ok_wrapper_leak_2026_11_06` (`KEPT-WITH-REASON`):
-   `interpreter_expr.spl` extracts `Result<Value, BackendError>` call arguments
-   via explicit `match Ok(inner_v)` instead of `.unwrap()` while OpenSBI baremetal
-   `rt_unwrap_or_trap` lacks positional `Result` discriminant checks.
-3. `riscv64_guest_result_text_payload_empty_2026_11_06` (`KEPT-WITH-REASON`):
-   `module_lowering.spl` avoids `Result` allocation on `"legacy"` and uses explicit
-   `match` on `mir_symbol_write_ledger_open(...)` / `mir_symbol_write_ledger_resolve(...)`
-   instead of `.unwrap()` / `.unwrap_err()`.
+2. `riscv64_interp_ok_wrapper_leak_2026_11_06` (`RETIRED`):
+   `examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:rt_unwrap_or_trap`
+   now handles positional Result discriminants `0u`/`1u` alongside legacy hashes,
+   so `interpreter_expr.spl` calls `evaluated_arg.unwrap()` directly.
+3. `riscv64_guest_result_text_payload_empty_2026_11_06` (`RETIRED`):
+   With `rt_unwrap_or_trap` accepting positional Result discriminants `0u`/`1u`,
+   `module_lowering.spl` uses `mir_target_hir_mode_from_env()` and `.unwrap()` /
+   `.unwrap_err()` on `mir_symbol_write_ledger_open(...)` / `mir_symbol_write_ledger_resolve(...)`
+   directly.
 """
 
 # @tag: unit, compiler, backend, mir, riscv64
@@ -86,8 +87,8 @@ describe "WA-S9 riscv64_interp_enum_check_discriminant_shift_2026_11_06 retireme
         expect_not(src.contains("rt_enum_discriminant(Value.String(\"\"))"))
         expect(parse_workarounds_error(path)).to_equal("")
 
-describe "WA-S9 riscv64_interp_ok_wrapper_leak_2026_11_06 kept guard":
-    """Verifies interpreter Call arg evaluation extracts Value payloads cleanly."""
+describe "WA-S9 riscv64_interp_ok_wrapper_leak_2026_11_06 retirement":
+    """Verifies interpreter Call arg evaluation extracts Value payloads cleanly via unwrap()."""
 
     it "evaluates nested string call arguments without leaking Result.Ok wrappers":
         val src =
@@ -110,15 +111,15 @@ describe "WA-S9 riscv64_interp_ok_wrapper_leak_2026_11_06 kept guard":
             case Err(e): "err:" + e.message
         expect(out).to_equal("ok:wa_s9_ok")
 
-    it "documents KEPT-WITH-REASON under valid @workaround grammar in interpreter_expr.spl":
+    it "retired riscv64_interp_ok_wrapper_leak_2026_11_06 from interpreter_expr.spl":
         val path = "src/compiler/70.backend/backend/interpreter_expr.spl"
         val src = file_read(path)
-        assert_true(src.contains("@workaround bug=riscv64_interp_ok_wrapper_leak_2026_11_06 reason=KEPT-WITH-REASON:"))
-        assert_true(src.contains("case Ok(inner_v): inner_v"))
+        expect_not(src.contains("riscv64_interp_ok_wrapper_leak_2026_11_06"))
+        assert_true(src.contains("evaluated_arg.unwrap()"))
         expect(parse_workarounds_error(path)).to_equal("")
 
-describe "WA-S9 riscv64_guest_result_text_payload_empty_2026_11_06 kept guard":
-    """Verifies MIR module lowering avoids Result.unwrap on the symbol-write overlay."""
+describe "WA-S9 riscv64_guest_result_text_payload_empty_2026_11_06 retirement":
+    """Verifies MIR module lowering uses typed TargetHIR mode and Result unwrap on symbol-write overlay."""
 
     it "lowers a module using Result<text, text> without mir lowering or mode errors":
         val src =
@@ -137,7 +138,7 @@ describe "WA-S9 riscv64_guest_result_text_payload_empty_2026_11_06 kept guard":
         expect(ml.errors.len()).to_equal(0)
         expect(mir.functions.len()).to_be_greater_than(0)
 
-    it "keeps mode resolution Result-free, handles ledger Ok/Err explicitly, and keeps valid @workaround syntax":
+    it "uses mir_target_hir_mode_from_env, handles ledger Ok/Err, and retired the @workaround tag":
         val ambient_mode = target_hir_mode_or_legacy()
         assert_true(ambient_mode == "legacy" or ambient_mode == "shadow" or ambient_mode == "typed")
         val legacy = mir_symbol_write_ledger_legacy()
@@ -158,7 +159,6 @@ describe "WA-S9 riscv64_guest_result_text_payload_empty_2026_11_06 kept guard":
         expect(bad_err).to_equal("target_hir_symbol_writes_bad_mode: invalid_mode")
         val path = "src/compiler/50.mir/_MirLowering/module_lowering.spl"
         val src = file_read(path)
-        assert_true(src.contains("@workaround bug=riscv64_guest_result_text_payload_empty_2026_11_06 reason=KEPT-WITH-REASON:"))
-        expect_not(src.contains("opened.unwrap()"))
-        expect_not(src.contains("symbol_writes.unwrap_err()"))
+        expect_not(src.contains("riscv64_guest_result_text_payload_empty_2026_11_06"))
+        assert_true(src.contains("val th_symbol_mode = mir_target_hir_mode_from_env()"))
         expect(parse_workarounds_error(path)).to_equal("")
