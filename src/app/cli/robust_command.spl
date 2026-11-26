@@ -3,7 +3,8 @@
 # walked for `.spl` files (sorted); text mode prints per-file blocks, `--sdn`
 # prints one cross-file SDN document.
 # `simple robust boundaries <file.spl|dir>...` — list boundary sites only.
-# `--source text|hir` picks the origin-fact source (text is the reference).
+# `--source text|hir` picks the origin-fact source; `hir` is the default,
+# `text` stays the parity reference.
 # Exit 2 on usage error or a missing path.
 
 use std.io_runtime.{file_read, is_dir, dir_walk}
@@ -55,7 +56,7 @@ fn run_robust(args: [text]) -> i64:
         print ROBUST_USAGE
         return 2
     if not robust_source_available(source):
-        print "robust: --source {source} unavailable (HIR origin table not built)"
+        print "robust: --source {source} unavailable"
         return 2
     val paths_opt = _robust_paths(targets)
     if not paths_opt.?:
@@ -64,16 +65,23 @@ fn run_robust(args: [text]) -> i64:
     var sources: [text] = []
     for p in paths:
         sources.push(file_read(p))
-    if args[0] == "boundaries":
-        print robust_render("boundaries", source, paths, sources).unwrap()
-    elif sdn:
-        print robust_render("inventory_sdn", source, paths, sources).unwrap()
-    else:
-        var j = 0
-        while j < paths.len():
-            val one = robust_render("inventory_text", source, [paths[j]], [sources[j]]).unwrap()
+    # The hir source renders None when a file does not parse: fail, never
+    # fall back to text.
+    if args[0] == "boundaries" or sdn:
+        val surface = if args[0] == "boundaries": "boundaries" else: "inventory_sdn"
+        if val out = robust_render(surface, source, paths, sources):
+            print out
+            return 0
+        print "robust: --source {source}: a file did not parse"
+        return 2
+    var j = 0
+    while j < paths.len():
+        if val one = robust_render("inventory_text", source, [paths[j]], [sources[j]]):
             print one.substring(0, one.byte_len() - 1)
-            j = j + 1
+        else:
+            print "robust: --source {source}: {paths[j]} did not parse"
+            return 2
+        j = j + 1
     0
 
 export run_robust

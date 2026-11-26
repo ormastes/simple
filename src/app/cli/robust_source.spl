@@ -2,18 +2,28 @@
 # text/hir parity harness, and the frozen v1 schema of the inventory `--sdn`
 # document. `text` is the reference source (line-level scan in
 # compiler.semantics.lint.bound_origin_facts and the SPL-BOUND-00x checkers).
-# `hir` reads the HIR origin side table (RB-ORIGIN lane 1); until that lands it
-# is reported unavailable, never silently substituted with text.
+# `hir` (the default) lowers each file to HIR and reads the origin side table
+# (compiler.semantics.lint.hir_origin_table); its `origin` column is the
+# table's `root_origin`, so a let-copy alias of an extern return reads
+# `extern_return` where text says `copy`. A file that fails to parse makes the
+# hir render unavailable (None), never a silent text substitute. The `lints`
+# surface has no HIR checker yet: both sources run the text SPL-BOUND checkers.
 
 use std.io_runtime.{is_dir, dir_walk}
-use compiler.semantics.lint.bound_origin_facts.{bound_origin_inventory_text, bound_origin_inventory_sdn, bound_origin_boundaries_text}
+use compiler.semantics.lint.bound_origin_facts.{bound_origin_inventory_text, bound_origin_inventory_sdn, bound_origin_boundaries_text, bound_origin_inventory_text_of, bound_origin_inventory_sdn_of, bound_origin_boundaries_text_of, BoundOriginFact}
+use compiler.semantics.lint.hir_origin_table.{hir_origin_table_for_module, hir_origin_table_facts}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
 use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts}
 use compiler.semantics.lint.bound_unit_reassert.{check_bound_unit_reasserts}
 
 val ROBUST_SOURCES = ["text", "hir"]
-val ROBUST_DEFAULT_SOURCE = "text"
+val ROBUST_DEFAULT_SOURCE = "hir"
 val ROBUST_SURFACES = ["inventory_text", "inventory_sdn", "boundaries", "lints"]
-val ROBUST_FIXTURE_DIRS = ["test/01_unit/compiler/lint/fixtures/bound_graph", "test/01_unit/compiler/lint/fixtures/bound_unit_graph"]
+val ROBUST_FIXTURE_DIRS = ["test/01_unit/compiler/lint/fixtures/bound_graph", "test/01_unit/compiler/lint/fixtures/bound_unit_graph", "test/01_unit/compiler/lint/fixtures/robust_alias"]
 
 val ROBUST_SDN_V1_ROW_KEYS = ["file", "line", "function", "subject", "origin", "boundary"]
 val ROBUST_SDN_V1_ORIGINS = ["extern_decl", "param", "literal", "extern_return", "cast", "copy", "call", "expr"]
@@ -25,11 +35,18 @@ pub struct RobustParityAllow:
     needle: text
     reason: text
 
-val ROBUST_PARITY_ALLOW: [RobustParityAllow] = []
+val ROBUST_ALIAS_REASON = "let-copy alias chain: `val a = raw; val b = a` after `val raw = c_read()`; HIR follows the copies by symbol id to extern_return, text stops at copy"
+val ROBUST_PARITY_ALLOW: [RobustParityAllow] = [
+    RobustParityAllow(surface: "inventory_text", needle: "alias_chain.spl:5 alias_chain a ", reason: ROBUST_ALIAS_REASON),
+    RobustParityAllow(surface: "inventory_text", needle: "alias_chain.spl:6 alias_chain b ", reason: ROBUST_ALIAS_REASON),
+    RobustParityAllow(surface: "inventory_text", needle: "summary: test/01_unit/compiler/lint/fixtures/robust_alias/alias_chain.spl ", reason: ROBUST_ALIAS_REASON + " (per-file copy/extern_return counts move with it)"),
+    RobustParityAllow(surface: "inventory_sdn", needle: "alias_chain.spl\", line: 5, function: \"alias_chain\", subject: \"a\"", reason: ROBUST_ALIAS_REASON),
+    RobustParityAllow(surface: "inventory_sdn", needle: "alias_chain.spl\", line: 6, function: \"alias_chain\", subject: \"b\"", reason: ROBUST_ALIAS_REASON)
+]
 
 @allow(primitive_api)  # CLI boundary: source is the --source flag value, result is a yes/no availability probe
 pub fn robust_source_available(source: text) -> bool:
-    source == "text"
+    source == "text" or source == "hir"
 
 pub fn robust_fixture_paths() -> [text]:
     var out: [text] = []
@@ -54,10 +71,49 @@ fn _robust_lints_text(paths: [text], sources: [text]) -> text:
         i = i + 1
     out
 
+# HIR facts of one file as reference-shaped rows (origin := root_origin);
+# None when the file does not parse.
+fn _robust_hir_facts(source: text, path: text) -> [BoundOriginFact]?:
+    val parsed = parse_full_frontend(source, path, "robust_hir", Logger(level: 0))
+    if parser_has_errors():
+        return None
+    var lowering = HirLowering.with_filename(path)
+    val hir = lowering.lower_module(parsed)
+    var out: [BoundOriginFact] = []
+    for r in hir_origin_table_facts(hir_origin_table_for_module(hir)):
+        out.push(BoundOriginFact(line_num: r.line_num, function: r.function, subject: r.subject, origin: r.root_origin, boundary: r.boundary))
+    Some(out)
+
+fn _robust_render_hir(surface: text, paths: [text], sources: [text]) -> text?:
+    if surface == "lints":
+        return Some(_robust_lints_text(paths, sources))
+    var per_file: [[BoundOriginFact]] = []
+    var i = 0
+    while i < paths.len():
+        # `if val`, not `.?`: a file with zero facts is Some([]), and `.?`
+        # reads an empty list as absent.
+        if val facts = _robust_hir_facts(sources[i], paths[i]):
+            per_file.push(facts)
+        else:
+            return None
+        i = i + 1
+    if surface == "inventory_sdn":
+        return Some(bound_origin_inventory_sdn_of(paths, per_file))
+    if surface == "boundaries":
+        return Some(bound_origin_boundaries_text_of(paths, per_file))
+    var out = ""
+    var j = 0
+    while j < paths.len():
+        out = out + bound_origin_inventory_text_of(per_file[j], paths[j]) + "\n"
+        j = j + 1
+    Some(out)
+
 # Render one surface from one source; None when the source is unavailable.
 pub fn robust_render(surface: text, source: text, paths: [text], sources: [text]) -> text?:
     if not robust_source_available(source):
         return None
+    if source == "hir":
+        return _robust_render_hir(surface, paths, sources)
     if surface == "inventory_sdn":
         return Some(bound_origin_inventory_sdn(paths, sources))
     if surface == "boundaries":
