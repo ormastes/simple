@@ -52,7 +52,7 @@ mod codegen_shared_tests;
 #[cfg(test)]
 mod enum_discriminant_convention_tests;
 
-#[cfg(all(test, not(doctest), target_arch = "x86_64"))]
+#[cfg(all(test, not(doctest)))]
 #[path = "local_execution_tests.rs"]
 mod local_execution_tests;
 

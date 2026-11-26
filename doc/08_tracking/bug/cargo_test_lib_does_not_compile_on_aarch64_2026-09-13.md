@@ -122,3 +122,58 @@ and attributable to PR #7597 (merge `9e7e7a526edb`) — real
 in this lane, so the executed leg remains the 2026-11-05 aarch64 run
 recorded above (target package compiles; 4608 passed / 8 failures all
 unrelated to this bug). No evidence to the contrary.
+
+## 2026-11-26 aarch64 run (lane work/bug-arm64-tooling-20261126, base `c07c1b8248d`)
+
+Host aarch64 Linux (GB10). `cargo test -j6 --workspace --lib --no-fail-fast`
+from `src/compiler_rust`, own `CARGO_TARGET_DIR`, `MemoryMax=24G`.
+
+**Compile blocker: gone.** `cargo test --workspace --lib --no-run` exits 0;
+every lib test binary of the workspace builds and runs on aarch64.
+
+Baseline (gates as in tree): 8263 passed / 59 failed.
+- simple-runtime 34 failures are all parallel interference (shared `GUARD`
+  poison cascade, process-global registries): `--test-threads=1` gives
+  **1594 passed / 0 failed**.
+- Isolated re-runs (`--exact`, one thread) of the 25 non-runtime failures:
+  10 pass alone; 15 still fail deterministically; arch not established (no
+  x86 `cargo test` log was retrievable for comparison; no arch reference seen
+  in the inspected tests or paths): `mir::reachability` x2, `pipeline::native_project` x7
+  (incl. the 4 recorded 2026-11-05 and a link-time `rt_value_eq` undefined),
+  `extern_drift_tests` (stale allowlist `rt_enum_new`), `collection_capture`,
+  `module_loader` (nogc_sync_mut io package), `value_tests_basic`
+  `shared_text_unicode_index_and_slice` (byte vs char slice semantics),
+  driver `build_cache` override hash, runtime_abi `realloc` manifest order.
+
+**Un-gated on aarch64 (x86-only gate not needed: no inline asm, Cranelift has
+an arm64 ISA):** `codegen::jit` tests (`jit.rs`), `codegen::local_execution_tests`
+(`codegen/mod.rs`), `cranelift_sffi` `stack_probe_tests` (cross-target AOT
+only) and `tests` (now x86_64|aarch64, JIT calls use a host-ISA
+`JIT_HOST_TARGET`; previously hard-coded `CL_TARGET_X86_64`, which
+`build_jit_isa_and_triple` correctly refuses off x86), `repl_runner_sffi`
+tests, and `driver/tests/runner_tests.rs`.
+Two stale runner_tests expectations fixed (target-independent logic, hidden because CI
+never ran this target on aarch64 and `rust-tests.yml` excludes simple-driver):
+file-backed SMF now embeds an `.interp_snapshot` instead of refusing
+(contract in `pipeline::execution` tests), and 32-bit `arm-linux` without the
+`llvm` feature is refused earlier with "32-bit targets require the LLVM
+backend".
+
+After: 8381 passed / 34 failed (simple-compiler 5160/18 with 72 more tests
+executed than before; runner_tests **51/51 pass**). Only newly-enabled test
+still red: `codegen::local_execution_tests::test_cranelift_jit_typed_dict_float_literal_key_compatibility`
+— deterministic in isolation: `map.get(1.0)` returns a TAG_HEAP pointer
+instead of 7 and `has/contains(1.0)` returns false; filed separately as
+`jit_dict_f64_key_get_membership_aarch64_2026-11-26`. Left red, not re-gated.
+
+Parallel-only note: `cranelift_sffi::abort_tests` (documented "run serially")
+reset the whole provider registry, so with the extra un-gated cranelift tests
+the simple-compiler-backfill binary fails 2-3 abort tests per parallel run
+(0 with `--test-threads=1`, 32/32). One intermediate run, before the
+`JIT_HOST_TARGET` fix, SIGSEGVed that binary; the final run did not.
+`extern_drift_tests` asks to drop `rt_enum_new` from its allowlist; not
+applied here (outside this lane).
+
+Still x86-gated and untouched: `driver/tests/{synthetic_driver_registration_live,
+anti_dummy_quality_cli_tests,os_cli_dispatch_tests,help_output_tests}.rs`
+(x86_64) and `native_compile_size_reporting.rs` (x86_64+linux).
