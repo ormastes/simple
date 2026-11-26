@@ -79,5 +79,11 @@ previous behaviour (their call-site key spelling is receiver-derived).
 ## Verification
 
 - Minimal repro above: fails before, passes after (stage2 lane rerun).
+  CONFIRMED 2026-11-26: the 41-module repro built with the pinned-06ba866385d5
+  stage2 binary (`native-build --mode dynload --entry-closure`, MIR sharding
+  8) links 41/41 and the executable runs clean (no panic, no
+  `named call lacks bootstrap parameter metadata`). SCV admission note: the
+  repro dir must be a git checkout with sources under `src/` and a `.simple`
+  storage dir (`mkdir -p .simple/storage`).
 - Stage 2 compiler-test matrix `test_runner_build` row: the
   `test_manifest_scanner.spl:313` call binds and the row builds.
