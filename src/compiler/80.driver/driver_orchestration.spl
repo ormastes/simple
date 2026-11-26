@@ -361,6 +361,15 @@ impl CompilerDriver:
         log_build_progress("load_sources", "files", self.ctx.sources.len(),
             self.ctx.sources.len(), "complete", 1, 6, 0, 0, "running")
 
+        if self.mir_shard_link_only_v1(compile_mode_text):
+            log_phase("phase2_4:mir_shard_link_skip_frontend")
+            return self.dispatch_phase5_mode_v1(
+                compile_mode_text,
+                native_noop_eligible,
+                native_noop_request,
+                collection_receipt_requested
+            )
+
         match self.stage_parse():
             case Some(stop): return stop
             case None: pass
@@ -382,51 +391,12 @@ impl CompilerDriver:
             case Some(stop): return stop
             case None: pass
 
-        log_phase("phase5:mode_dispatch:start")
-        log_debug("phase 5: mode-specific processing...")
-        if compile_mode_text == "check":
-            log_debug("check mode")
-            return CompileResult.Success(None)
-        if compile_mode_text == "sdn":
-            log_debug("sdn mode")
-            return self.process_sdn()
-        # Named rule `extreme_public_api` (REQ-EAPI-003/004): one choke point
-        # before any engine runs user code or emits an artifact. A denial
-        # returns before interpret/JIT/AOT, so no initializer effect occurs.
-        log_phase("phase5:extreme_public_api:start")
-        val api_decision = guard_api_publication_v1(self.ctx)
-        log_phase("phase5:extreme_public_api:done")
-        if not api_decision.allowed:
-            return CompileResult.TypeError(self.ctx.errors)
-        if compile_mode_text == "interpret":
-            log_debug("interpret mode")
-            return self.interpret()
-        if compile_mode_text == "jit":
-            log_debug("jit mode")
-            return self.jit_compile_and_run()
-        if compile_mode_text == "aot":
-            log_debug("aot mode")
-            val aot_result = self.aot_compile()
-            if aot_result.is_success() and native_noop_eligible:
-                val built_output = native_noop_built_output_v1(
-                    self.ctx.options.output_file ??
-                    driver_noop_default_output_v1(self.ctx.options.input_files))
-                val publication = native_noop_publish_built_v1(
-                    native_noop_request, self.ctx.source_paths_owner, built_output)
-                if publication != "ok":
-                    return CompileResult.CodegenError(
-                        "native no-op receipt publication failed: {publication}")
-                if collection_receipt_requested:
-                    val copied = collection_native_copy_v1(built_output, native_noop_request_output_v1(native_noop_request), native_noop_request.identity)
-                    if copied != "":
-                        return CompileResult.CodegenError("native collection receipt cache publication failed: {copied}")
-            return aot_result
-        if compile_mode_text == "smf_exec":
-            log_debug("smf_exec mode")
-            return self.execute_smf()
-
-        log_warn("no mode matched, falling through")
-        CompileResult.Success(None)
+        self.dispatch_phase5_mode_v1(
+            compile_mode_text,
+            native_noop_eligible,
+            native_noop_request,
+            collection_receipt_requested
+        )
 
     # PR2a per-stage entry points. Each runs one phase of compile() on the
     # driver's current ctx and returns Some(result) to stop the compilation
@@ -601,3 +571,58 @@ impl CompilerDriver:
         if self.ctx.has_errors():
             return CompileResult.CodegenError(self.ctx.error_message_at(0))
         driver_vhdl_lane_compile_v1(self, self.ctx.options.output_file ?? "a.out")
+
+    me dispatch_phase5_mode_v1(
+        compile_mode_text: text,
+        native_noop_eligible: bool,
+        native_noop_request: NativeNoopRequestV1,
+        collection_receipt_requested: bool
+    ) -> CompileResult:
+        """Mode dispatch after frontend stages (or directly after load_sources for
+        MIR-shard link workers): evaluates API publication guard, dispatches to
+        the selected mode, and publishes native no-op receipts on AOT success."""
+        log_phase("phase5:mode_dispatch:start")
+        log_debug("phase 5: mode-specific processing...")
+        if compile_mode_text == "check":
+            log_debug("check mode")
+            return CompileResult.Success(None)
+        if compile_mode_text == "sdn":
+            log_debug("sdn mode")
+            return self.process_sdn()
+        # Named rule `extreme_public_api` (REQ-EAPI-003/004): one choke point
+        # before any engine runs user code or emits an artifact. A denial
+        # returns before interpret/JIT/AOT, so no initializer effect occurs.
+        log_phase("phase5:extreme_public_api:start")
+        val api_decision = guard_api_publication_v1(self.ctx)
+        log_phase("phase5:extreme_public_api:done")
+        if not api_decision.allowed:
+            return CompileResult.TypeError(self.ctx.errors)
+        if compile_mode_text == "interpret":
+            log_debug("interpret mode")
+            return self.interpret()
+        if compile_mode_text == "jit":
+            log_debug("jit mode")
+            return self.jit_compile_and_run()
+        if compile_mode_text == "aot":
+            log_debug("aot mode")
+            val aot_result = self.aot_compile()
+            if aot_result.is_success() and native_noop_eligible:
+                val built_output = native_noop_built_output_v1(
+                    self.ctx.options.output_file ??
+                    driver_noop_default_output_v1(self.ctx.options.input_files))
+                val publication = native_noop_publish_built_v1(
+                    native_noop_request, self.ctx.source_paths_owner, built_output)
+                if publication != "ok":
+                    return CompileResult.CodegenError(
+                        "native no-op receipt publication failed: {publication}")
+                if collection_receipt_requested:
+                    val copied = collection_native_copy_v1(built_output, native_noop_request_output_v1(native_noop_request), native_noop_request.identity)
+                    if copied != "":
+                        return CompileResult.CodegenError("native collection receipt cache publication failed: {copied}")
+            return aot_result
+        if compile_mode_text == "smf_exec":
+            log_debug("smf_exec mode")
+            return self.execute_smf()
+
+        log_warn("no mode matched, falling through")
+        CompileResult.Success(None)

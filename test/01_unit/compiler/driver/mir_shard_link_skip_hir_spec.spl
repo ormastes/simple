@@ -1,0 +1,162 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_orchestration.spl 80%
+# @cover src/compiler/80.driver/driver_aot_pipeline.spl 80%
+"""
+# MIR shard link-only worker skips frontend parse and HIR lowering
+
+When `SIMPLE_MIR_SHARD_LINK` is set for a final AOT link worker (without
+`SIMPLE_MIR_SHARD` or `SIMPLE_MIR_SHARD_EXPORT_WRITE`), `CompilerDriver` must
+still load sources and compute `native_sources_fingerprint`, then jump to
+phase-5 mode dispatch (`guard_api_publication_v1` + `aot_compile()` ->
+`aot_link_mir_shards_v1()`) without running `stage_parse()`, `stage_lower_hir()`,
+or `stage_collection_analysis()`.
+"""
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, dir_remove_all, file_read, file_write, getpid}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.common.driver_compile_options.{CompileOptions, driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{CompileMode, driver_output_format_native}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.driver.driver_build.native_mir_shard.{
+    NATIVE_MIR_SHARD_ENV_V1, NATIVE_MIR_SHARD_LINK_ENV_V1}
+use compiler.driver.driver_build.native_mir_shard_export_v1.{
+    NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1}
+
+fn result_kind(result: CompileResult) -> text:
+    match result:
+        case Success(_): "success"
+        case ParseError(_): "parse"
+        case ResolveError(_): "resolve"
+        case TypeError(_): "type"
+        case CodegenError(_): "codegen"
+        case BorrowError(_): "borrow"
+        case RuntimeError(_): "runtime"
+
+fn result_detail(result: CompileResult) -> text:
+    match result:
+        case CodegenError(msg): msg
+        case ParseError(errs): errs.join("\n")
+        case TypeError(errs): errs.join("\n")
+        case _: ""
+
+fn link_skip_fixture(tag: text, code: text) -> (text, text):
+    val dir = "build/test_tmp/mir_shard_link_skip_hir_{tag}_{getpid()}"
+    val _rm = dir_remove_all(dir)
+    val _mk = dir_create_all(dir)
+    val path = "{dir}/broken.spl"
+    val _wr = file_write(path, code)
+    (dir, path)
+
+fn aot_options_for(path: text, out_path: text) -> CompileOptions:
+    var options = driver_core_compile_options_default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.cli_mode_text = "aot"
+    options.output_format = driver_output_format_native()
+    options.output_file = Some(out_path)
+    options.bootstrap_input_count = 0
+    options
+
+describe "MIR shard link-only frontend skip":
+    it "selects mir_shard_link_only_v1 only for AOT link-only workers":
+        val saved_link = env_get(NATIVE_MIR_SHARD_LINK_ENV_V1) ?? ""
+        val saved_shard = env_get(NATIVE_MIR_SHARD_ENV_V1) ?? ""
+        val saved_export = env_get(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1) ?? ""
+
+        val driver = compiler_driver_create(driver_core_compile_options_default())
+
+        env_set(NATIVE_MIR_SHARD_LINK_ENV_V1, "")
+        env_set(NATIVE_MIR_SHARD_ENV_V1, "")
+        env_set(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1, "")
+        expect(driver.mir_shard_link_only_v1("aot")).to_equal(false)
+
+        env_set(NATIVE_MIR_SHARD_LINK_ENV_V1, "/tmp/mir-queue")
+        expect(driver.mir_shard_link_only_v1("aot")).to_equal(true)
+        expect(driver.mir_shard_link_only_v1("check")).to_equal(false)
+        expect(driver.mir_shard_link_only_v1("interpret")).to_equal(false)
+        expect(driver.mir_shard_link_only_v1("jit")).to_equal(false)
+
+        env_set(NATIVE_MIR_SHARD_ENV_V1, "0/3")
+        expect(driver.mir_shard_link_only_v1("aot")).to_equal(false)
+
+        env_set(NATIVE_MIR_SHARD_ENV_V1, "")
+        env_set(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1, "/tmp/mir-export")
+        expect(driver.mir_shard_link_only_v1("aot")).to_equal(false)
+
+        env_set(NATIVE_MIR_SHARD_LINK_ENV_V1, saved_link)
+        env_set(NATIVE_MIR_SHARD_ENV_V1, saved_shard)
+        env_set(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1, saved_export)
+
+    it "skips stage_parse and stage_lower_hir when SIMPLE_MIR_SHARD_LINK is set":
+        val saved_link = env_get(NATIVE_MIR_SHARD_LINK_ENV_V1) ?? ""
+        val saved_shard = env_get(NATIVE_MIR_SHARD_ENV_V1) ?? ""
+        val saved_export = env_get(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1) ?? ""
+        val saved_clean = env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? ""
+        val saved_whole = env_get("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? ""
+
+        # Function-body syntax error: load_sources_impl only scans imports and
+        # succeeds, whereas stage_parse() would fail with ParseError.
+        val (dir, src_path) = link_skip_fixture("skip", "fn broken( -> i64:\n    1\n")
+        val queue = "{dir}/queue"
+        val _mk_q = dir_create_all(queue)
+        val out_path = "{dir}/out_bin"
+
+        env_set(NATIVE_MIR_SHARD_LINK_ENV_V1, queue)
+        env_set(NATIVE_MIR_SHARD_ENV_V1, "")
+        env_set(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1, "")
+        env_set("SIMPLE_NATIVE_BUILD_CLEAN", "")
+        env_set("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM", "")
+
+        val driver = compiler_driver_create(aot_options_for(src_path, out_path))
+        val res = compiler_driver_run_compile(driver)
+
+        env_set(NATIVE_MIR_SHARD_LINK_ENV_V1, saved_link)
+        env_set(NATIVE_MIR_SHARD_ENV_V1, saved_shard)
+        env_set(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1, saved_export)
+        env_set("SIMPLE_NATIVE_BUILD_CLEAN", saved_clean)
+        env_set("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM", saved_whole)
+
+        # Entered aot_link_mir_shards_v1() directly after load_sources_impl(),
+        # skipping stage_parse() and stage_lower_hir(), so it fails on the
+        # missing ledger inventory rather than ParseError.
+        expect(result_kind(res)).to_equal("codegen")
+        expect(result_detail(res)).to_contain("MIR shard ledger inventory does not match")
+        expect(driver.ctx.native_sources_fingerprint != "").to_equal(true)
+        expect(driver.ctx.modules.len()).to_equal(0)
+        expect(driver.ctx.hir_modules.len()).to_equal(0)
+        expect(driver.ctx.api_publication_decision.is_some()).to_equal(true)
+
+        val _rm = dir_remove_all(dir)
+
+    it "still parses when SIMPLE_MIR_SHARD is also set (shard worker)":
+        val saved_link = env_get(NATIVE_MIR_SHARD_LINK_ENV_V1) ?? ""
+        val saved_shard = env_get(NATIVE_MIR_SHARD_ENV_V1) ?? ""
+        val saved_export = env_get(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1) ?? ""
+
+        val (dir, src_path) = link_skip_fixture("shard", "fn broken( -> i64:\n    1\n")
+        val queue = "{dir}/queue"
+        val _mk_q = dir_create_all(queue)
+
+        env_set(NATIVE_MIR_SHARD_LINK_ENV_V1, queue)
+        env_set(NATIVE_MIR_SHARD_ENV_V1, "0/1")
+        env_set(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1, "")
+
+        val driver = compiler_driver_create(aot_options_for(src_path, "{dir}/out_bin"))
+        val res = compiler_driver_run_compile(driver)
+
+        env_set(NATIVE_MIR_SHARD_LINK_ENV_V1, saved_link)
+        env_set(NATIVE_MIR_SHARD_ENV_V1, saved_shard)
+        env_set(NATIVE_MIR_SHARD_EXPORT_WRITE_ENV_V1, saved_export)
+
+        expect(result_kind(res)).to_equal("parse")
+        val _rm = dir_remove_all(dir)
+
+    it "wires mir_shard_link_only_v1 before stage_parse in driver_orchestration.spl":
+        val orch = file_read("src/compiler/80.driver/driver_orchestration.spl")
+        val link_skip_pos = orch.index_of("if self.mir_shard_link_only_v1(compile_mode_text):") ?? -1
+        val parse_pos = orch.index_of("match self.stage_parse():") ?? -1
+        expect(link_skip_pos).to_be_greater_than(0)
+        expect(parse_pos).to_be_greater_than(link_skip_pos)
