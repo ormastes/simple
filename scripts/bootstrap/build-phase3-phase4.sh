@@ -617,7 +617,8 @@ run_stage3_step() {
 
   verify_stage3_dynlibs "$s3_label" "$s3_dir"
   sign_stage_outputs "$s3_dir" "$s3_out"
-  "$s3_out" --version | grep -Fq "simple-bootstrap"
+  s3_version_out=$("$s3_out" --version) || return $?
+  printf '%s\n' "$s3_version_out" | grep -Fq "simple-bootstrap" || return $?
   run_stage3_hello "$s3_label" "$s3_out" "$s3_dir" || return $?
   echo "=== [$s3_label] PASS ($s3_out) ==="
 }
@@ -780,8 +781,19 @@ run_stage4_all() {
       export SIMPLE_NO_DEPRECATED_WARNINGS="1"
       export SIMPLE_PACKAGE_INDEX_COLD_INIT="1"
       export LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING="1"
+      export SIMPLE_NATIVE_BUILD_TARGET="$STAGE3_RESOLVED_TARGET"
+      export SIMPLE_NATIVE_BUILD_THREADS="$THREADS"
+      export SIMPLE_NATIVE_BUILD_CACHE_DIR="$P4_DIR/tools-cache"
       export SIMPLE_RUNTIME_PATH="$RUNTIME_PATH"
       export SIMPLE_BINARY="$P3B_BIN"
+      if [ "$COMPILE_MODE" = "shard" ]; then
+        export SIMPLE_FILE_WORKERS="0"
+        export SIMPLE_HIR_SHARDING="1"
+        export SIMPLE_MIR_SHARDING="1"
+      else
+        export SIMPLE_FILE_WORKERS="1"
+        if unset SIMPLE_HIR_SHARDING SIMPLE_MIR_SHARDING 2>/dev/null; then :; fi
+      fi
       set -- \
         --target "$STAGE3_RESOLVED_TARGET" \
         --backend "$BACKEND" \
