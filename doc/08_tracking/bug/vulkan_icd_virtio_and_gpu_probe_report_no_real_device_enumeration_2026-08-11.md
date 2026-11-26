@@ -133,3 +133,49 @@ exists but could not be re-run on this host — `bin/simple.exe test` fails
 repo-wide at this HEAD (pinned seed rejects `@representation_boundary` in
 the test runner). Status stays **open** for the `gpu_vendor_probe.spl` half
 only; no header change.
+
+## 2026-11-26 triage on a real-GPU Linux host (gpuvk lane, aarch64 NVIDIA GB10) — stays OPEN, gap narrowed
+
+Seed `/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple` (sha256 prefix
+`fb80903917d6d5f5`), worktree on release/1.0.0 `add1f502e86`.
+
+This record's earlier text is stale in two places:
+
+- `gpu_vendor_probe.spl` no longer derives availability from `device_id > 0`. A
+  `GpuProbeState` enum (`NotProbed` / `NoDevice` / `DevicePresent(id)`) was added, and every
+  vendor `.probe()` returns `NotProbed`.
+- A real host vendor probe now exists in the userland library:
+  `gpu_vendor_probe_sysfs` / `gpu_vendor_probe_host`
+  (`src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl`) read sysfs DRM PCI ids and the matching
+  ICD manifest.
+
+The specs could not run on the earlier Windows lanes. They now run green here:
+`venus_icd_fail_closed_spec` 5/5, `gpu_vendor_probe_id_spec` 4/4,
+`device_enumeration_boundary_spec` 17/17, `vulkan_icd_virtio_spec` 12/12.
+
+Live probe on this host (`SIMPLE_EXECUTION_MODE=interpret seed run`):
+
+```
+host avail=true vendor=nvidia vid=4318 did=11794 card=card0 icd=/usr/share/vulkan/icd.d/nvidia_icd.json reason=sysfs-pci-device-detected
+venus avail=false reason=no-virtio-gpu-sysfs-device
+candidate_enumeration_is_available=false
+```
+
+So the Linux host probe reports real data (`10de:2e12`, matching `/sys/class/drm/card0`), and the
+Venus side correctly fails closed on a host with no virtio-gpu.
+
+**Remaining gap (why this stays OPEN):** `vulkan.device.enumeration@1` needs queue families,
+memory heaps/types and limits. A PCI vendor/device id is not that data. The SimpleOS-side
+candidate (`src/os/drivers/gpu/gpu_vendor_probe.spl`, read by
+`boundary_enumeration_provider.spl`'s `_vendor_probe_reports_any_device`) still has no
+kernel-side source. Wiring the Linux sysfs probe into those kernel driver probes would be wrong
+twice over: it is not available on the board, and `candidate_enumeration_is_available()` would
+flip to `executed` on id-only data. Closing this needs one of two things:
+
+- (a) a SimpleOS PCI-scan (`src/os/drivers/pci/`) to vendor-probe bridge that yields
+  `DevicePresent`, **together with** a provider change so that an id alone does not count as
+  enumeration;
+- (b) a real virtio-gpu Venus transport that decodes the device, queue and memory replies.
+
+Both are board/driver-lane work and need board evidence under `.claude/rules/board-runnable.md`.
+No code change in this lane.
