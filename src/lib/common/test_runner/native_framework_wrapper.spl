@@ -31,17 +31,18 @@ fn spipe_rewrite_infix_expect_line(line: text) -> text:
     line
 
 fn native_rewrite_infix_expect_line(line: text, string_ranges: [i64]) -> Result<text, text>:
-    # Compiler-provided string ranges are byte-based and include the quotes.
-    # Unlike code_lines (character columns), this mask preserves raw UTF-8
-    # byte offsets and distinguishes a trailing comment from a quoted '#'.
+    # Compiler-provided string ranges are UTF-8 byte offsets and include the quotes,
+    # matching `.substring()`, `.index_of()`, and `.byte_len()`. Using `.len()` here
+    # mixes character counts with byte offsets whenever operands contain non-ASCII text.
     if string_ranges.len() % 2 != 0: return Err("native-spec: invalid string ranges")
+    val line_bytes = line.byte_len()
     var mask_parts: [text] = []
     var previous = 0
     var range_index = 0
     while range_index < string_ranges.len():
         val start = string_ranges[range_index]
         val finish = string_ranges[range_index + 1]
-        if start < previous or finish < start or finish > line.len():
+        if start < previous or finish < start or finish > line_bytes:
             return Err("native-spec: invalid string ranges")
         mask_parts.push(line.substring(previous, start))
         mask_parts.push(" ".repeat(finish - start))
@@ -50,9 +51,9 @@ fn native_rewrite_infix_expect_line(line: text, string_ranges: [i64]) -> Result<
     mask_parts.push(line.substring(previous))
     val masked = mask_parts.join("")
     val comment = masked.index_of("#")
-    val code_end = if comment >= 0: comment else: line.len()
+    val code_end = if comment >= 0: comment else: line_bytes
     val code = masked.substring(0, code_end)
-    val indent = line.len() - line.trim_start().len()
+    val indent = line.byte_len() - line.trim_start().byte_len()
     val actual_start = indent + 7
     val matchers: [text] = ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
     for matcher in matchers:
@@ -60,11 +61,11 @@ fn native_rewrite_infix_expect_line(line: text, string_ranges: [i64]) -> Result<
         val split_at = code.index_of(needle)
         if split_at > actual_start:
             val actual = line.substring(actual_start, split_at).trim()
-            val expected_start = split_at + needle.len()
+            val expected_start = split_at + needle.byte_len()
             val expected_run = line.substring(expected_start, code_end)
             val expected = expected_run.trim()
             if actual != "" and expected != "":
-                val suffix = line.substring(expected_start + expected_run.trim_end().len())
+                val suffix = line.substring(expected_start + expected_run.trim_end().byte_len())
                 return Ok(line.substring(0, indent) + "expect(" + actual + ")." + matcher + "(" + expected + ")" + suffix)
     Ok(line)
 
@@ -387,9 +388,9 @@ fn native_plain_rename_main_line_v1(line: text, replacement_name: text) -> text:
         return line[0:pos] + replacement_name + line[pos + 4:]
     line
 
-fn native_plain_main_params_empty_v1(code_line: text) -> bool:
+fn native_plain_main_param_kind_v1(code_line: text) -> text:
     val lp = code_line.index_of("(")
-    if lp < 0: return true
+    if lp < 0: return "empty"
     var depth = 0
     var i = lp
     while i < code_line.len():
@@ -398,9 +399,23 @@ fn native_plain_main_params_empty_v1(code_line: text) -> bool:
         elif ch == ")":
             depth = depth - 1
             if depth == 0:
-                return code_line[lp + 1:i].trim() == ""
+                val inner = code_line[lp + 1:i].trim()
+                if inner == "":
+                    return "empty"
+                if inner.contains(","):
+                    return "unsupported"
+                val colon = inner.index_of(":")
+                if colon < 0:
+                    return "unsupported"
+                val ty = inner[colon + 1:].trim()
+                if ty == "[text]":
+                    return "text_list"
+                return "unsupported"
         i = i + 1
-    true
+    "empty"
+
+fn native_plain_main_params_empty_v1(code_line: text) -> bool:
+    native_plain_main_param_kind_v1(code_line) == "empty"
 
 fn native_plain_main_return_is_unit_v1(code_line: text) -> bool:
     val lp = code_line.index_of("(")
@@ -446,7 +461,10 @@ fn native_plain_wrapper_source(content: text, code_lines: [text], string_continu
         val user_main = prefix + "user_main"
         lines[main_idx] = native_plain_rename_main_line_v1(lines[main_idx], user_main)
         val rewritten = lines.join("\n")
-        val call_args = if native_plain_main_params_empty_v1(code_lines[main_idx]): "" else: "[]"
+        val param_kind = native_plain_main_param_kind_v1(code_lines[main_idx])
+        if param_kind == "unsupported":
+            return Err("native-plain: main parameters not supported: expected () or ([text])")
+        val call_args = if param_kind == "empty": "" else: "[]"
         val status_var = prefix + "status"
         val helper = "\n" + native_completion_imports_v1(prefix) +
             "fn " + complete + "(" + status_var + ": i64) -> bool:\n" +

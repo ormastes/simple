@@ -41,10 +41,9 @@ first two today) and a native run through a Stage 2-built runner as the green ev
 
 ## Fix & Verification 2026-11-27 (Windows host, W2-3)
 
-- `src/lib/common/test_runner/native_framework_wrapper.spl`: added `allow_authored_main: bool = false` to `spipe_partition_source` so `native_framework_wrapper_source` continues rejecting `fn main`, while `native_plain_wrapper_source` accepts declaration-only examples (non-empty `declarations`/`imports`) and single top-level `fn main` definitions (renaming top-level `fn main` to `{prefix}user_main` and generating `fn main() -> i64:` with `plain` completion evidence), while still rejecting comment-only/empty snippets and multiple `fn main` definitions.
-- `test/01_unit/lib/test_runner/native_framework_wrapper_spec.spl`: 19/22 (`native invocation completion wrappers` passes 6/6; 3 pre-existing failures remain in `complete configured native framework wrapper` on `ScenarioOmissionStatus` and lexical matcher test).
+- `src/lib/common/test_runner/native_framework_wrapper.spl`: added `allow_authored_main: bool = false` to `spipe_partition_source` and `native_plain_main_param_kind_v1` so `native_framework_wrapper_source` continues rejecting `fn main`, while `native_plain_wrapper_source` accepts declaration-only examples (non-empty `declarations`/`imports`) and single top-level `fn main` definitions (`()` or `(args: [text])`, renaming top-level `fn main` to `{prefix}user_main` and generating `fn main() -> i64:` with `plain` completion evidence, while rejecting non-empty unsupported `main` param lists), and updated `native_rewrite_infix_expect_line` to use `.byte_len()` for UTF-8-safe lexical matcher boundary slicing.
+- `test/01_unit/lib/test_runner/native_framework_wrapper_spec.spl`: 22/22 PASS (escaped `\{ScenarioOmissionStatus}` in test assertions and added `fn main(args: [text])` + rejected `fn main(a: i64, b: i64)` coverage).
 - `test/01_unit/lib/nogc_sync_mut/test_runner/wrapper_filename_owners_spec.spl`: 7/7 PASS.
 - `test/01_unit/app/test_runner/doctest_child_execution_spec.spl`: 7/7 PASS.
 - `test/01_unit/lib/test_runner/test_runner_doctest_scope_path_spec.spl`: 3/3 PASS.
-- Wrapped snippets (`decl_only`, `defines_main`, `plain_body`) executed with `--simple-native-evidence=...` exited 0 and wrote valid `simple-native-completion-v1` receipts.
 - Stage 2 native `--sdoctest --native-backend=<backend>` compilation/execution verification remains pending outside this Windows seed host.

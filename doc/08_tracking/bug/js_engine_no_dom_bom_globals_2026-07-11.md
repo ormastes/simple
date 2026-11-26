@@ -11,7 +11,7 @@ related: src/lib/gc_async_mut/gpu/browser_engine/script/script_runner.spl
 
 # JS engine binds no DOM/BOM globals — famous-page DOM JS silently no-ops
 
-**Status:** OPEN — but re-characterized 2026-08-10. The engine is pure Simple
+**Status:** fix-implemented-verification-pending (2026-11-27, W2-3; originally OPEN and re-characterized 2026-08-10; see Update 2026-11-27 below). The engine is pure Simple
 (`src/lib/nogc_sync_mut/js/engine/**`, NOT Rust seed), and it ALREADY has host
 DOM/BOM identifier hooks: `window`/`self`/`document`/`location`/`navigator`/
 `chrome`/`sessionStorage`/`localStorage` resolve at

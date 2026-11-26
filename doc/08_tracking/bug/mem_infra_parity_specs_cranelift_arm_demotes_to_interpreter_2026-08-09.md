@@ -2,7 +2,7 @@
 # mem_infra parity specs: the "cranelift" arm never measured cranelift
 
 - **Filed:** 2026-08-09
-- Status: CLOSED (2026-11-05, mirp2-E3 closure at the bottom of this file: Defect A registration fixed and both parity specs green; the interpreter `_native` residual was a stale-binary artifact; natively-linked-backend coverage explicitly scoped out). Header corrected 2026-11-25 (p2w3-al lane) — it still read OPEN after the closure was appended.
+- Status: OPEN (reopened 2026-11-10 in `.sdn` shard after 2026-11-05 `mirp2-E3` seed closure; Windows UAF trap failures in `guard_backend_parity_spec.spl` via out-of-scope `src/compiler_rust/compiler/src/interpreter_extern/mem_guard.rs` `#[cfg(not(unix))]` stub and natively-linked `cranelift` verification remain outstanding — see Triage 2026-11-27 below). Header corrected 2026-11-25 (`p2w3-al` lane) and aligned with `.sdn` 2026-11-27 (`W2-3`).
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
   are GREEN for real reasons; the natively-linked-backend coverage gap is
   SCOPED OUT and recorded below. The interpreter-mode `_native` residual
