@@ -23,6 +23,27 @@ describe "Typed selected-server controller boundary":
         expect(server_host_reference_validate_v1("host_config:\n  server_config: 7\n").unwrap_err()).to_equal("server-host-config-path")
         expect(server_host_reference_validate_v1("host_config:\n  server_config: servers.sdn\n").unwrap_err()).to_equal("server-host-config-path")
 
+    it "REQ-002 reads the endpoint from a generated host file whose other keys are tolerant values":
+        # scripts/setup/host-env.shs --init writes `cpu_features: a,b,c` unquoted;
+        # host_config.spl owns that key. Only schema/server_config are decoded here.
+        val generated = "# generated\nhost_config:\n  schema: simple-host-config-v1\n  max_threads: 20\n  # worker_mem_mib: 3300\n  cpu_features: neon,sve,sve2\n  llvm_root: /opt/llvm\n  gpu: on\n"
+        expect(server_host_reference_v1(generated).unwrap()).to_equal("")
+        expect(server_host_reference_v1(generated + "  server_config: \"/private/servers.sdn\"\n").unwrap()).to_equal("/private/servers.sdn")
+
+    it "REQ-002 still rejects a malformed endpoint beside tolerant host values":
+        val prefix = "host_config:\n  cpu_features: neon,sve\n"
+        expect(server_host_reference_validate_v1(prefix + "  server_config: /a/b, /c\n").unwrap_err()).to_equal("server-host-config-invalid")
+        expect(server_host_reference_validate_v1(prefix + "  server_config: /a\n  server_config: /b\n").unwrap_err()).to_equal("server-host-config-invalid")
+        expect(server_host_reference_validate_v1(prefix + "  server_config: servers.sdn\n").unwrap_err()).to_equal("server-host-config-path")
+
+    it "REQ-002 takes the endpoint only from a direct host_config child":
+        val nested = "host_config:\n  cpu_features: neon,sve\n  cache:\n    server_config: /evil/servers.sdn\n"
+        expect(server_host_reference_v1(nested).unwrap()).to_equal("")
+        val commented = "host_config:  # user file\n  server_config: /private/servers.sdn\n"
+        expect(server_host_reference_v1(commented).unwrap()).to_equal("/private/servers.sdn")
+        val quoted_key = "host_config:\n  cpu_features: neon,sve\n  \"server_config\": \"/private/servers.sdn\"\n"
+        expect(server_host_reference_v1(quoted_key).unwrap()).to_equal("/private/servers.sdn")
+
     it "REQ-004 rejects malformed remote success payload":
         val source = controller_gateway_request_encode_v1(gateway_request_v1()).unwrap()
         expect(controller_gateway_response_v1(source, "status: successful\n").is_err()).to_equal(true)
