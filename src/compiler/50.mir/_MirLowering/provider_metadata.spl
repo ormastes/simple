@@ -289,6 +289,49 @@ impl MirLowering:
             index = index + 1
         added
 
+    # Named-call parameter rows for surface-only providers (PM3 unit lane).
+    # Same fill-only-absent rule as the call-origin rows above: the HIR
+    # prescan registry is consulted first at the call site and stays
+    # authoritative. Shape is encoded as "name1,name2|101" (param names are
+    # identifiers, so neither ',' nor '|' can appear); two providers offering
+    # the same key with different shapes mark the key ambiguous and every
+    # named call through it keeps the fail-closed refusal.
+    me _register_one_surface_param_row_v1(key: text, shape: text) -> bool:
+        if key == "":
+            return false
+        if self.surface_fn_param_ambig_v1.has(key):
+            return false
+        if self.surface_fn_param_rows_v1.has(key):
+            if self.surface_fn_param_rows_v1[key] != shape:
+                self.surface_fn_param_ambig_v1[key] = true
+            return false
+        self.surface_fn_param_rows_v1[key] = shape
+        return true
+
+    me register_surface_param_rows_v1(owners: [text], names: [text],
+            param_counts: [i64], param_names_flat: [text], param_defaults_flat: [bool]) -> i64:
+        var added = 0
+        var cursor = 0
+        var index = 0
+        while index < names.len():
+            val count = param_counts[index]
+            var param_names: [text] = []
+            var flags = ""
+            var pi = 0
+            while pi < count and cursor + pi < param_names_flat.len():
+                param_names.push(param_names_flat[cursor + pi])
+                flags = flags + (if param_defaults_flat[cursor + pi]: "1" else: "0")
+                pi = pi + 1
+            val shape = "{param_names.join(",")}|{flags}"
+            if self._register_one_surface_param_row_v1(names[index], shape):
+                added = added + 1
+            if owners[index] != "" and names[index] != "":
+                val _qualified = self._register_one_surface_param_row_v1(
+                    "{owners[index]}.{names[index]}", shape)
+            cursor = cursor + count
+            index = index + 1
+        added
+
     fn provider_callable_accepts_text_value(symbol: SymbolId) -> bool:
         # Missing ownership keeps the established external pointer bridge.
         # Use has + a typed bracket lookup, avoiding HirSymbol? transport.

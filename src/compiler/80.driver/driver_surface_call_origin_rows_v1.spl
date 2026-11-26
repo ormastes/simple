@@ -66,3 +66,60 @@ fn surface_call_origin_rows_capture_v1(surfaces: ModuleSurfacesByName) -> Surfac
     SurfaceCallOriginRowsV1(owners: owners, names: names, externs: externs, methods: methods, statics: statics)
 
 export SurfaceCallOriginRowsV1, surface_call_origin_rows_empty_v1, surface_call_origin_rows_capture_v1
+
+# Named-call parameter rows for the same surface-only providers.
+#
+# The PM3 unit lane's MIR bootstrap branch binds named-call arguments from
+# bootstrap_fn_param_defaults_lookup (named_call_arguments_v1.spl), which the
+# HIR prescan populates only for HIR-resident modules. A callee held only as
+# a surface therefore failed with "named call lacks bootstrap parameter
+# metadata" even though the surface already carries every parameter name and
+# default flag (stage2 test_runner_build, 2026-11-25:
+# extract_blocks_from_content in lib/nogc_sync_mut/test_runner/
+# test_manifest_scanner.spl; minimal repro: a 41-module chain of cross-module
+# named calls under SIMPLE_BOOTSTRAP_STAGE3=1 --mode dynload).
+#
+# Default EXPRESSIONS are not transported: a surface-bound call must supply
+# every parameter by name, and an unsupplied defaulted parameter stays the
+# fail-closed "named default requires admitted declaration scope" refusal.
+# Module-level callables only; surface impl methods keep the existing
+# behaviour (their call-site key spelling is receiver-derived, not a bare
+# import name). Parallel scalar arrays, same native-transport rule as above.
+struct SurfaceParamRowsV1:
+    owners: [text]
+    names: [text]
+    param_counts: [i64]
+    param_names_flat: [text]
+    param_defaults_flat: [bool]
+
+fn surface_param_rows_empty_v1() -> SurfaceParamRowsV1:
+    SurfaceParamRowsV1(owners: [], names: [], param_counts: [], param_names_flat: [], param_defaults_flat: [])
+
+fn surface_param_rows_capture_v1(surfaces: ModuleSurfacesByName) -> SurfaceParamRowsV1:
+    var owners: [text] = []
+    var names: [text] = []
+    var param_counts: [i64] = []
+    var param_names_flat: [text] = []
+    var param_defaults_flat: [bool] = []
+    var si = 0
+    while si < surfaces.surfaces.len():
+        val owner: text = surfaces.surfaces[si].module_name
+        if owner != "":
+            val callables = surfaces.surfaces[si].callable_values
+            var ci = 0
+            while ci < callables.len():
+                owners.push(owner)
+                names.push(callables[ci].name)
+                val params = callables[ci].params
+                param_counts.push(params.len())
+                var pi = 0
+                while pi < params.len():
+                    param_names_flat.push(params[pi].name)
+                    param_defaults_flat.push(params[pi].has_default)
+                    pi = pi + 1
+                ci = ci + 1
+        si = si + 1
+    SurfaceParamRowsV1(owners: owners, names: names, param_counts: param_counts,
+        param_names_flat: param_names_flat, param_defaults_flat: param_defaults_flat)
+
+export SurfaceParamRowsV1, surface_param_rows_empty_v1, surface_param_rows_capture_v1

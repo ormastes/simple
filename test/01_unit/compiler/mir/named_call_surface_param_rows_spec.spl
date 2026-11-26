@@ -1,0 +1,60 @@
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/stage2_test_runner_named_call_surface_param_metadata_2026-11-26.md
+use std.spec.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.named_call_arguments_v1.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+
+fn scm_span() -> Span:
+    Span(start: 0, end: 0, line: 0, col: 1, file: "synthetic", length: 0)
+
+fn scm_text_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: scm_span())
+
+fn scm_nil() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: scm_text_type(), span: scm_span())
+
+fn scm_arg(name: text) -> HirCallArg:
+    HirCallArg(has_name: true, name: name, value: scm_nil(), span: scm_span())
+
+describe "Named call surface parameter rows":
+    it "binds a named call to a surface-only callee when every parameter is supplied":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val added = lowering.register_surface_param_rows_v1(
+            ["scm.mod"], ["pair"], [2], ["key", "value"], [false, false])
+        expect(added).to_equal(1)
+        expect(lowering.named_call_slots_v1("pair", [scm_arg("value"), scm_arg("key")])).to_equal(Ok([1, 0]))
+
+    it "binds through the owner-qualified spelling":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val added = lowering.register_surface_param_rows_v1(
+            ["scm.mod"], ["pair"], [2], ["key", "value"], [false, false])
+        expect(added).to_equal(1)
+        expect(lowering.named_call_slots_v1("scm.mod.pair", [scm_arg("key"), scm_arg("value")])).to_equal(Ok([0, 1]))
+
+    it "refuses a surface-bound named call that omits a defaulted parameter":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val added = lowering.register_surface_param_rows_v1(
+            ["scm.mod"], ["maybe"], [2], ["key", "opt"], [false, true])
+        expect(added).to_equal(1)
+        expect(lowering.named_call_slots_v1("maybe", [scm_arg("key")])).to_equal(
+            Err("named default requires admitted declaration scope: maybe.opt"))
+
+    it "keeps a callee without any surface row fail-closed":
+        var lowering = MirLowering.new(SymbolTable.new())
+        expect(lowering.named_call_slots_v1("absent", [scm_arg("key")])).to_equal(
+            Err("named call lacks bootstrap parameter metadata: absent"))
+
+    it "marks two surface providers with different shapes ambiguous":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val first = lowering.register_surface_param_rows_v1(
+            ["scm.one"], ["dup"], [1], ["key"], [false])
+        val second = lowering.register_surface_param_rows_v1(
+            ["scm.two"], ["dup"], [2], ["key", "value"], [false, false])
+        expect(first).to_equal(1)
+        expect(second).to_equal(0)
+        expect(lowering.named_call_slots_v1("dup", [scm_arg("key")])).to_equal(
+            Err("named call lacks bootstrap parameter metadata: dup"))
