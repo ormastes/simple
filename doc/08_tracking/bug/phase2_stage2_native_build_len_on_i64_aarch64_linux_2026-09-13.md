@@ -198,3 +198,51 @@ attachment to the manual-ctx dispatch tail in interpreter_method/mod.rs so this
 row's error shape is locatable too. Fix is seed-side Rust and only takes effect
 after a seed rebuild (cargo not runnable on this Windows host per the 2026-11-09
 note: disk < 30 GB), so no in-lane fix attempted.
+
+## 2026-11-26: verified at tip on aarch64 Linux
+
+**Compiler under test: an admitted Stage 2 built on this host** (aarch64 Linux,
+DGX GB10), using
+`COMPILER_BUILD_TIMEOUT_SECONDS=900 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2 --backend=cranelift`.
+It ran detached under `systemd-run -p MemoryMax=40G`, with no other job of
+this lane running.
+
+- **Source and seed.** The tree was pinned at `4995f23e7ccd`, which is
+  origin/release/1.0.0 57e92cb68fc7 plus a docs and tests commit only. The
+  pinned seed's sha256 prefix is `27cfa68556a374c9`.
+- **Build.** The seed native-built the compiler:
+  `Build complete: 1620 compiled, 0 cached, 0 failed` (210.4s compile + 5.7s link).
+- **Admission.** `stage2-sanity.receipt` says `stage2-sanity: pass`, and both
+  frontend legs (`SIMPLE_BOOTSTRAP=0` and `=1`) report `status=complete raw_status=0`.
+  The admitted binary
+  (`stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`) has sha256
+  `53e9e2e7513658f1...` and is 58,552,816 bytes.
+- **Earlier run.** A first run at 57e92cb68fc7 compiled identically but its
+  admission sanity timed out (rc=124, 180s default) on the 1-module
+  `stage2-module-path-naming` smoke. That was the only difference. Probe
+  results were the same on both binaries.
+
+Probes were built with
+`SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 <stage2> native-build main.spl --backend=<cranelift|llvm> --entry-closure`.
+They were run and compared byte for byte with hand-checked expected output,
+which is identical to the 11-26 seed interpreter output. Scope: the probes
+themselves ran on the `SIMPLE_BOOTSTRAP=1` native-build leg only.
+
+This record said a Phase-2 native-build of the compiler's own closure could
+not complete. It completed with 0 failures. The wrapper log and every
+per-stage log under the output dir have **0** occurrences of
+`not found on type` + `i64` and **0** of `SCV-E-SNAPSHOT`.
+A supplementary probe also passed on cranelift and llvm. It has
+Stage-2-compiled code call `.len()` on a text literal, empty text, text
+returned from a fn, `[i64]`, `[text]`, element text, a pushed array and
+interpolated text.
+
+The residual is unchanged (seed-side Rust, not in this lane). The location
+diagnostic gap from the 2026-11-11 addendum still holds on the 11-26 seed:
+`val x: i64 = 5` then `print(x.len())` under `SIMPLE_BOOTSTRAP_DIAG=1` prints
+only `error: semantic: method 'len' not found on type 'i64' (receiver value: 5)`,
+with no module and no stack. The gap is in the primitive dispatch tail in
+`interpreter_method/mod.rs`. The headline defect does not reproduce; status
+-> verified.
+
+Not rerun: the 2026-09-13 recipe of the seed native-building a 2-line hello world. The admitted Stage 2 above is the operation in this row's title, and it completed.

@@ -217,3 +217,42 @@ table was NOT repeated per the no-green-rerun rule):
 - Ledger note: master table row (doc/08_tracking/bug/bug_db.sdn:3915) still
   reads `fixing` (updated_at 2026-11-03) while this header reads FIXED
   (2026-11-11) — master-table sync gap for the bookkeeping pass.
+
+## 2026-11-26: verified at tip on aarch64 (run, not source review)
+
+**Compiler under test: an admitted Stage 2 built on this host** (aarch64 Linux,
+DGX GB10), using
+`COMPILER_BUILD_TIMEOUT_SECONDS=900 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2 --backend=cranelift`.
+It ran detached under `systemd-run -p MemoryMax=40G`, with no other job of
+this lane running.
+
+- **Source and seed.** The tree was pinned at `4995f23e7ccd`, which is
+  origin/release/1.0.0 57e92cb68fc7 plus a docs and tests commit only. The
+  pinned seed's sha256 prefix is `27cfa68556a374c9`.
+- **Build.** The seed native-built the compiler:
+  `Build complete: 1620 compiled, 0 cached, 0 failed` (210.4s compile + 5.7s link).
+- **Admission.** `stage2-sanity.receipt` says `stage2-sanity: pass`, and both
+  frontend legs (`SIMPLE_BOOTSTRAP=0` and `=1`) report `status=complete raw_status=0`.
+  The admitted binary
+  (`stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`) has sha256
+  `53e9e2e7513658f1...` and is 58,552,816 bytes.
+- **Earlier run.** A first run at 57e92cb68fc7 compiled identically but its
+  admission sanity timed out (rc=124, 180s default) on the 1-module
+  `stage2-module-path-naming` smoke. That was the only difference. Probe
+  results were the same on both binaries.
+
+Probes were built with
+`SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 <stage2> native-build main.spl --backend=<cranelift|llvm> --entry-closure`.
+They were run and compared byte for byte with hand-checked expected output,
+which is identical to the 11-26 seed interpreter output. Scope: the probes
+themselves ran on the `SIMPLE_BOOTSTRAP=1` native-build leg only.
+
+f64 probe (`f + g`, `-`, `*`, `/`, literal add, f64 param and return,
+`0.5 + 0.5`, `1.0 + 1.0`, `0.0 - 1.5`, unary minus, `< > == != <=`, a
+10-step `+ 0.25` loop and a branch on its result): **PASS on cranelift and
+llvm**, printing `add=3.75 sub=-0.75 mul=3.375 div=0.6666666666666666
+half=1.0 one=2.0 neg1=-1.5 acc=2.5 branch=gt`.
+Mixed int/float probe (`to_f64`, `/ 2.0`, `* 1.5`, `to_i64` round trip and
+truncation, int `/` and `%`, average of an `[i64]`, `i64.to_f64() + f64`,
+mixed compare): **PASS on both backends**. Also PASS on the 2026-11-22
+integ27 Stage 2. Status -> verified. No code change.
