@@ -3,8 +3,7 @@
 # Uses line-count framing over `TcpStream.read_line_bounded` (never unbounded
 # `read_line`) and canonical SDN payloads. Both server and client validate
 # host/server configuration through `server_selection_v1` (`host.sdn` ->
-# `servers.sdn`), supporting same-host local/loopback configs as well as
-# explicit server contexts.
+# `servers.sdn`) for request metadata. The TCP transport is same-host loopback.
 
 use std.nogc_sync_mut.sosix.host.{env_get, sosix_file_exists, file_read_regular_no_follow_bounded,
     file_atomic_write, dir_create_all}
@@ -133,6 +132,15 @@ pub fn orchestrator_caret_server_info_save_v1(runtime_dir: text,
     val _pfile = set_permissions(path, 0o600)
     ok
 
+fn _caret_loopback_addr_valid_v1(addr: text) -> bool:
+    # caret-serve binds 127.0.0.1:0 and publishes the assigned port.
+    val prefix = "127.0.0.1:"
+    if not addr.starts_with(prefix) or addr.byte_len() > prefix.byte_len() + 5:
+        return false
+    val port_text = addr.substring(prefix.byte_len(), addr.byte_len())
+    val port = port_text.to_i64() ?? 0
+    port >= 1 and port <= 65535 and port_text == port.to_text()
+
 pub fn orchestrator_caret_server_info_load_v1(runtime_dir: text) -> Result<OrchestratorCaretServerInfoV1, text>:
     if not host_path_is_absolute(runtime_dir):
         return Err("orchestrator-caret-runtime-dir-invalid")
@@ -146,10 +154,13 @@ pub fn orchestrator_caret_server_info_load_v1(runtime_dir: text) -> Result<Orche
     if (orchestrator_caret_int_v1(d, "version", 0) != 1 or
             orchestrator_caret_str_v1(d, "kind") != "orchestrator-caret-server"):
         return Err("orchestrator-caret-server-info-invalid")
+    val listen_addr = orchestrator_caret_str_v1(d, "listenAddr")
+    if not _caret_loopback_addr_valid_v1(listen_addr):
+        return Err("orchestrator-caret-listen-address-invalid")
     Ok(OrchestratorCaretServerInfoV1(
         controller_id: orchestrator_caret_str_v1(d, "controllerId"),
         state_root: orchestrator_caret_str_v1(d, "stateRoot"),
-        listen_addr: orchestrator_caret_str_v1(d, "listenAddr"),
+        listen_addr: listen_addr,
         token: orchestrator_caret_str_v1(d, "token"),
         pid: orchestrator_caret_int_v1(d, "pid", -1),
         session: orchestrator_caret_str_v1(d, "session"),
