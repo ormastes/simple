@@ -6,6 +6,9 @@ use app.orchestrator.server_config_load_v1.{server_host_reference_validate_v1, s
 use app.orchestrator.server_command_v1.{orchestrator_server_ssh_begin_v1,
     orchestrator_server_ssh_begin_file_v1, orchestrator_server_ssh_step_v1}
 use std.common.config_core.server_context_types_v1.{ResolvedServerV1, ServerRecordV1}
+use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_encode_v6}
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.{controller_dispatch_host_effect_key_v3,
+    controller_dispatch_host_action_key_v3}
 
 fn gateway_request_v1(action: text = "inspect") -> ControllerGatewayRequestV1:
     ControllerGatewayRequestV1(action: action, controller_id: "controller-a", request_uid: "request-a",
@@ -21,6 +24,48 @@ fn gateway_ssh_selection_v1(transport: text) -> ResolvedServerV1:
             remote_executable: "/opt/simple/bin/simple"))
 
 describe "Typed selected-server controller boundary":
+    it "requires separately installed dispatch pins for the opt-in attachment gateway":
+        val profile = "version: 1\nstateRoot: /private/controller\ncontrollerId: controller-a\nallowedActions: [agent-attachment]\n"
+        expect(controller_gateway_config_decode_v1(profile).unwrap_err()).to_equal("controller-gateway-attachment-profile")
+        val pinned = profile + "dispatchRoot: /private/dispatch\ndispatchConfigDigest: \"" + "a".repeat(64) + "\"\n"
+        val config = controller_gateway_config_decode_v1(pinned).unwrap()
+        expect(config.dispatch_root).to_equal("/private/dispatch")
+        expect(config.dispatch_config_digest).to_equal("a".repeat(64))
+
+    it "restricts attachment requests to exact operation IDs and an installed action grant":
+        var request = gateway_request_v1("agent-attachment")
+        request.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "agent-inspect", frame: "another-run")).unwrap()
+        expect(controller_gateway_request_encode_v1(request).unwrap_err()).to_equal("controller-gateway-agent-attachment-operation")
+        request.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "helper-inspect", frame: request.request_uid)).unwrap()
+        expect(controller_gateway_request_encode_v1(request).unwrap_err()).to_equal("controller-gateway-agent-attachment-sub")
+        request.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "agent-inspect", frame: request.request_uid)).unwrap()
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val header = controller_gateway_header_v1(source).unwrap()
+        expect(controller_gateway_authorize_v1(gateway_config_v1(["inspect"]), header, source).unwrap_err()).to_equal("controller-gateway-action-denied")
+        expect(controller_gateway_authorize_v1(gateway_config_v1(["agent-attachment"]), header, source).unwrap().request_uid).to_equal("request-a")
+
+    it "opens no terminal from an inspect response and rejects foreign or extra report data":
+        var request = gateway_request_v1("agent-attachment")
+        request.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "agent-inspect", frame: request.request_uid)).unwrap()
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val report = "version: 4\nkind: linux-host-agent-attachment\noperationId: request-a\nattachStage: none\n"
+        val checked = controller_gateway_response_v1(source, report).unwrap()
+        expect(checked).to_contain("attachStage")
+        expect(checked.contains("terminalAuthority")).to_equal(false)
+        expect(controller_gateway_response_v1(source, report.replace("request-a", "request-b")).unwrap_err()).to_equal("controller-gateway-attachment-report-operation")
+        expect(controller_gateway_response_v1(source, report + "bearer: secret\n").is_err()).to_equal(true)
+
+    it "keeps immutable attach and detach keys independent on the same Host run":
+        val attach = controller_dispatch_host_effect_key_v3("request-a", "agent-attach")
+        val detach = controller_dispatch_host_effect_key_v3("request-a", "agent-detach")
+        expect(attach).to_start_with("controller-agent-attachment-v1/")
+        expect(detach).to_start_with("controller-agent-attachment-v1/")
+        expect(attach == detach).to_equal(false)
+        expect(controller_dispatch_host_effect_key_v3("request-b", "agent-attach") == attach).to_equal(false)
+        val legacy = controller_dispatch_host_action_key_v3("request-a")
+        for sub in ["helper-abandon", "handoff-abandon", "retention-release"]:
+            expect(controller_dispatch_host_effect_key_v3("request-a", sub)).to_equal(legacy)
+
     it "validates the request before opening an SSH profile and keeps a finished turn settled":
         val invalid = "kind: wrong-request\n"
         val selection = gateway_ssh_selection_v1("ssh")

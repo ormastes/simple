@@ -221,6 +221,12 @@ This is trusted installation policy on the peer. A request cannot choose the
 peer's state root or broaden `allowedActions`. A remote client supplies its
 SSH profile, while the remote account supplies its own gateway profile.
 
+To authorize Linux agent attachment actions, add `agent-attachment` to
+`allowedActions` and pin the installed controller dispatch configuration
+with `dispatchRoot` and `dispatchConfigDigest`. The dispatch root must
+belong to the same controller as `controllerId`. These fields belong to the
+private gateway profile.
+
 ## Request document and ownership
 
 Every request contains all eight fields, including empty unused fields:
@@ -246,6 +252,7 @@ must appear in `allowedActions`.
 | `cancel` | Expected source digest in `sourceDigest`; other operation data empty. |
 | `dispatch` | Signed dispatch packet text in `source`; other operation data empty. |
 | `resume-execution` | Signed execution packet text in `source`; other operation data empty. |
+| `agent-attachment` | Canonical `host-control-sub` in `source` for `agent-inspect`, `agent-attach`, or `agent-detach`. The inspect frame is the exact Host operation ID. Attach and detach carry their respective signed V4 frames. `requestUid` equals that same Host operation ID and other operation data is empty. |
 | `inspect-execution` | Empty operation data. |
 
 Submit, inspect and cancel reuse the controller journal owners. Submission

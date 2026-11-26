@@ -41,6 +41,7 @@ val HOST_ACTION_BASE_OPTIONS_V1 = ["--dispatch-root", "--config-digest", "--aban
 val HOST_ACTION_SIGN_OPTIONS_V1 = ["--confirm", "--key-store", "--approver", "--grant-id", "--expires-in-ms"]
 # One authenticated exchange never waits longer than this (same bound as remote-run).
 val HOST_ACTION_EXCHANGE_MS_V1: i64 = 120000
+val HOST_ATTACHMENT_GATEWAY_EXCHANGE_MS_V1: i64 = 45000
 
 class HostActionBoxV1:
     var owner: Option<ControllerDispatchOwnerV3> = None
@@ -133,7 +134,8 @@ fn host_action_millis_v1(value: text) -> Result<i64, text>:
 
 # Steps one exchange to phase ready. An authenticated Host refusal (outcome host-refused) is an Err carrying the Host's
 # own reason; the owner stays alive for local cleanup.
-fn host_action_wait_v1(box: HostActionBoxV1, first: ControllerDispatchOwnedTurnV3) -> Result<text, text>:
+fn host_action_wait_v1(box: HostActionBoxV1, first: ControllerDispatchOwnedTurnV3,
+        budget_ms: i64 = HOST_ACTION_EXCHANGE_MS_V1) -> Result<text, text>:
     var turn = first
     val started = sosix_time_now_monotonic_ms()
     var steps = 0
@@ -145,7 +147,7 @@ fn host_action_wait_v1(box: HostActionBoxV1, first: ControllerDispatchOwnedTurnV
             return Err(host_action_refused_detail_v1(turn.response))
         if turn.phase == "ready" and turn.owner.is_some(): return Ok(turn.response)
         if turn.owner.is_none() or turn.completed: return Err("host-action-link-closed")
-        if started >= 0 and sosix_time_now_monotonic_ms() - started > HOST_ACTION_EXCHANGE_MS_V1:
+        if started >= 0 and sosix_time_now_monotonic_ms() - started > budget_ms:
             return Err("host-action-link-timeout")
         sosix_sleep_ms(5)
         turn = controller_dispatch_step_v3(turn.owner.unwrap())
@@ -198,6 +200,39 @@ fn host_action_finish_v1(box: HostActionBoxV1, exit_code: i64, output: text) -> 
 
 fn host_action_refusal_v1(command: text, exit_code: i64, code: text) -> OrchestratorValidationReplyV1:
     OrchestratorValidationReplyV1(exit_code: exit_code, output: host_action_output_v1(command, "refused", "", "", "", code))
+
+# Called with the installed gateway pins and an already checked canonical Host
+# control sub-frame. The controller's retained authority still owns the exchange.
+pub fn host_action_attachment_gateway_v1(root_path: text, config_digest: text, controller_id: text,
+        operation_id: text, payload: text) -> OrchestratorValidationReplyV1:
+    val command = "agent-attachment"
+    val opened = controller_local_root_open_v3(root_path, config_digest)
+    val box = HostActionBoxV1()
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        box.root_cleanup = opened.owner
+        return host_action_finish_v1(box, 2, host_action_output_v1(command, "refused", operation_id, "", "",
+            "agent-attachment-root-unavailable"))
+    val root = opened.owner.unwrap()
+    val config = root.config_v3()
+    if config.is_err() or config.unwrap().controller_id != controller_id:
+        box.root_cleanup = Some(root)
+        return host_action_finish_v1(box, 2, host_action_output_v1(command, "refused", operation_id, "", "",
+            "agent-attachment-controller-mismatch"))
+    val begun = host_action_wait_v1(box, controller_dispatch_host_action_begin_v3(root, operation_id),
+        HOST_ATTACHMENT_GATEWAY_EXCHANGE_MS_V1)
+    if begun.is_err():
+        return host_action_finish_v1(box, 2, host_action_output_v1(command, "unconfirmed", operation_id, "", "",
+            "agent-attachment-link-unconfirmed"))
+    val sent = host_action_wait_v1(box, controller_dispatch_host_action_send_v3(box.owner.unwrap(), payload),
+        HOST_ATTACHMENT_GATEWAY_EXCHANGE_MS_V1)
+    if sent.is_err():
+        return host_action_finish_v1(box, 2, host_action_output_v1(command, "unconfirmed", operation_id, "", "",
+            "agent-attachment-outcome-unconfirmed"))
+    var reply = host_action_finish_v1(box, 0, sent.unwrap())
+    if reply.controller_root_cleanup.is_some(): reply.exit_code = 2
+    if reply.exit_code != 0:
+        reply.output = host_action_output_v1(command, "unconfirmed", operation_id, "", "", "agent-attachment-cleanup-unconfirmed")
+    reply
 
 pub fn host_action_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
     val command = if args.len() > 0: args[0] else: ""
