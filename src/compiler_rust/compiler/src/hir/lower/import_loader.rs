@@ -97,6 +97,7 @@ impl Lowerer {
             } else {
                 &method.params[..]
             };
+            self.record_method_param_type_names(owner, &method.name, user_params, method.is_static);
             if user_params.iter().any(|p| p.default.is_some()) {
                 self.fn_param_defaults
                     .entry(format!("{}.{}", owner, method.name))
