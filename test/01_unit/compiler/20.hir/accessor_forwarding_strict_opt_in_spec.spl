@@ -106,3 +106,27 @@ describe "HIR strict undefined-field check (unconditional)":
         step("given get__hidden but no field _hidden when reading t._hidden then no strict error")
         val r = lower_probe("t._hidden")
         expect(r[1].contains("no field")).to_equal(false)
+
+    it "reports exactly one error for compound assignment on a setter-only property":
+        step("given set_weight but no getter when lowering s.weight += 1 then only the needs-a-getter error")
+        val src = "class Scale:\n" +
+            "    raw: i64\n" +
+            "    me set_weight(v: i64):\n" +
+            "        self.raw = v\n" +
+            "\nfn probe(t: Scale) -> i64:\n" +
+            "    var s = t\n" +
+            "    s.weight += 1\n" +
+            "    0\n"
+        val parsed = parse_full_frontend(src, "testdata/accessor_setter_only.spl", "accessor_setter_only", Logger(level: 0))
+        var lowering = HirLowering.with_filename("testdata/accessor_setter_only.spl")
+        lowering.lower_module(parsed)
+        var msgs = ""
+        for m in lowering.diagnostic_messages:
+            msgs = msgs + m + "\n"
+        var hard = 0
+        for rec in lowering.diagnostic_recovered:
+            if not rec:
+                hard = hard + 1
+        expect(hard).to_equal(1)
+        expect(msgs.contains("compound assignment to `weight` needs a getter")).to_equal(true)
+        expect(msgs.contains("no field `weight`")).to_equal(false)
