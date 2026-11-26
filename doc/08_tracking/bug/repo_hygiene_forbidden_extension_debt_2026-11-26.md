@@ -140,12 +140,12 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 
 | file | lines | why kept |
 |---|---|---|
-| `doc/01_research/domain/simple_clang_header_cache_2026-09-25/evidence/run_probes.py` | 190 | cited only from doc/ or the baseline |
-| `doc/08_tracking/bug/evidence/runtime_value_get_type_2026_11_14/run_probe.py` | 36 | cited only from doc/ or the baseline |
-| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/cache_probe.py` | 35 | cited only from doc/ or the baseline |
-| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/extract.py` | 37 | cited only from doc/ or the baseline |
-| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/formal-stages1-3.sh` | 124 | cited only from doc/ or the baseline |
-| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/run_probe.py` | 36 | cited only from doc/ or the baseline |
+| `doc/01_research/domain/simple_clang_header_cache_2026-09-25/evidence/run_probes.py` | 190 | KEEP (2026-11-26, dead-rest lane): retained evidence script, cited by bug/research docs as provenance; deleting it breaks those links |
+| `doc/08_tracking/bug/evidence/runtime_value_get_type_2026_11_14/run_probe.py` | 36 | KEEP (2026-11-26, dead-rest lane): retained evidence script, cited by bug/research docs as provenance; deleting it breaks those links |
+| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/cache_probe.py` | 35 | KEEP (2026-11-26, dead-rest lane): retained evidence script, cited by bug/research docs as provenance; deleting it breaks those links |
+| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/extract.py` | 37 | KEEP (2026-11-26, dead-rest lane): retained evidence script, cited by bug/research docs as provenance; deleting it breaks those links |
+| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/formal-stages1-3.sh` | 124 | KEEP (2026-11-26, dead-rest lane): retained formal-gate evidence, linked by compile_target_profile_optimization_coupling_2026_11_14.md; deleting it breaks provenance |
+| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/run_probe.py` | 36 | KEEP (2026-11-26, dead-rest lane): retained evidence script, cited by bug/research docs as provenance; deleting it breaks those links |
 | `scripts/bootstrap/cache-identity-model-check.py` | 128 | cited only from doc/ or the baseline |
 | `scripts/bootstrap/lib/executable_batch_policy.py` | 95 | cited only from doc/ or the baseline |
 | `scripts/bootstrap/tests/archive-root-exclusions-test.py` | 82 | zero-ref test; may test live code |
