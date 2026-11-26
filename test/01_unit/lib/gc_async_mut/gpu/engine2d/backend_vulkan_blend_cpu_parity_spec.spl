@@ -63,7 +63,8 @@ never the literal alone.
 
 use std.spec.*
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.color.{blend}
+use std.gc_async_mut.gpu.engine2d.color.{blend, blend_solid}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 
 val FB: i32 = 32
 val AT_X: i32 = 5
@@ -147,3 +148,79 @@ describe "The Vulkan src-over kernel computes the frozen CPU blend exactly":
         val px = e.read_pixels_with_source().pixels
         e.shutdown()
         expect(px[AT_Y.to_i64() * FB.to_i64() + AT_X.to_i64() + 1]).to_equal(GROUND)
+
+# draw_rect_blend is a translucent solid rect. It used to flush the pending
+# batch and read the WHOLE framebuffer back to the host per call
+# (`_flush_for_host_fallback("rect-blend-host-readback")` -> emu blend over the
+# trait-default `read_pixels_region_raw`, which crops a full readback): 28
+# full-frame readbacks on forms-media at 1x (~110 s of 126 s), and a 4x render
+# that did not finish in 17 min. It now takes the device solid composite that
+# `draw_rect_filled` already uses for alpha < 255.
+# An opaque ground: here the image rule (mode 1, `blend`) and the solid rule
+# (mode 2, `blend_solid`) disagree, so the device result names the mode it ran.
+# a = 0xC8, d = 0x64: solid (d*56)>>8 = 21, image div255r(d*55) = 22.
+val GROUND_OPAQUE: u32 = 0xFF646464u32
+val SRC_SOLID: u32 = 0xC8102030u32
+
+fn rect_blend_backend(ground: u32) -> VulkanBackend:
+    var b = VulkanBackend.create()
+    b.init(FB, FB)
+    b.clear(ground)
+    b
+
+# [pixel right of AT, cpu_fallback_used (0/1), device readback (0/1)]
+fn rect_blend_probe(ground: u32, src: u32) -> [i64]:
+    var b = rect_blend_backend(ground)
+    b.draw_rect_blend(AT_X, AT_Y, 2i32, 1i32, src)
+    b.finalize_compute_frame_no_readback()
+    val rb = b.read_pixels_with_source()
+    val fallback = if b.cpu_fallback_used: 1 else: 0
+    val device = if rb.source == "device_readback": 1 else: 0
+    b.shutdown()
+    [rb.pixels[AT_Y.to_i64() * FB.to_i64() + AT_X.to_i64() + 1].to_i64(), fallback, device]
+
+fn rect_blend_midframe_flushes(src: u32) -> i64:
+    var b = rect_blend_backend(GROUND)
+    val before = b.midframe_flush_count
+    b.draw_rect_blend(AT_X, AT_Y, 2i32, 1i32, src)
+    b.draw_rect_blend(AT_X, AT_Y + 2i32, 1i32, 1i32, src)
+    val flushes = b.midframe_flush_count - before
+    b.shutdown()
+    flushes
+
+# [mid-frame flushes, cpu_fallback_used (0/1)] for a translucent rect under an
+# empty clip, which must paint nothing and touch nothing.
+fn empty_clip_probe() -> [i64]:
+    var b = rect_blend_backend(GROUND)
+    b.set_clip(AT_X, AT_Y, 0i32, 0i32)
+    val before = b.midframe_flush_count
+    b.draw_rect_blend(AT_X, AT_Y, 2i32, 1i32, SRC_TRANSLUCENT)
+    b.draw_rect_filled(AT_X, AT_Y, 2i32, 1i32, SRC_TRANSLUCENT)
+    val flushes = b.midframe_flush_count - before
+    val fallback = if b.cpu_fallback_used: 1 else: 0
+    b.shutdown()
+    [flushes, fallback]
+
+describe "Vulkan draw_rect_blend composites on the device":
+
+    it "matches the frozen CPU blend() for a translucent solid rect, on the device":
+        val r = rect_blend_probe(GROUND, SRC_TRANSLUCENT)
+        expect(r[1]).to_equal(0)
+        expect(r[2]).to_equal(1)
+        expect(r[0]).to_equal(blend(SRC_TRANSLUCENT, GROUND).to_i64())
+
+    it "uses the solid rule (blend_solid) over an opaque ground, on the device":
+        # Precondition: the pair discriminates mode 1 from mode 2.
+        expect(blend_solid(SRC_SOLID, GROUND_OPAQUE) != blend(SRC_SOLID, GROUND_OPAQUE)).to_equal(true)
+        val r = rect_blend_probe(GROUND_OPAQUE, SRC_SOLID)
+        expect(r[1]).to_equal(0)
+        expect(r[2]).to_equal(1)
+        expect(r[0]).to_equal(blend_solid(SRC_SOLID, GROUND_OPAQUE).to_i64())
+
+    it "issues no mid-frame flush or host readback per translucent rect":
+        expect(rect_blend_midframe_flushes(SRC_TRANSLUCENT)).to_equal(0)
+
+    it "paints nothing under an empty clip without flushing or latching the fallback":
+        val r = empty_clip_probe()
+        expect(r[0]).to_equal(0)
+        expect(r[1]).to_equal(0)
