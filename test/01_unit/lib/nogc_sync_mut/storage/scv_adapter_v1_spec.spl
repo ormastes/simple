@@ -10,7 +10,7 @@ use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, immut
     immutable_store_v1_ingest_pinned, immutable_store_v1_release_pin, StoreFlagV1}
 use std.nogc_sync_mut.storage.scv_adapter_v1.{scv_adapter_v1_store_root, scv_adapter_v1_import_chunk,
     scv_adapter_v1_import_bytes, scv_adapter_v1_pin_reachable, scv_adapter_v1_open_projection}
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir_raw}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
 use app.io.file_ops.{path_absolute}
 
@@ -124,18 +124,18 @@ describe "scv_adapter_v1 pin_reachable":
         expect(pinned.status).to_equal("ok")
         expect(pinned.pinned.value).to_equal(2)
         expect(pinned.skipped.value).to_equal(4)
-        expect(file_exists(root + "/pins/scv-gc-0.sdn")).to_equal(true)
         expect(_count_objects(root)).to_equal(2)
         val held = immutable_store_v1_collect(root, StoreFlagV1(true))
         expect(held.unreachable.len()).to_equal(0)
-        # Dropping b from the reachable set keeps the batch count; b becomes collectable.
+        # Dropping b from the reachable set writes a new generation; b becomes collectable.
         val narrowed = scv_adapter_v1_pin_reachable(repo, a + "\n", "scv")
         expect(narrowed.pinned.value).to_equal(1)
         val after = immutable_store_v1_collect(root, StoreFlagV1(true))
         expect(after.unreachable.len()).to_equal(1)
         expect(after.unreachable[0]).to_equal(b)
-        # Empty reachable set releases the stale pin.
+        # Empty reachable set releases the last generation; a becomes collectable too.
         val empty = scv_adapter_v1_pin_reachable(repo, "", "scv")
         expect(empty.status).to_equal("ok")
-        expect(file_exists(root + "/pins/scv-gc-0.sdn")).to_equal(false)
+        val none = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(none.unreachable.len()).to_equal(2)
         _cleanup(repo)

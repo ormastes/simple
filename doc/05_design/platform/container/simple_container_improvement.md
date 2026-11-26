@@ -220,7 +220,19 @@ Increment 1 landed (PR #11818). Increment 2 has three lanes. Lane 0 lands first,
 **Named gap, not fixed here:** no synchronous SOSIX filesystem owner exists (`std.nogc_sync_mut.sosix` covers env, process and temp only). The store and SCV both use the typed std `io.file_ops` owner, with no direct `rt_*`. Moving them to SOSIX needs a sync SOSIX fs surface first.
 
 ### Lane A — SCV adapter (after Lane 0)
-This lane closes the architecture Phase 1 exit evidence: SCV references store objects through a read-only adapter, legacy `sha256_<hex>` objects import with their identity preserved, and two clients share one published object. Its signatures are fixed in a later revision of this section before dispatch.
+This lane closes the architecture Phase 1 exit evidence: SCV references store objects through a read-only adapter, legacy `sha256_<hex>` objects import with their identity preserved, and two clients share one published object.
+
+Module `src/lib/nogc_sync_mut/storage/scv_adapter_v1.spl` (imports no `std.scv`):
+```
+pub struct ScvImportV1: status: text, reason: text, object_key: text, reused: StoreFlagV1
+pub struct ScvPinV1:    status: text, reason: text, pinned: StoreCountV1, skipped: StoreCountV1
+pub fn scv_adapter_v1_store_root(repo_root: text) -> text            # "<repo>/.scv/store"
+pub fn scv_adapter_v1_import_bytes(repo_root: text, legacy_id: text, bytes: [u8]) -> ScvImportV1
+pub fn scv_adapter_v1_import_chunk(repo_root: text, legacy_id: text) -> ScvImportV1
+pub fn scv_adapter_v1_open_projection(repo_root: text, legacy_id: text) -> StoreOpenV1
+pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: text) -> ScvPinV1
+```
+Identity: ingest uses policy `sha256`, so the store key equals the legacy id. An id that is not `sha256_` + 64 lowercase hex, a digest mismatch, or any other returned key (including `_c<n>`) is `rejected`. Consumer: `scv_gc_command` calls `pin_reachable` (owner `scv`) right after the reachable set is computed, only when `<repo>/.scv/store` exists; no SCV write path is hooked (lazy import at GC time). Pins are append-only, so each call writes generation `g+1` as `scv-gc-<g>-<n>` (<= 16384 refs per pin) and then releases the older `scv-gc-*` generations.
 
 ### Lane B — Phase 2 storage view on the host (after Lane 0)
 This lane provides an immutable base with a private upper layer over store objects, plus filesystem save/load and reference clone, all proven with real temp directories on this Windows host. Its signatures are fixed before dispatch.

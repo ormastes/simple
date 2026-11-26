@@ -12,7 +12,6 @@ use std.nogc_sync_mut.storage.immutable_store_v1.{StoreOpenV1, StoreFlagV1, Stor
     immutable_store_v1_pin, immutable_store_v1_release_pin}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded_bytes}
 use std.nogc_sync_mut.io.dir_ops.{dir_list, is_dir}
-use std.scv.core.{scv_chunk_path, scv_object_ref_safe}
 
 val _SCVA1_MAX_CHUNK_BYTES: i64 = 268435456
 val _SCVA1_MAX_PIN_REFS: i64 = 16384
@@ -29,22 +28,38 @@ pub struct ScvImportV1:
 pub struct ScvPinV1:
     status: text        # "ok" | "rejected"
     reason: text
-    pinned: StoreCountV1    # chunk refs now held by scv-gc-<n> pins
+    pinned: StoreCountV1    # chunk refs now held by scv-gc-<g>-<n> pins
     skipped: StoreCountV1   # chunk ids ignored (not a chunk, missing, unreadable, or rejected)
 
 fn _scva1_import_rejected(reason: text) -> ScvImportV1:
     ScvImportV1(status: "rejected", reason: reason, object_key: "", reused: StoreFlagV1(false))
 
-pub fn scv_adapter_v1_store_root(repo_root: text) -> text:
+fn _scva1_repo_base(repo_root: text) -> text:
     var base = repo_root.replace("\\", "/")
     while base.ends_with("/"):
         base = base.substring(0, base.byte_len() - 1)
-    base + "/.scv/store"
+    base
+
+pub fn scv_adapter_v1_store_root(repo_root: text) -> text:
+    _scva1_repo_base(repo_root) + "/.scv/store"
+
+# Legacy chunk id: "sha256_" + 64 lowercase hex (a subset of scv_object_ref_safe,
+# so no path separator or metadata delimiter can appear).
+fn _scva1_id_valid(id: text) -> bool:
+    if not id.starts_with(_SCVA1_ID_PREFIX) or id.byte_len() != 71:
+        return false
+    for b in id.substring(7, 71).bytes():
+        if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102)):
+            return false
+    true
+
+fn _scva1_chunk_path(repo_root: text, id: text) -> text:
+    _scva1_repo_base(repo_root) + "/.scv/objects/chunks/" + id + ".blob"
 
 pub fn scv_adapter_v1_import_bytes(repo_root: text, legacy_id: text, bytes: [u8]) -> ScvImportV1:
     if repo_root == "":
         return _scva1_import_rejected("repo-root-empty")
-    if not scv_object_ref_safe(legacy_id, _SCVA1_ID_PREFIX):
+    if not _scva1_id_valid(legacy_id):
         return _scva1_import_rejected("legacy-id-invalid")
     if legacy_id != _SCVA1_ID_PREFIX + sha256_u8_fast_hex(bytes):
         return _scva1_import_rejected("legacy-digest-mismatch")
@@ -62,9 +77,9 @@ pub fn scv_adapter_v1_import_bytes(repo_root: text, legacy_id: text, bytes: [u8]
 pub fn scv_adapter_v1_import_chunk(repo_root: text, legacy_id: text) -> ScvImportV1:
     if repo_root == "":
         return _scva1_import_rejected("repo-root-empty")
-    if not scv_object_ref_safe(legacy_id, _SCVA1_ID_PREFIX):
+    if not _scva1_id_valid(legacy_id):
         return _scva1_import_rejected("legacy-id-invalid")
-    val path = scv_chunk_path(repo_root, legacy_id)
+    val path = _scva1_chunk_path(repo_root, legacy_id)
     if not file_exists(path):
         return _scva1_import_rejected("chunk-missing")
     val bytes = match file_read_regular_no_follow_bounded_bytes(path, _SCVA1_MAX_CHUNK_BYTES):
@@ -73,16 +88,31 @@ pub fn scv_adapter_v1_import_chunk(repo_root: text, legacy_id: text) -> ScvImpor
     scv_adapter_v1_import_bytes(repo_root, legacy_id, bytes)
 
 pub fn scv_adapter_v1_open_projection(repo_root: text, legacy_id: text) -> StoreOpenV1:
-    if not scv_object_ref_safe(legacy_id, _SCVA1_ID_PREFIX):
+    if not _scva1_id_valid(legacy_id):
         return StoreOpenV1(status: "missing", reason: "legacy-id-invalid", bytes: [])
     immutable_store_v1_open(scv_adapter_v1_store_root(repo_root), legacy_id)
 
 fn _scva1_pin_rejected(reason: text, pinned: i64, skipped: i64) -> ScvPinV1:
     ScvPinV1(status: "rejected", reason: reason, pinned: StoreCountV1(pinned), skipped: StoreCountV1(skipped))
 
+# Generation of an existing `scv-gc-<g>-<n>` pin id, or -1 when `name` is not
+# one of ours (wrong prefix, non-canonical integers).
+fn _scva1_pin_generation(name: text) -> i64:
+    if not name.starts_with(_SCVA1_PIN_PREFIX):
+        return -1
+    val parts = name.substring(_SCVA1_PIN_PREFIX.byte_len(), name.byte_len()).split("-")
+    if parts.len() != 2:
+        return -1
+    val generation = parts[0].to_i64() ?? -1
+    val batch = parts[1].to_i64() ?? -1
+    if generation < 0 or batch < 0 or "{generation}" != parts[0] or "{batch}" != parts[1]:
+        return -1
+    generation
+
 # Import every reachable on-disk `sha256_` chunk and pin the keys under
-# `scv-gc-<n>` (<= 16384 refs each) for `owner`. New pins are written before
-# stale `scv-gc-<k>` pins (k >= new batch count) are released. `reachable` is the
+# `scv-gc-<generation>-<n>` (<= 16384 refs each) for `owner`. Pins are
+# append-only, so each call writes a NEW generation first and only then
+# releases the older `scv-gc-*` generations. `reachable` is the
 # newline-separated id set from scv_gc_roots_reachable_checked.
 pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: text) -> ScvPinV1:
     if repo_root == "":
@@ -98,10 +128,10 @@ pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: tex
         if id == "" or seen.contains_key(id):
             continue
         seen[id] = true
-        if not scv_object_ref_safe(id, _SCVA1_ID_PREFIX):
+        if not _scva1_id_valid(id):
             skipped = skipped + 1
             continue
-        if not file_exists(scv_chunk_path(repo_root, id)):
+        if not file_exists(_scva1_chunk_path(repo_root, id)):
             skipped = skipped + 1
             continue
         val imported = scv_adapter_v1_import_chunk(repo_root, id)
@@ -109,30 +139,31 @@ pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: tex
             skipped = skipped + 1
             continue
         keys.push(imported.object_key)
+    val pins_dir = root + "/pins"
+    var old_pins: [text] = []
+    var generation: i64 = 0
+    if is_dir(pins_dir):
+        for entry in dir_list(pins_dir):
+            val name = entry.trim()
+            val old_generation = _scva1_pin_generation(name)
+            if old_generation < 0:
+                continue
+            old_pins.push(name)
+            if old_generation >= generation:
+                generation = old_generation + 1
     var batches: i64 = 0
     var start: i64 = 0
     while start < keys.len():
         var end = start + _SCVA1_MAX_PIN_REFS
         if end > keys.len():
             end = keys.len()
-        val reason = immutable_store_v1_pin(root, _SCVA1_PIN_PREFIX + "{batches}", owner, keys[start:end])
+        val reason = immutable_store_v1_pin(root, "{_SCVA1_PIN_PREFIX}{generation}-{batches}", owner, keys[start:end])
         if reason != "":
             return _scva1_pin_rejected(reason, start, skipped)
         batches = batches + 1
         start = end
-    val pins_dir = root + "/pins"
-    if is_dir(pins_dir):
-        for entry in dir_list(pins_dir):
-            val name = entry.trim()
-            if not name.starts_with(_SCVA1_PIN_PREFIX) or not name.ends_with(".sdn"):
-                continue
-            val stem = name.substring(0, name.byte_len() - 4)
-            val suffix = stem.substring(_SCVA1_PIN_PREFIX.byte_len(), stem.byte_len())
-            # Non-numeric / non-canonical suffixes read as -1: not ours to release.
-            val index = suffix.to_i64() ?? -1
-            if index < batches or "{index}" != suffix:
-                continue
-            val released = immutable_store_v1_release_pin(root, stem, owner)
-            if released != "" and released != "pin-missing":
-                return _scva1_pin_rejected(released, keys.len(), skipped)
+    for name in old_pins:
+        val released = immutable_store_v1_release_pin(root, name, owner)
+        if released != "" and released != "pin-missing":
+            return _scva1_pin_rejected(released, keys.len(), skipped)
     ScvPinV1(status: "ok", reason: "", pinned: StoreCountV1(keys.len()), skipped: StoreCountV1(skipped))
