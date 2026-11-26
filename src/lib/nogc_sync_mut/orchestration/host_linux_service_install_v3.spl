@@ -16,6 +16,8 @@ use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.container.machine_authority_v1.{MachineFreshEpochAdmissionTurnV1,
     machine_container_authority_open_fresh_epoch_v1}
 use std.nogc_sync_mut.container.machine_fresh_epoch_cleanup_v1.machine_fresh_epoch_admission_turn_close_v1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.{
+    MachineFreshEpochRecordV1, machine_fresh_epoch_record_validate_v1}
 
 pub struct HostLinuxServiceInstallRequestV3:
     binding: HostLinuxServiceEnrollmentBindingV3
@@ -124,6 +126,23 @@ pub fn host_linux_service_install_close_v3(cleanup: OperationHealthLinuxInstallC
     HostLinuxServiceInstallCloseV3(closed.cleanup, closed.closed, closed.error)
 
 
+# Compare signed intent to DATA projected by the retained native admission.
+# This predicate grants nothing. Production callers get the record from
+# the current epoch owner before publishing installation or ready state.
+pub fn host_linux_service_enrollment_epoch_check_v3(binding: HostLinuxServiceEnrollmentBindingV3,
+        epoch: MachineFreshEpochRecordV1) -> Result<(), text>:
+    machine_fresh_epoch_record_validate_v1(epoch)?
+    val allowed = host_linux_service_allocatable_v3(binding)?
+    if binding.physical_host_id != epoch.physical_host_id or binding.native_machine_id != epoch.native_machine_id:
+        return Err("linux-host-service-enrollment-epoch-host")
+    if binding.provider_identity_digest != epoch.provider_identity_digest or binding.engine_policy_digest != epoch.provider_policy_digest:
+        return Err("linux-host-service-enrollment-epoch-provider")
+    if binding.reserved_cpu_millis != epoch.reserved_cpu_millis or binding.reserved_memory_bytes != epoch.reserved_memory_bytes:
+        return Err("linux-host-service-enrollment-epoch-broker-reserve")
+    if allowed.cpu_millis > epoch.usable_cpu_millis or allowed.memory_bytes > epoch.usable_memory_bytes:
+        return Err("linux-host-service-enrollment-epoch-capacity")
+    Ok(())
+
 # Local provisioning owns the parent reader and actual epoch admission.
 # The installer borrows both and returns only its own outstanding writer.
 pub class HostLinuxServiceProvisionCleanupV3:
@@ -215,6 +234,10 @@ pub fn host_linux_service_provision_v3(request: HostLinuxServiceInstallRequestV3
     if admission.error != "" or admission.owner.is_none():
         val reason = if admission.error == "": "linux-service-provision-admission-unavailable" else: admission.error
         return service_provision_finish_v3(owner, None, false, false, reason)
+    val epoch = admission.owner.unwrap().current_v1()
+    if epoch.is_err(): return service_provision_finish_v3(owner, None, false, false, epoch.unwrap_err())
+    val compatible = host_linux_service_enrollment_epoch_check_v3(binding, epoch.unwrap())
+    if compatible.is_err(): return service_provision_finish_v3(owner, None, false, false, compatible.unwrap_err())
     val lent = admission.owner.unwrap().lend_service_identity_v1()
     admission.owner = Some(lent.owner)
     owner.admission = Some(admission)

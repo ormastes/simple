@@ -31,7 +31,11 @@ The command reads bounded regular files without following symlinks and uses the
 existing enrollment and credential decoders. The installer verifies the
 operation, grant, approval, current clock, and exact input pins against the
 protected parent policy before acquiring the existing fresh epoch admission.
-It then borrows the admission's actual machine identity and calls the existing
+It then compares the signed host, provider, policy, and broker reserve
+against the current native epoch record. Signed usable capacity must fit
+both observed usable limits. Installed startup repeats this comparison before
+opening the Host journal. Provision then borrows the admission's actual
+machine identity and calls the existing
 signed installer. That installer owns the claim, ordered publication, and exact
 duplicate checks. No separate writer or journal is created.
 

@@ -19,6 +19,8 @@ valid first proof is the intended owner decision (2026-11-16): an approval that
 expired while the service was down is refused after restart.
 """
 use std.spec.step
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
+use std.nogc_sync_mut.orchestration.host_linux_service_install_v3.host_linux_service_enrollment_epoch_check_v3
 use std.common.crypto.sha256.sha256_text
 use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
 use std.nogc_sync_mut.io.host_linux_service_records_v4.*
@@ -190,3 +192,66 @@ describe "Signed Linux service enrollment verifier V1":
             val refused = linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, fixture.credential,
                 fixture.configuration, fixture.engine_policy, fixture.broker_policy, fixture.agent_helper_template, supplied)
             expect(refused.unwrap_err()).to_equal("linux-host-service-remote-build-helper-template-pin")
+
+
+# Ledger DATA for compatibility coverage, never an acquired native owner.
+fn enrollment_observed_epoch_v3(fixture: LinuxServiceVerifierFixtureV1) -> MachineFreshEpochRecordV1:
+    MachineFreshEpochRecordV1(authority_id: "machine_1", physical_host_id: "worker_1",
+        native_machine_id: "linux-machine-id-v1:0123456789abcdef", epoch_id: "installed_epoch_1", epoch_generation: 7,
+        profile_digest: "a".repeat(64), machine_policy_digest: "b".repeat(64), process_identity_digest: "c".repeat(64),
+        principal_id: "linux:uid:20001", service_uid: 20001, service_gid: 20001, manager_unique_name: ":1.23",
+        partition_identity_digest: "d".repeat(64), store_identity_digest: "e".repeat(64),
+        provider_policy_digest: sha256_text(fixture.engine_policy), provider_identity_digest: "a".repeat(64),
+        capacity_cpu_millis: 4000, capacity_memory_bytes: 1073741824,
+        observed_cpu_millis: 2000, observed_memory_bytes: 536870912,
+        reserved_cpu_millis: 250, reserved_memory_bytes: 134217728,
+        outside_cpu_millis: 2000, outside_memory_bytes: 536870912,
+        usable_cpu_millis: 1750, usable_memory_bytes: 402653184)
+
+describe "Signed enrollment compatibility with the current native epoch":
+    it "should admit the exact usable capacity and a smaller signed budget":
+        # @req HOST-01 HOST-02
+        step("Check signed binding data against the accounted provider partition")
+        val fixture = linux_service_verifier_fixture_v1()
+        val epoch = enrollment_observed_epoch_v3(fixture)
+        expect(host_linux_service_enrollment_epoch_check_v3(fixture.binding, epoch)).to_equal(Ok(()))
+        var smaller = fixture.binding
+        smaller.physical_cpu_millis = 1000
+        smaller.physical_memory_bytes = 268435456
+        expect(host_linux_service_enrollment_epoch_check_v3(smaller, epoch)).to_equal(Ok(()))
+
+    it "should refuse a different native host or provider and an inconsistent broker reserve":
+        # @req HOST-01 HOST-02
+        step("Change each signed identity independently while retaining the valid native epoch data")
+        val fixture = linux_service_verifier_fixture_v1()
+        val epoch = enrollment_observed_epoch_v3(fixture)
+        var wrong_host = fixture.binding
+        wrong_host.physical_host_id = "worker_2"
+        expect(host_linux_service_enrollment_epoch_check_v3(wrong_host, epoch)).to_equal(Err("linux-host-service-enrollment-epoch-host"))
+        wrong_host = fixture.binding
+        wrong_host.native_machine_id = "linux-machine-id-v1:fedcba9876543210"
+        expect(host_linux_service_enrollment_epoch_check_v3(wrong_host, epoch)).to_equal(Err("linux-host-service-enrollment-epoch-host"))
+        var wrong_provider = fixture.binding
+        wrong_provider.engine_policy_digest = "0".repeat(64)
+        expect(host_linux_service_enrollment_epoch_check_v3(wrong_provider, epoch)).to_equal(Err("linux-host-service-enrollment-epoch-provider"))
+        wrong_provider = fixture.binding
+        wrong_provider.provider_identity_digest = "0".repeat(64)
+        expect(host_linux_service_enrollment_epoch_check_v3(wrong_provider, epoch)).to_equal(Err("linux-host-service-enrollment-epoch-provider"))
+        var wrong_reserve = fixture.binding
+        wrong_reserve.reserved_cpu_millis = 249
+        expect(host_linux_service_enrollment_epoch_check_v3(wrong_reserve, epoch)).to_equal(Err("linux-host-service-enrollment-epoch-broker-reserve"))
+
+    it "should refuse excess CPU or memory and malformed observed accounting":
+        # @req HOST-02
+        step("Exceed each enforceable limit by one while keeping the broker reservation")
+        val fixture = linux_service_verifier_fixture_v1()
+        var epoch = enrollment_observed_epoch_v3(fixture)
+        var excess = fixture.binding
+        excess.physical_cpu_millis = 2001
+        expect(host_linux_service_enrollment_epoch_check_v3(excess, epoch)).to_equal(Err("linux-host-service-enrollment-epoch-capacity"))
+        excess = fixture.binding
+        excess.physical_memory_bytes = 536870913
+        expect(host_linux_service_enrollment_epoch_check_v3(excess, epoch)).to_equal(Err("linux-host-service-enrollment-epoch-capacity"))
+        step("Reject an inconsistent epoch projection instead of trusting its stated usable capacity")
+        epoch.usable_cpu_millis = 1751
+        expect(host_linux_service_enrollment_epoch_check_v3(fixture.binding, epoch)).to_equal(Err("machine-fresh-epoch-record-partition-subdivision"))

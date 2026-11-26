@@ -1,3 +1,4 @@
+use std.nogc_sync_mut.orchestration.host_linux_service_install_v3.host_linux_service_enrollment_epoch_check_v3
 # Service 40 host-side composition over landed modules only: Linux service V4
 # startup, structural current-before-status ordering, and associated
 # prepare/execute dispatch on the sole Host capacity journal.
@@ -564,7 +565,7 @@ pub fn host_linux_service_anchor_parent_v4(anchor: text) -> Result<text, text>:
 # verify input); the root's fixed files must then equal, byte for byte,
 # what this proof would publish.
 fn linux_service_installed_proof_v4(anchor: text, parent: text, root_reader: LinuxProtectedRootReaderV1,
-        parent_reader: LinuxProtectedRootReaderV1) -> Result<LinuxServiceVerifiedEnrollmentV1, text>:
+        parent_reader: LinuxProtectedRootReaderV1) -> Result<(LinuxServiceVerifiedEnrollmentV1, HostLinuxServiceEnrollmentBindingV3), text>:
     linux_protected_root_reader_require_root_v1(root_reader, anchor)?
     linux_protected_root_reader_require_root_v1(parent_reader, parent)?
     val binding = host_linux_service_enrollment_decode_v3(host_linux_service_read_v4(root_reader, "linux-service-enrollment-v3.sdn")?)?
@@ -585,7 +586,7 @@ fn linux_service_installed_proof_v4(anchor: text, parent: text, root_reader: Lin
         if host_linux_service_read_v4(root_reader, leaf)? != item.1: return Err("linux-host-service-installed-file-mismatch:" + leaf)
     linux_protected_root_reader_require_root_v1(root_reader, anchor)?
     linux_protected_root_reader_require_root_v1(parent_reader, parent)?
-    Ok(proof)
+    Ok((proof, binding))
 
 fn linux_service_readers_pinned_v4(anchor: text, parent: text, root_reader: LinuxProtectedRootReaderV1,
         parent_reader: LinuxProtectedRootReaderV1) -> Result<(), text>:
@@ -622,6 +623,11 @@ pub fn host_linux_service_open_installed_v4(anchor: text) -> HostLinuxServiceSta
     shell.admission = Some(admission)
     if admission.error != "" or admission.owner.is_none():
         return linux_service_open_error_v4(shell, admission.error, "linux-host-service-admission-missing")
+    val (sealed, binding) = proof.unwrap()
+    val epoch = admission.owner.unwrap().current_v1()
+    if epoch.is_err(): return linux_service_start_error_v4(shell, epoch.unwrap_err())
+    val compatible = host_linux_service_enrollment_epoch_check_v3(binding, epoch.unwrap())
+    if compatible.is_err(): return linux_service_start_error_v4(shell, compatible.unwrap_err())
     val lent = admission.owner.unwrap().lend_service_identity_v1()
     admission.owner = Some(lent.owner)
     shell.admission = Some(admission)
@@ -640,7 +646,7 @@ pub fn host_linux_service_open_installed_v4(anchor: text) -> HostLinuxServiceSta
     # pinned to the anchor and its parent before start re-reads through them.
     val repinned = linux_service_readers_pinned_v4(anchor, parent.unwrap(), opened.owner.unwrap(), opened_parent.owner.unwrap())
     if repinned.is_err(): return linux_service_start_error_v4(shell, repinned.unwrap_err())
-    val started = host_linux_service_start_v4(anchor, opened.owner.unwrap(), opened_parent.owner.unwrap(), proof.unwrap(),
+    val started = host_linux_service_start_v4(anchor, opened.owner.unwrap(), opened_parent.owner.unwrap(), sealed,
         lent.native.unwrap(), lent.epoch_digest, stored.inventory.unwrap())
     var owner = started.owner
     owner.admission = shell.admission
