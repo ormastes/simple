@@ -1,0 +1,180 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+"""
+# `if val` on `text?` and `[T]?` preserves presence metadata until the present branch
+
+Regression spec for the `if val` MIR lowering bug where `Let` lowering called
+`option_non_scalar_payload_argument_v1` (and the `anyq_decl_concrete` unwrap)
+on `ExistsCheck` / `presence_word_locals` bindings before `lower_if` /
+`lower_if_chain` tested `binder != nil`. That prematurely decoded the sentinel
+`3` via `rt_interp_cstr(3)` into `0` (`NULL`) and discarded
+`exists_collection_locals` / `presence_word_locals`, making
+`if val raw = env_get_nullable(...)` enter the `then` branch on a miss with
+`raw = NULL`.
+"""
+
+# @tag: unit, compiler, mir, optional
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct IfValProbe:
+    mir_mod: MirModule
+    ir: text
+    errors: [text]
+
+fn lower_if_val_probe(src: text, tag: text) -> IfValProbe:
+    val file = "if_val_probe_" + tag + ".spl"
+    val module = parse_full_frontend(src, file, "if_val_probe_" + tag, Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(module)
+    var errs: [text] = []
+    for e in hl.errors:
+        errs = errs.push("hir: " + e.message)
+    val m: HirModule = hir
+    var mir_owner = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = mir_owner.lower_module(m)
+    for e in mir_owner.errors:
+        errs = errs.push("mir: " + e.message)
+    val ir = MirToLlvm.create("if_val_probe_" + tag, CodegenTarget.X86_64, None).translate_module(mir)
+    IfValProbe(mir_mod: mir, ir: ir, errors: errs)
+
+fn find_probe_fn(mir_mod: MirModule, target_name: text) -> MirFunction?:
+    for function in mir_mod.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            return Some(function)
+    None
+
+fn fn_calls_in_block(function: MirFunction, block_label: text) -> [text]:
+    var names: [text] = []
+    for block in function.blocks:
+        val label = block.label ?? ""
+        if label == block_label:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                names = names.push(name)
+                            case _: ()
+                    case _: ()
+    names
+
+fn fn_all_calls(function: MirFunction) -> [text]:
+    var names: [text] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            names = names.push(name)
+                        case _: ()
+                case _: ()
+    names
+
+describe "if val on Optional text and array in MIR":
+    it "defers rt_interp_cstr until inside then block and never calls rt_text_eq_any on nil check":
+        val src = """fn nil_text_fn() -> text?:
+    nil
+
+fn some_text_fn() -> text?:
+    Some("hello")
+
+fn check_nil() -> i64:
+    if val s = nil_text_fn():
+        return s.len() + 100
+    0
+
+fn check_some() -> text:
+    if val s = some_text_fn():
+        return s
+    "miss"
+"""
+        val probe = lower_if_val_probe(src, "text")
+        expect(probe.errors.len()).to_equal(0)
+        val check_nil_opt = find_probe_fn(probe.mir_mod, "check_nil")
+        expect(check_nil_opt.?).to_equal(true)
+        if val check_nil = check_nil_opt:
+            val all_calls = fn_all_calls(check_nil)
+            expect(all_calls.contains("rt_text_eq_any")).to_equal(false)
+            expect(all_calls.contains("rt_is_some")).to_equal(true)
+            expect(all_calls.contains("rt_interp_cstr")).to_equal(true)
+            val merge_calls = fn_calls_in_block(check_nil, "exists_check_merge")
+            expect(merge_calls.contains("rt_interp_cstr")).to_equal(false)
+            val then_calls = fn_calls_in_block(check_nil, "if_chain_then")
+            expect(then_calls.contains("rt_interp_cstr")).to_equal(true)
+        expect(probe.ir).to_contain("@rt_is_some")
+
+    it "preserves presence check and collection decoding on if val for [i64]?":
+        val src = """fn nil_arr_fn() -> [i64]?:
+    nil
+
+fn some_arr_fn() -> [i64]?:
+    Some([10, 20])
+
+fn check_nil_arr() -> i64:
+    if val xs = nil_arr_fn():
+        return xs.len() + 100
+    0
+
+fn check_some_arr() -> i64:
+    if val ys = some_arr_fn():
+        return ys.len() + ys[0] + ys[1]
+    -1
+"""
+        val probe = lower_if_val_probe(src, "arr")
+        expect(probe.errors.len()).to_equal(0)
+        val check_nil_opt = find_probe_fn(probe.mir_mod, "check_nil_arr")
+        expect(check_nil_opt.?).to_equal(true)
+        if val check_nil = check_nil_opt:
+            val all_calls = fn_all_calls(check_nil)
+            expect(all_calls.contains("rt_is_some")).to_equal(true)
+            val merge_calls = fn_calls_in_block(check_nil, "exists_check_merge")
+            expect(merge_calls.contains("rt_unwrap_or_self")).to_equal(false)
+            val then_calls = fn_calls_in_block(check_nil, "if_chain_then")
+            expect(then_calls.contains("rt_unwrap_or_self")).to_equal(true)
+        val check_some_opt = find_probe_fn(probe.mir_mod, "check_some_arr")
+        expect(check_some_opt.?).to_equal(true)
+        if val check_some = check_some_opt:
+            val then_calls = fn_calls_in_block(check_some, "if_chain_then")
+            expect(then_calls.contains("rt_unwrap_or_self")).to_equal(true)
+            expect(then_calls.contains("rt_array_len")).to_equal(true)
+        expect(probe.ir).to_contain("@rt_is_some")
+
+    it "does not double-decode decoded Result.ok text in call arg or if val":
+        val src = """fn take_txt(s: text) -> i64:
+    s.len()
+
+fn ok_res(flag: bool) -> Result<text, text>:
+    if flag:
+        return Ok("hello")
+    Err("bad")
+
+fn check_res_ok(flag: bool) -> i64:
+    if val s = ok_res(flag).ok:
+        return take_txt(s)
+    -1
+"""
+        val probe = lower_if_val_probe(src, "res_ok")
+        expect(probe.errors.len()).to_equal(0)
+        val check_fn_opt = find_probe_fn(probe.mir_mod, "check_res_ok")
+        expect(check_fn_opt.?).to_equal(true)
+        if val check_fn = check_fn_opt:
+            val merge_calls = fn_calls_in_block(check_fn, "exists_check_merge")
+            expect(merge_calls.contains("rt_interp_cstr")).to_equal(false)
+            val then_calls = fn_calls_in_block(check_fn, "if_chain_then")
+            expect(then_calls.contains("rt_interp_cstr")).to_equal(false)
+        expect(probe.ir).to_contain("check_res_ok")

@@ -1667,7 +1667,13 @@ impl MirLowering:
                                                     if erased_init:
                                                         self.remember_local_hir_type(init_local.id, declared_type, 0, 0)
                                         case HirTypeKind.Str | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Dict(_, _) | HirTypeKind.Tuple(_):
-                                            init_local = self.option_non_scalar_payload_argument_v1(let_init, init_local, declared_type)
+                                            # `if val v = opt` desugars to `v = opt.?` + `v != nil`.
+                                            # ExistsCheck/presence-word locals hold the payload-or-nil
+                                            # word (3 on miss) until lower_if's decode_present_collection
+                                            # decodes them ONLY on the present edge; unwrapping here
+                                            # turns 3 into NULL/garbage and drops presence metadata.
+                                            if not self.exists_collection_locals.contains(init_local.id) and not self.presence_word_locals.contains(init_local.id):
+                                                init_local = self.option_non_scalar_payload_argument_v1(let_init, init_local, declared_type)
                                         case _:
                                             ()
                         # Bug (any?/any receiver-type erasure, 2026-09-01):
@@ -1691,7 +1697,7 @@ impl MirLowering:
                         # 3), any non-Option value -> unchanged. A plain-Any init
                         # already holds the tagged value itself, so it is only
                         # retyped, never rewritten.
-                        if let_type.?:
+                        if let_type.? and not self.exists_collection_locals.contains(init_local.id) and not self.presence_word_locals.contains(init_local.id):
                             val anyq_declared: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                             if anyq_declared != None:
                                 # Positive gate: only container annotations
