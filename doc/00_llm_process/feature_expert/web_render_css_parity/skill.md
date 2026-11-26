@@ -5125,3 +5125,23 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
 - **Result with Chrome found** (with and without the #11963 scrollbar wiring,
   identical): wm_aqua 2/2, complex_layered 2/2, text_orientation 3/3,
   examples 7/8 (the hero-centring geometry, fixed in its own lane).
+
+## 2026-11-26 — a line-end space hangs on centred / right-aligned lines (`work/webrender-parity-examples-20261126`)
+
+- **Symptom:** `chrome_vs_simple_web_examples_parity` failed "centered hero
+  buttons": on `examples/06_io/ui/sample_page.html` the button group started at
+  x=252, Chrome 159 at 254 (group midpoint 397 vs 400).
+- **Diagnosis:** neither the inline-block gap nor the button width. The newline
+  after the last `</a>` is a whitespace-only `#text` run, and it handed its
+  space to the pen, so the centred line measured 296 px instead of Chrome's 292.
+  Fixtures: `ib` + space centred 148 (Chrome 150), right 296 (300); a text
+  run's own trailing space (`<b>Hello </b>`) was already right.
+- **Fix:** `align_inline_line_horizontal`
+  (`simple_web_html_layout_renderer_layout_engine.spl`) hangs the whitespace-only
+  runs at a ltr centre/right line end too, via `inline_line_end_space_px(...,
+  ws_runs_only: true)`. The rtl right case keeps the text-edge term. Spec:
+  `inline_line_end_space_align_chrome159_spec.spl`.
+- **Known limits:** a right-aligned trailing space after a TEXT element ends
+  1 px short (pen milli carry: 39.12 + 4.45 -> 44 charges 5, the hang returns
+  4); a space collapsing across an EMPTY inline (`ib <span></span> `) still
+  counts once. Matrix 79/979 and the 1x catalog equal base.
