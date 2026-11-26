@@ -1,0 +1,151 @@
+#!/bin/sh
+# check-extern-return-shape.shs — ratchet: an `rt_*` extern name may have only
+# ONE return shape across src/**.
+#
+# Why: the seed flattens modules and resolves an extern's return type by bare
+# name. PR #12057 made a *direct* call use its own module's declaration, but a
+# module that calls an extern it only IMPORTS still gets whichever declaration
+# loaded last. Two shapes for one name (e.g. `rt_tuple_get -> i64` vs
+# `<T> -> T?`) is therefore a latent miscompile. See
+# doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md.
+#
+# Census (committed content only, never the working tree — a sparse checkout
+# would undercount): `git grep <rev>` over src/**/*.spl excluding **/vendor/**,
+# lines containing `extern fn rt_` whose first non-blank char is not `#`.
+# Return shape = text after `->` that follows the parameter list, whitespace
+# removed; no `->` = `()`. Generic params are renamed positionally ($G1, $G2…)
+# so `<T> -> T?` and `<TElement> -> TElement?` are one shape. `void` and `()`
+# are NOT merged (not proven equivalent in the seed's lookup).
+#
+# Baseline: scripts/check/extern_return_shape_baseline.txt, one line per
+# conflicting name: `name<TAB>shape | shape ...` (sorted). FAIL on a NEW
+# conflicting name, on a CHANGED shape set, and on a STALE row (name no longer
+# conflicts) — a baseline that no longer describes the tree stops ratcheting.
+#
+# Usage: check-extern-return-shape.shs [--rev REV] [--root DIR]
+#        check-extern-return-shape.shs --generate-baseline [--rev REV]   (reviewed updates only)
+#        check-extern-return-shape.shs --list [--rev REV]   (census: name<TAB>shapes<TAB>sites)
+#        check-extern-return-shape.shs --selftest
+# Verdict (last stdout line): PASS — exit 0 / FAIL — exit 1 / ERROR — nothing was checked, exit 2.
+set -u
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$SELF_DIR/../.." && pwd)
+REV=HEAD
+MODE=check
+BASELINE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev) REV=$2; shift 2 ;;
+        --root) ROOT=$2; shift 2 ;;
+        --baseline) BASELINE=$2; shift 2 ;;
+        --generate-baseline) MODE=generate; shift ;;
+        --list) MODE=list; shift ;;
+        --selftest) MODE=selftest; shift ;;
+        *) echo "unknown arg: $1" >&2; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+    esac
+done
+[ -n "$BASELINE" ] || BASELINE="$ROOT/scripts/check/extern_return_shape_baseline.txt"
+
+# stdin: path:line:text  ->  stdout: name \t shape \t path:line
+normalize() {
+    awk '
+    {
+      s=$0
+      p=index(s,":"); path=substr(s,1,p-1); s=substr(s,p+1)
+      p=index(s,":"); ln=substr(s,1,p-1); s=substr(s,p+1)
+      if (s ~ /^[ \t]*#/) next
+      sub(/#.*$/,"",s)
+      if (!match(s,/extern[ \t]+fn[ \t]+rt_[A-Za-z0-9_]*/)) next
+      hd=substr(s,RSTART,RLENGTH); sub(/extern[ \t]+fn[ \t]+/,"",hd); name=hd
+      rest=substr(s,RSTART+RLENGTH)
+      np=0
+      if (substr(rest,1,1)=="<") { e=index(rest,">"); g=substr(rest,2,e-2); rest=substr(rest,e+1)
+        np=split(g,gp,","); for(i=1;i<=np;i++){gsub(/[ \t]/,"",gp[i]); sub(/:.*/,"",gp[i])} }
+      depth=0; found=0
+      for(i=1;i<=length(rest);i++){c=substr(rest,i,1); if(c=="(")depth++; else if(c==")"){depth--; if(depth==0){after=substr(rest,i+1); found=1; break}}}
+      if(!found) next
+      if (match(after,/->/)) { ret=substr(after,RSTART+2); sub(/:[ \t]*$/,"",ret); gsub(/[ \t]/,"",ret) } else ret="()"
+      for(i=1;i<=np;i++){ out=""; r=ret
+        while(match(r,"(^|[^A-Za-z0-9_])" gp[i] "([^A-Za-z0-9_]|$)")){ pre=substr(r,1,RSTART-1); m=substr(r,RSTART,RLENGTH); r=substr(r,RSTART+RLENGTH); gsub(gp[i],"$G" i,m); out=out pre m }
+        ret=out r }
+      if (ret=="") ret="()"
+      print name "\t" ret "\t" path ":" ln
+    }'
+}
+
+# census for repo $1 at rev $2 -> decls file $3; prints decl count
+census() {
+    git -C "$1" grep -n -I -E 'extern[[:space:]]+fn[[:space:]]+rt_' "$2" -- 'src/**/*.spl' ':(exclude)**/vendor/**' 2>/dev/null \
+        | sed "s#^$2:##" | normalize > "$3"
+    wc -l < "$3" | tr -d ' '
+}
+
+# decls -> conflicts (name \t shape | shape ...), sorted
+conflicts() {
+    sort -t "$(printf '\t')" -k1,1 -k2,2 -u "$1" | awk -F'\t' '
+      { if ($1!=prev) { if (n>1) print prev "\t" sh; prev=$1; n=0; sh="" }
+        n++; sh = (sh=="" ? $2 : sh " | " $2) }
+      END { if (n>1) print prev "\t" sh }'
+}
+
+# compare current conflicts $1 with baseline $2; prints report, returns 0/1
+compare() {
+    awk -F'\t' '
+      NR==FNR { b[$1]=$2; next }
+      { c[$1]=$2 }
+      END {
+        bad=0
+        for (n in c) { if (!(n in b)) { print "  NEW: " n " -> " c[n]; bad++ }
+                       else if (b[n]!=c[n]) { print "  CHANGED: " n " baseline {" b[n] "} now {" c[n] "}"; bad++ } }
+        for (n in b) if (!(n in c)) { print "  STALE: " n " no longer conflicts (regenerate the baseline)"; bad++ }
+        exit (bad>0)
+      }' "$2" "$1"
+}
+
+run_check() { # repo rev baseline
+    tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp)"; return 2; }
+    n=$(census "$1" "$2" "$tmp/decls")
+    if [ "${n:-0}" -eq 0 ]; then rm -rf "$tmp"; echo "ERROR — nothing was checked (0 extern rt_* declarations at $2)"; return 2; fi
+    conflicts "$tmp/decls" > "$tmp/cur"
+    k=$(wc -l < "$tmp/cur" | tr -d ' ')
+    case "$MODE" in
+        generate) cp "$tmp/cur" "$3"; rm -rf "$tmp"; echo "PASS — baseline regenerated: $k conflicting name(s) from $n declaration(s) at $2"; return 0 ;;
+        list) awk -F'\t' 'NR==FNR{cf[$1]=$2;next} ($1 in cf){s[$1]=s[$1] " " $3 "=" $2} END{for(n in s) print n "\t" cf[n] "\t" s[n]}' "$tmp/cur" "$tmp/decls" | sort; rm -rf "$tmp"; return 0 ;;
+    esac
+    if [ ! -f "$3" ]; then rm -rf "$tmp"; echo "ERROR — nothing was checked (missing baseline $3)"; return 2; fi
+    bk=$(grep -c . "$3" | tr -d ' ')
+    if compare "$tmp/cur" "$3"; then
+        rm -rf "$tmp"; echo "PASS — $n extern rt_* declaration(s) checked at $2, $k conflicting name(s) (baseline $bk), 0 new, 0 stale"; return 0
+    fi
+    rm -rf "$tmp"; echo "FAIL — $n extern rt_* declaration(s) checked at $2, $k conflicting name(s) vs baseline $bk; see NEW/CHANGED/STALE above"; return 1
+}
+
+selftest() {
+    st=$(mktemp -d) || return 2
+    r="$st/repo"; mkdir -p "$r/src/a" "$r/src/b" "$r/src/vendor/x"
+    git -C "$r" init -q && git -C "$r" config core.autocrlf false && git -C "$r" config user.email t@t && git -C "$r" config user.name t
+    printf 'extern fn rt_one(x: i64) -> i64\nextern fn rt_gen<T>(t: i64) -> T?\nextern fn rt_dup(x: i64) -> i64\n' > "$r/src/a/m.spl"
+    printf '# extern fn rt_one(x: i64) -> text\nextern fn rt_gen<TElem>(t: i64) -> TElem?\nextern fn rt_dup(x: i64) -> text?\n' > "$r/src/b/m.spl"
+    printf 'extern fn rt_one(x: i64) -> bool\n' > "$r/src/vendor/x/m.spl"
+    git -C "$r" add -A && git -C "$r" commit -qm base
+    fails=0
+    printf 'rt_dup\ti64 | text?\n' > "$st/base_ok"
+    out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^PASS' || { echo "selftest: clean fixture must PASS (comment, vendor, generic rename ignored): $out"; fails=1; }
+    printf 'extern fn rt_one(x: i64) -> u8\n' >> "$r/src/b/m.spl"; git -C "$r" commit -qam new
+    out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^FAIL' && echo "$out" | grep -q 'NEW: rt_one' || { echo "selftest: new conflict must FAIL naming rt_one: $out"; fails=1; }
+    git -C "$r" reset -q --hard HEAD~1
+    printf 'rt_dup\ti64 | text?\nrt_gone\ti64 | u8\n' > "$st/base_stale"
+    out=$(MODE=check run_check "$r" HEAD "$st/base_stale"); echo "$out" | grep -q 'STALE: rt_gone' || { echo "selftest: stale row must FAIL: $out"; fails=1; }
+    e="$st/empty"; mkdir -p "$e/src"; git -C "$e" init -q; git -C "$e" config core.autocrlf false; git -C "$e" config user.email t@t; git -C "$e" config user.name t
+    printf 'x\n' > "$e/src/n.spl"; git -C "$e" add -A; git -C "$e" commit -qm e
+    MODE=check run_check "$e" HEAD "$st/base_ok" >/dev/null; [ $? -eq 2 ] || { echo "selftest: empty census must ERROR"; fails=1; }
+    rm -rf "$st"
+    return $fails
+}
+
+if ! selftest; then echo "FAIL — selftest failed"; exit 1; fi
+[ "$MODE" = selftest ] && { echo "PASS — selftest: 4 fixture(s) checked"; exit 0; }
+git -C "$ROOT" rev-parse -q --verify "$REV^{commit}" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (cannot resolve rev $REV)"; exit 2; }
+run_check "$ROOT" "$REV" "$BASELINE"
+exit $?
