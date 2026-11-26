@@ -75,7 +75,7 @@ Open (P2, next increment):
 - A GC move-then-restore can make `open` briefly return `missing` on a reused object; a GC that moves the winner mid-publish yields a spurious `publish-winner-unreadable`.- `_ISV1_MAX_REFS` is per call; total refs per pin are unbounded. Base-key refs from lost races over-retain.
 - Staged publishes do not fsync.
 - Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot.
-- `substring(..., byte_len())` on non-ASCII hostile lines in doc/record decode: confirm `substring` clamps (fail-closed) or reject non-ASCII first.
+- DONE (2026-11-27): `substring` is byte-indexed in the interpreter and native (`rt_slice_text_bytes`); an end past the length clamps (no panic), and a bound inside a multi-byte char yields U+FFFD (lossy, not an error), so `substring(n, byte_len())` is safe by itself but `_isv1_unquote`'s one-byte slices silently mangled non-ASCII (a root doc with `name: "ma\u{e9}n"` decoded as ok). `_isv1_doc_decode` now rejects any byte >= 128 up front (`non-ascii`); spec: "rejects a root doc carrying non-ASCII bytes" in `immutable_store_v1_spec.spl` (30 -> 31). Other increment-1 decoders have no `substring(.., byte_len())` on disk/peer input.
 - Pointer-cache write failures are ignored; an unrefreshable pointer bricks a root after 4096 generations (`root-claim-chain-too-long`).
 - Drop the `.value` condition reads on the new bool units once the seed bool-unit bug is fixed.
 - Specs: no gxhash known-answer vector through the policy; lost-race publish path not exercised.

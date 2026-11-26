@@ -526,3 +526,16 @@ describe "immutable_store_v1 crash and failure safety":
         expect(file_write_bytes(pointer, "garbage".bytes())).to_equal(true)
         expect(immutable_store_v1_root_head(root, "main").status).to_equal("corrupt")
         _store_cleanup(root)
+
+    it "rejects a root doc carrying non-ASCII bytes instead of mis-slicing them":
+        val root = _store_root("nonascii")
+        val a = immutable_store_v1_ingest(root, "ascii a".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        expect(immutable_store_v1_root_head(root, "main").status).to_equal("ok")
+        val pointer = root + "/roots/main.sdn"
+        val hostile = "format_version: 1\nname: \"ma\u{e9}n\"\ngeneration: 0\ncount: 1\nobjects:\n" + a.object_key + "\n"
+        expect(file_write_bytes(pointer, hostile.bytes())).to_equal(true)
+        val head = immutable_store_v1_root_head(root, "main")
+        expect(head.status).to_equal("corrupt")
+        expect(head.reason).to_start_with("root-corrupt")
+        _store_cleanup(root)
