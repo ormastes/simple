@@ -1491,6 +1491,11 @@ impl RenderBackend for VulkanBackend:
             # both axes and alpha upfront avoids allocating pixel arrays or triggering
             # invalid zero-workgroup GPU dispatches and spurious fallback latches.
             return
+        if self.clip_enabled and (self.clip_w <= 0 or self.clip_h <= 0):
+            # An empty clip paints nothing. Without this the translucent lane's
+            # native composite declines (clip_reject) and the host fallback
+            # flushes, reads the frame back and latches cpu_fallback_used.
+            return
         if self.cpu_fallback_host_surface:
             if _i64(w) * _i64(h) > 2147483647:
                 self.mark_cpu_fallback("rect-size-overflow")
@@ -2951,6 +2956,14 @@ impl RenderBackend for VulkanBackend:
             return
         if self.cpu_fallback_host_surface:
             self._fallback_fill_rect_host(x, y, w, h, color)
+            return
+        if self.mask_buf.len() == 0:
+            # Device solid composite (the alpha<255 lane of draw_rect_filled).
+            # The host path below flushes and reads the WHOLE frame back per
+            # call: forms-media 1x spent ~110 s of 126 s there, 4x did not
+            # finish in 19 min. Masked rects keep it: the native composite
+            # has no mask plane.
+            self.draw_rect_filled(x, y, w, h, color)
             return
         if not self._flush_for_host_fallback("rect-blend-host-readback"):
             return

@@ -5057,3 +5057,49 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
 - **Open, unclaimed.** A `ul` with its own 20px or 24px font-size sits 4 or 12 rows higher than Chrome at 1x. The li text moves with the marker, so it is the list block's em margin, not the marker.
 - **Known gap (review 2026-11-26).** `Style` only tracks `list_style_none`, so a `square` or `circle` list marker still paints the disc. It did before this change too, as a radius side/2 box; it now gets the disc coverage. Fixing it needs `list-style-type` parsed into `Style`, which touches the decl_apply, declarations and style-copy paths. Not done here.
 - **Tables are faithful, not mirrored.** Row 4 of the 7 px table is left-heavy while rows 2 and 5 are right-heavy. That is Chrome's own capture (`3b .. 42`), not a typo. AC-4 pins the 4 px and 7 px discs.
+
+## 2026-11-26 — Vulkan vs CPU parity on the Chrome catalog (lavapipe, seed1126b)
+
+- **Pixels: Vulkan == CPU, byte for byte, on all 8 pages at 1x and 4x.** Before
+  the fix 15/16 PPMs were `cmp`-identical and forms-media 4x was killed at
+  1132 s; after it, 16/16, so Vulkan-vs-Chrome equals CPU-vs-Chrome: 1x overview
+  0.39, html 0.71, css-layout 1.01, css-paint 0.95, forms-media 0.84,
+  animation 0.90, evidence 0.32, tab-bar 0.24; 4x 0.16 / 0.22 / 0.47 / 0.29 /
+  0.43 / 0.31 / 0.03 / 0.13. Provenance checked, not assumed:
+  `readback_source=device_readback`, `font_readback=device_readback`,
+  `font_device_executed=true`, `cpu_fallback=false` (probe through
+  `simple_web_layout_render_html_readback_engine2d_result`). The 2026-11-14
+  "69 px on overview" CPU/Vulkan difference is gone. No Vulkan-only pixel
+  divergence existed, so no RenderDoc frame was needed.
+- **Perf defect found and fixed: Vulkan `draw_rect_blend` read the whole frame
+  back per call.** It flushed (`_flush_for_host_fallback("rect-blend-host-readback")`)
+  and ran `emu_draw_rect_blend`, whose `read_pixels_region_raw` is the TRAIT
+  DEFAULT on Vulkan — a full device readback + checksum, then a crop. The
+  2026-11-24 region-read fix only helped SoftwareBackend. forms-media 1x: 28
+  readbacks, 126 s of which the timed buckets covered 16 s; 4x did not finish
+  in 1132 s. Now unmasked translucent rects go to `draw_rect_filled`'s
+  alpha<255 lane (device `SRC_OVER_SOLID`); masked ones keep the host path (the
+  native composite has no mask plane). forms-media 1x 125.9 -> 26.7 s, 4x
+  DNF -> 133 s (interpreter, the gate's mode); frames unchanged. A non-mask
+  native decline now goes through the image-blend fallback and so sets the
+  sticky `cpu_fallback` provenance, which the old path did not. Spec: `backend_vulkan_blend_cpu_parity_spec.spl`
+  ("Vulkan draw_rect_blend composites on the device", 4 flushes -> 0).
+- **A/B (interpreter, Vulkan, 1x, median of rounds 2-4, alternating):** forms-media
+  147.0 -> 30.1 s; css-paint 33.1 -> 33.9 s (0 calls into the changed path, so
+  noise: pairs +0.8 / -11.3 / +0.5 s); RSS flat ~1.09 GB. CPU JIT 4x flat
+  (forms-media 3.98 / 3.98 s, css-paint 3.96 / 3.92 s), frames identical.
+- **Pre-existing, not this change:** `backend_vulkan_mask_plane_spec` fails 25/26
+  ("preserves thick-run alpha overlap ...") identically on base `b53118edcfc`.
+- **Find it again:** `SIMPLE_VK_ORDER_TRACE=1 SIMPLE_VK_TIMING=1` on the page
+  driver; a `vk-timing` table that sums far below the wall plus repeated
+  `flush site=_flush_for_host_fallback:*` / `readback-entry` lines = a host
+  fallback reading back the frame.
+- **Remaining Vulkan cost (not fixed):** `font_atlas_pack_u32_to_u8` is 14-19 s
+  per 1x page under the interpreter (the gate runs `SIMPLE_EXECUTION_MODE=interpreter`);
+  `SIMPLE_VK_FONT_UPLOAD=u32` is the existing opt-in that removes it.
+- **seed1126b Vulkan is interpreter-only:** under `SIMPLE_EXECUTION_MODE=jit`
+  strict mode refuses ("simple_runtime was compiled without" Vulkan) -- a JIT
+  timing that looks 30x faster rendered nothing. Read `backend_reported=` and rc.
+- **Gate traps:** this aarch64 host needs `CHROME_NO_SANDBOX=1` (Chrome aborts
+  and the gate reports "viewport probe returned no inner height"); the gate does
+  not record RSS — wrap `SIMPLE_BIN` with `/usr/bin/time -a -o LOG -f "%e %M %C"`.
