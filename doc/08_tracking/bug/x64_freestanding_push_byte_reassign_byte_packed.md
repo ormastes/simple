@@ -154,3 +154,12 @@ This patch repairs the LLVM sibling path, not proof of the original
 Cranelift/full-sshd acceptance. The original `.push` workaround remains in
 place. The record stays open for the rebuilt-producer HIR/native disassembly
 and full SSH byte-equality evidence described above.
+
+## BF-9 Update (2026-11-26) — OS-side `rt_push_byte` removal & verify waiting (`fix-implemented-verification-pending`)
+
+- **OS-side fix**: Removed all remaining `rt_push_byte(...)` reassignments and colliding `extern fn rt_push_byte` / `export use ... rt_push_byte` declarations across `src/os/apps/sshd/sshd.spl` (`_sshd_tokenize_command`), `src/os/apps/sshd/ssh_session.spl` (`_live_openssh_client_version_bytes`), `src/os/apps/sshd/ssh_session_helpers.spl` (`_copy_prefix_stable`, `_build_plain_packet_header`, `_push_u32_be_stable`, `_build_channel_*_stable`), and `src/os/apps/sshd/ssh_session_channel.spl` (`_build_channel_data_stable`, `_scp_*`), replacing them with direct `.push(... as u8)` calls preserving `BYTE_PACKED` layout.
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_sshd_byte_pack_and_text_spec.spl --mode=interpreter` -> `3 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/ssh_multi_cmd.shs && sh scripts/os/scp_retrieve_over_ssh_uefi.shs
+  ```

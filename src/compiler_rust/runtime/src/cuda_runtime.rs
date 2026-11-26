@@ -3061,14 +3061,16 @@ pub extern "C" fn rt_cuda_memcpy_dtoh_async(_dst: i64, _src: i64, _size: i64, _s
 }
 
 /// `rt_cuda_launch_kernel` plus dynamic shared memory and a stream slot.
-/// Same `(ptr, len)` function-name and `args_ptr` param-block contract.
+/// `func_name` is ONE NUL-terminated C string, unlike `rt_cuda_launch_kernel`:
+/// this name has no `text_extern_abi.spl` row, so native codegen passes its
+/// `text` argument as the single `rt_interp_cstr` word
+/// (cuda_launch_kernel_ex_text_abi_unregistered_2026-11-26).
 #[no_mangle]
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rt_cuda_launch_kernel_ex(
     module: i64,
-    func_name_ptr: *const u8,
-    func_name_len: u64,
+    func_name: *const c_char,
     grid_x: i64,
     grid_y: i64,
     grid_z: i64,
@@ -3079,19 +3081,15 @@ pub extern "C" fn rt_cuda_launch_kernel_ex(
     stream: i64,
     args_ptr: i64,
 ) -> i64 {
-    if func_name_ptr.is_null() || func_name_len == 0 || module <= 0 || shared_bytes < 0 || stream < 0 {
+    if func_name.is_null() || module <= 0 || shared_bytes < 0 || stream < 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
     unsafe {
-        let bytes = std::slice::from_raw_parts(func_name_ptr, func_name_len as usize);
-        let Ok(func_name) = CString::new(bytes) else {
-            return -1;
-        };
         let mut func: CUfunction = ptr::null_mut();
-        let err = cuModuleGetFunction(&mut func, module as CUmodule, func_name.as_ptr());
+        let err = cuModuleGetFunction(&mut func, module as CUmodule, func_name);
         if err != 0 {
             return -(err as i64);
         }
@@ -3116,8 +3114,7 @@ pub extern "C" fn rt_cuda_launch_kernel_ex(
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rt_cuda_launch_kernel_ex(
     _module: i64,
-    _func_name_ptr: *const u8,
-    _func_name_len: u64,
+    _func_name: *const c_char,
     _grid_x: i64,
     _grid_y: i64,
     _grid_z: i64,

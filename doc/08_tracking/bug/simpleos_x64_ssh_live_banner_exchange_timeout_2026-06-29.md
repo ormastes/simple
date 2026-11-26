@@ -46,3 +46,14 @@ The SSH exec bridge has a focused Simple launch proof path for
 `simple.smf --version` and `simple --check`, but live OpenSSH does not reach it
 while banner exchange fails.
 
+## BF-9 Update (2026-11-26) — fix implemented, verify waiting (`fix-implemented-verification-pending`)
+
+- **Root causes fixed**:
+  1. `src/os/apps/sshd/sshd.spl`: Switched `@cfg(not(riscv64))` listener helpers to `@when(riscv64): ... @elif((baremetal or simpleos) and x86_64): ... @else: ...` so x86_64 baremetal binds/listens/accepts/closes via VirtIO-net `rt_net_socket`/`rt_net_bind`/`rt_net_listen`/`rt_net_accept`/`rt_net_close` (decoded cleanly without `NOP2` `rt_io_tcp_*` stubs and preserving raw fd `0` rather than rewriting `0 -> 200` via RV64 `normalize_boot_tcp_client_fd`), while host `--mode=interpreter` retains `rt_io_tcp_*`.
+  2. `src/os/kernel/net/rt_net_socket_facade.spl`: Guarded C-colliding `@export("C")` exports (`rt_net_socket`, `rt_net_bind`, `rt_net_listen`, `rt_net_accept`, `rt_net_close`, `rt_net_send_bytes`, `rt_net_recv_bytes`, `rt_net_recv_version_text`, `rt_net_recv_ssh_plain_packet_payload`, `rt_net_bind_and_listen`) with `@when(not((baremetal or simpleos) and x86_64)):` so Simple no longer shadows `baremetal_stubs.c`'s VirtIO-net symbols (`[rt-net] version recv branch=nil` eliminated), and implemented `@else:` x86_64 baremetal `rt_net_send_ssh_banner`, `rt_net_recv_version_bytes`, and `rt_net_recv_ssh_encrypted_packet` over `rt_net_send_bytes` / `rt_net_recv_bytes`. Also fixed `_rt_net_trim_crlf` to check `10u32`/`13u32` instead of raw `'\n'`/`'\r'`.
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_x64_ssh_banner_facade_spec.spl --mode=interpreter` -> `4 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/ssh_multi_cmd.shs
+  ```
+

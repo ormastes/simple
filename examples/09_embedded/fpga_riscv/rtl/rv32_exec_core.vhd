@@ -29,7 +29,18 @@ entity rv32_exec_core is
     -- regs_q / pc_q and cannot perturb execution.
     dbg_reg_addr : in std_logic_vector(4 downto 0) := (others => '0');
     dbg_reg_data : out std_logic_vector(31 downto 0);
-    dbg_pc : out std_logic_vector(31 downto 0)
+    dbg_pc : out std_logic_vector(31 downto 0);
+    -- External debug halt / clock-enable (Gap 1) and IMEM / SBA read-write
+    -- port (Gap 2). Inputs have inactive defaults so existing callers stay
+    -- cycle- and bit-identical while debuggers can gate execution cleanly at
+    -- instruction boundaries and inspect/patch code BRAM without core surgery.
+    clk_en_i         : in  std_logic := '1';
+    halt_i           : in  std_logic := '0';
+    halted_o         : out std_logic;
+    dbg_imem_we_i    : in  std_logic := '0';
+    dbg_imem_addr_i  : in  std_logic_vector(31 downto 0) := (others => '0');
+    dbg_imem_wdata_i : in  std_logic_vector(31 downto 0) := (others => '0');
+    dbg_imem_rdata_o : out std_logic_vector(31 downto 0)
   );
 end entity rv32_exec_core;
 
@@ -149,6 +160,7 @@ architecture rtl of rv32_exec_core is
   signal debug_ra_q : std_logic_vector(15 downto 0) := (others => '0');
   signal debug_sp_q : std_logic_vector(15 downto 0) := (others => '0');
   signal debug_phase_q : std_logic_vector(3 downto 0) := (others => '0');
+  signal halted_q : std_logic := '0';
 
   function sext(v : std_logic_vector) return unsigned is
   begin
@@ -279,6 +291,8 @@ begin
   -- Lane KK: additive read-only debug taps (combinational, no state added).
   dbg_reg_data <= std_logic_vector(regs_q(to_integer(unsigned(dbg_reg_addr))));
   dbg_pc <= std_logic_vector(pc_q);
+  halted_o <= halted_q;
+  dbg_imem_rdata_o <= rom_b_q;
 
   process(clk)
     variable r : regs_t;
@@ -332,22 +346,24 @@ begin
         rom_ra_b := ROM_WORDS - 1;
       end if;
       dr_ra := 0;
-      debug_uart_valid_q <= debug_uart_valid_next_q;
-      debug_uart_valid_next_q <= '0';
-      if uart_busy_q = '1' then
-        if uart_baud_q >= BAUD_DIV - 1 then
-          uart_baud_q <= 0;
-          if uart_bits_q > 1 then
-            uart_tx_q <= uart_shift_q(1);
-            uart_shift_q <= '1' & uart_shift_q(9 downto 1);
-            uart_bits_q <= uart_bits_q - 1;
+      if clk_en_i = '1' then
+        debug_uart_valid_q <= debug_uart_valid_next_q;
+        debug_uart_valid_next_q <= '0';
+        if uart_busy_q = '1' then
+          if uart_baud_q >= BAUD_DIV - 1 then
+            uart_baud_q <= 0;
+            if uart_bits_q > 1 then
+              uart_tx_q <= uart_shift_q(1);
+              uart_shift_q <= '1' & uart_shift_q(9 downto 1);
+              uart_bits_q <= uart_bits_q - 1;
+            else
+              uart_tx_q <= '1';
+              uart_busy_q <= '0';
+              uart_bits_q <= 0;
+            end if;
           else
-            uart_tx_q <= '1';
-            uart_busy_q <= '0';
-            uart_bits_q <= 0;
+            uart_baud_q <= uart_baud_q + 1;
           end if;
-        else
-          uart_baud_q <= uart_baud_q + 1;
         end if;
       end if;
 
@@ -395,6 +411,10 @@ begin
         div_count_q <= (others => '0');
         div_rd_q <= 0;
         div_result_q <= (others => '0');
+        halted_q <= halt_i;
+      elsif clk_en_i = '0' then
+        -- Gap 1: clock-enable freeze holds architectural state, FSM, and halted_q steady.
+        null;
       elsif state_q = S_UART then
         if uart_busy_q = '0' then
           pc_q <= next_pc_q;
@@ -444,10 +464,16 @@ begin
           div_rd_q <= 0;
         end if;
       elsif state_q = S_FETCH then
-        -- Fetch cycle: registered BRAM reads at the bottom of this process
-        -- latch rom_a(pc_idx) / rom_b(pc_idx + 1) this edge (default
-        -- addressing above); decode + execute happens next cycle in S_EXEC.
-        state_q <= S_EXEC;
+        if halt_i = '1' then
+          -- Gap 1: halt cleanly at instruction boundary without advancing state_q or pc_q.
+          halted_q <= '1';
+        else
+          halted_q <= '0';
+          -- Fetch cycle: registered BRAM reads at the bottom of this process
+          -- latch rom_a(pc_idx) / rom_b(pc_idx + 1) this edge (default
+          -- addressing above); decode + execute happens next cycle in S_EXEC.
+          state_q <= S_EXEC;
+        end if;
       elsif state_q = S_LOAD then
         -- Complete a deferred rom/data_rom load using the data registered on
         -- the previous edge.
@@ -1118,6 +1144,19 @@ begin
         -- sequential pc_next commit must not override it.
         if state_q = S_EXEC and not trap_taken then
           pc_q <= pc_next;
+        end if;
+      end if;
+
+      -- Gap 2: External IMEM / SBA-into-fetch read-write access when halted at
+      -- an instruction boundary (halted_q = '1' in S_FETCH), excluding the resume
+      -- clock edge (halt_i = '0' and clk_en_i = '1') so port B fetches pc_idx + 1
+      -- into rom_b_q cleanly for S_EXEC, and preventing mid-instruction write races.
+      if rst = '0' and halted_q = '1' and (halt_i = '1' or clk_en_i = '0') then
+        rom_ra_b := word_index(unsigned(dbg_imem_addr_i));
+        if dbg_imem_we_i = '1' then
+          rom_we := true;
+          rom_wa := rom_ra_b;
+          rom_wd := dbg_imem_wdata_i;
         end if;
       end if;
 

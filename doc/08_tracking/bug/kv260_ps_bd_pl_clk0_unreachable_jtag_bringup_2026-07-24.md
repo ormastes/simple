@@ -3,8 +3,10 @@
 - **Date:** 2026-07-24
 - **Severity:** high (blocks all PS-clocked fabric designs on KV260 for
   JTAG-only bring-up; rv64 bring-up was built on this assumption)
-- **Status:** root-caused; resolution is architectural (switch clocking
-  source), not a register-poke fix
+- **Status:** fix-implemented-verification-pending — 2026-11-26 BF-7 hardened
+  `bringup_kv260_rv32_ddr.shs` / `bringup_kv260_rv64_ddr.shs` (`psu_init.tcl`
+  fail-closed gate) and aligned `soc_top_rv64_sim.vhd` CFGMCLK documentation;
+  physical KV260 JTAG bring-up verification pending hardware access.
 
 ## Symptom
 
@@ -113,3 +115,19 @@ recorded here for a follow-up change.
 No KV260/JTAG hardware session is possible in this lane; the root cause and
 the architectural resolution (free-running CFGMCLK clocking for JTAG-only
 bring-up) stand as recorded. Remains blocked on physical board work.
+
+## Fix Implemented 2026-11-26 (BF-7 lane, work/bf-7-riscv32-fpga-20261126)
+
+- **Status:** `fix-implemented-verification-pending`
+- **Code/script fixes landed:**
+  - Updated `scripts/fpga/bringup_kv260_rv32_ddr.shs` and `scripts/fpga/bringup_kv260_rv64_ddr.shs` to fail closed if `psu_init.tcl` is missing inside `$XSA` unless `ALLOW_NO_PSU_INIT=1` is explicitly set (preventing silent DDR/PS initialization skips during JTAG bring-up).
+  - Updated stale PS-clock comment in `examples/09_embedded/fpga_riscv/rtl/soc_top_rv64_sim.vhd` to accurately match `soc_top_rv64.vhd` (`STARTUPE3 CFGMCLK/2` + `BSCANE2 USER4 uart_bscan_log`).
+- **Host verification evidence (Windows host):**
+  - `sh -n scripts/fpga/bringup_kv260_rv32_ddr.shs` and `scripts/fpga/bringup_kv260_rv64_ddr.shs` -> exit `0`.
+  - `simple.exe test test/01_unit/hardware/riscv_bf7_rtl_and_kv260_contract_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed` (`outcome=OK`, exit `0`).
+- **Target KV260 JTAG verification commands:**
+  ```sh
+  sh scripts/fpga/build_k26_rv64_ddr_bitstream.shs
+  sh scripts/fpga/bringup_kv260_rv64_ddr.shs
+  sh scripts/fpga/check_kv260_jtag_debug.shs
+  ```

@@ -212,3 +212,15 @@ QEMU/baremetal-lane work not verifiable on this Windows host, and full fork
 remains the scheduler-integration program described in §2. The OPEN (P2)
 status stays accurate: the SpawnWait primitive is landed but still unproven
 in-guest, and this file must not be claimed green.
+
+## BF-9 Update (2026-11-26) — host contract verified; bug remains `open`
+
+- **Verified host contracts**: Verified fail-closed unauthenticated path spawn (`x86_64_fs_exec_spawn` returns `-13` `EACCES`), `spl_handle_spawn_binary` task threading, and `_handle_fork_state` + `_handle_waitpid_state(WNOHANG)` child parent tracking on `Scheduler`.
+- **Remaining open scope**: `src/os/kernel/loader/x86_64_fs_exec_ring3.spl:474-619` still builds an isolated `AddressSpace` and calls `x86_64_enter_user_task(ctx, space.phys_root)` without registering a scheduler `Task` (and `baremetal_stubs.c` `_bare_exec_handle` remains outside BF-9 host verification), so this bug remains `open` pending QEMU ring-3 Task/bare-exec work.
+- **Host specs**:
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_fork_exec_spawn_contract_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel/abi/syscall_shim_process_state_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/build_spawn_wait_ring3.shs && sh scripts/os/ssh_ring3_uefi_boot.shs
+  ```

@@ -12,11 +12,16 @@
 #              ELF (for the synth to bake) and print the host Adler-32 golden.
 #   synth    — run build_k26_rv32.shs with the soak ELF as the payload so the
 #              bitstream boots straight into the soak (30-60 min Vivado).
-#   run      — program the board and capture the fabric UART (FT4232H
-#              /dev/ttyUSB1 + /dev/ttyUSB2) with per-line timestamps until the
-#              final DONE=<hex>~ appears, then verify: wall >= MIN_WALL,
-#              progress markers present, golden == host golden.
+#   run      — program the board and capture an EXTERNAL 3.3V USB-UART wired to
+#              PMOD J2 (H12/E10 via UART_EXTRA_PORTS or non-Xilinx
+#              /dev/serial/by-id/*) until DONE=<hex>~ appears, then verify:
+#              wall >= MIN_WALL, progress markers present, golden == host golden.
+#              NOTE: KV260 onboard FT4232H /dev/ttyUSB* are NOT wired to fabric
+#              H12; use scripts/fpga/soak_rv32_board_jtag.shs when no PMOD UART
+#              adapter is attached.
 #   all      — payload, synth, run in sequence.
+#   --self-test — hermetic host check of golden computation, snapshot dir
+#              creation, and fail-closed unrouted-FT4232H UART guardrail.
 #
 # Board core clock = CFGMCLK/2. CFGMCLK is a free-running UltraScale+ oscillator
 # (nominal 50 MHz, datasheet spread ~30-70 MHz => core 15-35 MHz), so COUNT is
@@ -30,7 +35,7 @@ cd "$ROOT_DIR"
 MODE="${1:-all}"
 
 PAY="$ROOT_DIR/examples/09_embedded/fpga_riscv/payload"
-WORK="$ROOT_DIR/build/fpga/laneA_board_soak"
+WORK="${WORK:-$ROOT_DIR/build/fpga/laneA_board_soak}"
 EVID="${EVID:-$ROOT_DIR/build/fpga/evidence/rv32_2026-07-24}"
 GCC="${RV32_GCC:-riscv64-unknown-elf-gcc}"
 OBJCOPY="${RV32_OBJCOPY:-riscv64-unknown-elf-objcopy}"
@@ -39,13 +44,15 @@ COUNT="${RV32_BOARD_COUNT:-260000000}"
 INTERVAL="${RV32_BOARD_INTERVAL:-6500000}"
 MIN_WALL="${RV32_BOARD_MIN_WALL:-600}"
 CAP_MAX="${RV32_BOARD_CAP_MAX:-1800}"
-UART_PORTS="${RV32_BOARD_UART_PORTS:-/dev/ttyUSB1 /dev/ttyUSB2}"
+# External 3.3V USB-UART wired to H12/E10 (PMOD J2). KV260 onboard FT4232H
+# /dev/ttyUSB1..2 is NOT connected to PL UART H12; never default to ttyUSB1/2.
+UART_PORTS="${RV32_BOARD_UART_PORTS:-${UART_EXTRA_PORTS:-}}"
+SERIAL_BY_ID_DIR="${SERIAL_BY_ID_DIR:-/dev/serial/by-id}"
+ALLOW_XILINX_FT4232H_UART="${ALLOW_XILINX_FT4232H_UART:-0}"
 BAUD="${BAUD:-115200}"
 
 SOAK_ELF="$WORK/soak_board.elf"
 GOLDEN_FILE="$WORK/golden.txt"
-
-mkdir -p "$WORK" "$EVID"
 
 golden_of() {
     awk -v k="$1" 'BEGIN{
@@ -56,6 +63,7 @@ golden_of() {
 }
 
 do_payload() {
+    mkdir -p "$WORK" "$EVID" "$EVID/payload_snapshot"
     command -v "$GCC" >/dev/null 2>&1 || { echo "FAIL: $GCC not found"; exit 1; }
     command -v "$OBJCOPY" >/dev/null 2>&1 || { echo "FAIL: $OBJCOPY not found"; exit 1; }
     echo "=== payload: COUNT=$COUNT INTERVAL=$INTERVAL ==="
@@ -68,11 +76,13 @@ do_payload() {
     GOLDEN="$(golden_of "$COUNT")"
     echo "$GOLDEN" > "$GOLDEN_FILE"
     echo "host_golden=$GOLDEN"
+    echo "golden_provenance=host_sim_reference"
     cp "$WORK/soak_board.s" "$EVID/payload_snapshot/soak_board.s"
-    echo "$COUNT $INTERVAL $GOLDEN" > "$EVID/board_soak_params.txt"
+    echo "$COUNT $INTERVAL $GOLDEN host_sim_reference" > "$EVID/board_soak_params.txt"
 }
 
 do_synth() {
+    mkdir -p "$WORK" "$EVID"
     [ -f "$SOAK_ELF" ] || { echo "FAIL: run payload mode first ($SOAK_ELF missing)"; exit 1; }
     if [ "$(pgrep -fc 'lnx64.o/vivado' 2>/dev/null || echo 0)" -gt 0 ]; then
         echo "FAIL: a Vivado is already running (serialize: one at a time)"; exit 1
@@ -106,10 +116,33 @@ do_run() {
     OUT_BIT="${BITSTREAM:-build/build/rv32_fpga/gateware/rv32_fpga.bit}"
     [ -f "$OUT_BIT" ] || { echo "FAIL: bitstream $OUT_BIT missing (run synth)"; exit 1; }
     GOLDEN="$(cat "$GOLDEN_FILE" 2>/dev/null || golden_of "$COUNT")"
-    echo "=== run: program board + capture (expect golden=$GOLDEN) ==="
+    echo "=== run: program board + capture (expect host_sim_reference golden=$GOLDEN) ==="
     STAMP="$(date +%Y%m%d_%H%M%S)"
     RUNDIR="$EVID/board_run_$STAMP"
     mkdir -p "$RUNDIR"
+
+    # Auto-discover non-Xilinx 3.3V PMOD USB-UART adapters when caller didn't pass
+    # UART_EXTRA_PORTS / RV32_BOARD_UART_PORTS. KV260 onboard FT4232H
+    # (*usb-Xilinx_ML_Carrier_Card_* / /dev/ttyUSB0..2) is NOT routed to PL
+    # UART pin H12 and must NEVER be mistaken for a live fabric UART capture.
+    if [ -z "$UART_PORTS" ]; then
+        for link in "$SERIAL_BY_ID_DIR"/*; do
+            if [ -e "$link" ]; then
+                case "$link" in
+                    *usb-Xilinx_ML_Carrier_Card_*) continue ;;
+                esac
+                UART_PORTS="$UART_PORTS $(readlink -f "$link")"
+            fi
+        done
+    fi
+    UART_PORTS="$(printf '%s' "$UART_PORTS" | awk '{$1=$1;print}')"
+    if [ -z "$UART_PORTS" ] && [ "$ALLOW_XILINX_FT4232H_UART" != "1" ]; then
+        echo "BLOCKED: PL fabric UART (H12/E10 PMOD J2) is not routed to onboard FT4232H (/dev/ttyUSB1..2);" >&2
+        echo "         host golden $GOLDEN is host_sim_reference only, NOT board_captured." >&2
+        echo "         Attach a 3.3V PMOD USB-UART (set UART_EXTRA_PORTS) or run scripts/fpga/soak_rv32_board_jtag.shs." >&2
+        echo "SOAK_RV32_BOARD: BLOCKED reason=pl_uart_not_routed_to_ft4232h"
+        exit 3
+    fi
 
     # ONE raw reader per candidate fabric-UART port (two readers on the same
     # tty would split the byte stream and corrupt both). Wall time is derived
@@ -176,7 +209,9 @@ do_run() {
         echo "progress_markers=$PMARK"
         echo "wall_seconds=$WALL"
         echo "core_golden=$CORE_GOLD"
+        echo "core_golden_provenance=board_uart_captured"
         echo "host_golden=$GOLDEN"
+        echo "host_golden_provenance=host_sim_reference"
         echo "raw_capture=$RUNDIR/${base}.raw"
     } | tee "$RUNDIR/verdict.txt"
 
@@ -191,10 +226,35 @@ do_run() {
     fi
 }
 
+do_self_test() {
+    st_dir="$(mktemp -d)" || exit 2
+    trap 'rm -rf "$st_dir"' EXIT
+    EVID="$st_dir/evid" WORK="$st_dir/work" sh -c '
+        mkdir -p "$WORK" "$EVID" "$EVID/payload_snapshot"
+        printf "%s\n" "// snapshot test" > "$EVID/payload_snapshot/soak_board.s"
+        test -s "$EVID/payload_snapshot/soak_board.s"
+    '
+    g_small="$(golden_of 10)"
+    [ "$g_small" = "00AF002E" ] || { echo "FAIL: golden_of(10) expected 00AF002E got $g_small" >&2; exit 1; }
+    st_bit="$st_dir/fake.bit"
+    : > "$st_bit"
+    mkdir -p "$st_dir/serial_by_id"
+    : > "$st_dir/serial_by_id/usb-Xilinx_ML_Carrier_Card_JTAG-if01-port0"
+    set +e
+    out="$(BITSTREAM="$st_bit" EVID="$st_dir/evid" WORK="$st_dir/work" SERIAL_BY_ID_DIR="$st_dir/serial_by_id" RV32_BOARD_COUNT=10 RV32_BOARD_UART_PORTS="" UART_EXTRA_PORTS="" sh "$0" run 2>&1)"
+    rc=$?
+    set -e
+    [ "$rc" -eq 3 ] || { echo "FAIL: unrouted UART run must exit 3, got $rc: $out" >&2; exit 1; }
+    printf '%s\n' "$out" | grep -Fq "SOAK_RV32_BOARD: BLOCKED reason=pl_uart_not_routed_to_ft4232h" || {
+        echo "FAIL: missing blocked marker in unrouted UART run: $out" >&2; exit 1; }
+    echo "STATUS: PASS soak-rv32-board self-test"
+}
+
 case "$MODE" in
+    --self-test) do_self_test ;;
     payload) do_payload ;;
     synth)   do_synth ;;
     run)     do_run ;;
     all)     do_payload; do_synth; do_run ;;
-    *) echo "usage: $0 {payload|synth|run|all}"; exit 2 ;;
+    *) echo "usage: $0 {payload|synth|run|all|--self-test}"; exit 2 ;;
 esac

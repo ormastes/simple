@@ -1703,3 +1703,13 @@ the 2026-11-07 repro steps needing a SimpleOS/stage3 run):
 4. Restore the `vfs_boot_init.spl:374` skip to `if true:` afterwards.
 
 Disposition: BLOCKED. Header flipped Open → BLOCKED 2026-11-11 (lane p3-seedA).
+
+## BF-9 Update (2026-11-26) — OS-side C7 cleanup & verify waiting (`fix-implemented-verification-pending`)
+
+- **OS-side fix**: Replaced remaining scalar `.to_u32()` alias-bridge calls on `u8`/`u64` receivers in `src/os/services/vfs/direct_fat32_boot_reader.spl` (`138`, `361`, `394`, `400`, `412`) with `as u32` casts matching `_vfs_boot_mem_u16_le`. (No `.sdn` shard exists for this bug; `bug_db.sdn` untouched.)
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_freestanding_init_and_u32_contract_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/build-simpleos-x86-64-desktop-engine2d-kernel.shs && sh scripts/os/run_simpleos_q35_smoke.shs
+  bin/simple test test/03_system/os/simpleos_native_build_entry_closure_spec.spl
+  ```

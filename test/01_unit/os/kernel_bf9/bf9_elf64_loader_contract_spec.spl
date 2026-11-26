@@ -1,0 +1,109 @@
+"""
+# @req REQ-SSPEC-OS
+# @cover src/os/kernel/loader/elf_loader.spl
+#
+# Host unit specification for BF-9 Bug #5:
+#   simpleos_freestanding_kernel_elf32_wrap_and_weak_gate_overbroad_2026-08-06
+#
+# Verifies ELF64 acceptance, ELF32 rejection on x86_64, W|X segment rejection,
+# and truncated-header rejection through load_user_executable and elf_admit_executable.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.kernel.hal.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{load_user_executable, elf_admit_executable}
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _make_x86_64_elf64(entry: i64, flags: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7Fu8)
+    bytes.push(0x45u8)
+    bytes.push(0x4Cu8)
+    bytes.push(0x46u8)
+    bytes.push(2u8)   # ELFCLASS64
+    bytes.push(1u8)   # ELFDATA2LSB
+    bytes.push(1u8)   # EV_CURRENT
+    while bytes.len() < 16:
+        bytes.push(0u8)
+    bytes = _push_u16_le(bytes, 2)       # ET_EXEC
+    bytes = _push_u16_le(bytes, 62)      # EM_X86_64
+    bytes = _push_u32_le(bytes, 1)       # EV_CURRENT
+    bytes = _push_u64_le(bytes, entry)   # e_entry
+    bytes = _push_u64_le(bytes, 64)      # e_phoff
+    bytes = _push_u64_le(bytes, 0)       # e_shoff
+    bytes = _push_u32_le(bytes, 0)       # e_flags
+    bytes = _push_u16_le(bytes, 64)      # e_ehsize
+    bytes = _push_u16_le(bytes, 56)      # e_phentsize
+    bytes = _push_u16_le(bytes, 1)       # e_phnum
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    # Program header (PT_LOAD)
+    bytes = _push_u32_le(bytes, 1)       # PT_LOAD
+    bytes = _push_u32_le(bytes, flags)   # p_flags
+    bytes = _push_u64_le(bytes, 0x1000)  # p_offset
+    bytes = _push_u64_le(bytes, entry)   # p_vaddr
+    bytes = _push_u64_le(bytes, entry)   # p_paddr
+    bytes = _push_u64_le(bytes, 8)       # p_filesz
+    bytes = _push_u64_le(bytes, 8)       # p_memsz
+    bytes = _push_u64_le(bytes, 0x1000)  # p_align
+    while bytes.len() < 0x1008:
+        bytes.push(0x90u8)
+    bytes
+
+fn _make_elf32_x86() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7Fu8)
+    bytes.push(0x45u8)
+    bytes.push(0x4Cu8)
+    bytes.push(0x46u8)
+    bytes.push(1u8)   # ELFCLASS32
+    bytes.push(1u8)   # ELFDATA2LSB
+    bytes.push(1u8)   # EV_CURRENT
+    while bytes.len() < 52:
+        bytes.push(0u8)
+    bytes
+
+describe "SimpleOS x86_64 ELF64 loader admission contract":
+    it "admits a valid ET_EXEC ELF64 X86_64 image without truncation":
+        step("parse and admit an aligned R+X PT_LOAD ELF64 binary at 0x401000")
+        val elf = _make_x86_64_elf64(0x401000, 5)
+        val parsed = load_user_executable(elf, Architecture.X86_64)
+        expect(parsed.is_ok()).to_equal(true)
+        val image = parsed.unwrap()
+        expect(image.entry).to_equal(0x401000u64)
+        expect(image.segments.len()).to_equal(1)
+        expect(image.segments[0].virt_addr).to_equal(0x401000u64)
+        expect(elf_admit_executable(elf, Architecture.X86_64).is_ok()).to_equal(true)
+
+    it "rejects ELF32 binaries targeting X86_64":
+        step("verify ELFCLASS32 image returns an explicit mismatch Err")
+        val res = load_user_executable(_make_elf32_x86(), Architecture.X86_64)
+        expect(res.is_err()).to_equal(true)
+
+    it "rejects W|X PT_LOAD segments and truncated binaries":
+        step("verify W^X violation (flags=7) and truncated input fail closed")
+        val wx_res = elf_admit_executable(_make_x86_64_elf64(0x401000, 7), Architecture.X86_64)
+        expect(wx_res.is_err()).to_equal(true)
+        val trunc_res = load_user_executable([0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8], Architecture.X86_64)
+        expect(trunc_res.is_err()).to_equal(true)

@@ -2,10 +2,34 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+. "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
 SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
 SIDECAR_BUILD_ROOT="${RISCV_SIDECAR_BUILD_ROOT:-$ROOT_DIR/build/riscv_product_level_sidecar_$$}"
 BUDGET_BUILD_ROOT="${RISCV_BUDGET_BUILD_ROOT:-$ROOT_DIR/build/riscv_product_level_budget_$$}"
 DEFAULT_SYNTH_REPORT_DIR="$ROOT_DIR/build/riscv_synth_reports"
+
+if [ "${1:-}" = "--self-test" ]; then
+    st_dir="$(mktemp -d)" || exit 2
+    trap 'rm -rf "$st_dir"' EXIT
+    cat >"$st_dir/fake_seed.sh" <<'EOF_SEED'
+#!/bin/sh
+echo "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool." >&2
+exit 0
+EOF_SEED
+    chmod +x "$st_dir/fake_seed.sh"
+    set +e
+    out="$(SIMPLE_BIN="$st_dir/fake_seed.sh" sh "$0" 2>&1)"
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || { echo "STATUS: FAIL riscv-product-level-evidence self-test: seed exited $rc expected 2" >&2; exit 1; }
+    printf '%s\n' "$out" | grep -Fq "bootstrap seed" || { echo "STATUS: FAIL riscv-product-level-evidence self-test: missing seed diagnostic" >&2; exit 1; }
+    echo "STATUS: PASS riscv-product-level-evidence self-test"
+    exit 0
+fi
+
+require_self_hosted "$SIMPLE_BIN" "riscv-product-level-evidence"
+SIMPLE_BIN="$SELF_HOSTED_BIN"
+export SIMPLE_BIN
 
 "$SIMPLE_BIN" test "$ROOT_DIR/test/03_system/app/hardware/feature/riscv_fpga_linux_spec.spl"
 BUILD_ROOT="$SIDECAR_BUILD_ROOT" sh "$ROOT_DIR/scripts/check/check-riscv-formal-dual-track.shs"

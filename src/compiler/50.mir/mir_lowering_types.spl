@@ -1333,10 +1333,10 @@ impl MirLowering:
         self.runtime_value_local_ids = ids
 
     fn snapshot_tagged_text_locals() -> Dict<i64, bool>:
-        var copy: Dict<i64, bool> = {}
-        for id in self.tagged_text_locals.keys():
-            copy[id] = self.tagged_text_locals[id]
-        copy
+        mir_snapshot_bool_marks(self.tagged_text_locals)
+
+    fn snapshot_decoded_text_option_locals() -> Dict<i64, bool>:
+        mir_snapshot_bool_marks(self.decoded_text_option_locals)
 
     fn snapshot_runtime_value_local_ids() -> [i64]:
         var copy: [i64] = []
@@ -1344,18 +1344,12 @@ impl MirLowering:
             copy.push(id)
         copy
 
-    me restore_pre_branch_representation_marks(boundary_id: i64, pre_tagged: Dict<i64, bool>, pre_rv: [i64]):
-        """Restore tagged_text_locals and runtime_value_local_ids for locals
-        allocated before `boundary_id`, keeping arm-local temps (>= boundary_id)
-        intact for branch merges such as join_untyped_text_arms_v1."""
-        var next_tagged: Dict<i64, bool> = {}
-        for id in self.tagged_text_locals.keys():
-            if id >= boundary_id:
-                next_tagged[id] = self.tagged_text_locals[id]
-        for id in pre_tagged.keys():
-            if id < boundary_id:
-                next_tagged[id] = pre_tagged[id]
-        self.tagged_text_locals = next_tagged
+    me restore_pre_branch_representation_marks(boundary_id: i64, pre_tagged: Dict<i64, bool>, pre_rv: [i64], pre_decoded_text_opt: Dict<i64, bool>):
+        """Restore tagged_text_locals, decoded_text_option_locals, and
+        runtime_value_local_ids for locals allocated before `boundary_id`,
+        keeping arm-local temps (>= boundary_id) intact for branch merges."""
+        self.tagged_text_locals = mir_restore_bool_marks(boundary_id, self.tagged_text_locals, pre_tagged)
+        self.decoded_text_option_locals = mir_restore_bool_marks(boundary_id, self.decoded_text_option_locals, pre_decoded_text_opt)
 
         var next_rv: [i64] = []
         for id in self.runtime_value_local_ids:
@@ -1366,14 +1360,11 @@ impl MirLowering:
                 next_rv.push(id)
         self.runtime_value_local_ids = next_rv
 
-    me intersect_pre_branch_representation_marks(boundary_id: i64, alt_tagged: Dict<i64, bool>, alt_rv: [i64]):
+    me intersect_pre_branch_representation_marks(boundary_id: i64, alt_tagged: Dict<i64, bool>, alt_rv: [i64], alt_decoded_text_opt: Dict<i64, bool>):
         """Keep a pre-branch local (< boundary_id) marked only when BOTH the
-        current path and `(alt_tagged, alt_rv)` agree it is tagged."""
-        var next_tagged: Dict<i64, bool> = {}
-        for id in self.tagged_text_locals.keys():
-            if id >= boundary_id or alt_tagged.contains(id):
-                next_tagged[id] = self.tagged_text_locals[id]
-        self.tagged_text_locals = next_tagged
+        current path and the alternate path agree on the representation mark."""
+        self.tagged_text_locals = mir_intersect_bool_marks(boundary_id, self.tagged_text_locals, alt_tagged)
+        self.decoded_text_option_locals = mir_intersect_bool_marks(boundary_id, self.decoded_text_option_locals, alt_decoded_text_opt)
 
         var next_rv: [i64] = []
         for id in self.runtime_value_local_ids:
@@ -1454,6 +1445,29 @@ fn mir_id_list_contains(ids: [i64], target: i64) -> bool:
         if id == target:
             return true
     false
+
+fn mir_snapshot_bool_marks(marks: Dict<i64, bool>) -> Dict<i64, bool>:
+    var copy: Dict<i64, bool> = {}
+    for id in marks.keys():
+        copy[id] = marks[id]
+    copy
+
+fn mir_restore_bool_marks(boundary_id: i64, current: Dict<i64, bool>, pre: Dict<i64, bool>) -> Dict<i64, bool>:
+    var next: Dict<i64, bool> = {}
+    for id in current.keys():
+        if id >= boundary_id:
+            next[id] = current[id]
+    for id in pre.keys():
+        if id < boundary_id:
+            next[id] = pre[id]
+    next
+
+fn mir_intersect_bool_marks(boundary_id: i64, current: Dict<i64, bool>, alt: Dict<i64, bool>) -> Dict<i64, bool>:
+    var next: Dict<i64, bool> = {}
+    for id in current.keys():
+        if id >= boundary_id or alt.contains(id):
+            next[id] = current[id]
+    next
 
 fn text_map_without(marks: Dict<i64, text>, key: i64) -> Dict<i64, text>:
     if not marks.contains_key(key):

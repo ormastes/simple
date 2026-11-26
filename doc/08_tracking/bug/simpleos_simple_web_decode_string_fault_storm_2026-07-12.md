@@ -282,3 +282,12 @@ compiler plus a QEMU guest — both outside this lane. The status header
 
 Status: fix-implemented-verification-pending (native/QEMU gate still open),
 unchanged.
+
+## BF-9 Update (2026-11-26) — verify waiting (`fix-implemented-verification-pending`)
+
+- **Verified OS web contract**: `src/os/services/web/web_service.spl` routes through `http_classify_request` and escapes reflected paths (including HTML metacharacters and multi-byte UTF-8) via canonical `html_escape_core`.
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_web_utf8_and_vfs_bounds_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/simple_browser_board_gate.shs
+  ```

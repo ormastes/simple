@@ -1,0 +1,75 @@
+"""
+# BF-7 Firmware Build, RV64 Crypto C ABI, and Seed Gate Guards
+"""
+# @req: REQ-OS-RISCV-BF7-001
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _run_sh(command: text) -> (text, text, i64):
+    val (probe_out, probe_err, probe_code) = rt_process_run("/bin/sh", ["-c", "true"])
+    if probe_code == 0:
+        return rt_process_run("/bin/sh", ["-c", command])
+    rt_process_run("sh", ["-c", command])
+
+describe "BF-7 RISC-V firmware, Crypto C ABI, and seed-attribution contracts":
+    it "passes fw_rv32 build and boot self-tests including Rust seed refusal":
+        val logic_src = rt_file_read_text("examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic.spl") ?? ""
+        val bram_ld = rt_file_read_text("examples/09_embedded/fpga_riscv/rtl/nvme_fw_rv32_bram.ld") ?? ""
+        expect(logic_src).to_contain("use logic_sections_primary.*")
+        expect(logic_src).to_contain("use logic_sections_secondary.*")
+        expect(logic_src).to_not_contain("fn rv32_journal_selftest()")
+        expect(bram_ld).to_contain("_nandram_start")
+
+        val (b32_out, b32_err, b32_code) = _run_sh("sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs --self-test")
+        expect(b32_code).to_equal(0)
+        expect(b32_out).to_contain("STATUS: PASS nvme-rv32-build self-test")
+
+        val (boot32_out, boot32_err, boot32_code) = _run_sh("sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test")
+        expect(boot32_code).to_equal(0)
+        expect(boot32_out).to_contain("STATUS: PASS nvme-rv32-boot self-test")
+
+    it "passes fw_rv64 build and boot self-tests including Rust seed refusal":
+        val (b64_out, b64_err, b64_code) = _run_sh("sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs --self-test")
+        expect(b64_code).to_equal(0)
+        expect(b64_out).to_contain("STATUS: PASS nvme-rv64-build self-test")
+
+        val (boot64_out, boot64_err, boot64_code) = _run_sh("sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs --self-test")
+        expect(boot64_code).to_equal(0)
+        expect(boot64_out).to_contain("STATUS: PASS nvme-rv64-boot self-test")
+
+    it "verifies all 5 RV64 crypto C helpers and x86_64 AES-GCM wrapper across raw and tagged ABIs":
+        val (c_out, c_err, c_code) = _run_sh("sh test/01_unit/os/riscv_bf7/verify_rv64_crypto_helpers.shs")
+        expect(c_code).to_equal(0)
+        expect(c_out).to_contain("STATUS: PASS verify_rv64_crypto_helpers binaries=5 all_helpers=5")
+
+        expect(rt_file_exists("examples/09_embedded/simple_os/arch/riscv64/ed25519_probe_entry.spl")).to_equal(true)
+        val probe_src = rt_file_read_text("examples/09_embedded/simple_os/arch/riscv64/ed25519_probe_entry.spl") ?? ""
+        expect(probe_src).to_contain("val sig = ed25519_sign(seed, pk, empty_msg)")
+
+        val abi_hdr = rt_file_read_text("examples/09_embedded/simple_os/arch/riscv64/boot/rv64_crypto_array_abi.h") ?? ""
+        expect(abi_hdr).to_contain("rt_crypto_uses_tagged_index")
+        for path in [
+            "examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_sha512_helper.c",
+            "examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_scalar_helper.c",
+            "examples/09_embedded/simple_os/arch/riscv64/boot/curve25519_ring_helper.c",
+            "examples/09_embedded/simple_os/arch/riscv64/boot/tls13_aes256_gcm_helper.c",
+            "examples/09_embedded/simple_os/arch/riscv64/boot/tls13_sha256_helper.c"
+        ]:
+            val src = rt_file_read_text(path) ?? ""
+            expect(src).to_contain("rv64_crypto_array_abi.h")
+
+    it "enforces self-hosted runtime guards behaviorally in RISC-V evidence gates":
+        val (bud_out, bud_err, bud_code) = _run_sh("sh scripts/check/check-riscv-budget-evidence.shs --self-test")
+        expect(bud_code).to_equal(0)
+        expect(bud_out).to_contain("STATUS: PASS riscv-budget-evidence self-test")
+
+        val (prod_out, prod_err, prod_code) = _run_sh("sh scripts/check/check-riscv-product-level-evidence.shs --self-test")
+        expect(prod_code).to_equal(0)
+        expect(prod_out).to_contain("STATUS: PASS riscv-product-level-evidence self-test")
+
+        val mcdc = rt_file_read_text("scripts/check/check-rv32-hal-mcdc.shs") ?? ""
+        expect(mcdc).to_contain("require_self_hosted")

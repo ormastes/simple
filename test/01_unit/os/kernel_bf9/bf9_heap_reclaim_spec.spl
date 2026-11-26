@@ -1,0 +1,158 @@
+"""
+# @req REQ-SSPEC-OS
+# @cover src/os/kernel/memory/heap.spl
+#
+# Host unit specification for BF-9 Bug #3:
+#   simpleos_bump_heap_no_free_interactive_session_2026-07-26
+#
+# Verifies that heap_alloc records allocation byte sizes and unsized
+# heap_free(addr) recovers those sizes for mimalloc freelist recycling,
+# kernel accounting convergence, and large-page span reclaim.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.kernel.memory.heap.{
+    heap_init_identity,
+    heap_alloc,
+    heap_free,
+    heap_free_size,
+    heap_total_allocated,
+    heap_total_free,
+    heap_alloc_count,
+    heap_integrity_check,
+    heap_tracked_alloc_size,
+}
+use os.kernel.types.memory_types.{VirtAddr}
+
+describe "SimpleOS kernel heap unsized reclaim and page reuse":
+    it "tracks allocation sizes and reclaims counters on unsized heap_free":
+        step("initialize a 128 KiB identity heap and allocate 128 bytes")
+        val heap_bytes: u64 = 131072u64
+        heap_init_identity(VirtAddr(addr: 0x200000u64), heap_bytes)
+        expect(heap_total_allocated()).to_equal(0u64)
+        expect(heap_total_free()).to_equal(heap_bytes)
+        expect(heap_alloc_count()).to_equal(0u64)
+
+        val ptr_opt = heap_alloc(128)
+        expect(ptr_opt.is_some()).to_equal(true)
+        val ptr = ptr_opt.unwrap()
+        expect(ptr.addr >= 0x200000u64).to_equal(true)
+        expect(heap_tracked_alloc_size(ptr)).to_equal(128u64)
+        expect(heap_total_allocated()).to_equal(128u64)
+        expect(heap_total_free()).to_equal(heap_bytes - 128u64)
+        expect(heap_alloc_count()).to_equal(1u64)
+
+        step("free without explicit size and assert full accounting convergence")
+        heap_free(ptr)
+        expect(heap_tracked_alloc_size(ptr)).to_equal(0u64)
+        expect(heap_total_allocated()).to_equal(0u64)
+        expect(heap_total_free()).to_equal(heap_bytes)
+        expect(heap_alloc_count()).to_equal(0u64)
+        expect(heap_integrity_check()).to_equal(true)
+
+    it "recycles small/medium blocks across repeated interactive session alloc-free cycles":
+        step("run 50 alloc/free cycles of 256 bytes and confirm slot reuse + zero leak")
+        val heap_bytes: u64 = 131072u64
+        heap_init_identity(VirtAddr(addr: 0x300000u64), heap_bytes)
+
+        val first_opt = heap_alloc(256)
+        expect(first_opt.is_some()).to_equal(true)
+        val first_addr = first_opt.unwrap().addr
+        heap_free(first_opt.unwrap())
+
+        var reused_first_addr = false
+        var i: i64 = 0
+        while i < 50:
+            val blk_opt = heap_alloc(256)
+            expect(blk_opt.is_some()).to_equal(true)
+            val blk = blk_opt.unwrap()
+            if blk.addr == first_addr:
+                reused_first_addr = true
+            expect(heap_total_allocated()).to_equal(256u64)
+            heap_free(blk)
+            expect(heap_total_allocated()).to_equal(0u64)
+            i = i + 1
+
+        expect(reused_first_addr).to_equal(true)
+        expect(heap_total_free()).to_equal(heap_bytes)
+        expect(heap_alloc_count()).to_equal(0u64)
+        expect(heap_integrity_check()).to_equal(true)
+
+    it "reclaims page-backed large allocations exceeding total heap capacity cumulatively":
+        step("allocate and free 70000 bytes 3 times (210000 > 131072 heap size)")
+        val heap_bytes: u64 = 131072u64
+        heap_init_identity(VirtAddr(addr: 0x400000u64), heap_bytes)
+
+        var round: i64 = 0
+        while round < 3:
+            val big_opt = heap_alloc(70000)
+            expect(big_opt.is_some()).to_equal(true)
+            val big = big_opt.unwrap()
+            expect(heap_tracked_alloc_size(big)).to_equal(70000u64)
+            expect(heap_total_allocated()).to_equal(70000u64)
+            heap_free(big)
+            expect(heap_total_allocated()).to_equal(0u64)
+            expect(heap_total_free()).to_equal(heap_bytes)
+            round = round + 1
+
+        expect(heap_alloc_count()).to_equal(0u64)
+        expect(heap_integrity_check()).to_equal(true)
+
+    it "treats duplicate unsized heap_free as a safe no-op without corrupting class-0 freelist":
+        step("allocate 128 bytes, free once, then duplicate heap_free and allocate 8 bytes")
+        val heap_bytes: u64 = 131072u64
+        heap_init_identity(VirtAddr(addr: 0x500000u64), heap_bytes)
+
+        val ptr_opt = heap_alloc(128)
+        expect(ptr_opt.is_some()).to_equal(true)
+        val ptr = ptr_opt.unwrap()
+        heap_free(ptr)
+        expect(heap_tracked_alloc_size(ptr)).to_equal(0u64)
+        expect(heap_total_allocated()).to_equal(0u64)
+        expect(heap_total_free()).to_equal(heap_bytes)
+        expect(heap_alloc_count()).to_equal(0u64)
+
+        heap_free(ptr)
+        expect(heap_tracked_alloc_size(ptr)).to_equal(0u64)
+        expect(heap_total_allocated()).to_equal(0u64)
+        expect(heap_total_free()).to_equal(heap_bytes)
+        expect(heap_alloc_count()).to_equal(0u64)
+
+        val tiny_opt = heap_alloc(8)
+        expect(tiny_opt.is_some()).to_equal(true)
+        val tiny = tiny_opt.unwrap()
+        expect(tiny.addr != ptr.addr).to_equal(true)
+        expect(heap_total_allocated()).to_equal(8u64)
+        expect(heap_alloc_count()).to_equal(1u64)
+        heap_free(tiny)
+        expect(heap_total_allocated()).to_equal(0u64)
+        expect(heap_alloc_count()).to_equal(0u64)
+
+    it "treats duplicate large heap_free_size as a safe no-op without span aliasing":
+        step("allocate 70000 bytes, free once, attempt duplicate heap_free_size(131072), verify no alias")
+        val heap_bytes: u64 = 131072u64
+        heap_init_identity(VirtAddr(addr: 0x600000u64), heap_bytes)
+
+        val big_opt = heap_alloc(70000)
+        expect(big_opt.is_some()).to_equal(true)
+        val big = big_opt.unwrap()
+        heap_free(big)
+        expect(heap_total_allocated()).to_equal(0u64)
+        expect(heap_total_free()).to_equal(heap_bytes)
+        expect(heap_alloc_count()).to_equal(0u64)
+
+        heap_free_size(big, 131072)
+        heap_free_size(VirtAddr(addr: 0x608000u64), 131072)
+        expect(heap_total_allocated()).to_equal(0u64)
+        expect(heap_total_free()).to_equal(heap_bytes)
+        expect(heap_alloc_count()).to_equal(0u64)
+
+        val live_opt = heap_alloc(70000)
+        expect(live_opt.is_some()).to_equal(true)
+        val alias_opt = heap_alloc(70000)
+        expect(alias_opt.is_none()).to_equal(true)
+        heap_free(live_opt.unwrap())
+        expect(heap_total_allocated()).to_equal(0u64)
+        expect(heap_total_free()).to_equal(heap_bytes)
+        expect(heap_integrity_check()).to_equal(true)

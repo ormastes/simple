@@ -95,3 +95,14 @@ Still open: typed path-scoped capability projection through
 fail closed with `SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED`.
 `launcher_replace_composition_catalog_v1` (atomic replace) exists but is not
 wired because it retires built-in apps, which the sequential adapter does not.
+
+## BF-9 Update (2026-11-26) — verify waiting (`fix-implemented-verification-pending`)
+
+- **Verified owner API & catalog replacement**: Verified `manifest_project_scoped_capabilities_v1`, fail-closed unconfigured launch ceilings (`SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED` and `SCI_LAUNCHER_CAPABILITY_EXCEEDS_CEILING`), atomic catalog projection/rollback (`launcher_load_composition_bytes_v1`), `launcher_bind_process_app_id_v1`, and launch-arena capability mask validation.
+- **Host specs**:
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_sci_launcher_policy_projection_spec.spl --mode=interpreter` -> `3 examples, 0 failures`.
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/services/launcher/launcher_scoped_cap_atomic_catalog_spec.spl test/01_unit/os/services/launcher/launcher_scoped_cap_atomic_prevention_spec.spl --mode=interpreter`
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+  ```
