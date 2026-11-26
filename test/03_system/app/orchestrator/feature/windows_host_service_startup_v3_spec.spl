@@ -1,0 +1,87 @@
+# codex-system-test
+# AUTHORED_NOT_RUN. Requires a dedicated installed Windows Docker Host fixture.
+use std.spec.{describe, it, expect, step, fail}
+use app.orchestrator.command.orchestrator_command_v1
+use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceCleanupV3
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.{
+    HostServiceEnrollmentBindingV2, host_service_enrollment_payload_decode_v2}
+
+var windows_startup_cleanup_v3: Option<HostServiceCleanupV3> = None
+
+fn windows_startup_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("missing Windows Host status field:" + key)
+    match fields[key]:
+        case SdnValue.String(value):
+            if value == "": return Err("empty Windows Host status field:" + key)
+            Ok(value)
+        case _: Err("invalid Windows Host status field:" + key)
+
+fn windows_startup_status_v3(args: [text], binding: HostServiceEnrollmentBindingV2) -> Result<(text, text), text>:
+    val reply = orchestrator_reply_cleanup_v2(orchestrator_command_v1(args))
+    windows_startup_cleanup_v3 = reply.service_cleanup
+    if windows_startup_cleanup_v3.is_some(): return Err("Windows Host command retained cleanup")
+    if reply.exit_code != 0: return Err("Windows Host status command failed:" + str(reply.exit_code))
+    val parsed = sdn_parse_strict_v1(reply.output,
+        SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 4, max_nodes: 128))
+    if parsed.is_err(): return Err("invalid Windows Host status SDN")
+    match parsed.unwrap().value:
+        case SdnValue.Dict(fields):
+            val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+                "kind": SdnValue.String("host-local-status"), "ready": SdnValue.Bool(true),
+                "backend": SdnValue.String("windows-docker-process"),
+                "physicalHostId": SdnValue.String(binding.physical_host_id),
+                "serviceScopeId": SdnValue.String(binding.service_scope_id),
+                "nativeMachineId": SdnValue.String(binding.native_machine_id),
+                "providerIdentityDigest": SdnValue.String(binding.provider_identity_digest),
+                "continuityMode": SdnValue.String("service-incarnation-v1"),
+                "durabilityProfile": SdnValue.String("process-crash-v1")}
+            for key in expected.keys():
+                if not fields.contains_key(key) or fields[key] != expected[key]:
+                    return Err("Windows Host status did not match the enrolled fixture:" + key)
+            val incarnation = windows_startup_text_v3(fields, "continuityId")?
+            val fence = windows_startup_text_v3(fields, "fenceId")?
+            Ok((incarnation, fence))
+        case _: Err("Windows Host status did not return an object")
+
+describe "Installed Windows Docker Host startup through the shared Container API":
+    it "should reopen the exact enrolled Host with a fresh service incarnation and fence":
+        # @req AT-HOST-03
+        val parent = env_get("SIMPLE_WINDOWS_HOST_PRIVATE_PARENT")
+        val pin = env_get("SIMPLE_WINDOWS_HOST_POLICY_PIN")
+        val binding_path = env_get("SIMPLE_WINDOWS_HOST_BINDING_FILE")
+        if host_os() != "windows" or parent == "" or pin == "" or binding_path == "":
+            fail("BLOCKED: dedicated installed Windows Host fixture is unset")
+            return
+        if windows_startup_cleanup_v3.is_some():
+            fail("prior Windows fixture cleanup is still pending")
+            return
+
+        step("Read the installed fixture's enrollment binding")
+        val bytes = file_read_regular_no_follow_bounded(binding_path, 16384)
+        if bytes.is_err():
+            fail("Windows fixture enrollment binding is unreadable")
+            return
+        val binding = host_service_enrollment_payload_decode_v2(bytes.unwrap())
+        if binding.is_err() or binding.unwrap().backend != "windows-docker-process":
+            fail("Windows fixture requires a canonical Windows Docker enrollment binding")
+            return
+
+        val args = ["host-service", "windows-docker-process", parent, pin, binding_path, "host-status", "-"]
+        step("Open the installed Host through the dispatcher and close its owner after ready status")
+        val first = windows_startup_status_v3(args, binding.unwrap())
+        if first.is_err():
+            fail(first.unwrap_err())
+            return
+        step("Reopen the same deployment and require a different service incarnation and fence")
+        val second = windows_startup_status_v3(args, binding.unwrap())
+        if second.is_err():
+            fail(second.unwrap_err())
+            return
+        expect(first.unwrap().0 == second.unwrap().0).to_equal(false)
+        expect(first.unwrap().1 == second.unwrap().1).to_equal(false)
