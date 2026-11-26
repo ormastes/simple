@@ -1,0 +1,60 @@
+# End-to-end: `scv gc` on a real temp SCV repo, with and without the opt-in
+# `.scv/store`. Real files under build/test-artifacts (never mocks).
+# Design: doc/05_design/platform/container/simple_container_improvement.md (Increment 3, Lane C)
+use std.spec.{describe, it, expect}
+use std.scv.store.{scv_init_repo}
+use std.scv.working_copy.{scv_snapshot}
+use std.scv.gc.{scv_gc_command}
+use std.nogc_sync_mut.storage.scv_adapter_v1.{scv_adapter_v1_store_root, scv_adapter_v1_enable,
+    scv_adapter_v1_open_projection}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
+use app.io.file_ops.{path_absolute}
+
+fn _repo(tag: text) -> text:
+    dir_create_all("build/test-artifacts")
+    val owned = secure_temp_dir_raw("build/test-artifacts", "scv-gc-e2e-" + tag + "-")
+    expect(owned == "").to_equal(false)
+    val root = path_absolute(owned).replace("\\", "/")
+    expect(scv_init_repo(root)).to_equal("initialized\n")
+    expect(file_write_bytes(root + "/a.txt", "gc e2e content".bytes())).to_equal(true)
+    val snap = scv_snapshot(root)
+    expect(snap.starts_with("ERROR")).to_equal(false)
+    root
+
+fn _cleanup(root: text):
+    val parent = path_absolute("build/test-artifacts").replace("\\", "/") + "/"
+    expect(root.starts_with(parent)).to_equal(true)
+    expect(dir_remove_all(root)).to_equal(true)
+
+fn _chunk_ids(root: text) -> [text]:
+    var ids: [text] = []
+    for name in dir_list(root + "/.scv/objects/chunks"):
+        if name.ends_with(".blob"):
+            ids.push(name.substring(0, name.byte_len() - 5))
+    ids
+
+describe "scv gc with the shared immutable store":
+    it "leaves a repo without .scv/store unchanged":
+        val root = _repo("off")
+        val out = scv_gc_command(root, ["gc"])
+        expect(out).to_contain("PASS")
+        expect(is_dir(scv_adapter_v1_store_root(root))).to_equal(false)
+        _cleanup(root)
+
+    it "pins reachable chunks in the store once opted in":
+        val root = _repo("on")
+        val chunks = _chunk_ids(root)
+        expect(chunks.len() > 0).to_equal(true)
+        expect(scv_adapter_v1_enable(root)).to_equal("")
+        val out = scv_gc_command(root, ["gc"])
+        expect(out).to_contain("PASS")
+        val store = scv_adapter_v1_store_root(root)
+        var pins: [text] = []
+        for name in dir_list(store + "/pins"):
+            if name.starts_with("scv-gc-"):
+                pins.push(name)
+        expect(pins.len() > 0).to_equal(true)
+        for id in chunks:
+            expect(scv_adapter_v1_open_projection(root, id).status).to_equal("ok")
+        _cleanup(root)

@@ -275,3 +275,11 @@ a scope. Direct `read_at_pointer` re-reads stay deliberate. Spec:
 (REQ-SCV-ADMITTED-MEMO-006). Neither the seed nor the reader memoizes while a
 build session heap is live: promotion there is session adoption, reclaimed at
 `rt_session_heap_end`, so a stored graph would dangle (REQ-SCV-ADMITTED-MEMO-007).
+
+## Shared immutable store adapter (opt-in)
+`std.nogc_sync_mut.storage.scv_adapter_v1` imports legacy `sha256_<hex>` chunks
+into `<repo>/.scv/store` (store key == legacy id). `scv gc` pins reachable
+chunks as `scv-gc-<g>-<n>` only when `.scv/store` exists; without it gc is
+unchanged. Enable explicitly with `scv store-init` (never on by default).
+Spec: `test/01_unit/lib/nogc_sync_mut/storage/scv_gc_store_e2e_spec.spl`.
+Details: `doc/00_llm_process/feature_expert/simple_container_store/skill.md`.

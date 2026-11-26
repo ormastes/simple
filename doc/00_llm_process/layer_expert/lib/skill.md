@@ -139,8 +139,11 @@ ROCm coverage of all 26 former extension methods:
 
 ## Container shared immutable store (2026-11-26)
 
-`std.nogc_sync_mut.storage.immutable_store_v1` (it does file I/O, so it is not
-in `common/`) over pure `std.common.hash.hash_policy_v1` and
-`std.common.storage.object_record_v1`. Root CAS truth is the never-deleted
-`roots/<name>.g<N>.claim` chain; `roots/<name>.sdn` is a cache. Details:
+`std.nogc_sync_mut.storage.immutable_store_v1` (file I/O, so not in `common/`)
+over pure `std.common.hash.hash_policy_v1` and `std.common.storage.object_record_v1`.
+Root CAS truth is the never-deleted `roots/<name>.g<N>.claim` chain
+(`immutable_store_v1_root_head`); `roots/<name>.sdn` is a cache. Pins are
+append-only dirs `pins/<id>/owner` + `pins/<id>/refs/<key>`; GC is list-first
+with re-check/restore. Also `storage_view_v1` and `scv_adapter_v1` (opt-in via
+`scv store-init`). Details:
 `doc/00_llm_process/feature_expert/simple_container_store/skill.md`.
