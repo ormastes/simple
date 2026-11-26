@@ -1,0 +1,128 @@
+"""
+## Purpose and audience
+Purpose: Pin how Chrome 159 paints a box whose exact width (or left edge) has
+a fraction at device scale 1: both edges round to the nearest pixel, so the
+box is round(exact right) - round(exact left) px wide. This renderer floored
+the width (a `2.55rem` box, 40.796875 px, painted 40 px; Chrome paints 41).
+Audience: web renderer layout and paint (box width snapping at k=1).
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=k --window-size=400,300
+--screenshot`, 2026-11-26; geometry from getBoundingClientRect). Boxes are
+`#00f`, 10 px tall, no text. Last blue column per box (base in brackets):
+
+| probe                                    | exact x / w            | Chrome k=1 | base k=1  |
+|------------------------------------------|------------------------|------------|-----------|
+| abspos `width:30.75px` at 0              | 0 / 30.75              | 0..30      | 0..29     |
+| abspos `width:30.5px` at 40              | 40 / 30.5              | 40..70     | 40..69    |
+| abspos `width:30.4px` at 80 (guard)      | 80 / 30.390625         | 80..109    | 80..109   |
+| abspos `left:120.25px;width:30.5px`      | 120.25 / 30.5          | 120..150   | 120..149  |
+| abspos `left:160.5px;width:30.25px` (g)  | 160.5 / 30.25          | 161..190   | 161..190  |
+| abspos `left:200.75px;width:30.5px` (g)  | 200.75 / 30.5          | 201..230   | 201..230  |
+| `width:2.55rem` at 0                     | 0 / 40.796875          | 0..40      | 0..39     |
+| `width:4.04em` at 60                     | 60 / 64.625            | 60..124    | 60..123   |
+| `width:6.33em` at 140 (guard)            | 140 / 101.265625       | 140..240   | 140..240  |
+| `width:3.7em` at 13 px, 260 (guard)      | 260 / 48.09375         | 260..307   | 260..307  |
+| `width:40.75px` at 0                     | 0 / 40.75              | 0..40      | 0..39     |
+| `float:left;width:40.5px` at 60          | 60 / 40.5              | 60..100    | 60..99    |
+| inline-block `width:40.5px` at 120       | 120 / 40.5             | 120..160   | 120..159  |
+| auto child of `width:40.5px` at 180      | 180 / 40.5             | 180..220   | 180..219  |
+| `width:40.5px` + `border-left:2px` at 240| 240 / 42.5             | 242..282   | 242..281  |
+
+At k=4 the boxes already paint round(4 x exact) device columns except the
+auto-width child of a fractional-width block: Chrome 720..881, base
+720..879.
+"""
+
+"""
+Traceability: REQ-WEB-LAYOUT-EDGE-ROUND-001 - at device scale 1 a box with a fractional exact width or left edge paints from round(exact left) to round(exact right), and an auto-width block child spans its parent's painted width at every scale.
+"""
+# @tag: unit, browser_engine, layout, paint, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val W: i32 = 400
+val H: i32 = 300
+val B: text = "height:10px;background:#00f"
+
+fn _abs(left: text, top: text, width: text) -> text:
+    "<div style=\"position:absolute;left:" + left + ";top:" + top + ";width:" + width + ";" + B + "\"></div>"
+
+fn _wrap(left: text, top: text, wrap_w: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:" + left + ";top:" + top + ";width:" + wrap_w + "\">" + inner + "</div>"
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000;font-family:sans-serif\"><div style=\"position:relative;width:400px;height:300px;font-size:16px;line-height:20px\">" +
+    _abs("0", "0", "30.75px") + _abs("40px", "0", "30.5px") + _abs("80px", "0", "30.4px") +
+    _abs("120.25px", "0", "30.5px") + _abs("160.5px", "0", "30.25px") + _abs("200.75px", "0", "30.5px") +
+    _wrap("0", "20px", "390px", "<div style=\"width:2.55rem;" + B + "\"></div>") +
+    _wrap("60px", "20px", "300px", "<div style=\"width:4.04em;" + B + "\"></div>") +
+    _wrap("140px", "20px", "200px", "<div style=\"width:6.33em;" + B + "\"></div>") +
+    "<div style=\"position:absolute;left:260px;top:20px;width:100px;font-size:13px\"><div style=\"width:3.7em;" + B + "\"></div></div>" +
+    _wrap("0", "40px", "390px", "<div style=\"width:40.75px;" + B + "\"></div>") +
+    _wrap("60px", "40px", "300px", "<div style=\"float:left;width:40.5px;" + B + "\"></div>") +
+    _wrap("120px", "40px", "200px", "<span style=\"display:inline-block;width:40.5px;" + B + "\"></span>") +
+    _wrap("180px", "40px", "200px", "<div style=\"width:40.5px;height:10px\"><div style=\"" + B + "\"></div></div>") +
+    _wrap("240px", "40px", "200px", "<div style=\"width:40.5px;" + B + ";border-left:2px solid #f00\"></div>") +
+    "</div></body></html>"
+
+fn _blue(v: u32) -> bool:
+    val r = ((v >> 16u32) & 0xFFu32).to_i64()
+    val b = (v & 0xFFu32).to_i64()
+    b > 128 and r < 128
+
+fn _blue_first(px: [u32], k: i32, y: i32, x0: i32) -> i32:
+    var x = x0
+    while x < W * k and not _blue(px[y * W * k + x]):
+        x = x + 1
+    x
+
+# Last blue device column of the blue span that starts at or after x0 on
+# device row y.
+fn _blue_last(px: [u32], k: i32, y: i32, x0: i32) -> i32:
+    var x = _blue_first(px, k, y, x0)
+    while x < W * k and _blue(px[y * W * k + x]):
+        x = x + 1
+    x - 1
+
+# [first, last] blue columns of the span at or after each x0 on row y.
+fn _spans(px: [u32], k: i32, y: i32, starts: [i32]) -> [i32]:
+    var out: [i32] = []
+    for x0 in starts:
+        out.push(_blue_first(px, k, y, x0))
+        out.push(_blue_last(px, k, y, x0))
+    out
+
+describe "fractional width edge rounding at k=1 (Chrome 159)":
+    it "AC-1: k=1 an absolute box paints round(exact left) .. round(exact right)":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("30.75 / 30.5 / 30.4 at whole x: 0..30, 40..70, 80..109")
+        step("30.5 at 120.25 / 30.25 at 160.5 / 30.5 at 200.75: 120..150, 161..190, 201..230")
+        expect(_spans(px, 1, 5, [0, 35, 75, 115, 155, 195])).to_equal([0, 30, 40, 70, 80, 109, 120, 150, 161, 190, 201, 230])
+
+    it "AC-2: k=1 authored em / rem / px widths round their right edge":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("2.55rem / 4.04em / 6.33em / 3.7em at 13 px: 0..40, 60..124, 140..240, 260..307")
+        expect(_spans(px, 1, 25, [0, 55, 135, 255])).to_equal([0, 40, 60, 124, 140, 240, 260, 307])
+
+    it "AC-3: k=1 floats, inline-blocks, an auto child and a bordered box round too":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("40.75 block / 40.5 float / 40.5 inline-block / auto child of 40.5 / 40.5 + 2 px border")
+        expect(_spans(px, 1, 47, [0, 55, 115, 175, 235])).to_equal([0, 40, 60, 100, 120, 160, 180, 220, 242, 282])
+
+    it "AC-4: k=4 every box keeps Chrome's device columns, the auto child included":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        expect(px.len()).to_equal((W * H * 16).to_i64())
+        step("abspos row: 0..122 160..281 320..441 481..602 642..762 803..924")
+        expect(_spans(px, 4, 20, [0, 140, 300, 460, 620, 780])).to_equal([0, 122, 160, 281, 320, 441, 481, 602, 642, 762, 803, 924])
+        step("em row: 0..162 240..498 560..964 1040..1231")
+        expect(_spans(px, 4, 100, [0, 220, 540, 1020])).to_equal([0, 162, 240, 498, 560, 964, 1040, 1231])
+        step("block row: 0..162 240..401 480..641 720..881 968..1129")
+        expect(_spans(px, 4, 190, [0, 220, 460, 700, 940])).to_equal([0, 162, 240, 401, 480, 641, 720, 881, 968, 1129])

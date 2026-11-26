@@ -808,15 +808,26 @@ fn _html_draw_ir_descendant_bottom(
 # Device scale 1: an auto-width `<button>` paints between its fractional
 # edges snapped to whole pixels (`Submit`, 57.48 px at 0, paints 0-56), so
 # its box is narrowed by the snap layout recorded (`box_device_extra_w_at`)
-# while the layout box keeps the label rounded up. Unchanged at k > 1, where
-# the device-scale pass applies the same table as `device-extra-width`.
-fn _html_draw_ir_k1_button_boxes(nodes: [HNode], boxes: LayoutResult) -> LayoutResult:
+# while the layout box keeps the label rounded up. Any other box whose exact
+# width has a fraction paints round(exact right) - round(exact left) px
+# (`width:2.55rem` is 41 px), widened or narrowed by the same table.
+# Unchanged at k > 1, where the device-scale pass applies the table as
+# `device-extra-width`.
+# The k = 1 paint-width correction of node `i`: a narrowed auto-width button,
+# or any non-control box (form controls size themselves at k > 1 only).
+fn _html_draw_ir_k1_extra_w(nodes: [HNode], i: i32) -> i32:
+    val extra = box_device_extra_w_at(i)
+    if nodes[i].tag == "button":
+        return if extra < 0: extra else: 0
+    if nodes[i].tag == "#text" or _html_draw_ir_is_form_control_box(nodes[i]): 0 else: extra
+
+fn _html_draw_ir_k1_snapped_boxes(nodes: [HNode], boxes: LayoutResult) -> LayoutResult:
     if layout_device_scale() != 1:
         return boxes
     var narrowed = false
     var i = 0
     while i < nodes.len() and not narrowed:  # cpu-lane-loop-ok: one existence scan over the node list per render
-        if nodes[i].tag == "button" and box_device_extra_w_at(i) < 0:
+        if _html_draw_ir_k1_extra_w(nodes, i) != 0:
             narrowed = true
         i = i + 1
     if not narrowed:
@@ -824,8 +835,8 @@ fn _html_draw_ir_k1_button_boxes(nodes: [HNode], boxes: LayoutResult) -> LayoutR
     var bw: [i32] = []
     i = 0
     while i < nodes.len():  # cpu-lane-loop-ok: one copy of the width column, only on a page with a narrowed button
-        val extra = if nodes[i].tag == "button": box_device_extra_w_at(i) else: 0
-        bw.push(if extra < 0 and boxes.bw[i] + extra > 0: boxes.bw[i] + extra else: boxes.bw[i])
+        val extra = _html_draw_ir_k1_extra_w(nodes, i)
+        bw.push(if extra != 0 and boxes.bw[i] + extra > 0: boxes.bw[i] + extra else: boxes.bw[i])
         i = i + 1
     var out = boxes
     out.bw = bw
@@ -841,7 +852,7 @@ fn _html_draw_ir_commands(
     element_scroll_index: i32, element_scroll_top: i32,
     element_scroll_max: i32, widget_mode: bool, widget_chrome_text: bool
 ) -> ([DrawIrCommand], [i32]):
-    val boxes = _html_draw_ir_k1_button_boxes(nodes, layout_boxes)
+    val boxes = _html_draw_ir_k1_snapped_boxes(nodes, layout_boxes)
     # One uri -> index map per render. The per-node loop below used to rescan
     # the whole image list for every img, video and background layer.
     val image_index_by_uri = _html_draw_ir_image_index_by_uri(images)

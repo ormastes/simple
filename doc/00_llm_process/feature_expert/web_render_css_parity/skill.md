@@ -4772,3 +4772,28 @@ Three open items from the abspos-wrap lane, all measured against Chrome 159 (Lib
   device rows early, as on base; inline background fragments at k>1 still
   step k x whole CSS px. Measured: catalogs 1x/4x and gates equal base;
   perf medians within 1.7% (overview doc 840/826), RSS flat.
+
+## 2026-11-26 — k=1 fractional-width boxes paint round(left)..round(right) (edge-round lane)
+
+**Spec:** `test/01_unit/browser_engine/fractional_width_edge_round_k1_chrome159_spec.spl` (0/4 on base, 4/4 after).
+
+At device scale 1, Chrome 159 snaps both edges of a box to the nearest pixel.
+- `width:2.55rem` is 40.796875 px and paints 41 px.
+- `width:30.5px` at `left:120.25px` paints columns 120..150.
+
+This renderer floored every k=1 width.
+
+**Mechanism.** The k>1 `g_box_device_extra_w` table now fills at k=1 too.
+- abspos: `snap(fx + w_frac) - sx` in `absolute_box_snap`.
+- authored-width in-flow / float / inline-block boxes: `box_device_top_px(width_milli)`.
+- auto floats / inline-blocks: `shrink_box_device_extra_w`, now k>=1.
+
+At k=1, paint applies the table in `_html_draw_ir_k1_snapped_boxes` (renamed from `_html_draw_ir_k1_button_boxes`), which shifts `bw` by the extra.
+- Auto-width buttons keep their old rule: narrowing only.
+- Form controls and `#text` are excluded.
+
+**Auto-width child.** An auto-width block child that fills a block parent with an extra copies the parent's extra, at every k. Chrome paints the child of a `width:40.5px` block 41 px at k=1 and 720..881 at k=4; base painted 720..879.
+
+**Not covered.**
+- A fractional in-flow margin's k=1 edges belong to the fracmargin lane (`box_x_snap`, which records only at k>1).
+- The authored-width path still assumes a whole-px left edge.
