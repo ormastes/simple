@@ -1,0 +1,220 @@
+"""
+# Gen2 Stateful Retirement Lineage Contract Verification
+"""
+# @req: REQ-HARDWARE-RISCV-GEN2-LINEAGE-001
+
+use std.spec.*
+use hardware.riscv_common.core.gen2_retire_lineage.{
+    RiscvXlen, SignalLevel, ParcelLength, PrivilegeMode, RegWriteEnable,
+    TrapEvent, LineageFaultStatus, LineageVerdictStatus, TraceCoverage,
+    RetireOrder, InstructionParcel, GuestPc, GprIndex, RegValue,
+    TrapCause, TrapValue, RetireCount, ResetCount,
+    Gen2ParcelCapture, Gen2RetireOutput, Gen2LineageState,
+    gen2_lineage_init, gen2_lineage_step, check_gen2_retire_lineage_trace
+}
+
+fn cap_insn(xlen: RiscvXlen, parcel: u32, length: ParcelLength, pc: i64) -> Gen2ParcelCapture:
+    Gen2ParcelCapture(
+        valid: SignalLevel.High,
+        xlen: xlen,
+        privilege: PrivilegeMode.Machine,
+        original_parcel: InstructionParcel(value: parcel),
+        original_length: length,
+        pc_before: GuestPc(value: pc),
+        dispatch_accept: SignalLevel.High,
+        rst: SignalLevel.Low
+    )
+
+fn cap_idle(xlen: RiscvXlen, rst: SignalLevel) -> Gen2ParcelCapture:
+    Gen2ParcelCapture(
+        valid: SignalLevel.Low,
+        xlen: xlen,
+        privilege: PrivilegeMode.Machine,
+        original_parcel: InstructionParcel(value: 0),
+        original_length: ParcelLength.Full32,
+        pc_before: GuestPc(value: 0),
+        dispatch_accept: SignalLevel.Low,
+        rst: rst
+    )
+
+fn ret_insn(
+    order: i64, xlen: RiscvXlen, orig: u32, canon: u32, length: ParcelLength,
+    pc_before: i64, pc_after: i64, rd: u32, rd_write: RegWriteEnable, rd_value: i64,
+    trap: TrapEvent, cause: i64
+) -> Gen2RetireOutput:
+    Gen2RetireOutput(
+        valid: SignalLevel.High,
+        order: RetireOrder(value: order),
+        xlen: xlen,
+        privilege: PrivilegeMode.Machine,
+        original_instruction: InstructionParcel(value: orig),
+        canonical_instruction: InstructionParcel(value: canon),
+        instruction_length: length,
+        pc_before: GuestPc(value: pc_before),
+        pc_after: GuestPc(value: pc_after),
+        rd: GprIndex(value: rd),
+        rd_write: rd_write,
+        rd_value: RegValue(value: rd_value),
+        trap: trap,
+        cause: TrapCause(value: cause),
+        tval: TrapValue(value: 0),
+        protocol_fault: LineageFaultStatus.Clear,
+        rst: SignalLevel.Low
+    )
+
+fn ret_idle(xlen: RiscvXlen, rst: SignalLevel, fault: LineageFaultStatus) -> Gen2RetireOutput:
+    Gen2RetireOutput(
+        valid: SignalLevel.Low,
+        order: RetireOrder(value: 0),
+        xlen: xlen,
+        privilege: PrivilegeMode.Machine,
+        original_instruction: InstructionParcel(value: 0),
+        canonical_instruction: InstructionParcel(value: 0),
+        instruction_length: ParcelLength.Full32,
+        pc_before: GuestPc(value: 0),
+        pc_after: GuestPc(value: 0),
+        rd: GprIndex(value: 0),
+        rd_write: RegWriteEnable.Disabled,
+        rd_value: RegValue(value: 0),
+        trap: TrapEvent.None,
+        cause: TrapCause(value: 0),
+        tval: TrapValue(value: 0),
+        protocol_fault: fault,
+        rst: rst
+    )
+
+describe "RISC-V Gen2 stateful retirement lineage contract":
+    it "verifies RV32 parcel capture through compressed retirement, synchronous reset, and post-reset restart":
+        val captures = [
+            cap_idle(RiscvXlen.Rv32, SignalLevel.High),
+            cap_insn(RiscvXlen.Rv32, 0x0501, ParcelLength.Compressed16, 0x80001000),
+            cap_idle(RiscvXlen.Rv32, SignalLevel.Low),
+            cap_insn(RiscvXlen.Rv32, 0x00108293, ParcelLength.Full32, 0x80001002),
+            cap_idle(RiscvXlen.Rv32, SignalLevel.Low),
+            cap_idle(RiscvXlen.Rv32, SignalLevel.High),
+            cap_insn(RiscvXlen.Rv32, 0x9002, ParcelLength.Compressed16, 0x80002000),
+            cap_idle(RiscvXlen.Rv32, SignalLevel.Low)
+        ]
+        val retires = [
+            ret_idle(RiscvXlen.Rv32, SignalLevel.High, LineageFaultStatus.Clear),
+            ret_idle(RiscvXlen.Rv32, SignalLevel.Low, LineageFaultStatus.Clear),
+            ret_insn(0, RiscvXlen.Rv32, 0x0501, 0x00010513, ParcelLength.Compressed16, 0x80001000, 0x80001002, 10, RegWriteEnable.Enabled, 0, TrapEvent.None, 0),
+            ret_idle(RiscvXlen.Rv32, SignalLevel.Low, LineageFaultStatus.Clear),
+            ret_insn(1, RiscvXlen.Rv32, 0x00108293, 0x00108293, ParcelLength.Full32, 0x80001002, 0x80001006, 5, RegWriteEnable.Enabled, 10, TrapEvent.None, 0),
+            ret_idle(RiscvXlen.Rv32, SignalLevel.High, LineageFaultStatus.Clear),
+            ret_idle(RiscvXlen.Rv32, SignalLevel.Low, LineageFaultStatus.Clear),
+            ret_insn(0, RiscvXlen.Rv32, 0x9002, 0x00100073, ParcelLength.Compressed16, 0x80002000, 0x80000100, 0, RegWriteEnable.Disabled, 0, TrapEvent.Raised, 3)
+        ]
+        val verdict = check_gen2_retire_lineage_trace(RiscvXlen.Rv32, captures, retires)
+        expect(verdict.status).to_equal(LineageVerdictStatus.Passed)
+        expect(verdict.checked_retires.value).to_equal(3)
+        expect(verdict.reset_count.value).to_equal(2)
+        expect(verdict.coverage).to_equal(TraceCoverage.NonVacuous)
+
+    it "verifies RV64 parcel capture and retirement composition":
+        val captures = [
+            cap_insn(RiscvXlen.Rv64, 0x00108293, ParcelLength.Full32, 0x80200000),
+            cap_idle(RiscvXlen.Rv64, SignalLevel.Low),
+            cap_insn(RiscvXlen.Rv64, 0x2081, ParcelLength.Compressed16, 0x80200004),
+            cap_idle(RiscvXlen.Rv64, SignalLevel.Low)
+        ]
+        val retires = [
+            ret_idle(RiscvXlen.Rv64, SignalLevel.Low, LineageFaultStatus.Clear),
+            ret_insn(0, RiscvXlen.Rv64, 0x00108293, 0x00108293, ParcelLength.Full32, 0x80200000, 0x80200004, 5, RegWriteEnable.Enabled, 1, TrapEvent.None, 0),
+            ret_idle(RiscvXlen.Rv64, SignalLevel.Low, LineageFaultStatus.Clear),
+            ret_insn(1, RiscvXlen.Rv64, 0x2081, 0x0000809B, ParcelLength.Compressed16, 0x80200004, 0x80200006, 1, RegWriteEnable.Enabled, 2, TrapEvent.None, 0)
+        ]
+        val verdict = check_gen2_retire_lineage_trace(RiscvXlen.Rv64, captures, retires)
+        expect(verdict.status).to_equal(LineageVerdictStatus.Passed)
+        expect(verdict.checked_retires.value).to_equal(2)
+
+    it "rejects skewed reset between parcel capture and retirement producer":
+        val verdict = check_gen2_retire_lineage_trace(
+            RiscvXlen.Rv32,
+            [cap_idle(RiscvXlen.Rv32, SignalLevel.High)],
+            [ret_idle(RiscvXlen.Rv32, SignalLevel.Low, LineageFaultStatus.Clear)]
+        )
+        expect(verdict.status).to_equal(LineageVerdictStatus.Failed)
+        expect(verdict.diagnostic).to_contain("RISCV-GEN2-LINEAGE-E-RESET-SYNC")
+
+    it "rejects uncaptured retirement without active dispatch_lineage":
+        val captures = [cap_idle(RiscvXlen.Rv32, SignalLevel.Low), cap_idle(RiscvXlen.Rv32, SignalLevel.Low)]
+        val retires = [
+            ret_insn(0, RiscvXlen.Rv32, 0x00108293, 0x00108293, ParcelLength.Full32, 0x80001000, 0x80001004, 5, RegWriteEnable.Enabled, 1, TrapEvent.None, 0),
+            ret_idle(RiscvXlen.Rv32, SignalLevel.Low, LineageFaultStatus.Clear)
+        ]
+        val verdict = check_gen2_retire_lineage_trace(RiscvXlen.Rv32, captures, retires)
+        expect(verdict.status).to_equal(LineageVerdictStatus.Failed)
+        expect(verdict.diagnostic).to_contain("RISCV-GEN2-LINEAGE-E-UNCAPTURED-RETIRE")
+
+    it "rejects stale pre-reset order leaking across synchronous reset":
+        val captures = [
+            cap_insn(RiscvXlen.Rv32, 0x00108293, ParcelLength.Full32, 0x80001000),
+            cap_idle(RiscvXlen.Rv32, SignalLevel.Low),
+            cap_idle(RiscvXlen.Rv32, SignalLevel.High),
+            cap_insn(RiscvXlen.Rv32, 0x0501, ParcelLength.Compressed16, 0x80001004),
+            cap_idle(RiscvXlen.Rv32, SignalLevel.Low)
+        ]
+        val retires = [
+            ret_idle(RiscvXlen.Rv32, SignalLevel.Low, LineageFaultStatus.Clear),
+            ret_insn(0, RiscvXlen.Rv32, 0x00108293, 0x00108293, ParcelLength.Full32, 0x80001000, 0x80001004, 5, RegWriteEnable.Enabled, 1, TrapEvent.None, 0),
+            ret_idle(RiscvXlen.Rv32, SignalLevel.High, LineageFaultStatus.Clear),
+            ret_idle(RiscvXlen.Rv32, SignalLevel.Low, LineageFaultStatus.Clear),
+            ret_insn(1, RiscvXlen.Rv32, 0x0501, 0x00010513, ParcelLength.Compressed16, 0x80001004, 0x80001006, 10, RegWriteEnable.Enabled, 0, TrapEvent.None, 0)
+        ]
+        val verdict = check_gen2_retire_lineage_trace(RiscvXlen.Rv32, captures, retires)
+        expect(verdict.status).to_equal(LineageVerdictStatus.Failed)
+        expect(verdict.diagnostic).to_contain("RISCV-GEN2-LINEAGE-E-ORDER")
+
+    it "rejects overlapping double dispatch inside the single-outstanding window":
+        val captures = [
+            cap_insn(RiscvXlen.Rv64, 0x00108293, ParcelLength.Full32, 0x80200000),
+            cap_insn(RiscvXlen.Rv64, 0x00108293, ParcelLength.Full32, 0x80200004)
+        ]
+        val retires = [
+            ret_idle(RiscvXlen.Rv64, SignalLevel.Low, LineageFaultStatus.Clear),
+            ret_idle(RiscvXlen.Rv64, SignalLevel.Low, LineageFaultStatus.Clear)
+        ]
+        val verdict = check_gen2_retire_lineage_trace(RiscvXlen.Rv64, captures, retires)
+        expect(verdict.status).to_equal(LineageVerdictStatus.Failed)
+        expect(verdict.diagnostic).to_contain("RISCV-GEN2-LINEAGE-E-DOUBLE-DISPATCH")
+
+    it "fails closed on vacuous single-retire traces":
+        val captures = [cap_insn(RiscvXlen.Rv32, 0x00108293, ParcelLength.Full32, 0x80001000), cap_idle(RiscvXlen.Rv32, SignalLevel.Low)]
+        val retires = [
+            ret_idle(RiscvXlen.Rv32, SignalLevel.Low, LineageFaultStatus.Clear),
+            ret_insn(0, RiscvXlen.Rv32, 0x00108293, 0x00108293, ParcelLength.Full32, 0x80001000, 0x80001004, 5, RegWriteEnable.Enabled, 1, TrapEvent.None, 0)
+        ]
+        val verdict = check_gen2_retire_lineage_trace(RiscvXlen.Rv32, captures, retires)
+        expect(verdict.status).to_equal(LineageVerdictStatus.Failed)
+        expect(verdict.coverage).to_equal(TraceCoverage.Vacuous)
+        expect(verdict.diagnostic).to_contain("RISCV-GEN2-LINEAGE-E-VACUOUS")
+
+    it "triggers terminal fault at order saturation and blocks subsequent dispatch":
+        val base = Gen2LineageState(
+            xlen: RiscvXlen.Rv64,
+            occupied: SignalLevel.Low,
+            faulted: LineageFaultStatus.Clear,
+            next_order: RetireOrder(value: 9223372036854775807),
+            latched_order: RetireOrder(value: 0),
+            latched_original_instruction: InstructionParcel(value: 0),
+            latched_length: ParcelLength.Full32,
+            latched_pc_before: GuestPc(value: 0),
+            completed_retires: RetireCount(value: 0),
+            reset_cycles: ResetCount(value: 0)
+        )
+        val cap0 = cap_insn(RiscvXlen.Rv64, 0x00108293, ParcelLength.Full32, 0x80200000)
+        val step1 = gen2_lineage_step(
+            base, cap0, ret_idle(RiscvXlen.Rv64, SignalLevel.Low, LineageFaultStatus.Faulted)
+        )
+        expect(step1.is_ok()).to_equal(true)
+        var after_sat = base
+        match step1:
+            Ok(s): after_sat = s
+            Err(_): expect(false).to_equal(true)
+        val step2 = gen2_lineage_step(
+            after_sat,
+            cap_idle(RiscvXlen.Rv64, SignalLevel.Low),
+            ret_insn(9223372036854775807, RiscvXlen.Rv64, 0x00108293, 0x00108293, ParcelLength.Full32, 0x80200000, 0x80200004, 5, RegWriteEnable.Enabled, 1, TrapEvent.None, 0)
+        )
+        expect(step2.is_err()).to_equal(true)

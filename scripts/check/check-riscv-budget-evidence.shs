@@ -2,6 +2,7 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+. "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
 SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
 BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build/riscv_budget_evidence}"
 REPORT_DIR="${SYNTH_REPORT_DIR:-}"
@@ -14,9 +15,13 @@ RISCV_RV32_LUTS="${RISCV_RV32_LUTS:-25000}"
 RISCV_RV64_LUTS="${RISCV_RV64_LUTS:-45000}"
 RISCV_RV32_MHZ="${RISCV_RV32_MHZ:-50}"
 RISCV_RV64_MHZ="${RISCV_RV64_MHZ:-50}"
+SELF_TEST=0
 
 for arg in "$@"; do
     case "$arg" in
+        --self-test)
+            SELF_TEST=1
+            ;;
         --require-synth)
             REQUIRE_SYNTH=1
             ;;
@@ -30,6 +35,28 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [ "$SELF_TEST" = "1" ]; then
+    st_dir="$(mktemp -d)" || exit 2
+    trap 'rm -rf "$st_dir"' EXIT
+    cat >"$st_dir/fake_seed.sh" <<'EOF_SEED'
+#!/bin/sh
+echo "WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool." >&2
+exit 0
+EOF_SEED
+    chmod +x "$st_dir/fake_seed.sh"
+    set +e
+    out="$(SIMPLE_BIN="$st_dir/fake_seed.sh" sh "$0" 2>&1)"
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || { echo "STATUS: FAIL riscv-budget-evidence self-test: seed exited $rc expected 2" >&2; exit 1; }
+    printf '%s\n' "$out" | grep -Fq "bootstrap seed" || { echo "STATUS: FAIL riscv-budget-evidence self-test: missing seed diagnostic" >&2; exit 1; }
+    echo "STATUS: PASS riscv-budget-evidence self-test"
+    exit 0
+fi
+
+require_self_hosted "$SIMPLE_BIN" "riscv-budget-evidence"
+SIMPLE_BIN="$SELF_HOSTED_BIN"
 
 check_contains() {
     file="$1"

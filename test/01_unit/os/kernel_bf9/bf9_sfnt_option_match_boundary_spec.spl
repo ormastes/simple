@@ -1,0 +1,133 @@
+"""
+# @req REQ-SSPEC-OS
+# @cover src/lib/common/encoding/sfnt.spl
+# @cover src/os/kernel/net/rt_net_socket_facade.spl
+#
+# Host unit specification for BF-9 Bug #9:
+#   sfnt_fvar_option_match_nil_baremetal_2026-08-04
+#
+# Verifies Option<T> Some/None match parity across SFNT optional tables
+# (fvar/gvar/avar/name) and SimpleOS kernel socket/loader Option consumers.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.encoding.sfnt.{read_u32_be, parse_offset_table, find_table, parse_fvar_axes, validate_default_glyf_font}
+use os.kernel.net.rt_net_socket_facade.{RtNetSocketReadOwner, rt_net_resolve_socket_read_owner}
+
+val FVAR: u32 = 1719034226u32
+val GVAR: u32 = 1735811442u32
+val NAME: u32 = 1851878757u32
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var bytes: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        bytes.push(0u8)
+        index = index + 1
+    bytes
+
+fn _set_u16_be(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    result[offset] = ((value / 256) % 256) as u8
+    result[offset + 1] = (value % 256) as u8
+    result
+
+fn _set_u32_be(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    result[offset] = ((value / 16777216) % 256) as u8
+    result[offset + 1] = ((value / 65536) % 256) as u8
+    result[offset + 2] = ((value / 256) % 256) as u8
+    result[offset + 3] = (value % 256) as u8
+    result
+
+fn _build_sfnt(entries: [(i64, [u8])]) -> [u8]:
+    val directory_size = 12 + entries.len() * 16
+    var total_size = directory_size
+    for entry in entries:
+        total_size = ((total_size + 3) / 4) * 4 + entry.1.len()
+    var bytes = _zero_bytes(total_size)
+    bytes = _set_u32_be(bytes, 0, 65536)
+    bytes = _set_u16_be(bytes, 4, entries.len())
+    var data_offset = directory_size
+    var index: i64 = 0
+    while index < entries.len():
+        val entry = entries[index]
+        val record = 12 + index * 16
+        data_offset = ((data_offset + 3) / 4) * 4
+        bytes = _set_u32_be(bytes, record, entry.0)
+        bytes = _set_u32_be(bytes, record + 8, data_offset)
+        bytes = _set_u32_be(bytes, record + 12, entry.1.len())
+        var bidx: i64 = 0
+        while bidx < entry.1.len():
+            bytes[data_offset + bidx] = entry.1[bidx]
+            bidx = bidx + 1
+        data_offset = data_offset + entry.1.len()
+        index = index + 1
+    bytes
+
+fn _build_fvar_table() -> [u8]:
+    var bytes = _zero_bytes(36)
+    bytes = _set_u16_be(bytes, 0, 1)
+    bytes = _set_u16_be(bytes, 4, 16)
+    bytes = _set_u16_be(bytes, 6, 2)
+    bytes = _set_u16_be(bytes, 8, 1)
+    bytes = _set_u16_be(bytes, 10, 20)
+    bytes = _set_u16_be(bytes, 14, 8)
+    bytes = _set_u32_be(bytes, 16, 2003265652)
+    bytes = _set_u32_be(bytes, 20, 6553600)
+    bytes = _set_u32_be(bytes, 24, 26214400)
+    bytes = _set_u32_be(bytes, 28, 58982400)
+    bytes = _set_u16_be(bytes, 34, 256)
+    bytes
+
+fn _build_font(extra: [(i64, [u8])]) -> [u8]:
+    var entries: [(i64, [u8])] = [
+        (1735162214, [1u8]), (1819239265, [1u8]),
+        (1751474532, [1u8]), (1835104368, [1u8]),
+        (1668112752, [1u8]), (1751672161, [1u8]),
+        (1752003704, [1u8])
+    ]
+    for entry in extra:
+        entries.push(entry)
+    _build_sfnt(entries)
+
+fn _match_table_offset(blob: [u8], tag: u32) -> i64:
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return -2
+    val table = match find_table(font, tag):
+        Some(value): value
+        None: return -1
+    table.offset as i64
+
+describe "SimpleOS SFNT Option<T> match and OS boundary":
+    it "takes None arm when optional fvar/gvar/name tables are absent and Some arm when present":
+        step("verify absent optional SFNT tables yield None cleanly without nil-dereference")
+        val static_blob = _build_font([])
+        expect(_match_table_offset(static_blob, FVAR)).to_equal(-1)
+        expect(_match_table_offset(static_blob, GVAR)).to_equal(-1)
+        expect(_match_table_offset(static_blob, NAME)).to_equal(-1)
+        val static_font = parse_offset_table(static_blob).unwrap()
+        expect(parse_fvar_axes(static_font).len()).to_equal(0)
+        expect(validate_default_glyf_font(static_blob).supported).to_equal(true)
+
+        val var_blob = _build_font([(FVAR as i64, _build_fvar_table()), (NAME as i64, [9u8, 8u8])])
+        val expected_fvar_off = read_u32_be(var_blob, 12 + 7 * 16 + 8) as i64
+        expect(_match_table_offset(var_blob, FVAR)).to_equal(expected_fvar_off)
+        val var_font = parse_offset_table(var_blob).unwrap()
+        val axes = parse_fvar_axes(var_font)
+        expect(axes.len()).to_equal(1)
+        expect(axes[0].default_value).to_equal(400.0)
+
+    it "resolves Option<i64> socket owner match arms deterministically":
+        step("verify Some vs nil arms on rt_net_resolve_socket_read_owner")
+        val owner = RtNetSocketReadOwner(socket_fd: 7, os_fd: 19)
+        val ok_fd = match rt_net_resolve_socket_read_owner(7, owner):
+            Some(v): v
+            nil: -1
+        val bad_fd = match rt_net_resolve_socket_read_owner(8, owner):
+            Some(v): v
+            nil: -1
+        expect(ok_fd).to_equal(19)
+        expect(bad_fd).to_equal(-1)

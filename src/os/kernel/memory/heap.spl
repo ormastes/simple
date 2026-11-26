@@ -38,6 +38,111 @@ var g_heap: KernelHeap = KernelHeap(
 # Bump pointer within the pre-mapped heap region (used by _kernel_pmm_page_alloc)
 var _g_bump_ptr: u64 = 0
 var _g_bump_end: u64 = 0
+var _g_alloc_addrs: [u64] = []
+var _g_alloc_sizes: [u64] = []
+var _g_alloc_meta_ready: bool = false
+var _g_reclaimed_bases: [u64] = []
+var _g_reclaimed_sizes: [u64] = []
+var _g_reclaimed_ready: bool = false
+
+val _HEAP_LARGE_DIRECT_THRESHOLD: u64 = 65536
+
+fn _ensure_heap_meta():
+    if not _g_alloc_meta_ready:
+        _g_alloc_addrs = []
+        _g_alloc_sizes = []
+        _g_alloc_meta_ready = true
+    if not _g_reclaimed_ready:
+        _g_reclaimed_bases = []
+        _g_reclaimed_sizes = []
+        _g_reclaimed_ready = true
+
+fn _reset_heap_meta():
+    _g_alloc_addrs = []
+    _g_alloc_sizes = []
+    _g_alloc_meta_ready = true
+    _g_reclaimed_bases = []
+    _g_reclaimed_sizes = []
+    _g_reclaimed_ready = true
+
+fn _track_heap_alloc(addr: u64, size: u64):
+    _ensure_heap_meta()
+    var i: u64 = 0
+    while i < _g_alloc_addrs.len():
+        if _g_alloc_addrs[i] == 0:
+            _g_alloc_addrs[i] = addr
+            _g_alloc_sizes[i] = size
+            return
+        i = i + 1
+    _g_alloc_addrs.push(addr)
+    _g_alloc_sizes.push(size)
+
+fn _take_tracked_heap_size(addr: u64) -> u64:
+    _ensure_heap_meta()
+    var i: u64 = 0
+    while i < _g_alloc_addrs.len():
+        if _g_alloc_addrs[i] == addr:
+            val size = _g_alloc_sizes[i]
+            _g_alloc_addrs[i] = 0
+            _g_alloc_sizes[i] = 0
+            return size
+        i = i + 1
+    0
+
+fn heap_tracked_alloc_size(addr: VirtAddr) -> u64:
+    """Return tracked allocation byte size for a live kernel heap pointer, or 0."""
+    _ensure_heap_meta()
+    var i: u64 = 0
+    while i < _g_alloc_addrs.len():
+        if _g_alloc_addrs[i] == addr.addr:
+            return _g_alloc_sizes[i]
+        i = i + 1
+    0
+
+fn _reclaim_heap_pages(base: u64, alloc_bytes: u64):
+    _ensure_heap_meta()
+    if alloc_bytes == 0:
+        return
+    val end = base + alloc_bytes
+    var free_slot: i64 = -1
+    var i: u64 = 0
+    while i < _g_reclaimed_bases.len():
+        val avail = _g_reclaimed_sizes[i]
+        if avail == 0:
+            if free_slot < 0:
+                free_slot = i as i64
+        else:
+            val existing_base = _g_reclaimed_bases[i]
+            val existing_end = existing_base + avail
+            if base < existing_end and end > existing_base:
+                log_raw_println("[HEAP] WARNING: ignoring duplicate reclaimed page span")
+                return
+        i = i + 1
+    if free_slot >= 0:
+        val slot = free_slot as u64
+        _g_reclaimed_bases[slot] = base
+        _g_reclaimed_sizes[slot] = alloc_bytes
+        return
+    _g_reclaimed_bases.push(base)
+    _g_reclaimed_sizes.push(alloc_bytes)
+
+fn _alloc_reclaimed_pages(alloc_bytes: u64) -> u64:
+    _ensure_heap_meta()
+    var i: u64 = 0
+    while i < _g_reclaimed_bases.len():
+        val avail = _g_reclaimed_sizes[i]
+        if avail >= alloc_bytes:
+            val base = _g_reclaimed_bases[i]
+            val rem = avail - alloc_bytes
+            if rem == 0:
+                _g_reclaimed_bases[i] = 0
+                _g_reclaimed_sizes[i] = 0
+            else:
+                _g_reclaimed_bases[i] = base + alloc_bytes
+                _g_reclaimed_sizes[i] = rem
+            return base
+        i = i + 1
+    0
 
 # Forward declarations
 use os.kernel.log.klog_api.{log_raw_println}
@@ -52,15 +157,18 @@ use os.kernel.types.memory_types.{PageFrame}
 val _HEAP_PAGE_SIZE: u64 = 4096
 
 fn _kernel_pmm_page_alloc(size: usize) -> usize:
-    """Bump allocator within the pre-mapped heap virtual region.
+    """Page-aligned allocator within the pre-mapped heap virtual region.
 
-    Returns the next aligned slot of at least PAGE_SIZE bytes, or 0 on
-    exhaustion. In interpreter/stub mode _g_bump_end == 0, so returns 0.
+    Reuses reclaimed large-page spans before bumping _g_bump_ptr. Returns 0 on
+    exhaustion or in uninitialized interpreter mode (_g_bump_end == 0).
     """
     if _g_bump_ptr == 0 or _g_bump_end == 0:
         return 0
     val pages_needed = (size as u64 + _HEAP_PAGE_SIZE - 1) / _HEAP_PAGE_SIZE
     val alloc_bytes = pages_needed * _HEAP_PAGE_SIZE
+    val reused = _alloc_reclaimed_pages(alloc_bytes)
+    if reused != 0:
+        return reused as usize
     if _g_bump_ptr + alloc_bytes > _g_bump_end:
         return 0
     val addr = _g_bump_ptr
@@ -107,6 +215,7 @@ fn heap_init(start: VirtAddr, size: u64):
     # Set up bump region for the mimalloc OS page provider
     _g_bump_ptr = base
     _g_bump_end = base + size
+    _reset_heap_meta()
 
     # Wire mimalloc as the backing allocator
     mimalloc_init(MiHeap(size_classes: [], pages_by_class: []))
@@ -135,6 +244,7 @@ fn heap_init_identity(start: VirtAddr, size: u64):
 
     _g_bump_ptr = base
     _g_bump_end = base + size
+    _reset_heap_meta()
 
     mimalloc_init(MiHeap(size_classes: [], pages_by_class: []))
     mimalloc_set_os_page_alloc(_kernel_pmm_page_alloc)
@@ -179,6 +289,7 @@ fn heap_alloc(size: usize) -> VirtAddr?:
         return nil
 
     val tracked_size = size as u64
+    _track_heap_alloc(addr as u64, tracked_size)
     g_heap.total_allocated = g_heap.total_allocated + tracked_size
     if g_heap.total_free >= tracked_size:
         g_heap.total_free = g_heap.total_free - tracked_size
@@ -193,9 +304,9 @@ fn heap_alloc(size: usize) -> VirtAddr?:
 fn heap_free(addr: VirtAddr):
     """Free a heap allocation.
 
-    Delegates to heap_free_size with size 0. Without allocation metadata,
-    this can only update allocation count; use heap_free_size when the caller
-    knows the original size and wants byte counters to stay accurate.
+    Recovers the allocation size recorded by heap_alloc so mimalloc returns the
+    block to its owning size-class freelist (or reclaimed page pool for large
+    allocations) and keeps byte counters accurate.
 
     Args:
         addr: Virtual address previously returned by heap_alloc
@@ -203,12 +314,7 @@ fn heap_free(addr: VirtAddr):
     heap_free_size(addr, 0)
 
 fn heap_free_size(addr: VirtAddr, size: usize):
-    """Free a heap allocation when the original allocation size is known.
-
-    mi_free_raw can then update mimalloc raw accounting. Page reclaim is not
-    yet implemented in mi_free_raw, so this only updates logical counters and
-    mimalloc bookkeeping.
-    """
+    """Free a heap allocation with explicit or recorded allocation size."""
     if addr.addr == 0:
         return
 
@@ -220,17 +326,30 @@ fn heap_free_size(addr: VirtAddr, size: usize):
         log_raw_println("[HEAP] WARNING: free() on address above heap")
         return
 
-    mi_free_raw(addr.addr as usize, size)
+    val recorded_size = _take_tracked_heap_size(addr.addr)
+    if recorded_size == 0:
+        log_raw_println("[HEAP] WARNING: free() on untracked or already-freed address")
+        return
+    if size > 0 and (size as u64) != recorded_size:
+        log_raw_println("[HEAP] WARNING: free_size() mismatch; using tracked size")
+    val effective_size_u64 = recorded_size
+
+    mi_free_raw(addr.addr as usize, effective_size_u64 as usize)
+    if effective_size_u64 > _HEAP_LARGE_DIRECT_THRESHOLD:
+        val pages_freed = (effective_size_u64 + _HEAP_PAGE_SIZE - 1) / _HEAP_PAGE_SIZE
+        _reclaim_heap_pages(addr.addr, pages_freed * _HEAP_PAGE_SIZE)
 
     if g_heap.alloc_count > 0:
         g_heap.alloc_count = g_heap.alloc_count - 1
-    val tracked_size = size as u64
-    if tracked_size > 0:
-        if g_heap.total_allocated >= tracked_size:
-            g_heap.total_allocated = g_heap.total_allocated - tracked_size
-        val new_free = g_heap.total_free + tracked_size
-        if new_free <= g_heap.size:
-            g_heap.total_free = new_free
+    if g_heap.total_allocated >= effective_size_u64:
+        g_heap.total_allocated = g_heap.total_allocated - effective_size_u64
+    else:
+        g_heap.total_allocated = 0
+    val new_free = g_heap.total_free + effective_size_u64
+    if new_free <= g_heap.size:
+        g_heap.total_free = new_free
+    else:
+        g_heap.total_free = g_heap.size
 
 # ============================================================================
 # Heap Query Interface

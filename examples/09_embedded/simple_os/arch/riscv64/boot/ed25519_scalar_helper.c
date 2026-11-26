@@ -16,24 +16,14 @@ extern spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value);
 extern spl_i64 rt_array_data_ptr(spl_i64 collection);
 extern spl_i64 rt_tls13_sha512_full(spl_i64 data_value);
 
-static spl_i64 rt_int(spl_i64 value) {
-    return value << 3;
-}
-
-static spl_i64 rt_index_arg(spl_i64 value) {
-    return value >> 3;
-}
-
-static spl_i64 rt_empty_bytes(void) {
-    return rt_byte_array_new_len(rt_int(0));
-}
+#include "rv64_crypto_array_abi.h"
 
 static int rt_copy_64_bytes_in(spl_i64 array_value, spl_u8 out[64]) {
     if ((spl_u64)rt_array_len(array_value) != 64ULL) {
         return 0;
     }
     for (spl_u64 i = 0; i < 64ULL; i = i + 1ULL) {
-        spl_i64 value = rt_array_get(array_value, rt_int((spl_i64)i));
+        spl_i64 value = rt_crypto_array_get(array_value, (spl_i64)i);
         out[i] = (spl_u8)((spl_u64)rt_index_arg(value) & 0xffULL);
     }
     return 1;
@@ -44,14 +34,14 @@ static int rt_copy_32_bytes_in(spl_i64 array_value, spl_u8 out[32]) {
         return 0;
     }
     for (spl_u64 i = 0; i < 32ULL; i = i + 1ULL) {
-        spl_i64 value = rt_array_get(array_value, rt_int((spl_i64)i));
+        spl_i64 value = rt_crypto_array_get(array_value, (spl_i64)i);
         out[i] = (spl_u8)((spl_u64)rt_index_arg(value) & 0xffULL);
     }
     return 1;
 }
 
 static spl_i64 rt_copy_32_bytes_out(const spl_u8 in[32]) {
-    spl_i64 out = rt_byte_array_new_len(rt_int(32));
+    spl_i64 out = rt_crypto_byte_array_new_len(32);
     spl_i64 *data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
     if (!data) {
         return rt_empty_bytes();
@@ -63,7 +53,7 @@ static spl_i64 rt_copy_32_bytes_out(const spl_u8 in[32]) {
 }
 
 static spl_i64 rt_copy_64_bytes_out(const spl_u8 in[64]) {
-    spl_i64 out = rt_byte_array_new_len(rt_int(64));
+    spl_i64 out = rt_crypto_byte_array_new_len(64);
     spl_i64 *data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
     if (!data) {
         return rt_empty_bytes();
@@ -85,19 +75,19 @@ static spl_i64 rt_concat_arrays3(spl_i64 a_value, spl_i64 b_value, spl_i64 c_val
     spl_i64 staged[ED25519_HELPER_MAX_CONCAT];
     spl_u64 out_i = 0;
     for (spl_u64 i = 0; i < a_len; i = i + 1ULL) {
-        staged[out_i] = rt_array_get(a_value, rt_int((spl_i64)i));
+        staged[out_i] = rt_crypto_array_get(a_value, (spl_i64)i);
         out_i = out_i + 1ULL;
     }
     for (spl_u64 i = 0; i < b_len; i = i + 1ULL) {
-        staged[out_i] = rt_array_get(b_value, rt_int((spl_i64)i));
+        staged[out_i] = rt_crypto_array_get(b_value, (spl_i64)i);
         out_i = out_i + 1ULL;
     }
     for (spl_u64 i = 0; i < c_len; i = i + 1ULL) {
-        staged[out_i] = rt_array_get(c_value, rt_int((spl_i64)i));
+        staged[out_i] = rt_crypto_array_get(c_value, (spl_i64)i);
         out_i = out_i + 1ULL;
     }
 
-    spl_i64 out = rt_byte_array_new_len(rt_int((spl_i64)total));
+    spl_i64 out = rt_crypto_byte_array_new_len((spl_i64)total);
     spl_i64 *data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
     if (!data) {
         return rt_empty_bytes();
@@ -172,7 +162,7 @@ spl_i64 rt_ed25519_sign_seed(spl_i64 seed_value, spl_i64 public_key_value, spl_i
     }
     ed25519_clamp_scalar(a);
 
-    spl_i64 prefix_value = rt_byte_array_new_len(rt_int(32));
+    spl_i64 prefix_value = rt_crypto_byte_array_new_len(32);
     spl_i64 *prefix_data = (spl_i64 *)(spl_u64)rt_array_data_ptr(prefix_value);
     if (!prefix_data) {
         return rt_empty_bytes();

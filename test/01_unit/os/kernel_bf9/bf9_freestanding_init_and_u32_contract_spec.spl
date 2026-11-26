@@ -1,0 +1,89 @@
+"""
+# @req REQ-SSPEC-OS
+# @cover src/os/kernel/net/rt_net_socket_facade.spl
+# @cover src/os/kernel/fs/fat32_fd_table.spl
+# @cover src/os/services/vfs/direct_fat32_boot_reader.spl
+#
+# Host unit specification for BF-9 Bugs #1 & #2:
+#   - simpleos_freestanding_nil_array_init_optimizer_guard_fold
+#   - simpleos_native_build_entry_closure_codegen_defects_2026-07-17
+#
+# Verifies lazy-init guards on kernel module-level arrays and u8/u64 -> u32
+# cast safety (as u32 rather than alias-bridged .to_u32()) in FAT32 boot reader.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read}
+use os.kernel.net.rt_net_socket_facade.{
+    rt_net_close,
+    rt_net_socket,
+    net_last_ssh_plain_payload_len,
+    rt_net_last_ssh_plain_payload_slice,
+    rt_net_ssh_banner_wire_bytes
+}
+use os.kernel.fs.fat32_fd_table.{
+    fat32_fd_is_registered,
+    fat32_fd_object_id,
+    fat32_fd_clear_for_test
+}
+use os.services.vfs.direct_fat32_boot_reader.{
+    _vfs_boot_u16_le,
+    _vfs_boot_u32_le,
+    _vfs_boot_fat83_short_name_key,
+    _vfs_boot_dirent_matches_short_name,
+    _vfs_boot_short_name_for_path
+}
+
+describe "SimpleOS freestanding array-init guards and u32 conversion safety":
+    it "guards rt_net_socket_facade and fat32_fd_table tables against uninitialized access":
+        step("exercise socket facade and FAT32 fd table lookups prior to socket/fd creation")
+        expect(rt_net_close(98765)).to_equal(-1)
+        expect(rt_net_socket(99)).to_equal(-1)
+        expect(net_last_ssh_plain_payload_len()).to_equal(0)
+        expect(rt_net_last_ssh_plain_payload_slice(0, 0).len()).to_equal(0u64)
+        expect(rt_net_ssh_banner_wire_bytes().len()).to_equal(22u64)
+
+        fat32_fd_clear_for_test()
+        expect(fat32_fd_is_registered(1u64, 3i32)).to_equal(false)
+        expect(fat32_fd_object_id(1u64, 3i32)).to_equal(0u64)
+
+        val facade_src = file_read("src/os/kernel/net/rt_net_socket_facade.spl")
+        expect(facade_src).to_contain("var _rt_net_sockets_ready: bool = false")
+        expect(facade_src).to_contain("fn _rt_net_ensure_sockets():")
+        expect(facade_src).to_contain("fn _rt_net_ensure_plain_payload():")
+
+    it "uses as u32 instead of alias-bridged .to_u32() in direct_fat32_boot_reader":
+        step("verify little-endian scalar decoders and 8.3 short-name matching on synthetic FAT32 directory bytes")
+        var buf: [u8] = []
+        var i = 0
+        while i < 64:
+            buf.push(0u8)
+            i = i + 1
+        # Put 0x1234 at off=0 and 0x78563412 at off=4
+        buf[0] = 0x34u8
+        buf[1] = 0x12u8
+        buf[4] = 0x12u8
+        buf[5] = 0x34u8
+        buf[6] = 0x56u8
+        buf[7] = 0x78u8
+        expect(_vfs_boot_u16_le(buf, 0)).to_equal(0x1234u32)
+        expect(_vfs_boot_u32_le(buf, 4)).to_equal(0x78563412u32)
+
+        # Put FAT 8.3 dirent "HELLO   ELF" at offset 32
+        val key = _vfs_boot_fat83_short_name_key("HELLO.ELF")
+        expect(key.len()).to_equal(11u64)
+        var k = 0
+        while k < 11:
+            buf[32 + k] = key[k]
+            k = k + 1
+        expect(_vfs_boot_dirent_matches_short_name(buf, 32, "HELLO.ELF")).to_equal(true)
+        expect(_vfs_boot_dirent_matches_short_name(buf, 32, "OTHER.ELF")).to_equal(false)
+        expect(_vfs_boot_short_name_for_path("/SYS/APPS/HELLOSMF.SMF")).to_equal("HELLOSMF.SMF")
+        expect(_vfs_boot_short_name_for_path("/sys/fonts/default.ttf")).to_equal("DEFAULT.TTF")
+        expect(_vfs_boot_short_name_for_path("/SYS/VERSION.TXT")).to_equal("VERSION.TXT")
+
+        val boot_reader_src = file_read("src/os/services/vfs/direct_fat32_boot_reader.spl")
+        expect(boot_reader_src.contains("key[i].to_u32()")).to_equal(false)
+        expect(boot_reader_src.contains("out.len().to_u32()")).to_equal(false)
+        expect(boot_reader_src.contains("* 8u64).to_u32()")).to_equal(false)

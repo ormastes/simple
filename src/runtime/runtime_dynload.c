@@ -1757,22 +1757,24 @@ GPU_CALL2(double, rt_cuda_event_elapsed_ms, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_ev
 GPU_CALL4(int64_t, rt_cuda_memcpy_htod_async, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_htod_async", -3, int64_t, int64_t, int64_t, int64_t)
 GPU_CALL4(int64_t, rt_cuda_memcpy_dtoh_async, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_dtoh_async", -3, int64_t, int64_t, int64_t, int64_t)
 
-/* 12 C-ABI params (module, (func_name_ptr, func_name_len) for the Simple
- * `text` arg, then grid/block/shared_bytes/stream/args_ptr) matching
- * rt_cuda_launch_kernel_ex's Rust signature exactly — too wide for the
+/* 11 C-ABI params (module, the Simple `text` func_name as ONE NUL-terminated
+ * C string, then grid/block/shared_bytes/stream/args_ptr) matching
+ * rt_cuda_launch_kernel_ex's Rust signature exactly. The name has no
+ * text_extern_abi.spl row, so native codegen passes the rt_interp_cstr word
+ * (cuda_launch_kernel_ex_text_abi_unregistered_2026-11-26). Too wide for the
  * GPU_CALLn macros above, so written out directly. */
-int64_t rt_cuda_launch_kernel_ex(int64_t module, const uint8_t *func_name_ptr, uint64_t func_name_len,
+int64_t rt_cuda_launch_kernel_ex(int64_t module, const char *func_name,
                                   int64_t grid_x, int64_t grid_y, int64_t grid_z,
                                   int64_t block_x, int64_t block_y, int64_t block_z,
                                   int64_t shared_bytes, int64_t stream, int64_t args_ptr) {
-    typedef int64_t (*Fn)(int64_t, const uint8_t *, uint64_t, int64_t, int64_t, int64_t,
+    typedef int64_t (*Fn)(int64_t, const char *, int64_t, int64_t, int64_t,
                            int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
     SimpleGpuCallPinV1 pin;
     int64_t result;
     if (!simple_gpu_call_acquire_v1(
             SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_launch_kernel_ex", &pin))
         return -3;
-    result = ((Fn)pin.symbol)(module, func_name_ptr, func_name_len,
+    result = ((Fn)pin.symbol)(module, func_name,
         grid_x, grid_y, grid_z, block_x, block_y, block_z,
         shared_bytes, stream, args_ptr);
     simple_gpu_call_release_v1(&pin);
@@ -1810,7 +1812,8 @@ GPU_CALL5(int64_t, rt_cuda_f64_slice_1d, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_f64_s
 GPU_CALL2(int64_t, rt_cuda_module_load_data_bytes, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load_data_bytes", -3, int64_t, int64_t)
 GPU_CALL1(int64_t, rt_cuda_module_unload, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_unload", -3, int64_t)
 GPU_CALL0(int64_t, rt_cuda_sync, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_sync", -3)
-/* A Simple `text` argument is (bytes, byte length), as in launch_kernel_ex. */
+/* A Simple `text` argument is (bytes, byte length) here: these names have
+ * text_extern_abi.spl rows. */
 GPU_CALL2(int64_t, rt_cuda_module_load, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load", -3, const uint8_t *, uint64_t)
 GPU_CALL2(int64_t, rt_cuda_module_load_data, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_load_data", -3, const uint8_t *, uint64_t)
 #undef GPU_CALL5

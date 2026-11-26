@@ -3,8 +3,11 @@
 - **Date:** 2026-07-25
 - **Severity:** medium (blocks on-silicon observation of the rv32 soak; risks
   false-green if a sim value is reported as board-captured evidence)
-- **Status:** open (fixed hardware/observability gap — NOT a regression, NOT a
-  core-not-running defect)
+- **Status:** fix-implemented-verification-pending — 2026-11-26 BF-7 stopped
+  `soak_rv32_board.shs` from probing unrouted FT4232H `ttyUSB1`/`ttyUSB2`, fails
+  closed unless an external PMOD/extra UART is present, and labels sim vs board
+  golden provenance in `soak_rv32_board.shs` / `soak_rv32_board_jtag.shs`. Physical
+  KV260 verification with wired PMOD J2 UART pending hardware access.
 - **Component:** `build/fpga/evidence/rv32_2026-07-24/rv32_fpga.bit`,
   `scripts/fpga/k26_rv64.xdc`, `scripts/fpga/soak_rv32_board.shs`
 
@@ -80,3 +83,19 @@ No hardware access in this lane. The fabric UART (H12/PMOD J2) is still not
 routed to any host tty, so `0x7EB5A8A9` remains a host/GHDL-simulated golden;
 fix options 1 (external USB-UART on PMOD J2) and 2 (EMIO bridge / TAP
 de-framer) are unchanged. Remains blocked on physical hardware.
+
+## Fix Implemented 2026-11-26 (BF-7 lane, work/bf-7-riscv32-fpga-20261126)
+
+- **Status:** `fix-implemented-verification-pending`
+- **Script fixes landed:**
+  - Fixed `scripts/fpga/soak_rv32_board.shs`: stopped defaulting `UART_PORTS` to unrouted onboard FT4232H `/dev/ttyUSB1`/`/dev/ttyUSB2`; auto-discovers only non-Xilinx PL USB-UART adapters (via configurable `SERIAL_BY_ID_DIR`) or explicit `UART_EXTRA_PORTS` and fails closed with `SOAK_RV32_BOARD: BLOCKED reason=pl_uart_not_routed_to_ft4232h` (exit `3`), allows `WORK` override and defers `mkdir -p "$WORK" "$EVID" "$EVID/payload_snapshot"` until `payload`/`synth`, records `golden_provenance=host_sim_reference` vs `board_uart_captured`, and makes `--self-test` deterministic without scanning host `/dev/serial/by-id/*`.
+  - Updated `scripts/fpga/soak_rv32_board_jtag.shs` to emit `core_golden_provenance=board_jtag_captured` and `host_golden_provenance=host_sim_reference`.
+- **Host verification evidence (Windows host):**
+  - `sh -n scripts/fpga/soak_rv32_board.shs` and `scripts/fpga/soak_rv32_board_jtag.shs` -> exit `0`.
+  - `sh scripts/fpga/soak_rv32_board.shs --self-test` -> `STATUS: PASS soak-rv32-board self-test` (exit `0`).
+  - `simple.exe test test/01_unit/hardware/riscv_bf7_rtl_and_kv260_contract_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed` (`outcome=OK`, exit `0`).
+- **Target KV260 verification command (requires wired PMOD J2 H12/E10 3.3V USB-UART adapter):**
+  ```sh
+  UART_EXTRA_PORTS=/dev/ttyUSB_pmod sh scripts/fpga/soak_rv32_board.shs
+  sh scripts/fpga/soak_rv32_board_jtag.shs
+  ```

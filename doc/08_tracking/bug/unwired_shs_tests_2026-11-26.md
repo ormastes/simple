@@ -690,3 +690,20 @@ failures. Batches of at most 60 files per PR.
 Exit 1/2 = assertion or usage failure, 127 = missing tool (jq etc.), 70/77 = other. Wired in batches of 53: PR for batch 1 lists its rows in must_check_gates.sdn as push-unwired-*.
 - Batch 01 wired: 53 rows (push-unwired-*).
 - Batch 02 wired: 53 rows (push-unwired-*).
+
+## Triage of the 126 failures (2026-11-26, second WSL ubuntu-p2 run, 8 parallel)
+Re-run with `build/` and `scratch/` pre-created: 4 green, 122 still fail.
+- Green and wired (advisory `push-unwired-bootstrap-*`): `bootstrap_phase1_current_authority`,
+  `bootstrap_phase1_tool_containment` (class 1: test assumed `build/native_probe` exists;
+  now `mkdir -p`), `bootstrap_stage3_snapshot_path_contract`, `bootstrap_strategy_fallback_contract`
+  (first-run failure was load/timeout noise).
+- Class 1 environmental, not wired (about 29): 8 exit 127 (rg, jq, gdb, helper functions not on
+  PATH), 7 `set -o pipefail` bash-only scripts (green only under bash), and tests needing a
+  binary/arguments (`arch_check_fast_help`, `stdio_runtime_owner`, `conditional_empty_symbol_keys_native`,
+  `native_parent_parse_closure_scope`, `checker_performance_harness`, `raw_rt_lint_cli_fix`,
+  `simple_release_wrapper_platform_probe`), Windows/macOS-only tests, and the read-only `/tmp` test
+  `memory_snapshot_sink_contract`.
+- Classes 2/3 not yet triaged (about 93): assertion failures where a source-contract test greps
+  for text the target no longer contains (for example `entry_closure_app_doc_source_contract`,
+  `dynsmf_facet_ref_count_contract`, `aspect_pack_cardinality_contract`). Each needs a
+  `git log` check on its target to decide stale test (update) versus real bug (fix + bug doc).

@@ -1064,6 +1064,12 @@ impl CoreLexer:
                     parts.push("\"")
                 elif esc == "'":
                     parts.push("'")
+                elif (esc == "{{" or esc == "}}") and not self.cur_no_interp:
+                    # `\{` / `\}` is a bare brace (seed parity). Emit the
+                    # doubled `{{` / `}}` escape so the interpolation pass
+                    # keeps it literal (native_string_backslash_brace_escape_kept_2026-11-26).
+                    parts.push(esc)
+                    parts.push(esc)
                 elif esc == "x":
                     var hv: i64 = 0
                     var hn: i64 = 0
@@ -1130,8 +1136,21 @@ impl CoreLexer:
                 # for the downstream interpolation re-parse).
                 val la_next: text = self.peek_next()
                 val la_is_quote: bool = la_next == "\"" or la_next == "'"
+                # `{{` and `{` followed by an escape are literal braces (seed
+                # parity: strings.rs, "`{` followed by an escape"). Emit the
+                # `{{` escape and keep scanning, so the escapes that follow are
+                # decoded. Copying the region verbatim left them raw: a native
+                # `"a) {\n}"` carried `\` `n` (native_text_literal_brace_
+                # escape_unprocessed_2026-11-26).
+                val la_literal_brace: bool = (la_next == "{{" or la_next == "\\") and not self.cur_no_interp
                 var la_found: i64 = -1
-                if not la_is_quote:
+                if la_literal_brace:
+                    self.advance()
+                    if la_next == "{{":
+                        self.advance()
+                    parts.push("{{")
+                    parts.push("{{")
+                elif not la_is_quote:
                     var la: i64 = self.pos + 1
                     val src_len: i64 = self.source_chars.len()
                     var la_depth: i64 = 1
@@ -1183,7 +1202,7 @@ impl CoreLexer:
                         if self.pos > la_found:
                             break
                         parts.push(self.advance())
-                else:
+                elif not la_literal_brace:
                     parts.push(self.advance())
             else:
                 parts.push(self.advance())

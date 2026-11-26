@@ -4,13 +4,11 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** BLOCKED 2026-11-11 (lane p3-seedA) — blocker row confirmed, not a defect in
-  the gates themselves. Header flipped from "open". The seed-attribution finding still
-  holds at the lane base (`bin/simple.exe --version` prints the Rust-seed warning banner,
-  build-commit 46fe8f6b6def); no source change can alter *binary attribution* — only a
-  sanctioned whole-compiler bootstrap + redeploy can, which is forbidden in this lane
-  (tracked `bin/simple.exe` stays; T3 gate; needs a quiescent host). Grant re-recorded
-  verbatim in the dated addendum below.
+**Status:** fix-implemented-verification-pending — 2026-11-26 BF-7 wired fail-closed
+  `require_self_hosted` guards + `--self-test` into RISC-V evidence gates so Rust-seed
+  `bin/simple` can no longer produce attributed PASS verdicts; Linux whole-compiler
+  bootstrap + live self-hosted gate re-run still pending. (Header was BLOCKED 2026-11-11
+  when tracked `bin/simple.exe` remained Rust seed `46fe8f6b6def`.)
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane H)
 **Area:** bootstrap / deploy — `bin/release/x86_64-unknown-linux-gnu/simple`
 **Severity:** medium — blocks *release attribution* of every RISC-V gate result,
@@ -154,3 +152,26 @@ Verbatim grant (re-recorded intact from the "Resume plan" above):
   captured under the campaign's scratch dir.
 
 Disposition: BLOCKED. Header flipped open → BLOCKED 2026-11-11 (lane p3-seedA).
+
+## Fix Implemented 2026-11-26 (BF-7 lane, work/bf-7-riscv32-fpga-20261126)
+
+- **Status:** `fix-implemented-verification-pending`
+- **Gate hardening landed:**
+  - Added fail-closed `require_self_hosted` guard (`scripts/check/lib/require-self-hosted.shs`) + `--self-test` mode to `scripts/check/check-riscv-budget-evidence.shs` and `scripts/check/check-riscv-product-level-evidence.shs`.
+  - Added fail-closed `require_self_hosted` guard to `scripts/check/check-rv32-hal-mcdc.shs`.
+  - Rust-seed `bin/simple` invocations are now explicitly rejected before emitting attributed PASS evidence.
+- **Host verification evidence (Windows host):**
+  - `sh -n` on `check-riscv-budget-evidence.shs`, `check-riscv-product-level-evidence.shs`, and `check-rv32-hal-mcdc.shs` -> exit `0`.
+  - `sh scripts/check/check-riscv-budget-evidence.shs --self-test` -> `STATUS: PASS riscv-budget-evidence self-test` (exit `0`).
+  - `sh scripts/check/check-riscv-product-level-evidence.shs --self-test` -> `STATUS: PASS riscv-product-level-evidence self-test` (exit `0`).
+  - `sh scripts/check/check-riscv-hardware-gates.shs --selftest` and `sh scripts/check/check-riscv-fpga-sidecar-contract.shs --self-test` -> pass (verified alongside).
+  - `simple.exe test test/01_unit/os/riscv_bf7/riscv_bf7_firmware_and_gates_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed` (`outcome=OK`, exit `0`).
+  - Note: pre-existing out-of-ownership `src/verification/riscv_product/riscv_product.byl` causes `check-riscv-budget-evidence-selfcheck.shs` to report `formal_gate = "rvfi+sby"` vs `"placeholder-rejected"`.
+- **Target Linux bootstrap + self-hosted attribution verification commands:**
+  ```sh
+  sh scripts/setup/setup.shs && bin/simple build bootstrap
+  bin/simple --version
+  sh scripts/check/check-riscv-hardware-gates.shs
+  sh scripts/check/check-riscv-budget-evidence.shs
+  sh scripts/check/check-riscv-product-level-evidence.shs
+  ```

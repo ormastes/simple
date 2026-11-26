@@ -15,6 +15,9 @@ use os.apps.sshd.ssh_kex.{ssh_build_kexinit_for_host_keys_and_certs}
 use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, host_key_set_has_any_algorithm}
 use os.apps.sshd.ssh_auth.{SshUserDb}
 use os.kernel.net.rt_net_socket_facade.{rt_net_close}
+@when((baremetal or simpleos) and x86_64):
+use os.kernel.net.rt_net_socket_facade.{rt_net_socket, rt_net_bind, rt_net_listen, rt_net_accept}
+@end
 use std.common.string_core.{text_to_bytes}
 use std.common.contracts.execution.simpleos_capability_v1.{ProtocolCapabilityManifestV1}
 use std.common.contracts.execution.simpleos_server_protocol_capabilities.{ServerProtocolProbeHandle, server_protocol_probe_handle_admitted, simpleos_ssh_capability_manifests}
@@ -40,7 +43,6 @@ extern fn rt_boot_tcp_bind(addr: text) -> i64
 extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 # Hosted-runtime TCP externs (registered in the host runtime and the
 # interpreter; see rt_io_tcp_* in src/runtime/runtime_native.c).
 extern fn rt_io_tcp_bind(addr: text) -> i64
@@ -57,29 +59,69 @@ extern fn rt_io_tcp_close(fd: i64) -> bool
 # ssh_daemon_baremetal_only_and_duplication_2026-08-05.md.
 # ---------------------------------------------------------------------------
 
-@cfg(riscv64)
+@when(riscv64):
 fn _sshd_listener_bind(port: u16) -> i64:
     rt_boot_tcp_bind("0.0.0.0:{port}")
 
-@cfg(not(riscv64))
-fn _sshd_listener_bind(port: u16) -> i64:
-    rt_io_tcp_bind("0.0.0.0:{port}")
-
-@cfg(riscv64)
 fn _sshd_listener_accept_timeout(listen_fd: i64, ms: i64) -> i64:
     rt_boot_tcp_accept_timeout(listen_fd, ms)
 
-@cfg(not(riscv64))
-fn _sshd_listener_accept_timeout(listen_fd: i64, ms: i64) -> i64:
-    rt_io_tcp_accept_timeout(listen_fd, ms)
-
-@cfg(riscv64)
 fn _sshd_listener_close(listen_fd: i64):
     rt_net_close(listen_fd)
 
-@cfg(not(riscv64))
+fn _sshd_normalize_client_fd(raw_client_fd: i64) -> i64:
+    normalize_boot_tcp_client_fd(raw_client_fd)
+
+pub fn sshd_selected_listener_transport_for_test() -> text:
+    "riscv64-boot"
+@elif((baremetal or simpleos) and x86_64):
+fn _sshd_decode_x64_net_status(raw: i64) -> i64:
+    if raw > 7 or raw < -7:
+        return raw >> 3
+    raw
+
+fn _sshd_listener_bind(port: u16) -> i64:
+    val sock_fd = _sshd_decode_x64_net_status(rt_net_socket(1))
+    if sock_fd < 0:
+        return sock_fd
+    val bind_rc = _sshd_decode_x64_net_status(rt_net_bind(sock_fd, port.to_i64()))
+    if bind_rc < 0:
+        val _ = rt_net_close(sock_fd)
+        return bind_rc
+    val listen_rc = _sshd_decode_x64_net_status(rt_net_listen(sock_fd, 8))
+    if listen_rc < 0:
+        val _ = rt_net_close(sock_fd)
+        return listen_rc
+    sock_fd
+
+fn _sshd_listener_accept_timeout(listen_fd: i64, ms: i64) -> i64:
+    val _ = ms
+    _sshd_decode_x64_net_status(rt_net_accept(listen_fd))
+
+fn _sshd_listener_close(listen_fd: i64):
+    val _ = rt_net_close(listen_fd)
+
+fn _sshd_normalize_client_fd(raw_client_fd: i64) -> i64:
+    raw_client_fd
+
+pub fn sshd_selected_listener_transport_for_test() -> text:
+    "x86_64-baremetal"
+@else:
+fn _sshd_listener_bind(port: u16) -> i64:
+    rt_io_tcp_bind("0.0.0.0:{port}")
+
+fn _sshd_listener_accept_timeout(listen_fd: i64, ms: i64) -> i64:
+    rt_io_tcp_accept_timeout(listen_fd, ms)
+
 fn _sshd_listener_close(listen_fd: i64):
     rt_io_tcp_close(listen_fd)
+
+fn _sshd_normalize_client_fd(raw_client_fd: i64) -> i64:
+    raw_client_fd
+
+pub fn sshd_selected_listener_transport_for_test() -> text:
+    "hosted"
+@end
 
 # ============================================================================
 # Constants
@@ -126,7 +168,7 @@ fn _sshd_tokenize_command(command: text) -> [text]:
                 tokens.push(rt_string_from_byte_array(cur))
                 cur = []
         else:
-            cur = rt_push_byte(cur, code)
+            cur.push((code & 0xFF) as u8)
         i = i + 1
     if cur.len() > 0:
         tokens.push(rt_string_from_byte_array(cur))
@@ -683,7 +725,7 @@ impl SshDaemon:
         val raw_client_fd = _sshd_listener_accept_timeout(self.listen_fd, 1)
         if raw_client_fd < 0:
             return SshDaemonAcceptResult(accepted: false, session_complete: false, accept_resumed: false)
-        val client_fd = normalize_boot_tcp_client_fd(raw_client_fd)
+        val client_fd = _sshd_normalize_client_fd(raw_client_fd)
         serial_println("[sshd] accepted client fd={client_fd}")
         serial_println("[sshd] handle_connection")
 
