@@ -1332,6 +1332,55 @@ impl MirLowering:
                 ids.push(id)
         self.runtime_value_local_ids = ids
 
+    fn snapshot_tagged_text_locals() -> Dict<i64, bool>:
+        var copy: Dict<i64, bool> = {}
+        for id in self.tagged_text_locals.keys():
+            copy[id] = self.tagged_text_locals[id]
+        copy
+
+    fn snapshot_runtime_value_local_ids() -> [i64]:
+        var copy: [i64] = []
+        for id in self.runtime_value_local_ids:
+            copy.push(id)
+        copy
+
+    me restore_pre_branch_representation_marks(boundary_id: i64, pre_tagged: Dict<i64, bool>, pre_rv: [i64]):
+        """Restore tagged_text_locals and runtime_value_local_ids for locals
+        allocated before `boundary_id`, keeping arm-local temps (>= boundary_id)
+        intact for branch merges such as join_untyped_text_arms_v1."""
+        var next_tagged: Dict<i64, bool> = {}
+        for id in self.tagged_text_locals.keys():
+            if id >= boundary_id:
+                next_tagged[id] = self.tagged_text_locals[id]
+        for id in pre_tagged.keys():
+            if id < boundary_id:
+                next_tagged[id] = pre_tagged[id]
+        self.tagged_text_locals = next_tagged
+
+        var next_rv: [i64] = []
+        for id in self.runtime_value_local_ids:
+            if id >= boundary_id:
+                next_rv.push(id)
+        for id in pre_rv:
+            if id < boundary_id:
+                next_rv.push(id)
+        self.runtime_value_local_ids = next_rv
+
+    me intersect_pre_branch_representation_marks(boundary_id: i64, alt_tagged: Dict<i64, bool>, alt_rv: [i64]):
+        """Keep a pre-branch local (< boundary_id) marked only when BOTH the
+        current path and `(alt_tagged, alt_rv)` agree it is tagged."""
+        var next_tagged: Dict<i64, bool> = {}
+        for id in self.tagged_text_locals.keys():
+            if id >= boundary_id or alt_tagged.contains(id):
+                next_tagged[id] = self.tagged_text_locals[id]
+        self.tagged_text_locals = next_tagged
+
+        var next_rv: [i64] = []
+        for id in self.runtime_value_local_ids:
+            if id >= boundary_id or mir_id_list_contains(alt_rv, id):
+                next_rv.push(id)
+        self.runtime_value_local_ids = next_rv
+
 # One severity owner for lifted-body checks and the driver collector: the
 # site's own `fatal` flag or the legacy message-prefix allowlist.
 pub fn mir_legacy_message_is_fatal(message: text) -> bool:
@@ -1399,6 +1448,12 @@ fn marker_map_without(marks: Dict<i64, bool>, key: i64) -> Dict<i64, bool>:
         if k != key:
             kept[k] = marks[k]
     kept
+
+fn mir_id_list_contains(ids: [i64], target: i64) -> bool:
+    for id in ids:
+        if id == target:
+            return true
+    false
 
 fn text_map_without(marks: Dict<i64, text>, key: i64) -> Dict<i64, text>:
     if not marks.contains_key(key):

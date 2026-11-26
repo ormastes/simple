@@ -2598,6 +2598,11 @@ impl MirLowering:
             if local.id < 0:
                 self.error_fatal("assignment target has no local binding", Some(span))
                 return
+            val local_was_tagged_text = self.is_tagged_text_local(local.id)
+            val local_was_runtime_value = self.is_runtime_value_local(local.id)
+            var local_mir_is_str = false
+            if val local_mir_ty = self.builder.local_type(local):
+                local_mir_is_str = self.mir_type_is_str(local_mir_ty)
             # Use the positive `op.?` presence test, NOT `if val assign_op = op`:
             # the seed interpreter's `if val <pat> = <optional>` presence check
             # can wrongly enter the true branch when the optional is nil (the
@@ -2616,7 +2621,13 @@ impl MirLowering:
                 b.emit_copy(local, result)
                 self.builder = b
                 if self.is_tagged_text_local(result.id):
-                    self.mark_tagged_text_local(local.id)
+                    # An untagged `str`-typed var (`var name = parts[...]`)
+                    # must not be promoted to `tagged_text_locals` across a
+                    # conditional `+=`: paths that skip the `+=` still hold a
+                    # raw char*, while `local_is_str` is already true from its
+                    # MIR type.
+                    if local_was_tagged_text or not local_mir_is_str:
+                        self.mark_tagged_text_local(local.id)
                     self.nil_locals = marker_map_without(self.nil_locals, local.id)
                     self.option_value_locals = marker_map_without(self.option_value_locals, local.id)
                     return
@@ -2675,6 +2686,23 @@ impl MirLowering:
                                     ()
                     case None:
                         ()
+                # If `local` already uses the tagged-text contract (e.g. an i64
+                # slice/renderer var), normalize any untagged text RHS so the
+                # slot never loses its tagged invariant or `local_is_str` across
+                # conditional or loop reassignments. Conversely, an untagged
+                # `mir_type_is_str` var (`Opaque("str")` / fat-pointer text)
+                # must stay unmarked so downstream consumers always run the
+                # tag-aware runtime probe instead of assuming all paths took a
+                # conditional `.substring(...)` assignment.
+                var keep_local_tagged_text = false
+                if assign_keep_declared_any == None and (local_was_tagged_text or (local_was_runtime_value and local_mir_is_str)):
+                    if self.local_is_str(assigned_value) or self.local_hir_type_is_str(assigned_value):
+                        if not self.is_tagged_text_local(assigned_value.id):
+                            if not self.is_runtime_value_local(assigned_value.id):
+                                assigned_value = self.ensure_tagged_str(assigned_value)
+                            if local_was_tagged_text:
+                                keep_local_tagged_text = true
+                val keep_unmarked_str_var = local_mir_is_str and not local_was_tagged_text and not local_was_runtime_value and assign_keep_declared_any == None
                 val assignment_moves = self.ownership_assignment_requires_move(value_local, value_kind, span)
                 var b = self.builder
                 # Bug iso_transfer_sites_missing_move_return_assign_field
@@ -2696,14 +2724,18 @@ impl MirLowering:
                 self.copy_assignment_short_provenance(value_local, local)
                 self.copy_optional_record_owner(assigned_value.id, local.id)
                 self.assign_result_err_record_owner(assigned_value.id, local.id)
-                if self.is_runtime_value_local(assigned_value.id):
-                    self.mark_runtime_value_local(local.id)
-                else:
+                if keep_unmarked_str_var:
                     self.unmark_runtime_value_local(local.id)
-                if self.is_tagged_text_local(assigned_value.id):
-                    self.mark_tagged_text_local(local.id)
-                else:
                     self.tagged_text_locals = marker_map_without(self.tagged_text_locals, local.id)
+                else:
+                    if self.is_runtime_value_local(assigned_value.id):
+                        self.mark_runtime_value_local(local.id)
+                    else:
+                        self.unmark_runtime_value_local(local.id)
+                    if keep_local_tagged_text or self.is_tagged_text_local(assigned_value.id):
+                        self.mark_tagged_text_local(local.id)
+                    else:
+                        self.tagged_text_locals = marker_map_without(self.tagged_text_locals, local.id)
                 if self.is_decoded_text_option_local(assigned_value.id):
                     self.mark_decoded_text_option_local(local.id)
                 else:
@@ -4706,6 +4738,9 @@ impl MirLowering:
                 ()
 
         var b = self.builder
+        val pre_branch_local_limit = b.next_local_id
+        val pre_branch_tagged = self.snapshot_tagged_text_locals()
+        val pre_branch_rv = self.snapshot_runtime_value_local_ids()
         val then_block = b.new_block(Some("then"))
         val else_block = b.new_block(Some("else"))
         val merge_block = b.new_block(Some("merge"))
@@ -4759,7 +4794,8 @@ impl MirLowering:
         var b3 = self.builder
         var result_defined = false
         var merge_has_incoming = false
-        if not b3.current_block_has_explicit_terminator():
+        val then_reaches_merge = not b3.current_block_has_explicit_terminator()
+        if then_reaches_merge:
             # `.?` + `??` extraction: if-val on lower_block_expected's
             # LocalId? evaluates FALSE on the stage4 lane (pairing class),
             # silently skipping the arm-result copy (value-position if
@@ -4786,15 +4822,20 @@ impl MirLowering:
             b3.terminate_goto(merge_block)
             merge_has_incoming = true
         self.builder = b3
+        val then_end_tagged = self.snapshot_tagged_text_locals()
+        val then_end_rv = self.snapshot_runtime_value_local_ids()
+        self.restore_pre_branch_representation_marks(pre_branch_local_limit, pre_branch_tagged, pre_branch_rv)
 
         # Else block
         var b4 = self.builder
         b4.switch_to_block(else_block)
         self.builder = b4
+        var else_reaches_merge = else_ == None
         if val else_block_value = else_:
             val else_result = self.lower_block_expected(else_block_value, expected_type)
             var b5 = self.builder
-            if not b5.current_block_has_explicit_terminator():
+            else_reaches_merge = not b5.current_block_has_explicit_terminator()
+            if else_reaches_merge:
                 if else_result.?:
                     val else_local_fb = LocalId(id: 0)
                     val else_local = else_result ?? else_local_fb
@@ -4825,6 +4866,10 @@ impl MirLowering:
         # the completed arm instead of trying to terminate the empty merge.
         if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
             return result
+        if then_reaches_merge and else_reaches_merge:
+            self.intersect_pre_branch_representation_marks(pre_branch_local_limit, then_end_tagged, then_end_rv)
+        elif then_reaches_merge and not else_reaches_merge:
+            self.restore_pre_branch_representation_marks(pre_branch_local_limit, then_end_tagged, then_end_rv)
         self.builder.switch_to_block(merge_block)
         # The terminator guard skips emit_copy in arms that already returned;
         # if no arm defined result, the returned LocalId would be read while
@@ -4876,6 +4921,7 @@ impl MirLowering:
             return empty_chain
 
         var b = self.builder
+        val pre_chain_local_limit = b.next_local_id
         val merge_block = b.new_block(Some("if_chain_merge"))
         # A real bool, never `else_.?`: `.?` yields the `HirBlock?` itself, so
         # `chain_has_else and expected_type == nil` below read the absent
@@ -4907,6 +4953,9 @@ impl MirLowering:
         var inferred_known = false
         var inferred_ty = MirType.i64()
         var merged_arm_locals: [LocalId] = []
+        var chain_has_merge_marks = false
+        var merged_chain_tagged: Dict<i64, bool> = {}
+        var merged_chain_rv: [i64] = []
         var arm_index = 0
 
         while arm_index < arms.len():
@@ -4961,6 +5010,8 @@ impl MirLowering:
             b_cond.terminate_if(mir_operand_copy(cond_local), then_block, false_block)
             b_cond.switch_to_block(then_block)
             self.builder = b_cond
+            val pre_arm_tagged = self.snapshot_tagged_text_locals()
+            val pre_arm_rv = self.snapshot_runtime_value_local_ids()
 
             if has_if_val_scalar_binding:
                 val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
@@ -4975,6 +5026,14 @@ impl MirLowering:
                 self.bind_local(if_val_symbol_id, if_val_raw_local)
             var b_then = self.builder
             if not b_then.current_block_has_explicit_terminator():
+                if not chain_has_merge_marks:
+                    merged_chain_tagged = self.snapshot_tagged_text_locals()
+                    merged_chain_rv = self.snapshot_runtime_value_local_ids()
+                    chain_has_merge_marks = true
+                else:
+                    self.intersect_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv)
+                    merged_chain_tagged = self.snapshot_tagged_text_locals()
+                    merged_chain_rv = self.snapshot_runtime_value_local_ids()
                 if arm_result.?:
                     val arm_fallback = LocalId(id: 0)
                     val arm_local = arm_result ?? arm_fallback
@@ -4993,6 +5052,7 @@ impl MirLowering:
                 merge_has_incoming = true
             b_then.switch_to_block(false_block)
             self.builder = b_then
+            self.restore_pre_branch_representation_marks(pre_chain_local_limit, pre_arm_tagged, pre_arm_rv)
             arm_index = arm_index + 1
 
         # The final false edge owns the optional terminal else.  With no else,
@@ -5001,6 +5061,8 @@ impl MirLowering:
             val else_result = self.lower_block_expected(terminal_else, expected_type)
             var b_else = self.builder
             if not b_else.current_block_has_explicit_terminator():
+                if chain_has_merge_marks:
+                    self.intersect_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv)
                 if else_result.?:
                     val else_fallback = LocalId(id: 0)
                     val else_local = else_result ?? else_fallback
@@ -5017,8 +5079,13 @@ impl MirLowering:
                                 inferred_ty = else_ty
                 b_else.terminate_goto(merge_block)
                 merge_has_incoming = true
+            else:
+                if chain_has_merge_marks:
+                    self.restore_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv)
             self.builder = b_else
         else:
+            if chain_has_merge_marks:
+                self.intersect_pre_branch_representation_marks(pre_chain_local_limit, merged_chain_tagged, merged_chain_rv)
             var b_no_else = self.builder
             # A no-else chain is Unit-typed. Its false edge reaches the merge
             # with the unit local, which has no runtime payload to define.
@@ -5117,7 +5184,11 @@ impl MirLowering:
         b3.switch_to_block(body_block)
         self.builder = b3
 
+        val pre_loop_local_limit = self.builder.next_local_id
+        val pre_loop_tagged = self.snapshot_tagged_text_locals()
+        val pre_loop_rv = self.snapshot_runtime_value_local_ids()
         self.lower_block(body)
+        self.intersect_pre_branch_representation_marks(pre_loop_local_limit, pre_loop_tagged, pre_loop_rv)
 
         # If the body's last statement already terminated the current block
         # (an explicit break/continue/return with no trailing code), don't
@@ -5310,7 +5381,11 @@ impl MirLowering:
         self.builder = b_cond
 
         # Lower the loop body
+        val pre_loop_local_limit = self.builder.next_local_id
+        val pre_loop_tagged = self.snapshot_tagged_text_locals()
+        val pre_loop_rv = self.snapshot_runtime_value_local_ids()
         self.lower_block(body)
+        self.intersect_pre_branch_representation_marks(pre_loop_local_limit, pre_loop_tagged, pre_loop_rv)
 
         # If the body's last statement already terminated the current block
         # (an explicit break/continue/return with no trailing code), don't
@@ -5940,7 +6015,11 @@ impl MirLowering:
             self.remember_array_index_projection_provenance(collection_local, loop_var)
 
         # Lower the loop body
+        val pre_loop_local_limit = self.builder.next_local_id
+        val pre_loop_tagged = self.snapshot_tagged_text_locals()
+        val pre_loop_rv = self.snapshot_runtime_value_local_ids()
         self.lower_block(body)
+        self.intersect_pre_branch_representation_marks(pre_loop_local_limit, pre_loop_tagged, pre_loop_rv)
 
         # Fall through into the increment block. If the body's last statement
         # already terminated the current block (an explicit break/continue/
