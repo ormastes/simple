@@ -57,3 +57,15 @@ needs its own Stage 2: run the lane with `--backend=cranelift
 --produce-stage3-receipt=verify-landed-compiler-fix` (separate output root).
 The planner receipt is produced BEFORE the matrix step, so it still exists
 when the matrix rejects again; then resume Stage 3 the same way.
+
+## 2026-11-26 (`BF-8` Verification)
+
+- Both root-cause blockers on pin `18a1f28937c2` (`compiler_cli_build` via
+  `hir_lambda_param_hint_outlives_module_scope_2026-11-14`, and `test_runner_build` via
+  `native_noop_receipt_misses_windows_exe_suffix_2026-11-14`) are fixed at `origin/release/1.0.0`
+  and `scripts/bootstrap/admit-built-stage2-compiler-tests.shs` handles `.exe` outputs cleanly.
+- Verified with host tests (`test/01_unit/compiler/held_verify/stage2_matrix_noop_and_parse_shard_spec.spl`
+  `6/6` pass, `struct_dict_key_and_hir_scope_reset_spec.spl` `3/3` pass, `native_noop_windows_exe_output_spec.spl`
+  `2/2` pass, `begin_module_detaches_module_owners_spec.spl` `7/7` pass).
+- Shard `doc/08_tracking/bug/db/stage2_compiler_tests_matrix_rejected_pin_18a1f28937c2_2026-11-14.sdn`
+  set to `fix-implemented-verification-pending` pending rebuilt Stage 2 matrix verification.

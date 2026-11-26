@@ -1,0 +1,82 @@
+# Bugs 7 & 9 verification:
+#   - Bug 7: stale_merge_reverted_august_fixes_audit_2026-11-15
+#   - Bug 9: stage2_mir_field_type_garbage_carrier_2026-11-01 (closed not-a-defect)
+#
+# Verifies:
+# 1. Optional fields (`Span?` like BackendError.span and `text?` like CompiledUnit.entry_point)
+#    lower cleanly through HIR -> MIR -> mir_verify_module -> MirToLlvm, and no leftover
+#    `[mir-field-type]` probe strings remain in compiler sources.
+# 2. Resolved August fixes in 20.hir (`verification_contract_lowering.spl`) and std crypto
+#    (`src/lib/common/crypto/ed25519.spl` RFC 8032 TEST 2 vector) stay fixed, and the audit
+#    doc records remaining out-of-lane reverted owners accurately.
+
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_verify.{mir_verify_module}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+describe "MIR optional field layout and August reverted-fixes audit invariants":
+    context "Bug 9: stage2_mir_field_type_garbage_carrier_2026-11-01":
+        it "lowers Span? and text? optional fields through MIR, mir_verify, and LLVM IR with zero errors":
+            val src = "struct TinySpan:\n    start: i64\n    end_pos: i64\n\n" +
+                "struct TinyBackendError:\n    message: text\n    span: TinySpan?\n\n" +
+                "struct TinyCompiledUnit:\n    name: text\n    entry_point: text?\n\n" +
+                "fn check_opt_fields(err: TinyBackendError, unit: TinyCompiledUnit) -> text:\n" +
+                "    val fallback = unit.entry_point ?? err.message\n" +
+                "    fallback\n"
+            val parsed = parse_full_frontend(src, "testdata/opt_fields.spl", "opt_fields", Logger(level: 0))
+            var hl = HirLowering.with_filename("testdata/opt_fields.spl")
+            val hir = hl.lower_module(parsed)
+            expect(hl.errors.len()).to_equal(0)
+
+            var ml = MirLowering.new_for_target(
+                hir.symbols,
+                driver_mir_target_context(driver_core_compile_options_default())
+            )
+            val mir = ml.lower_module(hir, [])
+            expect(ml.errors).to_equal([])
+
+            val report = mir_verify_module(mir)
+            expect(report.fatal_count()).to_equal(0)
+
+            var tr = MirToLlvm.create("held_verify.opt_fields", CodegenTarget.X86_64, None)
+            val ir = tr.translate_module(mir)
+            expect(tr.codegen_errors).to_equal([])
+            expect(ir).to_contain("check_opt_fields")
+
+        it "keeps Optional span/entry_point declarations in backend_types and zero [mir-field-type] debug probes":
+            val backend_types = file_read("src/compiler/70.backend/backend_types.spl")
+            val expr_disp = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+            val mir_types = file_read("src/compiler/50.mir/mir_types.spl")
+            expect(backend_types).to_contain("span: Span?")
+            expect(backend_types).to_contain("entry_point: text?")
+            expect(expr_disp.contains("[mir-field-type]")).to_equal(false)
+            expect(mir_types.contains("[mir-field-type]")).to_equal(false)
+
+    context "Bug 7: stale_merge_reverted_august_fixes_audit_2026-11-15":
+        it "keeps resolved HIR verification_contract_lowering and lib Ed25519 TEST 2 vector intact":
+            val vcl = file_read("src/compiler/20.hir/hir_lowering/_Items/verification_contract_lowering.spl")
+            expect(vcl).to_contain("return None")
+            expect(vcl.contains("return nil")).to_equal(false)
+
+            val lib_ed25519 = file_read("src/lib/common/crypto/ed25519.spl")
+            expect(lib_ed25519).to_contain("0x92, 0xa0, 0x09, 0xa9")
+            expect(lib_ed25519).to_contain("0x99, 0x6e")
+            expect(lib_ed25519.contains("0x9c, 0x7e, 0x94")).to_equal(false)
+
+        it "records remaining out-of-lane reverted owners accurately in the audit tracking doc":
+            val audit_doc = file_read("doc/08_tracking/bug/stale_merge_reverted_august_fixes_audit_2026-11-15.md")
+            expect(audit_doc).to_contain("4d6616c2426")
+            expect(audit_doc).to_contain("e7ceed097be")
+            expect(audit_doc).to_contain("4558514d53f")
+            expect(audit_doc).to_contain("b2623c437f8")
+            expect(audit_doc).to_contain("c5588d34c6f")

@@ -155,3 +155,13 @@ The frozen parent predates the sibling-death bound above.
   A spinning child never dies, so the sibling-death bound in #8937 would not fire either.
   The parent only gets past it at the build timeout.
 - Workaround applied: `SIMPLE_PARSE_SHARDING=0 SIMPLE_FILE_FIBERS=0`.
+
+## 2026-11-26 (`BF-8` Verification)
+
+- Status remains `deferred` by design (per-file worker pool supersedes phase-split parse shards).
+- Verified guards remain intact at `origin/release/1.0.0`:
+  - `src/compiler/80.driver/driver_parse_shard_entry.spl:324` (`reset_all_pools()`)
+  - `src/app/cli/shard_worker_reap_v1.spl` (`parse_shard_reap_v1`, `parse_shard_death_deadline_v1`)
+  - `scripts/bootstrap/p3-targeted-stage2-build.shs` (`SIMPLE_PARSE_SHARDING=0`, `SIMPLE_FILE_FIBERS=0`)
+- Tests passed: `test/01_unit/app/cli/shard_worker_reap_spec.spl` (`20/20` pass),
+  `test/01_unit/compiler/held_verify/stage2_matrix_noop_and_parse_shard_spec.spl` (`6/6` pass).

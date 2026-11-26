@@ -63,3 +63,14 @@ a freed carrier; probe removed) re-verified FRESH at tip 6233df4b9f9ea: the
 The bug_db.sdn row for this ID still reads `open` at this tip — a
 never-flipped prior-lane tracker row, left for the mechanical sync-db lane
 per boot22/boot23 precedent (doc-header flips only in p3fix lanes).
+
+## 2026-11-26 (`BF-8` Host Regression Verification)
+
+- Shard `doc/08_tracking/bug/db/stage2_mir_field_type_garbage_carrier_2026-11-01.sdn` already holds
+  `status = closed` (`not-a-defect`); `bug_db.sdn` left untouched per shard policy.
+- Added executable regression spec
+  `test/01_unit/compiler/held_verify/mir_optional_field_and_august_audit_spec.spl` (`4/4` pass):
+  lowers structs with `span: TinySpan?` and `entry_point: text?` through HIR -> MIR ->
+  `mir_verify_module` (0 fatal findings) -> `MirToLlvm.create(...).translate_module(mir)` (0 errors),
+  verifies `src/compiler/70.backend/backend_types.spl` retains `span: Span?` / `entry_point: text?`,
+  and confirms 0 `[mir-field-type]` debug probe strings in `src/compiler/50.mir/`.

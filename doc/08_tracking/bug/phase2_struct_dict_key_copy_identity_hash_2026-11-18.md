@@ -171,3 +171,16 @@ the interpreter and cannot reproduce the native failure.
 - **2026-11-25:** Removed all 35 `# @workaround bug=phase2_struct_dict_key_copy_identity_hash_2026-11-18`
   sites across the 13 `src/` files on `release/1.0.0`; interpreter unit specs
   and MIR key-canonicalization checks pass, awaiting per-file P3 relink review.
+- **2026-11-26 (`BF-8` verification):**
+  - `test/01_unit/compiler/held_verify/struct_dict_key_and_hir_scope_reset_spec.spl`: `3/3` pass
+    (verifies `abi_interface.spl`-style `SymbolId` `Dict<SymbolId, i64>` across `set`, `get`,
+    `contains`, `remove`, `keys()`, `for-in`, and cross-module import -> `rt_value_int_wide(getfield)`
+    + `AggregateKind.Struct` key rebuild, `mir_verify_module` 0 fatal findings, and 0
+    `# @workaround` tags in `src/compiler/20.hir/abi_interface.spl` &
+    `src/compiler/35.semantics/join_point_model.spl`).
+  - Note on `test/01_unit/compiler/mir/struct_keyed_dict_key_lowering_spec.spl` (`20/21` on `origin/release/1.0.0`):
+    the `Sid?` optional-key assertion expecting `rt_is_some`/`rt_panic` in `50.mir` fails
+    (`unwraps a Some-checked Sid? key and keys it by its field on every key-in path`), tracked
+    outside `BF-8` `20.hir` ownership (`50.mir`).
+  - Shard `doc/08_tracking/bug/db/phase2_struct_dict_key_copy_identity_hash_2026-11-18.sdn` set to
+    `fix-implemented-verification-pending` pending rebuilt Phase 2/Stage 3 verification.
