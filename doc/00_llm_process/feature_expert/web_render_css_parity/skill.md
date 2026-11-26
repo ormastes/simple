@@ -5391,3 +5391,76 @@ spread 2.30..2.59 on both sides), rerun 7 rounds head-first-on-odd: 2.359 / 2.37
 - Pre-existing lib failures, identical on base `7035e24b267`:
   `value::tests::shared_text_unicode_index_and_slice`,
   `object_cache_slice_tests::reused_objects_are_byte_identical_to_a_cold_build_of_the_same_world`.
+
+## 2026-11-26 — fractional-margin follow-ups (frac-margin-flex2 lane)
+
+Three follow-ups to the frac-margin-flex review, each red spec first:
+
+- **Snap records are cleared on every pass.** Row flex, column flex, grid and
+  float items called `box_x_snap_clear` only when the current pass was
+  fractional, and the block-flow whole-margin branch reset only the line-start
+  error (not device dx / extra width). Shrink-to-fit containers (float,
+  inline-block, table cell, auto flex item, auto grid track) measure their
+  content intrinsically, so the probes never re-laid an item at another width
+  in a full `layout()` (same-box re-layouts exist: the beside-float trial, the
+  column `natural_first` pass, the grid second pass); `layout_selected` (`contain: layout` relayout) starts
+  from the previous layout's tables: an item whose `10%` margin went 20.5px ->
+  20px kept device dx -2 at k=4. All five sites now clear unconditionally,
+  always BEFORE the item's own layout (the item's self-records, e.g. a
+  fractional `width` extra, are written after). Spec:
+  `test/01_unit/browser_engine/fractional_margin_stale_snap_record_spec.spl`.
+  Trap: a single-column `grid-template-columns:auto` grid item goes through
+  the block-flow snap site (line ~4961), not the grid one.
+- **Block-flow multi-decimal em margins match Chrome.** The `#11896`
+  `_decl_horizontal_margin_px` fix (0.375em -> 6px, 0.25em -> 4px) was checked
+  on 9 block rows (0.25/0.375/0.3125/0.15/1.33/2.25+0.75/0.625/13px 0.35/
+  -0.625em) at k=1 and k=4: all match Chrome 159 (AC-24 in
+  `fractional_margin_flex_grid_float_chrome159_spec.spl`). No catalog page
+  carries a multi-decimal em margin.
+- **Exact-overflow rows shrink.** When whole-px margins fit but the exact ones
+  overflow (two `width:88px; margin:0 3.3%` items in 200px: 202.4px), Chrome
+  shrinks definite-size items by the exact deficit, weighted by flex-shrink x
+  base width, never below min-content / min-width, and the row has no free
+  space left to justify (flex-end / center start at 0). `margin_shrink_row`
+  does that through the fractional pen (`shrink_share_milli` lowers
+  `item_frac_delta_milli`; the pen drops `justify_start_offset`). Row-reverse
+  works through the same give-back. Rows with auto-size, growing or
+  auto-margin items keep base output (ponytail). A row whose WHOLE margins
+  already overflow (`shrink_deficit > 0`, e.g. 0.4em margins on 88+103px) is
+  still the whole-px shrink path: Chrome 570..959 vs head 568..959 at k=4.
+
+Found while probing, not fixed (separate lanes): an `inline-block` holding a
+row flex with a `%`-margin item paints the item 1px wide (Chrome 44..79, head
+40..40), and a `grid-template-columns:auto 1fr` auto track takes the whole
+width when it holds a row flex (head 61..100, Chrome 44..79).
+
+Gates at head 60e24d81a52 (seed1126b, sha256 fb80903917d6d5f5, rebased on
+52462c0321e): 30 lane/neighbour specs green except `containment_contain_spec` (b),
+which fails identically on base 52462c0321e (Dict demo, unrelated); matrix 77
+mismatching (ratchet PASS); catalogs 1x worst 0.44 / 4x worst 0.27, byte-identical
+to base 8/8 at both scales. Perf (measured before the shrink review commits, which
+touch only exact-overflow rows) css-layout (load
+< 8, warmups discarded), base / head medians, 6 alternated rounds: k=1 3566 / 3614
+ms, RSS 2.356 / 2.381 GB (+1.1%); k=4 3557 / 3324 ms, RSS 2.379 / 2.426 GB (+2.0%,
+per-run spread 2.27..2.52 on both sides); k=4 rerun 7 rounds head-first-on-odd:
+3148 / 3235 ms, RSS 2.394 / 2.402 GB (+0.3%). The change allocates nothing new
+(lazy tables, scalar locals).
+
+Second pass on the shrink path (review): a shrunk item's content was laid out
+at its unshrunk base (a `width:100%` child painted 148..235 vs Chrome 148..232),
+and an item at its floor dropped its share instead of handing it on. Floored
+items (`flex_zero_basis_floor_w`: min-width, or visible min-content) are now
+frozen in a pre-pass over candidate rows only, and the content width is the
+snapped width at k=1, the exact width rounded up at k>1 (a filling child ends
+1 device px late at k=4: 591..934 vs 591..933, pinned in AC-25). Not covered:
+the flex-wrap row path (`fc_wrap` snap records, line ~2956) still has no
+unconditional clear.
+
+Third pass (review): the floor freeze is now the CSS Flexbox 9.7 loop, not one
+pre-pass. An item whose share would cross its floor freezes AT the floor (a
+min-width:87px item of base 88 takes 1px, not 0), and the rest of the deficit
+is shared again until no new item freezes (AC-27, SHRINK3). A fractional
+`min-width` (87.5px) is still parsed to whole px, so Chrome 186..535 vs head
+186..533 at k=4 on that row. The stale-record spec now also covers a
+templated-grid item (`tgriditem`, the grid snap site at line ~2441), red when
+that clear is conditional.
