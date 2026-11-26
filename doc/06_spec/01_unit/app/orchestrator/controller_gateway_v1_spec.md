@@ -44,3 +44,8 @@ grants controller or uploaded-key authority.
 These scenarios do not establish successful live SSH, container reachability,
 signed execution completion, cross-host throughput or cleanup under native
 failure. Those require the admitted runtime and real installed endpoint.
+
+The cooperative SSH coverage refuses a non-SSH selection and validates
+terminal results across extra progress or cancellation calls. These
+admission and state checks require no SSH connection. The live Caret gateway
+scenario covers the actual configured server separately.
