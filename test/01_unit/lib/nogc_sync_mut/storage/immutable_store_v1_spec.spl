@@ -9,10 +9,11 @@ use std.common.hash.hash_policy_v1.{hash_policy_v1_digest, HASH_POLICY_V1_XXH3_1
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, StoreGcV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_publish_root, immutable_store_v1_pin, immutable_store_v1_release_pin,
-    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, StoreFlagV1, StoreCountV1, StoreGenerationV1}
+    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, StoreFlagV1, StoreCountV1, StoreGenerationV1}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
+use std.nogc_sync_mut.sosix.fs_v1.{rename_path}
 use app.io.file_ops.{path_absolute}
 
 val HELLO_XXH3_128 = "b5e9c1ad071b3e7fc779cfaa5e523818"
@@ -538,4 +539,48 @@ describe "immutable_store_v1 crash and failure safety":
         val head = immutable_store_v1_root_head(root, "main")
         expect(head.status).to_equal("corrupt")
         expect(head.reason).to_start_with("root-corrupt")
+
+    it "restores a pin another owner holds after the rename-aside instead of deleting it":
+        val root = _store_root("rel-owner-changed")
+        val a = immutable_store_v1_ingest(root, "owner changed".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_pin(root, "shared", "owner-b", [a.object_key])).to_equal("")
+        # Drive the post-rename step: the moved pin belongs to owner-b, releaser is owner-a.
+        val tomb = root + "/staging/pinrel-x"
+        dir_create_all(tomb)
+        expect(rename_path(root + "/pins/shared", tomb + "/pin")).to_equal(true)
+        expect(_isv1_release_pin_finish(root, "shared", "owner-a", tomb)).to_equal("pin-owner-changed")
+        expect(is_dir(root + "/pins/shared/refs")).to_equal(true)
+        expect(is_dir(tomb)).to_equal(false)
+        _store_cleanup(root)
+
+    it "does not clobber a re-created pin when restoring a foreign pin":
+        val root = _store_root("rel-owner-changed2")
+        val a = immutable_store_v1_ingest(root, "owner changed 2".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_pin(root, "shared", "owner-b", [a.object_key])).to_equal("")
+        val tomb = root + "/staging/pinrel-y"
+        dir_create_all(tomb)
+        expect(rename_path(root + "/pins/shared", tomb + "/pin")).to_equal(true)
+        expect(immutable_store_v1_pin(root, "shared", "owner-c", [a.object_key])).to_equal("")
+        expect(_isv1_release_pin_finish(root, "shared", "owner-a", tomb)).to_equal("pin-owner-changed")
+        val owner_c = file_read_regular_no_follow_bounded(root + "/pins/shared/owner", 512)
+        expect(owner_c.unwrap()).to_equal("owner-c")
+        val owner_b = file_read_regular_no_follow_bounded(root + "/pins/shared.r1/owner", 512)
+        expect(owner_b.unwrap()).to_equal("owner-b")
+        _store_cleanup(root)
+
+    it "sweeps stale staging dirs but keeps fresh ones, and never during dry-run GC":
+        val root = _store_root("staging-sweep")
+        dir_create_all(root + "/staging/ingest-dead")
+        dir_create_all(root + "/staging/pinrel-dead/pin")
+        dir_create_all(root + "/staging/other-keep")
+        # Fresh dirs survive the real GC threshold (one hour) and a dry run.
+        expect(immutable_store_v1_sweep_staging(root, StoreCountV1(3600)).value).to_equal(0)
+        immutable_store_v1_collect(root, StoreFlagV1(true))
+        immutable_store_v1_collect(root, StoreFlagV1(false))
+        expect(is_dir(root + "/staging/ingest-dead")).to_equal(true)
+        # With a zero age bound every recognised entry counts as stale.
+        expect(immutable_store_v1_sweep_staging(root, StoreCountV1(0)).value).to_equal(2)
+        expect(is_dir(root + "/staging/ingest-dead")).to_equal(false)
+        expect(is_dir(root + "/staging/pinrel-dead")).to_equal(false)
+        expect(is_dir(root + "/staging/other-keep")).to_equal(true)
         _store_cleanup(root)
