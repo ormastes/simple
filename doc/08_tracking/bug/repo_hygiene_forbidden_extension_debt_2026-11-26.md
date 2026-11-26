@@ -234,25 +234,25 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/test/test-rss-observation-budget.py` | 36 | zero-ref test; may test live code |
 | `scripts/test/test-rss-proc-stat-diagnostic.py` | 25 | cited only from doc/ or the baseline |
 | `scripts/test/test-rss-proc-stat-record.py` | 91 | cited only from doc/ or the baseline |
-| `test/00_quick/bootstrap/stage3_cgroupfs_kernel.py` | 127 | cited only from doc/ or the baseline |
-| `test/00_unit/scripts/stage4_retained_self_evidence_test.py` | 219 | zero-ref test; may test live code |
-| `test/01_unit/app/devhub/mail_cli_shared_config_test.bash` | 98 | zero-ref test; may test live code |
-| `test/01_unit/runtime/windows_terminal_raw_bytes/project-controlled-provider.py` | 29 | zero-ref test; may test live code |
-| `test/01_unit/runtime/windows_terminal_raw_bytes/run-term-byte-fixtures.py` | 56 | zero-ref test; may test live code |
-| `test/01_unit/scripts/bootstrap_cache_path_retention_test.py` | 38 | zero-ref test; may test live code |
-| `test/01_unit/scripts/bootstrap_campaign_nested_session_test.py` | 28 | zero-ref test; may test live code |
-| `test/01_unit/scripts/bootstrap_essential_apps_gate_test.py` | 173 | zero-ref test; may test live code |
-| `test/01_unit/scripts/hello_sanity_buildrunner_test.py` | 287 | cited only from doc/ or the baseline |
-| `test/01_unit/scripts/hello_sanity_matrix_test.py` | 312 | zero-ref test; may test live code |
-| `test/01_unit/scripts/native_aot_suite_contract_test.py` | 179 | cited only from doc/ or the baseline |
-| `test/01_unit/scripts/reviewed_native_sanity_argv_test.py` | 76 | zero-ref test; may test live code |
-| `test/01_unit/scripts/windows_collector_helper_hash_test.py` | 80 | cited only from doc/ or the baseline |
-| `test/01_unit/tools/mail_cli/account_secret_argv_test.bash` | 72 | cited only from doc/ or the baseline |
-| `test/02_integration/app/fixtures/lsp_stdio_live_protocol_linux_evidence.py` | 41 | zero-ref test; may test live code |
-| `test/02_integration/app/lsp_native_stdio_protocol_test.py` | 208 | cited only from doc/ or the baseline |
-| `test/02_integration/app/mcp_native_stdio_protocol_test.py` | 30 | zero-ref test; may test live code |
-| `test/fixtures/database/sqlcipher4/gen_boundary_oracles.py` | 24 | cited only from doc/ or the baseline |
-| `test/scripts/test_prepare_mail_config_helper.py` | 52 | zero-ref test; may test live code |
+| `test/00_quick/bootstrap/stage3_cgroupfs_kernel.py` | 127 | DECISION (d) keep: root-only Linux kernel regression for live scripts/bootstrap/lib/stage3-cgroupfs.py; not runnable or verifiable on this Windows host; follows the scripts/ lane decision on that helper |
+| `test/00_unit/scripts/stage4_retained_self_evidence_test.py` | 219 | DECISION (d) keep: tests live scripts/check/lib/stage4-retained-self-evidence.py (scripts/ lane owns it); port or delete together with that helper |
+| `test/01_unit/app/devhub/mail_cli_shared_config_test.bash` | 98 | DECISION (d) keep: tests live tools/mail-cli/lib/config.shs and auth.shs; real bash test, port is tracked by todo 467 with the mail CLI |
+| `test/01_unit/runtime/windows_terminal_raw_bytes/project-controlled-provider.py` | 29 | DECISION (d) keep: builds the fault-injection provider for live rt_term_write (src/runtime/runtime_core_io_exports.c); rt_core_exports_behaviour_selfcheck.c has no short/zero/error write cases, so not superseded; needs a Windows C toolchain to port and verify |
+| `test/01_unit/runtime/windows_terminal_raw_bytes/run-term-byte-fixtures.py` | 56 | DECISION (d) keep: runner for the provider above; port the pair together |
+| `test/01_unit/scripts/bootstrap_cache_path_retention_test.py` | 38 | DECISION (c) PORTED to test/01_unit/scripts/bootstrap_cache_path_retention_spec.spl (passes; fails with stage3-native-cache renamed in the collector); original deleted |
+| `test/01_unit/scripts/bootstrap_campaign_nested_session_test.py` | 28 | DECISION (d) keep: needs perl process-tree watchdog and real process sessions (Linux only); cannot verify on this host |
+| `test/01_unit/scripts/bootstrap_essential_apps_gate_test.py` | 173 | DECISION (d) keep: 173 lines against live check-bootstrap-essential-apps.shs and validate-test-runner-json.pl; no sibling coverage; port is a separate lane |
+| `test/01_unit/scripts/hello_sanity_buildrunner_test.py` | 287 | DECISION (d) keep: tests live scripts/bootstrap/hello-sanity-buildrunner.py; follows the scripts/ lane decision on that helper |
+| `test/01_unit/scripts/hello_sanity_matrix_test.py` | 312 | DECISION (d) keep: tests live hello-sanity-matrix.py and hello-sanity-matrix-darwin.py; follows the scripts/ lane decision |
+| `test/01_unit/scripts/native_aot_suite_contract_test.py` | 179 | DECISION (d) keep: 179 lines against live run-native-aot-suite.shs; sibling bootstrap_native_aot_evidence_contract_test.shs covers only the evidence validator, not the suite runner; port is a separate lane |
+| `test/01_unit/scripts/reviewed_native_sanity_argv_test.py` | 76 | DECISION (c) PORTED to test/01_unit/scripts/reviewed_native_sanity_argv_spec.spl plus reviewed_native_sanity_argv_fixture.shs (passes; fails when the canonical argv gains a duplicate launcher name); original deleted |
+| `test/01_unit/scripts/windows_collector_helper_hash_test.py` | 80 | DECISION (d) keep: tests live run-process-group-bounded-log-windows.py; follows the scripts/ lane decision on that helper |
+| `test/01_unit/tools/mail_cli/account_secret_argv_test.bash` | 72 | DECISION (d) keep: tests live tools/mail-cli/lib/config.bash, which is itself baselined until the mail CLI port (todo 467) |
+| `test/02_integration/app/fixtures/lsp_stdio_live_protocol_linux_evidence.py` | 41 | DECISION (d) keep: Linux evidence driver for the live simple_lsp_mcp server; needs an interactive stdio harness that process_run cannot provide |
+| `test/02_integration/app/lsp_native_stdio_protocol_test.py` | 208 | DECISION (d) keep: live protocol gate (JSONL and Content-Length with stdin held open); no spec covers it and process_run cannot hold stdin open |
+| `test/02_integration/app/mcp_native_stdio_protocol_test.py` | 30 | DECISION (d) keep: thin wrapper over lsp_native_stdio_protocol_test.py; moves with it |
+| `test/fixtures/database/sqlcipher4/gen_boundary_oracles.py` | 24 | DECISION (d) keep: independent oracle (stdlib hashlib, by design not Simple) that is the provenance of checked-in boundary_oracles.sdn; porting would remove the independence |
+| `test/scripts/test_prepare_mail_config_helper.py` | 52 | DECISION (b) already removed by 1586a6278f9 (helper ported to scripts/ci/prepare_mail_config_helper.shs); row was stale |
 
 ## Coordinator default decisions, applied 2026-11-26 (not owner-signed)
 
