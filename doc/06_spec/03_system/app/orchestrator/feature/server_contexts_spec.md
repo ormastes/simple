@@ -5,7 +5,10 @@ Manually authored companion. **NOT_RUN**: no admitted self-hosted runtime.
 
 The application selects the same server and credential reference for Simple
 and Orchestrator, selects a separate local Caret override, and projects the
-agent's explicit container address. The controller scenario initializes a real private state root,
+agent's explicit container address. The actual Caret remote dispatcher
+refuses a local selection before reading the gateway request. An explicit
+SSH alias reaches the bounded input read. An unresolved native SSH exit
+remains a failure across cleanup turns. The controller scenario initializes a real private state root,
 submits the AgentSession fixture through the typed gateway, inspects its UID,
 records cancellation using the original source digest, and inspects the retained
 cancelled state. It asserts that metadata submission is not execution authority

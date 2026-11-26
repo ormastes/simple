@@ -34,3 +34,16 @@ runtime/host inspection fields require a coordinated client schema update.
 The explicit executable path is not a pinned binary identity. See the design
 document for bounds and the distinction between source checks and runtime
 qualification: `doc/05_design/caret_orchestrator_client.md`.
+
+
+## Caret Suite remote controller requests
+
+The interactive `/orchestrator remote <config|-> <context|-> <server|->
+<ssh-profile.sdn> <request.sdn>` command uses the shared Caret server context
+and authenticated SSH gateway. The request is a canonical controller gateway
+document. The profile's authentication and trust references must match the
+selected server. For configuration discovery and request documents see the
+[shared server guide](../tooling/orchestration_server_contexts.md).
+
+Local session commands use the local Caret listener. Remote controller intent
+and terminal attachment have separate authorities.

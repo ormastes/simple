@@ -79,8 +79,21 @@ simple-orchestrator server-request <config-file|-> <consumer> <context|-> <serve
 
 The `simple orchestrator` command uses the same resolver and request dispatcher
 as the standalone `simple-orchestrator` executable. The `llm_caret orchestrator`
-route requires the `caret` consumer. An agent selects the `agent` consumer with
-`container` address selection when it runs inside the workload.
+route requires the `caret` consumer. Caret Suite also sends the same typed
+gateway requests from its interactive command.
+
+```text
+/orchestrator remote <config|-> <context|-> <server|-> <ssh-profile.sdn> <request.sdn>
+```
+
+A `-` config uses the session's config selection, then normal discovery.
+The remote action requires an SSH server and uses its selected address,
+port and protected identity and trust references. Start, launch, attach and
+pane controls continue to use the separate local session listener. Use an
+original request UID to inspect an uncertain controller operation.
+
+An agent selects the `agent` consumer with `container` address selection when
+it runs inside the workload.
 
 For the config argument, `-` requests default configuration discovery. For
 context and server arguments, `-` selects the normal defaults. These are

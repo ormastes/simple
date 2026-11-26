@@ -7,6 +7,8 @@ use app.orchestrator.local_controller.orchestrator_local_command_v1
 use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
 use app.orchestrator.controller_gateway_v1.*
 use app.orchestrator.server_command_v1.server_selection_v1
+use app.llm_caret.cs_orchestrator_v1.cs_orchestrator_dispatch_v1
+use app.orchestrator.validation.OrchestratorValidationReplyV1
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 use std.common.sdn.value.SdnValue
@@ -46,6 +48,26 @@ describe "Shared server selection and actual controller state":
         expect(caret.record.transport).to_equal("local")
         val agent = server_selection_v1(["server-resolve", path, "agent", "development", "-", "container"]).unwrap()
         expect(agent.record.host).to_equal("192.168.50.2")
+
+    it "uses the Caret context and explicit SSH server through the real Caret dispatch":
+        val path = cwd() + "/test/fixtures/server_contexts/shared.sdn"
+        val unavailable = cwd() + "/test/fixtures/server_contexts/does-not-exist.sdn"
+        step("Refuse the Caret local selection on the remote route before reading request data")
+        val local = cs_orchestrator_dispatch_v1("server-context-test",
+            ["remote", path, "development", "-", unavailable, unavailable])
+        expect(local).to_equal("orchestrator remote requires an SSH server")
+        step("Use the explicit shared SSH alias and attempt the bounded request read")
+        val remote = cs_orchestrator_dispatch_v1("server-context-test",
+            ["remote", path, "development", "shared", unavailable, unavailable])
+        expect(remote).to_contain("server-request-unavailable")
+
+    it "keeps unresolved SSH exit evidence across cleanup turns":
+        val reply = OrchestratorValidationReplyV1(exit_code: 2, output: "",
+            transport_exit_unconfirmed: true)
+        val finalized = orchestrator_reply_cleanup_v2(reply)
+        expect(finalized.exit_code).to_equal(2)
+        expect(finalized.transport_exit_unconfirmed).to_equal(true)
+        expect(finalized.output).to_contain("server-ssh-cleanup-unconfirmed")
 
     it "retains submission and cancellation through the typed controller gateway":
         step("Install a private local controller for this scenario")

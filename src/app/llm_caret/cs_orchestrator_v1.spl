@@ -11,7 +11,12 @@ use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{macos_seatbel
 use app.orchestrator.caret_session_protocol_v1.{orchestrator_caret_server_info_load_v1,
     orchestrator_caret_client_call_v1, orchestrator_caret_parse_dict_v1,
     orchestrator_caret_bool_v1, orchestrator_caret_str_v1}
+use app.orchestrator.server_command_v1.{server_selection_v1, orchestrator_server_request_file_v1}
+use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
+use app.orchestrator.validation.OrchestratorValidationReplyV1
 
+# This holds only the two SSH cleanup carriers and the native exit state.
+var _cs_orch_remote_cleanup_v1: Option<OrchestratorValidationReplyV1> = None
 var _cs_orch_runtime_dirs: Dict<text, text> = {}
 var _cs_orch_config_args: Dict<text, text> = {}
 
@@ -154,10 +159,35 @@ pub fn cs_orchestrator_start_v1(session: text, words: [text]) -> text:
         waited_ms = waited_ms + 250
     "orchestrator start timed out waiting for server readiness in " + runtime_dir
 
+fn cs_orchestrator_remote_cleanup_v1(reply: OrchestratorValidationReplyV1) -> OrchestratorValidationReplyV1:
+    val cleaned = orchestrator_reply_cleanup_v2(reply)
+    if (cleaned.transport_cleanup.is_some() or cleaned.transport_store_cleanup.is_some() or cleaned.transport_exit_unconfirmed):
+        _cs_orch_remote_cleanup_v1 = Some(OrchestratorValidationReplyV1(exit_code: 2, output: "",
+            transport_cleanup: cleaned.transport_cleanup, transport_store_cleanup: cleaned.transport_store_cleanup,
+            transport_exit_unconfirmed: cleaned.transport_exit_unconfirmed))
+    else:
+        _cs_orch_remote_cleanup_v1 = None
+    cleaned
+
+fn cs_orchestrator_remote_v1(session: text, args: [text]) -> text:
+    if args.len() != 5 or args.contains(""):
+        return "usage: /orchestrator remote <config|-> <context|-> <server|-> <profile> <request.sdn>"
+    if val previous = _cs_orch_remote_cleanup_v1:
+        val _cleaned = cs_orchestrator_remote_cleanup_v1(previous)
+        if _cs_orch_remote_cleanup_v1.is_some(): return "orchestrator remote transport cleanup is pending"
+    val config = if args[0] == "-": _cs_orch_config_v1(session) else: args[0]
+    val selected = server_selection_v1(["server-resolve", config, "caret", args[1], args[2], "host"])
+    if selected.is_err(): return "orchestrator remote selection failed: " + selected.unwrap_err()
+    val server = selected.unwrap()
+    if server.record.transport != "ssh": return "orchestrator remote requires an SSH server"
+    val reply = orchestrator_server_request_file_v1(server, args[3], args[4])
+    cs_orchestrator_remote_cleanup_v1(reply).output.trim()
+
 pub fn cs_orchestrator_dispatch_v1(session: text, sub_words: [text]) -> text:
     if sub_words.len() == 0 or sub_words[0] == "help":
         return ("/orchestrator start [--runtime-dir <dir>] [--config <file|->]\n" +
             "/orchestrator status | crashed | stop\n" +
+            "/orchestrator remote <config|-> <context|-> <server|-> <profile> <request.sdn>\n" +
             "/orchestrator launch <spec> [--container <img|macos-seatbelt>] [--worktree] [args...]\n" +
             "/orchestrator inspect [id] | send <id> <msg> | relaunch <id> [args...] | close <id>\n" +
             "/orchestrator cleanup <id>  Remove one crashed agent's worktree and artifacts\n" +
@@ -170,6 +200,8 @@ pub fn cs_orchestrator_dispatch_v1(session: text, sub_words: [text]) -> text:
         i = i + 1
     if sub == "start":
         return cs_orchestrator_start_v1(session, tail)
+    if sub == "remote":
+        return cs_orchestrator_remote_v1(session, tail)
     val runtime_dir = cs_orchestrator_runtime_dir_v1(session)
     val config_arg = _cs_orch_config_v1(session)
     val action = if sub == "stop": "shutdown" else: sub

@@ -48,9 +48,13 @@ pub fn orchestrator_server_command_v1(args: [text]) -> OrchestratorValidationRep
             "transport": SdnValue.String(selection.record.transport), "host": SdnValue.String(selection.record.host),
             "port": SdnValue.Int(selection.record.port), "connected": SdnValue.Bool(false)}
         return OrchestratorValidationReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
-    val source = file_read_regular_no_follow_bounded(args[7], 2097152)
+    orchestrator_server_request_file_v1(selection, args[6], args[7])
+
+pub fn orchestrator_server_request_file_v1(selection: ResolvedServerV1, profile_path: text,
+        request_path: text) -> OrchestratorValidationReplyV1:
+    val source = file_read_regular_no_follow_bounded(request_path, 2097152)
     if source.is_err(): return server_error_v1("server-request-unavailable", false)
-    orchestrator_server_source_v1(selection, args[6], source.unwrap())
+    orchestrator_server_source_v1(selection, profile_path, source.unwrap())
 
 pub fn orchestrator_server_source_v1(selection: ResolvedServerV1, profile_path: text, source: text) -> OrchestratorValidationReplyV1:
     val header = controller_gateway_header_v1(source)
@@ -80,13 +84,14 @@ pub fn orchestrator_server_source_v1(selection: ResolvedServerV1, profile_path: 
     if not turn.complete:
         turn = server_ssh_cancel_v1(turn)
         var cleanup_polls = 0
-        while not turn.complete and cleanup_polls < 100:
+        while not turn.complete and not turn.exit_unconfirmed and cleanup_polls < 100:
             turn = server_ssh_poll_v1(turn)
             cleanup_polls = cleanup_polls + 1
     if turn.error != "" or not turn.complete or turn.response_header.is_none():
         var reply = server_error_v1(if turn.error != "": turn.error else: "server-transport-collection-unconfirmed", true)
         reply.transport_cleanup = turn.lease
         reply.transport_store_cleanup = turn.store_cleanup
+        reply.transport_exit_unconfirmed = turn.exit_unconfirmed
         return reply
     if turn.response_header.unwrap().exit_code != 0:
         return OrchestratorValidationReplyV1(exit_code: turn.response_header.unwrap().exit_code, output: turn.response_payload)
@@ -149,3 +154,5 @@ pub fn orchestrator_gateway_stdio_v1() -> OrchestratorValidationReplyV1:
     reply.output = ""
     reply.exit_code = if written.is_ok(): 0 else: 2
     reply
+
+export orchestrator_server_request_file_v1
