@@ -75,6 +75,17 @@ unsafe extern "system" {
     fn DeleteProcThreadAttributeList(attributes: *mut c_void);
     fn GetLastError() -> u32;
     fn GetFileInformationByHandleEx(file: Handle, kind: i32, information: *mut c_void, size: u32) -> i32;
+    fn GetVolumePathNameW(path: *const u16, volume_path: *mut u16, capacity: u32) -> i32;
+    fn GetVolumeInformationW(
+        root: *const u16,
+        name: *mut u16,
+        name_len: u32,
+        serial: *mut u32,
+        max_component: *mut u32,
+        flags: *mut u32,
+        fs_name: *mut u16,
+        fs_name_len: u32,
+    ) -> i32;
     fn ReadFile(file: Handle, buffer: *mut c_void, capacity: u32, count: *mut u32, overlapped: *mut c_void) -> i32;
     fn GetFinalPathNameByHandleW(handle: Handle, buffer: *mut u16, capacity: u32, flags: u32) -> u32;
     fn GetFileAttributesW(path: *const u16) -> u32;
@@ -247,6 +258,8 @@ const NAMES: &[&str] = &[
     "DeleteProcThreadAttributeList",
     "GetLastError",
     "GetFileInformationByHandleEx",
+    "GetVolumePathNameW",
+    "GetVolumeInformationW",
     "ReadFile",
     "BCryptOpenAlgorithmProvider",
     "BCryptCreateHash",
@@ -507,6 +520,34 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let capacity = arg_i64(args, 2, name)? as u32;
             let flags = arg_i64(args, 3, name)? as u32;
             Ok(Value::Int(unsafe { GetFinalPathNameByHandleW(handle, buffer.cast(), capacity, flags) } as i64))
+        }
+        "GetVolumePathNameW" => {
+            let path = opt_ptr(arg_i64(args, 0, name)?);
+            let volume_path = opt_ptr(arg_i64(args, 1, name)?);
+            let capacity = arg_i64(args, 2, name)? as u32;
+            Ok(Value::Int(unsafe { GetVolumePathNameW(path.cast(), volume_path.cast(), capacity) } as i64))
+        }
+        "GetVolumeInformationW" => {
+            let root = opt_ptr(arg_i64(args, 0, name)?);
+            let volume_name = opt_ptr(arg_i64(args, 1, name)?);
+            let name_len = arg_i64(args, 2, name)? as u32;
+            let serial = opt_ptr(arg_i64(args, 3, name)?);
+            let max_component = opt_ptr(arg_i64(args, 4, name)?);
+            let flags = opt_ptr(arg_i64(args, 5, name)?);
+            let fs_name = opt_ptr(arg_i64(args, 6, name)?);
+            let fs_name_len = arg_i64(args, 7, name)? as u32;
+            Ok(Value::Int(unsafe {
+                GetVolumeInformationW(
+                    root.cast(),
+                    volume_name.cast(),
+                    name_len,
+                    serial.cast(),
+                    max_component.cast(),
+                    flags.cast(),
+                    fs_name.cast(),
+                    fs_name_len,
+                )
+            } as i64))
         }
         "GetFileInformationByHandleEx" => {
             let file = opt_ptr(arg_i64(args, 0, name)?);
