@@ -49,15 +49,14 @@ Rules:
 2. Host selection follows `doc/04_architecture/platform/platform_variant_directory_rule.md`:
    bodies under `sosix/<os>/`, canonical names (`macos`, not `mac`), an identical
    public API in every variant, and a typed refusal where a host is not implemented.
-   Recommended binding: each level-0 facade is one
+   Binding (owner decision, final): each level-0 facade is one
    `@when(os="windows"): export use ... @elif(os="linux"): ... @end` import
    switch (the form `nogc_sync_mut/container/machine_authority_cleanup_v1.spl`
    uses) and contains no body and no other host test. That directory rule's §3
    rule 1 forbids `@cfg(os=)` in level-0 files once a variant exists, and the
-   `variants/` resolver hook it points to is not implemented, so the switch
-   needs a one-line exception in that rule. The alternative is to implement the
-   resolver hook first. The owner chooses (plan §6 Q4); until then P2 and P1
-   use the switch.
+   `variants/` resolver hook it points to is not implemented, so P2 adds a
+   one-line exception to that rule for body-free import-switch facades. There
+   is no resolver lane.
 3. A variant reports what it enforces through `SosixContainSupportV1`. The runtime
    never infers support from the OS name.
 4. An unsupported axis is refused before a child exists
@@ -157,7 +156,7 @@ pub struct SosixContainSupportV1:
     process_limit: SosixContainFlagV1
     cpu_rate_limit: SosixContainFlagV1
     kill_all_descendants: SosixContainFlagV1
-    write_confinement: SosixContainFlagV1
+    write_confinement: SosixContainFlagV1   # mechanism implemented; static, not a measured result
     read_confinement: SosixContainFlagV1
     network_isolation: SosixContainFlagV1
     pid_isolation: SosixContainFlagV1
@@ -175,6 +174,33 @@ pub struct SosixContainPollV1:
 
 pub struct SosixContainLeaseV1:
     slot: SosixContainSlotV1
+
+pub struct SosixContainCanaryV1:
+    id: text
+    expected: text                     # "allow" | "deny"
+    observed: text                     # "allow" | "deny" | "not-run"
+
+pub struct SosixContainQualifyRequestV1:
+    probe_program: text                # canary executable (performs one attempt, prints the outcome)
+    probe_digest: text
+    work_dir: text                     # empty scratch directory the op owns for the run
+    scope: text
+    wall: SosixContainMillisV1
+
+pub struct SosixContainQualifyResultV1:
+    canaries: [SosixContainCanaryV1]   # every planned canary, in plan order
+    evidence_digest: text              # "" when nothing ran
+    reason: text                       # "" = ran to completion
+
+pub const SOSIX_CONTAIN_CANARY_OWN_WRITE_V1 = "own-dir-write"            # allow
+pub const SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1 = "lower-read-exec"    # allow
+pub const SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1 = "lower-overwrite"        # deny
+pub const SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1 = "user-private-write"   # deny
+pub const SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1 = "other-scope-write"     # deny
+pub const SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1 = "other-scope-process-open"   # deny
+
+# True only if every planned id is present once and observed == expected.
+pub fn sosix_contain_canaries_pass_v1(result: SosixContainQualifyResultV1) -> SosixContainFlagV1
 
 pub enum SosixContainAdmissionV1:
     Started(lease: SosixContainLeaseV1)
@@ -212,18 +238,29 @@ pub fn sosix_contain_start_v1(request: SosixContainRequestV1) -> SosixContainAdm
 pub fn sosix_contain_poll_v1(lease: SosixContainLeaseV1) -> Result<SosixContainPollV1, text>
 pub fn sosix_contain_cancel_v1(lease: SosixContainLeaseV1) -> Result<SosixContainFlagV1, text>
 pub fn sosix_contain_collect_v1(lease: SosixContainLeaseV1) -> Result<SosixContainPollV1, text>
+pub fn sosix_contain_qualify_v1(request: SosixContainQualifyRequestV1) -> SosixContainQualifyResultV1
 ```
+
+`support` is static: it says which mechanisms the variant implements and never
+depends on a measurement, so `start` has no dependency on canaries. Whether
+the mechanism works on this host is measured by `sosix_contain_qualify_v1`, a
+separate op that sets up its own directories under `work_dir` (one granted to
+`scope`, one to a second scope, one linked file) and launches only
+`probe_program` through the variant's internal launch. Its result is folded
+into `PureContainerEvidenceV1.write_confinement_observed`, and the runtime, not
+`start`, refuses a `restricted` run without it (§7). A host without a
+qualify body returns no canaries and `containment-qualify-unimplemented-<os>`.
 
 `start` calls `sosix_contain_request_reason_v1` against its own `support` first.
 
 | Axis | Windows (increment 1) | Linux | FreeBSD | macOS |
 |---|---|---|---|---|
-| Owner reused | `io/windows_process_owner` | `io/linux_process_owner`, `linux_process_replace_*`, `io/linux_container_containment_v1` (retirement evidence) | none: FreeBSD is served by the existing `jail_runtime_v1` sibling backend, see below | `sosix/darwin_sandbox_v1`; SBPL from the emitter after N3 moves it to `common/` |
+| Owner reused | `io/windows_process_owner` | `io/linux_process_owner`, `linux_process_replace_*`, `io/linux_container_containment_v1` (retirement evidence) | none: FreeBSD is served by the existing `jail_runtime_v1` sibling backend, see below | `darwin_sandbox_v1` and the SBPL emitter, after N3 moves both (see below) |
 | Memory | Job `JOB_OBJECT_LIMIT_JOB_MEMORY` (commit) | cgroup v2 `memory.max` | `rctl jail:<n>:memoryuse:deny` | none aggregate (`RLIMIT_AS` is per process) -> unsupported |
 | Process count | Job `ActiveProcessLimit` | `pids.max` | `rctl maxproc:deny` | `RLIMIT_NPROC` is per UID -> unsupported |
 | CPU rate | `JobObjectCpuRateControlInformation` hard cap | `cpu.max` | `rctl pcpu:deny` | none (`RLIMIT_CPU` is CPU seconds) -> unsupported |
 | Kill descendants | `KILL_ON_JOB_CLOSE`, no breakaway | `cgroup.kill` | `jail_remove` | process group only -> false |
-| Write confinement | low integrity + restricting SIDs + per-scope grant ACE (§4.3); true only while its four canaries pass | mount namespace, read-only bind | jail path + `nullfs -o ro` | Seatbelt `deny file-write*` |
+| Write confinement | low integrity + restricting SIDs + per-scope grant ACE (§4.3); mechanism flag, proven per host by `sosix_contain_qualify_v1` | mount namespace, read-only bind | jail path + `nullfs -o ro` | Seatbelt `deny file-write*` |
 | Read confinement | not claimed (AppContainer, increment 2) | `pivot_root` | jail path | Seatbelt `deny file-read*` allowlist |
 | Network | no | `CLONE_NEWNET` | jail without `ip4`/`ip6` or `vnet` | Seatbelt `deny network*` |
 | PID isolation | no | `CLONE_NEWPID` | jail | no |
@@ -238,8 +275,11 @@ the FreeBSD route is the existing `providers/freebsd/jail_runtime_v1.spl`
 
 Layering for the later variants: a SOSIX variant imports only `sosix/**`,
 `io/**` and `common/**`, never `container/providers/**` or `src/os/**`.
-So N3 first moves the pure SBPL emitter `seatbelt_profile_v1` to
-`common/container_policy/` (forward left behind), and the SimpleOS body lives
+So N3 first moves two files, leaving forwards: the pure SBPL emitter
+`seatbelt_profile_v1` to `common/container_policy/`, and
+`nogc_async_mut/sosix/darwin_sandbox_v1.spl` (a synchronous extern wrapper that
+sits in the async tree today) to `nogc_sync_mut/sosix/macos/darwin_sandbox_v1.spl`,
+so the sync macOS variant imports no async module. The SimpleOS body lives
 in `src/os/sosix/` behind the existing SimpleOS SOSIX provider binding, while
 `lib/.../sosix/simpleos/containment_v1.spl` stays a refusal on hosted targets.
 
@@ -294,9 +334,19 @@ pub fn sosix_windows_scope_sid_v1(scope: text) -> Result<text, text>   # SDDL SI
 ```
 
 `OpenProcessToken` -> `CreateRestrictedToken(DISABLE_MAX_PRIVILEGE, restricting
-SIDs = {Everyone S-1-1-0, Users S-1-5-32-545, scope SID})` ->
-`SetTokenInformation(TokenIntegrityLevel, S-1-16-4096)`. Reads back the integrity
-level and `TokenRestrictedSids`; a mismatch closes the token and returns `Err`.
+SIDs = {Everyone S-1-1-0, Users S-1-5-32-545, the caller's logon SID, the fixed
+reader SID, scope SID})` -> `SetTokenInformation(TokenIntegrityLevel,
+S-1-16-4096)` -> `SetTokenInformation(TokenDefaultDacl, {scope SID, user SID,
+SYSTEM})`. Reads back the integrity level and `TokenRestrictedSids`; a mismatch
+closes the token and returns `Err`.
+
+- The logon SID is needed because the window station and desktop are granted
+  to it; without it the child can die at start with `0xC0000142`.
+- The default DACL omits the logon SID and Everyone, so objects the child
+  creates (its process, threads, files without an inherited ACL) are not
+  openable by a child of another scope even though both are low integrity.
+- The reader SID is one fixed SID shared by all containers. It only ever
+  appears in read+execute ACEs on materialized base objects (§4.4).
 
 Low integrity alone is not write confinement: a low child can write every
 low-labelled object (the user's `LocalLow`, another container's `upper/` or
@@ -308,16 +358,17 @@ container's directories grant a different scope SID. The scope SID is derived
 from `sha256(scope)` under one fixed prefix that P1 chooses and records; it
 names no account.
 
-This is unproven on this host. `write_confinement` is true only while these
-canaries pass in P2's spec, and the variant reports false otherwise (the
-runtime then refuses every `restricted` request):
+This is unproven on this host. The mechanism counts as working only when
+`sosix_contain_qualify_v1` returns all six canaries as expected:
 
-| Canary | Expected |
-|---|---|
-| write a file in own granted directory | allow |
-| overwrite a `lower/` hard link | deny |
-| write into the user's `LocalLow` | deny |
-| write into a directory granted to a different scope | deny |
+| Canary id | Attempt | Expected |
+|---|---|---|
+| `own-dir-write` | write a file in own granted directory | allow |
+| `lower-read-exec` | read and execute a linked base file whose store ACL is user-only | allow |
+| `lower-overwrite` | overwrite a linked base file | deny |
+| `user-private-write` | write into the user's `LocalLow` | deny |
+| `other-scope-write` | write into a directory granted to a different scope | deny |
+| `other-scope-process-open` | open a process of a different scope for write | deny |
 
 Side effect, not claimed as a guarantee: files readable only by the user SID
 become unreadable to the child.
@@ -336,11 +387,13 @@ pub fn sosix_fs_link_readonly_v1(source: text, destination: text,
 # std.nogc_sync_mut.sosix.contained_write_v1, and the same name in every
 # std.nogc_sync_mut.sosix.<os>.contained_write_v1 variant behind it
 pub fn sosix_fs_grant_contained_write_v1(empty_dir: text, scope: text) -> text   # "" = granted
+pub fn sosix_fs_grant_contained_read_v1(tree: text) -> text                      # "" = granted
 ```
 
 | Op | Windows | Linux / FreeBSD / macOS |
 |---|---|---|
 | `link_readonly` | `file_hardlink` (`CreateHardLinkW`, already in `io/file_ops`). `file_seal_readonly` answers false on Windows by design and is not required: the object keeps its medium integrity label, so a low-integrity child cannot open it for write | `file_hardlink` + `file_seal_readonly` (0444); the launch variant adds the read-only mount or Seatbelt rule |
+| `grant_contained_read` | read+execute ACE for the fixed reader SID on a tree | typed refusal until that host's lane |
 | `grant_contained_write` | Low mandatory label `(OI)(CI)` plus an inheritable modify ACE for the scope SID, via `SetNamedSecurityInfoW` | typed refusal `contained-write-unimplemented-<os>` until that host's lane defines its grant; never "granted" by default |
 
 `link_readonly` has one portable body: it links, then seals where the host can
@@ -350,6 +403,21 @@ seal, and it never branches on the OS. It returns `copied` only when `allow_copy
 (`grant-target-not-empty`). That check is load-bearing: a hard link shares one
 security descriptor across all its names, so labelling a tree that contains links
 would make store objects writable by every container.
+
+`grant_contained_write` also refuses a directory whose existing or inherited
+ACEs already give Everyone or Users write (`grant-target-world-writable`): the
+restricting list contains both, so any child could write there.
+
+`grant_contained_read` exists because the restricted access check applies to
+read and execute too, and a hard link carries the store object's DACL. A store
+under the user profile or `%TEMP%` has a user-only ACL, so `lower/` would be
+unreadable. The op adds one read+execute ACE for the fixed reader SID to the
+directory tree and every file under it (bounded count, idempotent, never a
+write ACE, never a label change). It deliberately reaches the shared store
+objects through the links; one ACE per object ever, shared by all containers.
+Off Windows it returns `contained-read-unimplemented-<os>`. P1 owns it; the
+runtime (P4) calls it on `lower/` after materialization, so P3 is unchanged.
+A failure is a refusal before start, `rootfs-read-grant-failed`.
 
 A `copied` fallback file is a new file under `lower/`. It inherits that
 directory's medium label and has no scope ACE, so it is as unwritable as a link.
@@ -468,11 +536,12 @@ pub fn pure_container_qualify_v1(request: PureContainerQualifyV1) -> PureContain
 pub fn pure_container_run_v1(spec: PureContainerSpecV1) -> PureContainerRunV1
 ```
 
-Evidence comes first and from a separate call. `pure_container_qualify_v1` runs
-the canaries (§4.3 and plan P4) through `sosix_contain_start_v1` directly, with
-no admission step, and calls `sosix_contain_memory_cap_evidence_v1`. It sets
-`launch_observed`, `cleanup_observed` and `memory_cap_enforced` from what it
-saw and sets `evidence_revision` to `pure:<sha256 of the canary and memory
+Evidence comes first and from a separate call. `pure_container_qualify_v1` calls
+`sosix_contain_qualify_v1` (the canaries; it never goes through
+`sosix_contain_start_v1` or admission, so nothing is circular) and
+`sosix_contain_memory_cap_evidence_v1`. It sets `write_confinement_observed`
+from `sosix_contain_canaries_pass_v1`, `launch_observed` and `cleanup_observed`
+from the canary run, `memory_cap_enforced` from the memory evidence, and sets `evidence_revision` to `pure:<sha256 of the canary and memory
 digests>`, always non-empty once it has run, even when nothing is affirmed
 (lane E's `unaffirmed:` precedent). `base_fully_linked` is false in qualify
 output and is set per run by the materializer.
@@ -482,11 +551,16 @@ empty `spec.evidence` any constrained requirement fails
 `capability-evidence-missing`; with qualify output, a `native-container`
 requirement reaches `isolation-kind-mismatch`.
 
+A `restricted` run with `spec.evidence.write_confinement_observed` false is
+refused before any effect: `write-confinement-unqualified`.
+
 Order: `sosix_contain_support_v1` -> build report from support and
-`spec.evidence` -> `container_capability_v1_admission_reason` -> journal
+`spec.evidence` -> `container_capability_v1_admission_reason` -> the
+`write-confinement-unqualified` check -> journal
 `created` -> `storage_view_v1_create` -> materialize `lower/` -> if a base file
 was copied and the requirement needs `readonly_file_backing_reuse`, refuse and
-clean up -> grant `upper/` and scratch to `scope = container_id` ->
+clean up -> `sosix_fs_grant_contained_read_v1(lower)` -> grant `upper/` and
+scratch to `scope = container_id` ->
 journal `starting` -> `sosix_contain_start_v1` -> poll to terminal -> collect ->
 journal `stopped` -> remove `lower/`, release pin, `storage_view_v1_destroy` ->
 journal `destroyed`. Every failure after `created` walks the journal's cleanup
