@@ -1,0 +1,103 @@
+#![allow(primitive_api)] # slot geometry and byte offsets are the raw mmap contract
+# Shared present slot for a remote application window.
+#
+# One file per window holding exactly `width * height * 4` bytes of ARGB32,
+# mapped MAP_SHARED by the window manager and by the client. The slot carries
+# no header: size, content revision, checksum and damage travel in the
+# present message, and that message is the publication point. The client
+# writes, sends the message and waits for the reply; the window manager reads
+# only while handling the message. The two sides therefore never touch the
+# slot at the same time, which is why no lock, atomic or memory barrier is
+# needed.
+#
+# The window manager never maps the slot itself. A client that truncates its
+# slot while it is mapped elsewhere would fault the reader (SIGBUS), and a
+# length check before mapping cannot close that window. The window manager
+# therefore copies the slot with ordinary reads into a private snapshot file
+# and maps only that; a short or vanished slot becomes a short copy, which is
+# refused by length. Plan:
+# doc/03_plan/ui/wm_remote_app/remote_app_presentation_plan.md
+
+use std.nogc_sync_mut.sffi.fs.{file_mmap_create_raw, file_mmap_raw, file_munmap_raw}
+use std.nogc_sync_mut.io.file_ops.{file_size, file_remove}
+use std.nogc_sync_mut.io_runtime.{file_copy}
+use std.nogc_sync_mut.ptr.raw.{raw_read_u32s, raw_write_u32s_checksum}
+
+val WM_REMOTE_SURFACE_MAX_SIDE: i64 = 8192
+val WM_REMOTE_SURFACE_MAX_PIXELS: i64 = 16777216
+
+pub fn wm_remote_surface_byte_len(width: i32, height: i32) -> i64:
+    """Slot length in bytes, or 0 when the geometry is not admissible."""
+    val w = width.to_i64()
+    val h = height.to_i64()
+    if w <= 0 or h <= 0 or w > WM_REMOTE_SURFACE_MAX_SIDE or h > WM_REMOTE_SURFACE_MAX_SIDE:
+        return 0
+    if w > WM_REMOTE_SURFACE_MAX_PIXELS / h:
+        return 0
+    w * h * 4
+
+pub fn wm_remote_surface_create(path: text, width: i32, height: i32) -> bool:
+    """Window-manager side: create a zero-filled slot of the exact size."""
+    val len = wm_remote_surface_byte_len(width, height)
+    if len == 0 or path == "":
+        return false
+    val addr = file_mmap_create_raw(path, len)
+    if addr == 0:
+        return false
+    file_munmap_raw(addr, len)
+    file_size(path) == len
+
+pub fn wm_remote_surface_write(path: text, width: i32, height: i32, pixels: [u32]) -> bool:
+    """Client side: copy a full frame into the slot. Never creates or resizes
+    the file; a slot of the wrong length is refused before it is mapped."""
+    val len = wm_remote_surface_byte_len(width, height)
+    if len == 0 or pixels.len().to_i64() * 4 != len or file_size(path) != len:
+        return false
+    val addr = file_mmap_raw(path, len, 0, 0)
+    if addr == 0:
+        return false
+    raw_write_u32s_checksum(addr, pixels, pixels.len().to_i64())
+    file_munmap_raw(addr, len)
+    true
+
+pub fn wm_remote_surface_read_rect(path: text, snapshot_path: text, width: i32, height: i32, x: i64, y: i64, w: i64, h: i64) -> [u32]:
+    """Window-manager side: copy one rectangle out of the slot, through a
+    private snapshot at `snapshot_path` (a path only the window manager
+    uses). Returns an empty list when the slot is missing, has the wrong
+    length, or the rectangle does not fit. The snapshot is removed before
+    returning."""
+    val len = wm_remote_surface_byte_len(width, height)
+    if len == 0 or snapshot_path == "" or file_size(path) != len:
+        return []
+    if (x < 0 or y < 0 or w <= 0 or h <= 0 or
+        x > width.to_i64() - w or y > height.to_i64() - h):
+        return []
+    file_remove(snapshot_path)
+    if not file_copy(path, snapshot_path) or file_size(snapshot_path) != len:
+        file_remove(snapshot_path)
+        return []
+    val addr = file_mmap_raw(snapshot_path, len, 0, 1)
+    if addr == 0:
+        file_remove(snapshot_path)
+        return []
+    var out: [u32] = []
+    if x == 0 and w == width.to_i64():
+        out = raw_read_u32s(addr + y * width.to_i64() * 4, w * h)
+    else:
+        var row: i64 = 0
+        while row < h:
+            val line = raw_read_u32s(addr + ((y + row) * width.to_i64() + x) * 4, w)
+            for pixel in line:
+                out.push(pixel)
+            row = row + 1
+    file_munmap_raw(addr, len)
+    file_remove(snapshot_path)
+    out
+
+pub fn wm_remote_surface_read(path: text, snapshot_path: text, width: i32, height: i32) -> [u32]:
+    wm_remote_surface_read_rect(path, snapshot_path, width, height, 0, 0, width.to_i64(), height.to_i64())
+
+pub fn wm_remote_surface_remove(path: text) -> bool:
+    if path == "":
+        return false
+    file_remove(path)

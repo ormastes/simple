@@ -1,0 +1,121 @@
+#![allow(primitive_api)] # window handle and request builders carry the daemon_sdk wire scalars (ids, pixel sizes, revisions)
+# Remote application client for the resident WM daemon.
+#
+# The half an application process links: open a window backed by a shared
+# present slot, write pixels, publish them with a present message, drain
+# input. Deliberately does NOT import the compositor. Request builders are
+# separate from the file hop so the same messages can be routed in-process.
+# Plan: doc/03_plan/ui/wm_remote_app/remote_app_presentation_plan.md
+
+use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_request_new}
+use std.daemon_sdk.client.{daemon_submit_and_wait}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.ui.wm_remote_surface.{wm_remote_surface_write}
+use common.ui.window_scene.{wm_content_frame_checksum}
+use app.play.wm_daemon_client.{wm_daemon_config, WMD_WINDOW_CLOSE, WMD_SURFACE_OPEN, WMD_SURFACE_PRESENT, WMD_SURFACE_EVENTS}
+
+val WM_REMOTE_APP_TIMEOUT_MS: i64 = 30000
+
+pub struct WmRemoteAppWindow:
+    ok: bool
+    window_id: i64
+    slot_path: text
+    width: i32
+    height: i32
+
+pub fn wm_remote_app_open_request(title: text, width: i32, height: i32, client_pid: i64) -> DaemonRequest:
+    var req = daemon_request_new(WMD_SURFACE_OPEN)
+    req.set_field("title", title)
+    req.set_field("w", "{width}")
+    req.set_field("h", "{height}")
+    req.set_field("pid", "{client_pid}")
+    req
+
+pub fn wm_remote_app_window_from_response(resp: DaemonResponse) -> WmRemoteAppWindow:
+    val id = resp.get_field("window_id").to_i64() ?? 0
+    val width = (resp.get_field("w").to_i64() ?? 0).to_i32()
+    val height = (resp.get_field("h").to_i64() ?? 0).to_i32()
+    val slot = resp.get_field("slot")
+    WmRemoteAppWindow(
+        ok: resp.status == 0 and id > 0 and slot != "" and width > 0 and height > 0,
+        window_id: id,
+        slot_path: slot,
+        width: width,
+        height: height
+    )
+
+fn _present_base(window: WmRemoteAppWindow, revision: i64, client_pid: i64) -> DaemonRequest:
+    var req = daemon_request_new(WMD_SURFACE_PRESENT)
+    req.set_field("id", "{window.window_id}")
+    req.set_field("w", "{window.width}")
+    req.set_field("h", "{window.height}")
+    req.set_field("rev", "{revision}")
+    req.set_field("pid", "{client_pid}")
+    req
+
+pub fn wm_remote_app_present_request(window: WmRemoteAppWindow, pixels: [u32], revision: i64, client_pid: i64) -> DaemonRequest:
+    """Write a full frame into the slot and build the message that publishes
+    it. `written=false` travels in the message when the slot refused the
+    write, so the window manager answers with a reason instead of presenting
+    stale pixels."""
+    var req = _present_base(window, revision, client_pid)
+    val written = wm_remote_surface_write(window.slot_path, window.width, window.height, pixels)
+    req.set_field("written", if written: "true" else: "false")
+    req.set_field("checksum", "{wm_content_frame_checksum(pixels)}")
+    req
+
+pub fn wm_remote_app_damage_request(window: WmRemoteAppWindow, pixels: [u32], revision: i64, client_pid: i64, x: i64, y: i64, w: i64, h: i64) -> DaemonRequest:
+    """Write the frame and publish only one changed rectangle of it. The
+    checksum covers the rectangle's pixels in row order."""
+    var req = _present_base(window, revision, client_pid)
+    val written = wm_remote_surface_write(window.slot_path, window.width, window.height, pixels)
+    req.set_field("written", if written: "true" else: "false")
+    var rect: [u32] = []
+    val fits = (x >= 0 and y >= 0 and w > 0 and h > 0 and
+        x <= window.width.to_i64() - w and y <= window.height.to_i64() - h and
+        pixels.len().to_i64() == window.width.to_i64() * window.height.to_i64())
+    if fits:
+        var row: i64 = 0
+        while row < h:
+            var col: i64 = 0
+            while col < w:
+                rect.push(pixels[(y + row) * window.width.to_i64() + x + col])
+                col = col + 1
+            row = row + 1
+    req.set_field("damage", "{x},{y},{w},{h}")
+    req.set_field("checksum", "{wm_content_frame_checksum(rect)}")
+    req
+
+pub fn wm_remote_app_open(title: text, width: i32, height: i32) -> WmRemoteAppWindow:
+    val resp = daemon_submit_and_wait(
+        wm_remote_app_open_request(title, width, height, getpid()),
+        wm_daemon_config(), WM_REMOTE_APP_TIMEOUT_MS)
+    wm_remote_app_window_from_response(resp)
+
+pub fn wm_remote_app_present(window: WmRemoteAppWindow, pixels: [u32], revision: i64) -> DaemonResponse:
+    """Publish a frame and wait for the window manager's verdict. The caller
+    must not write the slot again before this returns."""
+    daemon_submit_and_wait(
+        wm_remote_app_present_request(window, pixels, revision, getpid()),
+        wm_daemon_config(), WM_REMOTE_APP_TIMEOUT_MS)
+
+pub fn wm_remote_app_poll_events(window: WmRemoteAppWindow) -> [text]:
+    """Drain input the window manager routed to this window. Each row is
+    `kind|local_x|local_y|key|action`."""
+    var req = daemon_request_new(WMD_SURFACE_EVENTS)
+    req.set_field("id", "{window.window_id}")
+    req.set_field("pid", "{getpid()}")
+    val resp = daemon_submit_and_wait(req, wm_daemon_config(), WM_REMOTE_APP_TIMEOUT_MS)
+    var out: [text] = []
+    val count = resp.get_field("count").to_i64() ?? 0
+    var i: i64 = 0
+    while i < count:
+        out.push(resp.get_field("ev{i}"))
+        i = i + 1
+    out
+
+pub fn wm_remote_app_close(window: WmRemoteAppWindow) -> bool:
+    var req = daemon_request_new(WMD_WINDOW_CLOSE)
+    req.set_field("id", "{window.window_id}")
+    val resp = daemon_submit_and_wait(req, wm_daemon_config(), WM_REMOTE_APP_TIMEOUT_MS)
+    resp.status == 0 and resp.request_id != ""

@@ -633,3 +633,27 @@ links here BEFORE committing, so the next agent starts from the current
 project state.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
+
+## Remote application presentation (2026-11-26)
+
+A separate process can present pixels in the resident headless WM
+(`app.play.wm_daemon`). Entry points: `app.play.wm_remote_app_client` (app
+side), `app.play.wm_remote_app_host` (WM side), slot in
+`std.nogc_sync_mut.ui.wm_remote_surface`. Plan:
+`doc/03_plan/ui/wm_remote_app/remote_app_presentation_plan.md`.
+
+Traps:
+- The slot has no header and no lock. The `surface-present` message publishes
+  it; never write the slot between sending the message and reading the reply.
+- A frame is admitted only if it is exactly `window.w - 8` by `window.h - 36`,
+  carries the active theme id, and `require_external_content_frame` was called
+  for the window first. Otherwise `set_external_content_frame` returns false
+  with no reason.
+- `init_headless_host_wm` must set `headless_backend`, or
+  `pure_simple_pixel_buffer()` returns an empty list.
+- On the seed, anything importing the compositor needs
+  `SIMPLE_EXECUTION_MODE=interpreter` under `simple run`; `env_set` in a parent
+  does not reach a spawned child, pass the variable through `env`.
+- The empty desktop's framebuffer hash is not stable across wall-clock time;
+  assert colour counts, not hash equality between runs.
+- Measured: two-process spec 74 s, in-process spec 33 s (interpreted).
