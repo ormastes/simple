@@ -856,7 +856,7 @@ describe "CUDA backend intensive MIR contract":
         val result = CudaBackend.create((8, 6)).compile(cuda_module_with_types([fn_], types))
         expect(result.is_ok()).to_equal(true)
         val ptx = result.unwrap().ptx
-        expect(ptx).to_contain("ld.local.u64 %r1, [%r0+8];")
+        expect(ptx).to_contain("ld.global.u64 %r1, [%r0+8];")
         expect(ptx.contains("WARN: unresolved aggregate layout")).to_equal(false)
         assert_no_placeholder_output(ptx)
 
@@ -928,10 +928,31 @@ describe "CUDA backend intensive MIR contract":
         val result = CudaBackend.create((8, 6)).compile(cuda_module_with_types([fn_], types))
         expect(result.is_ok()).to_equal(true)
         val ptx = result.unwrap().ptx
-        expect(ptx).to_contain("ld.local.u16 %r5, [%r0+16];")
-        expect(ptx).to_contain("st.local.u64 [%r0+8], %r2;")
+        expect(ptx).to_contain("ld.global.u16 %r5, [%r0+16];")
+        expect(ptx).to_contain("st.global.u64 [%r0+8], %r2;")
         expect(ptx).to_contain(", 24;")
         expect(ptx.contains("WARN:")).to_equal(false)
+        expect(ptx.contains("ld.local")).to_equal(false)
+        expect(ptx.contains("st.local")).to_equal(false)
+
+    it "rejects struct field access through a pointer without memory-space provenance":
+        val symbol = SymbolId(id: 162)
+        val aggregate = MirType(kind: MirTypeKind.Struct(symbol))
+        val pointer = MirType.ptr(aggregate, true)
+        val types: Dict<SymbolId, MirTypeDef> = {
+            symbol: MirTypeDef(symbol: symbol, name: "Unplaced", kind: MirTypeDefKind.Struct([
+                MirFieldDef(name: "wide", type_: cuda_u64(), offset: 0, has_bits_attr: false, bits_width: 0)
+            ]), is_export_c: false, export_name: "")
+        }
+        val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 1), MirOperand.copy(LocalId(id: 0)), 0), span: nil)
+        ], terminator: MirTerminator.Ret(nil))
+        val fn_ = cuda_function(162, "cuda_unplaced_field", [pointer], MirType.unit(), [
+            cuda_arg(0, 0, "base", pointer), cuda_temp(1, cuda_u64())
+        ], [block], false)
+        val result = CudaBackend.create((8, 6)).compile(cuda_module_with_types([fn_], types))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message).to_contain("no memory-space provenance")
 
     it "uses maximum physical field end for reordered struct stride":
         val symbol = SymbolId(id: 181)
@@ -1084,4 +1105,4 @@ describe "CUDA backend intensive MIR contract":
         ], [block], true)
         val ptx = compile_supported_cuda([fn_])
         expect(ptx).to_contain(", 24;")
-        expect(ptx).to_contain("ld.local.u8 %r3, [%r0+16];")
+        expect(ptx).to_contain("ld.global.u8 %r3, [%r0+16];")

@@ -934,10 +934,11 @@ class CudaBackend:
         val dest_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
         if dest_ty.kind != layout.1.kind:
             return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field load destination type mismatch"))
+        val space = self.field_base_space(func, base)?
         val dest_reg = "%r{dest.id}"
-        val base_reg = self.operand_to_reg(builder, base)
+        val base_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, base), space)
         val ld_ty = self.ptx_mem_type(layout.1)
-        builder.emit_line("ld.local{ld_ty} {dest_reg}, [{base_reg}+{layout.0}];")
+        builder.emit_line("ld{self.type_mapper.ptx_state_space(space)}{ld_ty} {dest_reg}, [{base_reg}+{layout.0}];")
         Ok(())
 
     me compile_set_field(builder: PtxBuilder, base: MirOperand, field: i64, value: MirOperand, func: MirFunction) -> Result<(), CompileError>:
@@ -947,11 +948,21 @@ class CudaBackend:
         val value_ty = self.operand_mir_type(func, value)?
         if value_ty.kind != layout.1.kind:
             return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field store value type mismatch"))
-        val base_reg = self.operand_to_reg(builder, base)
+        val space = self.field_base_space(func, base)?
+        val base_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, base), space)
         val value_reg = self.operand_to_reg(builder, value)
         val st_ty = self.ptx_mem_type(layout.1)
-        builder.emit_line("st.local{st_ty} [{base_reg}+{layout.0}], {value_reg};")
+        builder.emit_line("st{self.type_mapper.ptx_state_space(space)}{st_ty} [{base_reg}+{layout.0}], {value_reg};")
         Ok(())
+
+    me field_base_space(func: MirFunction, base: MirOperand) -> Result<MemorySpace, CompileError>:
+        """State space of a field access. A pointer base keeps its tracked
+        provenance (kernel args are global, GEP inherits, Alloc is local) and
+        fails closed without one; a by-value aggregate base is thread-local."""
+        val base_ty = self.operand_mir_type(func, base)?
+        match base_ty.kind:
+            case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _): self.pointer_memory_space(base, self.pointer_spaces)
+            case _: Ok(MemorySpace.Local)
 
     me compile_cast(builder: PtxBuilder, dest: LocalId, operand: MirOperand, target: MirType, func: MirFunction):
         """Compile type conversion using PTX cvt instruction."""
@@ -1495,8 +1506,9 @@ class CudaBackend:
             case Tuple(elements):
                 var total = 0
                 for e in elements:
+                    total = cuda_checked_extent_align_v1(total, self.cuda_type_align(e))?
                     total = cuda_checked_extent_add_v1(total, self.cuda_type_size(e)?)?
-                Ok(total)
+                cuda_checked_extent_align_v1(total, self.cuda_type_align(ty))
             case _: cuda_checked_extent_add_v1(0, self.type_mapper.size_of(ty))
 
     me cuda_type_align(ty: MirType) -> i64:
