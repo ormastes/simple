@@ -1,0 +1,62 @@
+# ContainerCapabilityReportV2: lossless v1 upgrade, tri-state isolation axes,
+# independent fail-closed network/pid admission.
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1,
+    ContainerCapabilityFlagV1, container_capability_report_v1_empty}
+use std.common.contracts.container.capability_report_v2.{ContainerIsolationStateV1,
+    ContainerCapabilityReportV2, container_capability_report_v2_from_v1,
+    container_isolation_state_v1_from_flag, container_capability_report_v2_pure_windows,
+    container_capability_report_v2_docker_process, container_isolation_v2_admission_reason}
+
+fn _v1() -> ContainerCapabilityReportV1:
+    var r = container_capability_report_v1_empty()
+    r.host_os = "windows"
+    r.provider_version = "p1"
+    r.evidence_revision = "ev-1"
+    r.memory_hard_limit = ContainerCapabilityFlagV1(true)
+    r
+
+fn _yes() -> ContainerCapabilityFlagV1:
+    ContainerCapabilityFlagV1(true)
+
+fn _no() -> ContainerCapabilityFlagV1:
+    ContainerCapabilityFlagV1(false)
+
+describe "capability report v2":
+    it "upgrades v1 losslessly with unknown axes":
+        val v2 = container_capability_report_v2_from_v1(_v1())
+        expect(v2.base.host_os).to_equal("windows")
+        expect(v2.base.provider_version).to_equal("p1")
+        expect(v2.base.evidence_revision).to_equal("ev-1")
+        expect(v2.base.memory_hard_limit.value).to_equal(true)
+        expect(v2.network_isolation == ContainerIsolationStateV1.Unknown).to_equal(true)
+        expect(v2.pid_isolation == ContainerIsolationStateV1.Unknown).to_equal(true)
+    it "never admits unknown":
+        val v2 = container_capability_report_v2_from_v1(_v1())
+        expect(container_isolation_v2_admission_reason(v2, _yes(), _no())).to_equal("network-isolation-required")
+        expect(container_isolation_v2_admission_reason(v2, _no(), _yes())).to_equal("pid-isolation-required")
+    it "imposes nothing when neither is required":
+        val v2 = container_capability_report_v2_pure_windows(_v1())
+        expect(container_isolation_v2_admission_reason(v2, _no(), _no())).to_equal("")
+    it "pure windows is not isolated on either axis":
+        val v2 = container_capability_report_v2_pure_windows(_v1())
+        expect(v2.network_isolation == ContainerIsolationStateV1.NotIsolated).to_equal(true)
+        expect(container_isolation_v2_admission_reason(v2, _yes(), _no())).to_equal("network-isolation-required")
+        expect(container_isolation_v2_admission_reason(v2, _no(), _yes())).to_equal("pid-isolation-required")
+    it "docker process with network none admits network only":
+        val v2 = container_capability_report_v2_docker_process(_v1(), "none")
+        expect(container_isolation_v2_admission_reason(v2, _yes(), _no())).to_equal("")
+        expect(container_isolation_v2_admission_reason(v2, _yes(), _yes())).to_equal("pid-isolation-required")
+    it "docker process on a named network keeps network unknown":
+        val v2 = container_capability_report_v2_docker_process(_v1(), "abc123")
+        expect(v2.network_isolation == ContainerIsolationStateV1.Unknown).to_equal(true)
+        expect(container_isolation_v2_admission_reason(v2, _yes(), _no())).to_equal("network-isolation-required")
+    it "requires evidence even for an isolated axis":
+        var v1 = _v1()
+        v1.evidence_revision = ""
+        val v2 = container_capability_report_v2_docker_process(v1, "none")
+        expect(container_isolation_v2_admission_reason(v2, _yes(), _no())).to_equal("network-isolation-required")
+    it "maps flags to states":
+        expect(container_isolation_state_v1_from_flag(_no(), _yes()) == ContainerIsolationStateV1.Unknown).to_equal(true)
+        expect(container_isolation_state_v1_from_flag(_yes(), _yes()) == ContainerIsolationStateV1.Isolated).to_equal(true)
+        expect(container_isolation_state_v1_from_flag(_yes(), _no()) == ContainerIsolationStateV1.NotIsolated).to_equal(true)
