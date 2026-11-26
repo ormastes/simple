@@ -92,3 +92,43 @@ The four remaining examples (नहीं, कुछ, र्कं, टुँ) a
 edge, the glyph's vertical raster phase (see
 `glyph_vertical_raster_phase_chrome159_spec`). They are not the baseline, so the
 `in-development` tag stays.
+
+### 2026-11-26 — the four red examples are glyph raster (no layout or shaping fix)
+
+Measured on base `b53118edcfc`, seed1126b, Chrome 159 at factor 4 (same page,
+bundled Noto Sans Devanagari through `@font-face`). Edge rows are the darkest
+channel per row over the ink box.
+
+Position and line box are ruled out:
+- Glyph ids, `device-glyph-xs` and `ys` equal Chrome's table. कुछ is
+  `56 34 62` at `0,35,49`, टुँ is `66 34 101` at `0,29,32`, नहीं is
+  `75 88 635` at `0,35,69`, and every `ys` is 0. The ink x ranges are equal.
+- The baseline is 179 on both sides. In र्कं, rows 176-178 are 0 and row 179
+  is 255 in both Chrome and Simple. AC-1, AC-2, AC-5 and AC-8 to AC-10 are
+  green.
+
+| AC | word | edge | Chrome | Simple | cause |
+|----|------|------|--------|--------|-------|
+| 3 | नहीं | top | row 121 = 206, row 122 = 0 | row 121 = 192 | 4x4 kernel quantisation |
+| 6 | र्कं  | top | row 121 = 202, row 122 = 0 | row 121 = 192 | 4x4 kernel quantisation |
+| 4 | कुछ  | bottom | row 195 = 72, row 196 = 255 | row 195 = 0, row 196 = 192 | outline not y-hinted |
+| 7 | टुँ   | bottom | row 195 = 78, row 196 = 255 | row 195 = 0, row 196 = 192 | outline not y-hinted |
+
+- **AC-3 and AC-6, the 4x4 kernel.** The anusvara dot top lies at about 121.66
+  device px (control-point bound of glyphs 635 and 510, top 896 units). Above
+  48 device px the gray path (`_glyf_raster_alpha_rows`, sfnt_glyf.spl) takes
+  4 vertical samples, so a row about 20% covered keeps one sample: 4/16 gives
+  192, which is ink under the spec's < 200 rule. Chrome's analytic coverage
+  gives 202-206, which is not ink.
+- **AC-4 and AC-7, no y-hinting.** The bottom edge is the u-matra, glyph 34.
+  Its control-point bound is -268 units, about 196.15 device px, and Simple
+  paints it there unhinted (the baseline-anchored `_gray_frame` frame). Chrome
+  ends the glyph about 0.4-0.5 px higher: row 195 is 72-78 and row 196 is
+  empty. The suspected cause, not yet verified, is FreeType slight (y-only)
+  autohinting at 64 device px. The same snap shows on the headline: Chrome's
+  row 139 is solid where the unhinted top is 139.19. That headline case is
+  already pinned by `glyph_vertical_raster_phase_chrome159_spec.spl`.
+- **Owner: glyph raster.** Both causes are in the gray path above 48 px of
+  `src/lib/common/encoding/sfnt_glyf.spl`. The lcdround claim explicitly
+  excludes "gray >48 path, 4x4 kernel", so the path is unclaimed. The
+  in-development tag stays.
