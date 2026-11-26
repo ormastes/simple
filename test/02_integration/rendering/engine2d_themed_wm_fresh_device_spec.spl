@@ -1,48 +1,98 @@
 """
 Strict fresh-device composition of the themed WM window stream that both
-production WM bootstraps install (registry default fluid_light). Red handover:
-the fresh-device preflight rejects the themed chrome on NVIDIA GB10 and
-llvmpipe, while the no-package stream (engine2d_embedded_surface_spec.spl)
-reaches device_readback with pixels equal to the CPU composition.
+production WM bootstraps install (registry default fluid_light, and
+aetheric_dark). The themed chrome puts style-free translucent rects (command
+lane, taskbar) straight onto the root after the opaque desktop initializer;
+the fresh-device entry admits exactly that placement (the retained damage and
+tile wrappers do not) and the device must then match
+the CPU composition pixel for pixel.
 """
-# @tag:in-development
-# Tracks: engine2d_fresh_device_preflight_rejects_themed_wm_chrome_2026-11-26
 
 use std.spec.{describe, it, expect, step}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_resolved_draw_ir_image}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{_engine2d_draw_ir_fresh_device_reason, engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_resolved_draw_ir_image}
 use std.gpu.engine2d.color.{rgb}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_image_command, draw_ir_rect, draw_ir_style_prop}
 use common.ui.taskbar_model.{empty_taskbar_model}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, simple_gui_internal_window, simple_gui_internal_window_scene, wm_content_frame_checksum}
 use common.ui.window_scene_draw_ir.{shared_wm_content_frame_image_uri, shared_wm_scene_draw_ir_composition_with_content}
 use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
 use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme}
+
+fn themed_window_device_matches_cpu(snapshot: ThemeRenderSnapshot):
+    apply_theme_render_snapshot_to_wm_chrome(snapshot)
+    val green = rgb(0, 255, 0)
+    val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, false, 1)
+    val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
+    val pixels: [u32] = [green; 112 * 44]
+    val frame = WmContentFrame(window_id: "win", scene_revision: 7, content_revision: 1,
+        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 112, height: 44,
+        pixels: pixels, checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "", offset_x: 0, offset_y: 0)
+    val composition = shared_wm_scene_draw_ir_composition_with_content(scene, empty_taskbar_model(), [frame], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
+    val image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), 112, 44, pixels)
+    expect(_engine2d_draw_ir_fresh_device_reason(composition, [image], 160, 120, true)).to_equal("")
+    var cpu = Engine2D.create_with_backend(160, 120, "cpu")
+    val expected = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [image])
+    match Engine2D.create_requested_backend(160, 120, "vulkan"):
+        Err(reason):
+            expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
+        Ok(engine):
+            val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [image])
+            expect(result.readback_source).to_equal("device_readback")
+            expect(result.skipped_command_count).to_equal(0)
+            expect(result.fallback_required).to_be(false)
+            expect(result.pixels).to_equal(expected.pixels)
+            engine.shutdown()
+    cpu.shutdown()
+    reset_wm_chrome_theme()
+
+fn root_composition(overlay_style_key: text) -> DrawIrComposition:
+    val root = draw_ir_embedding_config("root", "root", 0, 0, 8, 8, 0, 1000, false)
+    val init = draw_ir_rect("init", 0, 0, 8, 8, 0xFF102030u32)
+    var overlay = draw_ir_rect("overlay", 2, 2, 4, 4, 0x80FFFFFFu32)
+    if overlay_style_key != "":
+        overlay.computed_style = [draw_ir_style_prop(overlay_style_key, "2px")]
+    draw_ir_composition("c", "c", DRAW_IR_BACKEND_GPU, [draw_ir_batch("root", DRAW_IR_BACKEND_GPU, root, [init, overlay])])
 
 describe "Engine2D strict fresh-device themed WM window":
     it "composites the fluid_light themed window on the device with CPU-equal pixels":
         step("Install fluid_light, build the canonical one-window scene, and compare device vs CPU")
-        apply_theme_render_snapshot_to_wm_chrome(fluid_light_theme_render_snapshot())
+        themed_window_device_matches_cpu(fluid_light_theme_render_snapshot())
+
+    it "composites the aetheric_dark themed window on the device with CPU-equal pixels":
+        step("Install aetheric_dark and compare device vs CPU")
+        themed_window_device_matches_cpu(aetheric_dark_theme_render_snapshot())
+
+    it "admits a style-free translucent root rect only after the opaque initializer":
+        step("A plain translucent rect over the opaque root passes; a rounded one and the clipped callers stay rejected")
+        expect(_engine2d_draw_ir_fresh_device_reason(root_composition(""), [], 8, 8, true)).to_equal("")
+        expect(_engine2d_draw_ir_fresh_device_reason(root_composition("border-radius"), [], 8, 8, true)).to_equal("fresh-device-command-preflight-required")
+        # The retained damage replay and tile wrappers call without the opt-in.
+        expect(_engine2d_draw_ir_fresh_device_reason(root_composition(""), [], 8, 8)).to_equal("fresh-device-command-preflight-required")
+
+    it "draws a translucent root rect over an opaque image on the device like CPU":
+        step("Opaque image initializer plus a style-free translucent rect: device pixels equal CPU")
         val green = rgb(0, 255, 0)
-        val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, false, 1)
-        val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
-        val pixels: [u32] = [green; 112 * 44]
-        val frame = WmContentFrame(window_id: "win", scene_revision: 7, content_revision: 1,
-            origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 112, height: 44,
-            pixels: pixels, checksum: wm_content_frame_checksum(pixels),
-            parent_window_id: "", offset_x: 0, offset_y: 0)
-        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, empty_taskbar_model(), [frame], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
-        val image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), 112, 44, pixels)
-        var cpu = Engine2D.create_with_backend(160, 120, "cpu")
+        val root = draw_ir_embedding_config("surf-mixed", "win-mixed", 0, 0, 2, 1, 0, 1000, true)
+        val batch = draw_ir_batch("batch-mixed", DRAW_IR_BACKEND_GPU, root, [
+            draw_ir_image_command("mixed-image", 0, 0, 2, 1, "image://mixed", []),
+            draw_ir_rect("mixed-rect", 0, 0, 1, 1, 0x80FF0000u32)
+        ])
+        val composition = draw_ir_composition("mixed-composition", "mixed-scene", DRAW_IR_BACKEND_GPU, [batch])
+        val image = engine2d_resolved_draw_ir_image("image://mixed", 2, 1, [green, green])
+        var cpu = Engine2D.create_with_backend(2, 1, "cpu")
         val expected = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [image])
-        match Engine2D.create_requested_backend(160, 120, "vulkan"):
+        expect(expected.pixels[1]).to_equal(green)
+        expect(expected.pixels[0] == green).to_be(false)  # oracle: the translucent red rect visibly blends over pixel 0
+        match Engine2D.create_requested_backend(2, 1, "vulkan"):
             Err(reason):
-                expect(reason.len()).to_be_greater_than(0)  # oracle: a failed backend request must state why
+                expect(reason.len()).to_be_greater_than(0)
             Ok(engine):
                 val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [image])
                 expect(result.readback_source).to_equal("device_readback")
-                expect(result.skipped_command_count).to_equal(0)
                 expect(result.pixels).to_equal(expected.pixels)
                 engine.shutdown()
         cpu.shutdown()
-        reset_wm_chrome_theme()

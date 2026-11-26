@@ -1904,7 +1904,7 @@ fn _engine2d_draw_ir_fresh_device_initializes_target(command: DrawIrCommand, ima
             _engine2d_draw_ir_image_is_opaque(images[image_index]))
     _engine2d_draw_ir_image_is_opaque(images[image_index])
 
-fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> text:
+fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32, admit_translucent_root_rects: bool = false) -> text:
     var first_command = true
     for batch in composition.batches:
         val embedding = batch.embedding
@@ -1922,7 +1922,19 @@ fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images:
         var command_index = 0
         for command in batch.commands:
             val allow_translucent_initializer = not fills_target and embedding.clip and command_index == 0
-            if not _engine2d_draw_ir_fresh_device_command_supported(command, images, embedding.width, embedding.height, not fills_target and embedding.clip, allow_translucent_initializer):
+            # A style-free translucent rect in a full-target opaque batch is
+            # executed directly on the root (fills_target_exactly), after
+            # the opaque full-target initializer, so it blends over an opaque
+            # destination, which the device rect composite (blend_solid mode
+            # 2) matches byte-for-byte with CPU. The themed WM chrome's
+            # command lane and taskbar are exactly this. Only the fresh-device
+            # composition entry opts in; the retained damage replay and tile
+            # wrappers execute under clips and keep the opaque-only rule.
+            val translucent_over_opaque_root = (admit_translucent_root_rects and fills_target and
+                not css_opacity_group_surface(embedding.surface_id) and
+                embedding.opacity_milli == 1000 and not first_command and
+                command.kind == DRAW_IR_COMMAND_RECT and command.computed_style.len() == 0)
+            if not _engine2d_draw_ir_fresh_device_command_supported(command, images, embedding.width, embedding.height, not fills_target and embedding.clip, allow_translucent_initializer or translucent_over_opaque_root):
                 return "fresh-device-command-preflight-required"
             if first_command and not _engine2d_draw_ir_fresh_device_initializes_target(command, images, width, height):
                 return "fresh-device-opaque-full-target-first-command-required"
@@ -3999,7 +4011,7 @@ fn engine2d_draw_ir_adv_composition_window_present_with_images(engine: Engine2D,
 
 fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Render/read back an exhaustively preflighted fresh device composition."""
-    val reason = _engine2d_draw_ir_fresh_device_reason(composition, images, engine.width(), engine.height())
+    val reason = _engine2d_draw_ir_fresh_device_reason(composition, images, engine.width(), engine.height(), true)
     if reason != "":
         val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
         return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, reason, engine2d_readback([], "preflight_rejected"))
