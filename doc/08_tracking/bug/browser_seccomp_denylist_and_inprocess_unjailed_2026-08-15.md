@@ -92,3 +92,28 @@ The Linux seccomp/Landlock self-check
 (`sh scripts/check/check-browser-renderer-sandbox-seccomp.shs`) was NOT run
 here (Windows host; it exits "nothing was checked" off-Linux) and is not
 claimed.
+
+## Verification note (2026-11-26, Linux x86_64 lane 3)
+
+Verified on `origin/release/1.0.0` (Linux x86_64):
+
+1. `src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c`: added
+   `proc_close_inherited_fds_except(-1)` in the forked child before
+   `RLIMIT_NOFILE=4` (matching `rt_browser_renderer_spawn_sandboxed`), fixing a
+   false `SKIP` (`EMFILE` in `landlock_create_ruleset`) when parent harnesses
+   hold extra inherited fds >= 3 open.
+2. `sh scripts/check/check-browser-renderer-sandbox-seccomp.shs`: `PASS` — 10
+   check(s) verified (`rt_browser_renderer_seccomp_allowlist_selfcheck: PASS`,
+   `rt_browser_renderer_namespace_selfcheck: PASS` with
+   `sandbox_namespaces=unavailable`,
+   `rt_browser_renderer_startup_failure_selfcheck: PASS`,
+   `rt_browser_renderer_preinit_entry_selfcheck: PASS`).
+3. `test/01_unit/app/browser/browser_sandbox_routing_spec.spl`: 5/5 PASS;
+   `test/01_unit/app/browser/browser_sandbox_status_spec.spl`: 3/3 PASS
+   (`bootstrap/simple --mode=interpreter`).
+4. `browser_sandbox_status_line(browser_sandbox_status())` under
+   `SIMPLE_BROWSER_SANDBOX=1` prints `browser sandbox: refused — sandbox requested
+   but unavailable (worker-executable-not-configured); refusing to render
+   unjailed` (note: running `src/app/browser/main.spl` directly via the Rust
+   seed hits pre-existing `SPL-UNIT-002: Count Add <scalar>` in seed HIR
+   lowering). Status updated to `fixed`.
