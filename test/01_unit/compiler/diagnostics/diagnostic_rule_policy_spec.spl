@@ -16,7 +16,7 @@ use std.spec
 use std.nogc_sync_mut.fs.text_io.{file_read_text}
 use compiler.common.diagnostics.diagnostic_rule_policy.{
     DiagnosticPolicyInputV1, DiagnosticRuleLevel, DiagnosticPolicySnapshot, PolicyResolveContext,
-    load_diagnostic_policy_text, diagnostic_policy_default_path, project_policy_parity_v1
+    load_diagnostic_policy_text, diagnostic_policy_default_path, project_policy_parity_v1, resolve_policy_with_input
 }
 use compiler.common.assurance.warning_phase.{
     phased_rule_severity_rank, severity_rank_deny, severity_rank_advisory
@@ -118,6 +118,21 @@ describe "DiagnosticRulePolicy resolution order (plan §4)":
         val before = s.resolve("SPL-UNIT-001", ctx_at("moderate", "2026.8", "2026-09-01"), DiagnosticRuleLevel.Warn)
         expect(before.level.name()).to_equal("allow")
         expect(before.stage).to_equal("schedule")
+
+    it "fails closed on a date-only schedule when no release date is supplied (CLI lint path)":
+        # @req REQ-DIAG-POLICY-002
+        # Regression: the CLI lint engine supplies no release date, so a row with only
+        # warn_since_date used to resolve to allow ("schedule") forever.
+        val s = shipped()
+        val input = DiagnosticPolicyInputV1.for_mode("default", "", false, "", "")
+        for code in ["SPL-GC-001", "SPL-RET-001", "SPL-IMPORT-001", "SPL-MATCH-002", "SPL-MATCH-003"]:
+            val r = resolve_policy_with_input(s, code, input, DiagnosticRuleLevel.Warn)
+            expect(r.level.name()).to_equal("warn")
+            expect(r.stage).to_equal("profile")
+        step("An explicit date before the start still keeps the rule silent")
+        val early = s.resolve("SPL-MATCH-003", ctx_at("moderate", "2026.11", "2026-11-01"), DiagnosticRuleLevel.Warn)
+        expect(early.level.name()).to_equal("allow")
+        expect(early.stage).to_equal("schedule")
 
     it "honours a scoped exception only when the rule's exception policy allows it":
         # @req REQ-DIAG-POLICY-002
