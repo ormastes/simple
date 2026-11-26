@@ -19,7 +19,7 @@ Conversion/validation happens before the optional daemon build. Failures keep
 the gate's ERROR/exit-2 contract; no direct-kernel fallback or admission
 relaxation was added.
 
-`python3 scripts/check/check-arm64-wm-firmware-image.py` passed with a real
+`python3 scripts/check/check-arm64-wm-firmware-image.py [deleted 2026-11-26]` passed with a real
 clang/LLD-produced ARM64 ELF and the production conversion/ESP-handoff shell
 fragments. It verifies the exact flat bytes reaching the builder boundary,
 quoted paths, bad magic, zero size, truncated image, wrong machine, accidental

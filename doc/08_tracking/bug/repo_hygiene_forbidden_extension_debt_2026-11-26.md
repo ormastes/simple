@@ -193,40 +193,40 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/bootstrap/tests/watchdog-source-path-test.py` | 190 | zero-ref test; may test live code |
 | `scripts/bootstrap/tests/windows-collector-zero-timeout-test.py` | 107 | zero-ref test; may test live code |
 | `scripts/bootstrap/tests/windows-output-root-env-test.py` | 80 | cited only from doc/ or the baseline |
-| `scripts/check/assemble-parse-closure-native-probe.py` | 46 | cited only from doc/ or the baseline |
-| `scripts/check/check-arm64-boot-dtb-handoff.py` | 254 | cited only from doc/ or the baseline |
-| `scripts/check/check-arm64-net-tx-ring-cursor.py` | 141 | cited only from doc/ or the baseline |
-| `scripts/check/check-arm64-wm-firmware-image.py` | 97 | cited only from doc/ or the baseline |
-| `scripts/check/check-bootstrap-cargo-path-batch.py` | 120 | cited only from doc/ or the baseline |
-| `scripts/check/check-bootstrap-path-access.py` | 103 | cited only from doc/ or the baseline |
-| `scripts/check/check-bootstrap-positioned-authority.py` | 868 | cited only from doc/ or the baseline |
-| `scripts/check/check-bug-claim-lock-owner.py` | 172 | cited only from doc/ or the baseline |
+| `scripts/check/assemble-parse-closure-native-probe.py` | 46 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-arm64-boot-dtb-handoff.py` | 254 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-arm64-net-tx-ring-cursor.py` | 141 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-arm64-wm-firmware-image.py` | 97 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-bootstrap-cargo-path-batch.py` | 120 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-bootstrap-path-access.py` | 103 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-bootstrap-positioned-authority.py` | 868 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-bug-claim-lock-owner.py` | 172 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-coff-partial-link.py` | 104 | cited only from doc/ or the baseline |
 | `scripts/check/check-coff-projection.py` | 55 | zero-ref tool, touched after 2026-11-22 |
-| `scripts/check/check-core-stdin-line.py` | 82 | cited only from doc/ or the baseline |
-| `scripts/check/check-env-guard-materialized-aliases.py` | 280 | cited only from doc/ or the baseline |
+| `scripts/check/check-core-stdin-line.py` | 82 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-env-guard-materialized-aliases.py` | 280 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-focused-native-output.py` | 103 | cited only from doc/ or the baseline |
 | `scripts/check/check-ladder-scv-evidence.py` | 84 | zero-ref tool, touched after 2026-11-22 |
-| `scripts/check/check-materializer-startup-perf.py` | 184 | cited only from doc/ or the baseline |
-| `scripts/check/check-mcp-script-mode-perf-contract.py` | 110 | cited only from doc/ or the baseline |
-| `scripts/check/check-mir-immediate-diagnostic.py` | 62 | cited only from doc/ or the baseline |
-| `scripts/check/check-office-handoff-evidence-root.py` | 77 | cited only from doc/ or the baseline |
-| `scripts/check/check-owned-worker-drain-binding-windows.py` | 52 | cited only from doc/ or the baseline |
-| `scripts/check/check-runner-self-coverage.py` | 60 | cited only from doc/ or the baseline |
-| `scripts/check/check-rust-atomic-updates.py` | 53 | cited only from doc/ or the baseline |
-| `scripts/check/check-stage2-scv-cold-init.py` | 114 | cited only from doc/ or the baseline |
+| `scripts/check/check-materializer-startup-perf.py` | 184 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-mcp-script-mode-perf-contract.py` | 110 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-mir-immediate-diagnostic.py` | 62 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-office-handoff-evidence-root.py` | 77 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-owned-worker-drain-binding-windows.py` | 52 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-runner-self-coverage.py` | 60 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-rust-atomic-updates.py` | 53 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/check-stage2-scv-cold-init.py` | 114 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-windows-cross-caller.py` | 75 | cited only from doc/ or the baseline |
 | `scripts/check/check-windows-cross-import-authority.py` | 90 | zero-ref tool, touched after 2026-11-22 |
-| `scripts/check/check-windows-host-capacity.py` | 105 | cited only from doc/ or the baseline |
+| `scripts/check/check-windows-host-capacity.py` | 105 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-windows-private-root-sdk.py` | 52 | zero-ref tool, touched after 2026-11-22 |
-| `scripts/check/check-windows-remove-tree.py` | 126 | cited only from doc/ or the baseline |
-| `scripts/check/runtime-value-get-type-projection.py` | 81 | cited only from doc/ or the baseline |
-| `scripts/check/target-profile-projection.py` | 37 | cited only from doc/ or the baseline |
-| `scripts/check/test-item5-hello-receipt.py` | 219 | cited only from doc/ or the baseline |
-| `scripts/check/test-item5-matched-app-performance.py` | 109 | zero-ref test; may test live code |
-| `scripts/check/tests/cold_hir_path_diagnostic_contract_test.py` | 83 | cited only from doc/ or the baseline |
-| `scripts/check/tests/test_prepush_selftest_isolation.py` | 85 | zero-ref test; may test live code |
-| `scripts/check/test-stage4-retained-manual.py` | 515 | cited only from doc/ or the baseline |
+| `scripts/check/check-windows-remove-tree.py` | 126 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/runtime-value-get-type-projection.py` | 81 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/target-profile-projection.py` | 37 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/test-item5-hello-receipt.py` | 219 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/test-item5-matched-app-performance.py` | 109 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/tests/cold_hir_path_diagnostic_contract_test.py` | 83 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/tests/test_prepush_selftest_isolation.py` | 85 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/check/test-stage4-retained-manual.py` | 515 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/debug/rsp_watch.py` | 172 | cited only from doc/ or the baseline |
 | `scripts/release/tests/candidate-release-routing-test.py` | 140 | cited only from doc/ or the baseline |
 | `scripts/test/test-arm32-authenticated-syscall-abi.py` | 187 | cited only from doc/ or the baseline |

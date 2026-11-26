@@ -25,7 +25,7 @@ retain their existing configuration and semantics.
 
 The focused spec is `test/01_unit/compiler/driver/mir_immediate_diagnostic_spec.spl`.
 The native fixture calls the actual reporting owner, then stays in later work;
-`scripts/check/check-mir-immediate-diagnostic.py` must observe redirected stdout
+`scripts/check/check-mir-immediate-diagnostic.py [deleted 2026-11-26]` must observe redirected stdout
 with profiling off before killing the process. Normal exit would mask a
 missing flush. No full phase-3 rerun is necessary for this bounded check.
 

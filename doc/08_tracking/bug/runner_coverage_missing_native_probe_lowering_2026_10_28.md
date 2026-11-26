@@ -111,7 +111,7 @@ by `ce1f3aaf436`; a fresh native fixture run remains pending as described above.
 The separate historical raw probe green/red/empty controls passed.
 
 Build `test/fixtures/runner_self_coverage/main.spl` with an existing producer,
-then run `python3 scripts/check/check-runner-self-coverage.py /path/to/binary
+then run `python3 scripts/check/check-runner-self-coverage.py [deleted 2026-11-26] /path/to/binary
 --output /path/to/evidence`. The controls exercise all six true/false outcomes,
 retain all six declarations with no execution, and ensure an intentionally
 incorrect expectation still exits nonzero with a coverage artifact.

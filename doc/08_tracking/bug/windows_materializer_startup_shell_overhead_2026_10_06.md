@@ -27,7 +27,7 @@ are unchanged. Unicode names, spaces, NUL record boundaries, exact mode matching
 and `target/` exclusions must remain byte-equivalent. Optional pending aliases
 retain their exact policy distinction; this change does not admit missing targets.
 
-`scripts/check/check-materializer-startup-perf.py` exercises the actual extracted
+`scripts/check/check-materializer-startup-perf.py [deleted 2026-11-26]` exercises the actual extracted
 C# and Bash helpers, compares old/new output on an immutable representative tree
 and adversarial fixtures, rejects malformed input/output destinations, tests 29
 valid/invalid Windows paths, and records native-helper RSS/retained allocation.

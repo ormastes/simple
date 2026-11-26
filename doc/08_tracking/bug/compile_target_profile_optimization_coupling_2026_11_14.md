@@ -51,7 +51,7 @@ process-group RSS bound and 120-second deadline; no address-space limit.
 - Managed lane adds 30 native profile/receipt cases, two focused debug-info-default cases, and bound command-option checks.
 
 [Retained commands, exits, logs, provenance, and extraction scripts](evidence/target_profile_2026_11_14/).
-Core fixture regeneration: `python3 scripts/check/target-profile-projection.py
+Core fixture regeneration: `python3 scripts/check/target-profile-projection.py [deleted 2026-11-26]
 <fresh-private-output-directory>`. The archived launch scripts describe their
 original local layout; they are evidence, not a bootstrap entrypoint.
 

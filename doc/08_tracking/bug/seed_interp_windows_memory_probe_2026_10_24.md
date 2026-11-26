@@ -71,7 +71,7 @@ commit capacity. The native wrapper now uses the SDK's
 Bounded Windows validation:
 
 ```
-python scripts/check/check-windows-host-capacity.py --cc C:/dev/tool/llvm-mingw-20260908-ucrt-x86_64/bin/clang.exe --output build/headroom-registration/sdk-negative-control
+python scripts/check/check-windows-host-capacity.py [deleted 2026-11-26] --cc C:/dev/tool/llvm-mingw-20260908-ucrt-x86_64/bin/clang.exe --output build/headroom-registration/sdk-negative-control
 ```
 
 The fixture extracts the actual production C commit function, compiles it

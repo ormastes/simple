@@ -51,7 +51,7 @@ retain diagnostics without a successful receipt.
 
 ## Verification scope
 
-`scripts/check/test-item5-hello-receipt.py` uses test-only fake commands and
+`scripts/check/test-item5-hello-receipt.py [deleted 2026-11-26]` uses test-only fake commands and
 temporary Git sources. The first six protocol tests passed, including one
 actual canonical-gate invocation against a fake compiler; this is not a
 Simple/native qualification claim. After correcting runtime-directory command

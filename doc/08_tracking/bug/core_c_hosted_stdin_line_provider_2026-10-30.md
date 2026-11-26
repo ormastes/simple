@@ -20,7 +20,7 @@ initialization on Windows preserves Ctrl-Z, CR and NUL. A stream lock spans
 each complete line. Allocation failure returns NIL without a partial result.
 Legacy helpers and the Simple extern declaration remain unchanged.
 
-`scripts/check/check-core-stdin-line.py` compiles actual production runtime
+`scripts/check/check-core-stdin-line.py [deleted 2026-11-26]` compiles actual production runtime
 owners and drives fresh raw stdin pipes. Its 19 cases cover newline/EOF,
 multiple reads, long lines, UTF-8 including malformed input, embedded NUL,
 Ctrl-Z, BOM preservation and a real closed-descriptor I/O error. All 19 cases

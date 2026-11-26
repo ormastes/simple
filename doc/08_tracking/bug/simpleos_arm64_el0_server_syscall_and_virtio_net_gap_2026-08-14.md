@@ -120,7 +120,7 @@ The publisher now indexes the ring by its producer cursor and stores the
 selected descriptor ID as the entry value. Descriptor ownership, timeout
 retention, completion validation and the shared network service are unchanged.
 
-`python3 scripts/check/check-arm64-net-tx-ring-cursor.py --negative-control`
+`python3 scripts/check/check-arm64-net-tx-ring-cursor.py [deleted 2026-11-26] --negative-control`
 executes the extracted production C sender against a device-side available-ring
 consumer. All 56 cursor/descriptor combinations, including 16-bit wrap, pass;
 payload bytes and unrelated descriptor ownership are checked. Restoring the

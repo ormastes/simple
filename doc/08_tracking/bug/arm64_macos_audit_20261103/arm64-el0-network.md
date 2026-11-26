@@ -12,8 +12,8 @@ Candidate changes only that publication position plus a checked explanatory comm
 
 ## Checks performed once
 
-- Pre-fix python3 scripts/check/check-arm64-net-tx-ring-cursor.py printed TX ring mismatch producer=0 descriptor=1 result=-110 (failing regression).
-- Post-fix python3 scripts/check/check-arm64-net-tx-ring-cursor.py --negative-control: PASS56publication/reuse/wrap cases; PASS old-descriptor-index mutation rejection. Fixture compiles extracted production constants, structures, zero helper and send function. Device model consumes ring producer positions and writes used completions; cache-maintenance boundary alone substituted. Actual packet bytes and unrelated outstanding descriptor ownership checked.
+- Pre-fix python3 scripts/check/check-arm64-net-tx-ring-cursor.py [deleted 2026-11-26] printed TX ring mismatch producer=0 descriptor=1 result=-110 (failing regression).
+- Post-fix python3 scripts/check/check-arm64-net-tx-ring-cursor.py [deleted 2026-11-26] --negative-control: PASS56publication/reuse/wrap cases; PASS old-descriptor-index mutation rejection. Fixture compiles extracted production constants, structures, zero helper and send function. Device model consumes ring producer positions and writes used completions; cache-maintenance boundary alone substituted. Actual packet bytes and unrelated outstanding descriptor ownership checked.
 - clang --target=aarch64-none-elf -ffreestanding -fsyntax-only full baremetal_stubs.c: exit0; pre-existing _rt_int_fits_tagged signed-shift warning.
 - Working/staged direct-env guards PASS; executable spec count under doc/06_spec zero; whitespace clean.
 

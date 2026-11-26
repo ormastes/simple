@@ -20,7 +20,7 @@ checked arithmetic, return mapping, exhaustion sentinel, and reset behavior.
 
 ## Focused verification
 
-`python scripts/check/check-rust-atomic-updates.py --output <external-dir>`
+`python scripts/check/check-rust-atomic-updates.py [deleted 2026-11-26] --output <external-dir>`
 compiles the actual helper plus all six call expressions extracted from their
 owners, with `-Dwarnings`. It runs four tests: actual owner calls, checked
 boundaries (including transient u32 wrap-to-zero), callback retry then refusal,

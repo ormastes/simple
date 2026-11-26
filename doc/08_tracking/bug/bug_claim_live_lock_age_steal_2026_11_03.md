@@ -36,7 +36,7 @@ No statuses, claim expiry policy, tracker schema or PR admission rules change.
 
 ## Focused regression
 
-`python scripts/check/check-bug-claim-lock-owner.py --shell <POSIX-sh>` invokes
+`python scripts/check/check-bug-claim-lock-owner.py [deleted 2026-11-26] --shell <POSIX-sh>` invokes
 the real helper against private fixture databases. Only resealing is replaced
 by a bounded barrier; checksum functionality is outside this test's scope.
 
