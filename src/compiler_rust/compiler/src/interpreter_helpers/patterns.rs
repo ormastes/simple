@@ -14,7 +14,7 @@ use super::super::{
 
 use super::args::{eval_arg, eval_arg_int, eval_arg_usize};
 use super::collections::bind_sequence_pattern;
-use super::method_dispatch::call_method_on_value;
+use super::method_dispatch::call_method_on_value_with_args;
 use crate::value::{OptionVariant, ResultVariant};
 
 /// Snapshot the current value of every name a pattern binds, so a scoped
@@ -1401,10 +1401,11 @@ fn handle_method_call_with_self_update_inner(
             }
 
             // Call the method on the inner_result value
-            let outer_result = call_method_on_value(
+            let outer_result = call_method_on_value_with_args(
                 inner_result.clone(),
                 method,
                 &eval_args,
+                Some(args),
                 &mut working_env,
                 functions,
                 classes,

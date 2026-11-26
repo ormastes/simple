@@ -3,7 +3,7 @@
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::semantics::{cast_float_to_numeric, cast_int_to_numeric, CastNumericResult, NumericType};
 use crate::value::{format_f32_display, format_f64_display, Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -41,6 +41,63 @@ pub(crate) fn call_method_on_value(
     _enums: &Enums,
     _impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    call_method_on_value_with_args(
+        recv_val,
+        method,
+        _args,
+        None,
+        _env,
+        _functions,
+        _classes,
+        _enums,
+        _impl_methods,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exec_method_with_values_and_self_checked(
+    func: &FunctionDef,
+    args: &[Value],
+    arg_exprs: Option<&[Argument]>,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
+) -> Result<Value, CompileError> {
+    if let Some(exprs) = arg_exprs {
+        crate::interpreter::interpreter_call::reject_bool_literal_args_with_self(
+            &func.params,
+            exprs,
+            self_ctx.is_some(),
+        )
+        .map_err(|e| crate::interpreter::interpreter_call::name_callee(e, func))?;
+    }
+    exec_function_with_values_and_self(
+        func,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_ctx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn call_method_on_value_with_args(
+    recv_val: Value,
+    method: &str,
+    _args: &[Value],
+    arg_exprs: Option<&[Argument]>,
+    _env: &mut Env,
+    _functions: &mut HashMap<String, Arc<FunctionDef>>,
+    _classes: &mut HashMap<String, Arc<ClassDef>>,
+    _enums: &Enums,
+    _impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
     let recv_val = recv_val.deref_pointer();
 
     // Packed `[u8]` in chained position (e.g. `result.unwrap().len()`): answer
@@ -66,10 +123,11 @@ pub(crate) fn call_method_on_value(
         } else {
             Value::array(elements)
         };
-        return call_method_on_value(
+        return call_method_on_value_with_args(
             widened,
             method,
             _args,
+            arg_exprs,
             _env,
             _functions,
             _classes,
@@ -783,9 +841,10 @@ pub(crate) fn call_method_on_value(
             if let Some(class_def) = crate::interpreter::resolve_class_for_instance(_classes, class, fields) {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
                     // Call method with self context
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -799,9 +858,10 @@ pub(crate) fn call_method_on_value(
             // Search for method in impl blocks (local first, then GLOBAL_IMPL_METHODS fallback)
             if let Some(methods) = _impl_methods.get(class) {
                 if let Some(func) = methods.iter().find(|m| m.name == method) {
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -817,9 +877,10 @@ pub(crate) fn call_method_on_value(
                     .and_then(|methods| methods.iter().find(|m| m.name == method).cloned())
             });
             if let Some(func) = global_impl {
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     &func,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -844,9 +905,10 @@ pub(crate) fn call_method_on_value(
                     let mut enum_fields = HashMap::new();
                     enum_fields.insert("self".to_string(), recv_val.clone());
                     let enum_fields = Arc::new(enum_fields);
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -865,9 +927,10 @@ pub(crate) fn call_method_on_value(
                     let mut enum_fields = HashMap::new();
                     enum_fields.insert("self".to_string(), recv_val.clone());
                     let enum_fields = Arc::new(enum_fields);
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -927,9 +990,10 @@ pub(crate) fn call_method_on_value(
                 let mut self_fields = HashMap::new();
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     method_def.as_ref(),
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -942,6 +1006,16 @@ pub(crate) fn call_method_on_value(
         }
 
         _ => {}
+    }
+
+    // Postfix BDD matchers on a chained-call receiver (`xs.len().to_equal(3)`,
+    // `xs.len().to_be_greater_than(2)`, `s.trim().to_contain(...)`, etc.):
+    // must run BEFORE TRAIT_IMPLS / UFCS so spec.spl's synthetic
+    // `ExpectScalarMatcher for i64` (which indexes `_expect_helper_slots[0]`)
+    // does not hijack bare chained `xs.len().to_*()` calls.
+    // Bug: ml_kem_postfix_to_equal_chained_call_not_found_2026-07-20.
+    if let Some(res) = crate::interpreter::eval_bdd_matcher_on_values(&recv_val, method, _args.first())? {
+        return Ok(res);
     }
 
     // Trait impl dispatch fallback for built-in types in chained calls.
@@ -979,9 +1053,10 @@ pub(crate) fn call_method_on_value(
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
                 let type_name = type_names[0];
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     &func,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -1007,9 +1082,10 @@ pub(crate) fn call_method_on_value(
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
                 let type_name = type_names[0];
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     &func,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -1024,6 +1100,10 @@ pub(crate) fn call_method_on_value(
     // UFCS Fallback: Try to find a free function with the method name
     // This allows both len(x) and x.len() syntax to work in chained calls
     if let Some(func) = _functions.get(method).cloned() {
+        if let (Some(rest), Some(exprs)) = (func.params.get(1..), arg_exprs) {
+            crate::interpreter::interpreter_call::reject_bool_literal_args_for_slice(rest, exprs)
+                .map_err(|e| crate::interpreter::interpreter_call::name_callee(e, &func))?;
+        }
         // Prepend receiver to the arguments
         let mut arg_values = vec![recv_val.clone()];
         arg_values.extend(_args.iter().cloned());
@@ -1046,32 +1126,6 @@ pub(crate) fn call_method_on_value(
             "is_none" | "is_err" => return Ok(Value::Bool(false)),
             _ => {}
         }
-    }
-
-    // Postfix equality matcher on a chained-call receiver
-    // (`xs.len().to_equal(3)`): the top-level method path in
-    // interpreter_method/mod.rs handles `x.to_equal(y)`, but a chained receiver
-    // arrives here already evaluated. Same nullable-aware semantics.
-    // Bug: ml_kem_postfix_to_equal_chained_call_not_found_2026-07-20.
-    if matches!(method, "to_equal" | "to_be" | "to_not_equal") {
-        use crate::interpreter::interpreter_call::{
-            push_bdd_failure, BDD_EXPECT_FAILED, BDD_MATCHER_COUNT, BDD_MATCHER_RAN,
-        };
-        BDD_MATCHER_RAN.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-        BDD_MATCHER_COUNT.with(|cell: &std::cell::RefCell<usize>| *cell.borrow_mut() += 1);
-        let expected = _args.first().cloned().unwrap_or(Value::Nil);
-        let want_equal = method != "to_not_equal";
-        let matched = recv_val.nullable_eq(&expected) == want_equal;
-        if !matched {
-            BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-            push_bdd_failure(format!(
-                "expected {} to {}equal {}",
-                recv_val.to_display_string(),
-                if want_equal { "" } else { "not " },
-                expected.to_display_string()
-            ));
-        }
-        return Ok(Value::Bool(matched));
     }
 
     // Unit receivers in chained position (`opt.unwrap().value()`): mirror the
@@ -1102,10 +1156,11 @@ pub(crate) fn call_method_on_value(
                 )? {
                     return Ok(converted);
                 }
-                return call_method_on_value(
+                return call_method_on_value_with_args(
                     (**value).clone(),
                     method,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -1114,10 +1169,11 @@ pub(crate) fn call_method_on_value(
                 );
             }
             _ => {
-                return call_method_on_value(
+                return call_method_on_value_with_args(
                     (**value).clone(),
                     method,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
