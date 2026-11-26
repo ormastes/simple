@@ -1081,6 +1081,7 @@ pub use value::{
     rt_typed_words_i64_at,
     rt_typed_words_i64_push,
     rt_typed_words_i64_set,
+    rt_typed_words_byte_write_trap,
     rt_for_iterable,
     rt_index_get,
     rt_get,

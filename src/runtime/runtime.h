@@ -838,6 +838,7 @@ int8_t   rt_typed_words_u64_set(SplArray* array, int64_t idx, int64_t value);
 int64_t  rt_typed_words_i64_at(SplArray* array, int64_t idx);
 int8_t   rt_typed_words_i64_push(SplArray* array, int64_t value);
 int8_t   rt_typed_words_i64_set(SplArray* array, int64_t idx, int64_t value);
+void     rt_typed_words_byte_write_trap(void);
 int64_t  rt_typed_words_u64_raw_data_at(int64_t data_ptr, int64_t idx);
 int8_t   rt_typed_words_u64_store_known_data_at(
     int64_t header_ptr,

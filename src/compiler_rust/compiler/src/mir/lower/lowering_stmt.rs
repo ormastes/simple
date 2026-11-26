@@ -1737,6 +1737,7 @@ impl<'a> MirLowerer<'a> {
                         let packed_bit = func.new_vreg();
                         let slot_bit = func.new_vreg();
                         let u8_ptr = func.new_vreg();
+                        let word_ptr = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
                         block.instructions.push(MirInst::LocalAddr {
                             dest: addr,
@@ -1785,7 +1786,18 @@ impl<'a> MirLowerer<'a> {
                             left: data_ptr,
                             right: slot_bit,
                         });
-                        (data_ptr, u8_ptr)
+                        // Word readers (`[u32]`/`[u64]` `_data_at`) use the opposite
+                        // tag: bit 0 set = byte-packed. A `[u8]` can reach a word-typed
+                        // parameter through an untyped caller, and 8-byte loads over its
+                        // byte buffer read past it. Bug:
+                        // seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27.
+                        block.instructions.push(MirInst::BinOp {
+                            dest: word_ptr,
+                            op: BinOp::BitOr,
+                            left: data_ptr,
+                            right: packed_bit,
+                        });
+                        (word_ptr, u8_ptr)
                     })?)
                 } else {
                     None

@@ -3978,3 +3978,128 @@ fn bsm_p1_adopt_ambiguous_index_preserves_ownership() {
     assert!(super::rt_session_heap_end(session));
     assert!(!bsm_p1_live(root) && !bsm_p1_live(first));
 }
+
+// seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27: a byte-packed
+// `[u8]` reaching a `[i64]` / `[u64]` / `[u32]` typed reader (an untyped
+// caller the static check cannot see) must read the stored byte, as
+// rt_array_get and the interpreter do -- not word slots of the byte buffer.
+#[test]
+fn test_typed_words_readers_decode_byte_packed_arrays() {
+    let bytes = rt_byte_array_new(4);
+    for b in [1, 255, 128, 7] {
+        assert!(rt_typed_bytes_u8_push(bytes, b));
+    }
+    assert_ne!(rt_array_is_byte_packed(bytes), 0);
+    for (i, want) in [1i64, 255, 128, 7].into_iter().enumerate() {
+        assert_eq!(collections::rt_typed_words_i64_at(bytes, i as i64), want, "i64 at {i}");
+        assert_eq!(rt_typed_words_u64_at(bytes, i as i64), want, "u64 at {i}");
+        assert_eq!(rt_typed_words_u32_at(bytes, i as i64), want, "u32 at {i}");
+    }
+    assert_eq!(collections::rt_typed_words_i64_at(bytes, -1), 7);
+    assert_eq!(collections::rt_typed_words_i64_at(bytes, 4), 0);
+}
+
+// The hoisted / bound-proved readers: `_unchecked` sees the header flag, and
+// the `_data_at` readers see bit 0 of the MIR-tagged loop pointer.
+#[test]
+fn test_typed_words_hoisted_readers_decode_byte_packed_arrays() {
+    let bytes = rt_byte_array_new(4);
+    for b in [1, 255, 128, 7] {
+        assert!(rt_typed_bytes_u8_push(bytes, b));
+    }
+    let tagged = rt_array_data_ptr(bytes) | 1;
+    let header = bytes.to_raw() as i64;
+    for (i, want) in [1i64, 255, 128, 7].into_iter().enumerate() {
+        let i = i as i64;
+        assert_eq!(
+            collections::rt_typed_words_u32_unchecked(bytes, i),
+            want,
+            "u32 unchecked {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u64_unchecked(bytes, i),
+            want,
+            "u64 unchecked {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u32_data_at(tagged, i),
+            want,
+            "u32 data_at {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u64_data_at(tagged, i),
+            want,
+            "u64 data_at {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u64_raw_data_at(tagged, i),
+            want,
+            "u64 raw {i}"
+        );
+        assert_eq!(
+            collections::rt_typed_words_u64_data_at_checked(header, tagged, i),
+            want,
+            "checked {i}"
+        );
+    }
+}
+
+// A typed word write into a byte-packed `[u8]` is a runtime error (owner
+// decision): it used to overrun the byte buffer (u32/u64 set) or drop the
+// value silently. Each writer runs in a child process, which must abort.
+const TYPED_WORDS_TRAP_ENV: &str = "SIMPLE_TEST_TYPED_WORDS_TRAP_OP";
+
+#[test]
+fn typed_words_byte_write_trap_child() {
+    let Ok(op) = std::env::var(TYPED_WORDS_TRAP_ENV) else {
+        return;
+    };
+    let bytes = rt_byte_array_new(16);
+    for b in 0..16 {
+        assert!(rt_typed_bytes_u8_push(bytes, b));
+    }
+    match op.as_str() {
+        "u32_set" => drop(rt_typed_words_u32_set(bytes, 1, 77)),
+        "u64_set" => drop(rt_typed_words_u64_set(bytes, 1, 77)),
+        "i64_set" => drop(collections::rt_typed_words_i64_set(bytes, 1, 77)),
+        "u32_push" => drop(collections::rt_typed_words_u32_push(bytes, 77)),
+        "u64_push" => drop(collections::rt_typed_words_u64_push(bytes, 77)),
+        "i64_push" => drop(collections::rt_typed_words_i64_push(bytes, 77)),
+        "u64_push_known_at" => drop(collections::rt_typed_words_u64_push_known_at(bytes, 2, 77)),
+        other => panic!("unknown op {other}"),
+    }
+    println!("NO-TRAP {op}");
+}
+
+#[test]
+fn test_typed_words_writers_trap_on_byte_packed_arrays() {
+    let exe = std::env::current_exe().expect("test binary");
+    for op in [
+        "u32_set",
+        "u64_set",
+        "i64_set",
+        "u32_push",
+        "u64_push",
+        "i64_push",
+        "u64_push_known_at",
+    ] {
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "value::collections::tests::typed_words_byte_write_trap_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(TYPED_WORDS_TRAP_ENV, op)
+            .output()
+            .expect("spawn child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{op}: child exited cleanly: {stdout}");
+        assert!(!stdout.contains("NO-TRAP"), "{op}: write returned: {stdout}");
+        assert!(
+            stderr.contains("cannot be written through a word-typed array parameter"),
+            "{op}: {stderr}"
+        );
+    }
+}

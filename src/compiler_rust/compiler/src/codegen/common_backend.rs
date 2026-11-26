@@ -162,6 +162,11 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
                             names.insert(alias.to_string());
                         }
+                        // The inlined `[u32]` set traps on a byte-packed `[u8]`
+                        // through this cold-branch symbol, never named in MIR.
+                        if base == "rt_typed_words_u32_set" {
+                            names.insert("rt_typed_words_byte_write_trap".to_string());
+                        }
                     }
                     MirInst::InterpCall { func_name, .. } => {
                         names.insert(func_name.clone());

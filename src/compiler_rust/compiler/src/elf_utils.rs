@@ -495,6 +495,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_typed_words_u64_set" => value::rt_typed_words_u64_set as *const () as usize,
         "rt_typed_words_i64_at" => value::rt_typed_words_i64_at as *const () as usize,
         "rt_typed_words_i64_set" => value::rt_typed_words_i64_set as *const () as usize,
+        "rt_typed_words_byte_write_trap" => value::rt_typed_words_byte_write_trap as *const () as usize,
         "rt_typed_words_i64_push" => value::rt_typed_words_i64_push as *const () as usize,
         "rt_array_pop" => simple_runtime::rt_array_pop as *const () as usize,
         "rt_array_clear" => value::rt_array_clear as *const () as usize,
