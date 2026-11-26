@@ -730,6 +730,10 @@ fn _sv_read_host_file(base: text, rel: text) -> ViewReadV1:
     val checked = _sv_check_parents(base, rel.split("/"), ViewFlagV1(false))
     if checked == "path-missing":
         return _sv_read_result("missing", "path-missing")
+    # An upper file at an ancestor hides everything beneath it (overlay
+    # whiteout-by-file): not found, and the caller must not fall through.
+    if checked == "path-conflict":
+        return _sv_read_result("missing", "path-shadowed")
     if checked != "":
         return _sv_read_result("rejected", checked)
     val path = base + "/" + rel
@@ -761,7 +765,7 @@ pub fn storage_view_v1_read(view: StorageViewV1, rel_path: text) -> ViewReadV1:
     if not dir_is_real_no_follow(upper):
         return _sv_read_result("rejected", "upper-missing")
     val from_upper = _sv_read_host_file(upper, rel_path)
-    if from_upper.status != "missing":
+    if from_upper.status != "missing" or from_upper.reason == "path-shadowed":
         return from_upper
     _sv_read_base(view, rel_path)
 
@@ -923,7 +927,9 @@ pub fn storage_view_v1_clone(src: StorageViewV1, new_view_id: text) -> ViewHandl
 # journal/meta landed. A live view always has a valid journal (writes require
 # `_sv_live`), so a dir with a missing or unparseable journal is removed only
 # when it holds nothing but the create artifacts: journal.sdn and view.sdn as
-# plain files and an EMPTY real upper/. Anything else is refused untouched.
+# plain files, an EMPTY real upper/, and atomic-write staging residue
+# (`.simple-atomic-bytes-*/` holding at most a `payload` file). Anything else
+# is refused untouched.
 fn _sv_destroy_half_created(view_root: text, view_id: text, reason: text) -> ViewDestroyV1:
     val view_dir = _sv_view_dir(view_root, view_id)
     val listed = dir_list_optional(view_dir)
@@ -943,6 +949,20 @@ fn _sv_destroy_half_created(view_root: text, view_id: text, reason: text) -> Vie
             val inner = dir_list_optional(full)
             if inner == nil or (inner ?? []).len() > 0:
                 return _sv_destroy_result("rejected", reason)
+        elif name.starts_with(".simple-atomic-bytes-"):
+            # Crash residue of atomic_write_bytes: a real dir holding at most
+            # its single `payload` file.
+            if not dir_is_real_no_follow(full):
+                return _sv_destroy_result("rejected", reason)
+            val staged = dir_list_optional(full)
+            if staged == nil:
+                return _sv_destroy_result("rejected", reason)
+            for entry in staged ?? []:
+                val en = entry.trim()
+                if en == "" or en == "." or en == "..":
+                    continue
+                if en != "payload" or is_dir(full + "/" + en):
+                    return _sv_destroy_result("rejected", reason)
         else:
             return _sv_destroy_result("rejected", reason)
     if not dir_remove_all(view_dir) or is_dir(view_dir):

@@ -14,7 +14,9 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_di
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.nogc_sync_mut.storage.storage_view_v1.{_sv_merged_count_error}
+use std.nogc_sync_mut.storage.storage_view_v1.{_sv_merged_count_error, _sv_manifest_encode, StorageViewV1}
+use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_ingest}
+use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_XXH3_128}
 use std.nogc_sync_mut.sosix.fs_v1.{dir_create_new}
 use app.io.file_ops.{path_absolute}
 
@@ -449,4 +451,98 @@ describe "storage_view_v1 half-created recovery":
         expect(file_write_bytes(vdir + "/journal.sdn", "junk".bytes())).to_equal(true)
         expect(storage_view_v1_destroy(view).status).to_equal("rejected")
         expect(file_exists(vdir + "/upper/a.txt")).to_equal(true)
+        _cleanup(base)
+
+describe "storage_view_v1 overlay shadowing":
+    it "an upper file hides base paths beneath it as not found, not rejected":
+        val base = _temp("shadowfile")
+        val store = _store(base)
+        val seed = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(seed, "a/b", "base".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(seed, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        expect(loaded.status).to_equal("ok")
+        expect(storage_view_v1_read(loaded.view, "a/b").status).to_equal("ok")
+        # Replace the base dir `a` with an upper FILE `a` (write straight to upper).
+        expect(file_write_bytes(base + "/views/v2/upper/a", "file".bytes())).to_equal(true)
+        val hidden = storage_view_v1_read(loaded.view, "a/b")
+        expect(hidden.status).to_equal("missing")
+        expect(hidden.reason).to_equal("path-shadowed")
+        expect(storage_view_v1_read(loaded.view, "a").status).to_equal("ok")
+        _cleanup(base)
+
+    it "an upper dir falls through to base paths it does not override":
+        val base = _temp("shadowdir")
+        val store = _store(base)
+        val seed = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(seed, "a/b", "base-b".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_write(seed, "a/c", "base-c".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(seed, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        expect(loaded.status).to_equal("ok")
+        expect(storage_view_v1_write(loaded.view, "a/c", "upper-c".bytes()).status).to_equal("ok")
+        val fell = storage_view_v1_read(loaded.view, "a/b")
+        expect(fell.status).to_equal("ok")
+        expect(fell.bytes).to_equal("base-b".bytes())
+        expect(storage_view_v1_read(loaded.view, "a/c").bytes).to_equal("upper-c".bytes())
+        expect(storage_view_v1_read(loaded.view, "a/zzz").status).to_equal("missing")
+        _cleanup(base)
+
+describe "storage_view_v1 save entry cap wiring":
+    it "storage_view_v1_save rejects with manifest-too-many-entries when base plus upper exceeds the cap":
+        val base = _temp("savecap")
+        val store = _store(base)
+        val blob = immutable_store_v1_ingest(store, "x".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(blob.status).to_equal("ok")
+        # A cap-sized (4096) base manifest sharing one object key; the cap
+        # constant is not parameterised, so build the base directly.
+        var paths: [text] = []
+        var keys: Dict<text, text> = {}
+        var lens: Dict<text, i64> = {}
+        for i in 0..4096:
+            val p = "f{i}"
+            paths.push(p)
+            keys[p] = blob.object_key
+            lens[p] = 1
+        val encoded = match _sv_manifest_encode(paths, keys, lens):
+            case Ok(value): value
+            case Err(reason): reason
+        val manifest = immutable_store_v1_ingest(store, encoded.bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(manifest.status).to_equal("ok")
+        val view = _new_view(base, store, "v1", 1000)
+        val capped = StorageViewV1(store: view.store, view_root: view.view_root, view_id: view.view_id,
+            base_root: view.base_root, base_generation: view.base_generation,
+            base_manifest_key: manifest.object_key, quota: view.quota, volumes: view.volumes)
+        expect(storage_view_v1_write(capped, "extra", "e".bytes()).status).to_equal("ok")
+        val objects_before = _count_objects(store)
+        val saved = storage_view_v1_save(capped, "main", StoreGenerationV1(0))
+        expect(saved.status).to_equal("rejected")
+        expect(saved.reason).to_equal("manifest-too-many-entries")
+        expect(_count_objects(store)).to_equal(objects_before)
+        _cleanup(base)
+
+describe "storage_view_v1 atomic staging residue":
+    it "destroys a half-created dir holding a payload-only atomic staging dir":
+        val base = _temp("halfatomic")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vdir = base + "/views/v1"
+        expect(file_write_bytes(vdir + "/journal.sdn", "junk".bytes())).to_equal(true)
+        expect(dir_create_all(vdir + "/.simple-atomic-bytes-abc123")).to_equal(true)
+        expect(file_write_bytes(vdir + "/.simple-atomic-bytes-abc123/payload", "p".bytes())).to_equal(true)
+        expect(dir_create_all(vdir + "/.simple-atomic-bytes-empty")).to_equal(true)
+        expect(storage_view_v1_destroy(view).status).to_equal("ok")
+        expect(is_dir(vdir)).to_equal(false)
+        _cleanup(base)
+
+    it "refuses an atomic staging dir that holds anything besides payload":
+        val base = _temp("halfatomicextra")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vdir = base + "/views/v1"
+        expect(file_write_bytes(vdir + "/journal.sdn", "junk".bytes())).to_equal(true)
+        expect(dir_create_all(vdir + "/.simple-atomic-bytes-abc123")).to_equal(true)
+        expect(file_write_bytes(vdir + "/.simple-atomic-bytes-abc123/precious.txt", "keep".bytes())).to_equal(true)
+        expect(storage_view_v1_destroy(view).status).to_equal("rejected")
+        expect(file_exists(vdir + "/.simple-atomic-bytes-abc123/precious.txt")).to_equal(true)
         _cleanup(base)
