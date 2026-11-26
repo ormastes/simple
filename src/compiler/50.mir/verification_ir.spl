@@ -155,19 +155,22 @@ fn _vir_effect_closure_index(nodes: [VerificationEffectClosureNodeV1], symbol_id
 
 fn resolve_verification_effect_closure(nodes: [VerificationEffectNodeV1]) -> VerificationEffectClosureV1:
     var closure: [VerificationEffectClosureNodeV1] = []
+    var node_idx_by_sym: Dict<text, i64> = {}
     for index in 0..nodes.len():
         val node: VerificationEffectNodeV1 = nodes[index]
         if node.symbol_id == "": return VerificationEffectClosureV1([], "VIR-E-EFFECT-SYMBOL: SymbolId is required")
-        if _vir_effect_node_index(nodes, node.symbol_id) != index:
+        if node_idx_by_sym.has(node.symbol_id):
             return VerificationEffectClosureV1([], "VIR-E-EFFECT-DUPLICATE: duplicate SymbolId " + node.symbol_id)
+        node_idx_by_sym[node.symbol_id] = index
         if not node.unresolved_call_sites.is_empty():
             return VerificationEffectClosureV1([], "VIR-E-EFFECT-INDIRECT: unresolved call targets at " + node.unresolved_call_sites.join(","))
         for effect in node.direct_effects:
             if effect.diagnostic() != "": return VerificationEffectClosureV1([], effect.diagnostic())
-        for callee in node.callee_symbol_ids:
-            if _vir_effect_node_index(nodes, callee) < 0:
-                return VerificationEffectClosureV1([], "VIR-E-EFFECT-CALLEE: missing callee SymbolId " + callee)
         closure = closure.push(VerificationEffectClosureNodeV1(node.symbol_id, _vir_normalize_effects(node.direct_effects)))
+    for node in nodes:
+        for callee in node.callee_symbol_ids:
+            if not node_idx_by_sym.has(callee):
+                return VerificationEffectClosureV1([], "VIR-E-EFFECT-CALLEE: missing callee SymbolId " + callee)
 
     # Monotone fixed point. Each iteration adds at least one of the finite
     # effect atoms or terminates; the extra pass detects implementation drift.
@@ -177,16 +180,18 @@ fn resolve_verification_effect_closure(nodes: [VerificationEffectNodeV1]) -> Ver
     while changed and iteration < limit:
         changed = false
         iteration = iteration + 1
-        for node in nodes:
-            val owner_index = _vir_effect_closure_index(closure, node.symbol_id)
+        var owner_index = 0
+        while owner_index < nodes.len():
+            val node = nodes[owner_index]
             var combined = closure[owner_index].transitive_effects
             for callee in node.callee_symbol_ids:
-                val callee_index = _vir_effect_closure_index(closure, callee)
+                val callee_index = node_idx_by_sym[callee]
                 for effect in closure[callee_index].transitive_effects:
                     if not _vir_effect_contains(combined, effect):
                         combined = combined.push(effect)
                         changed = true
             closure[owner_index] = VerificationEffectClosureNodeV1(node.symbol_id, _vir_normalize_effects(combined))
+            owner_index = owner_index + 1
     if changed: return VerificationEffectClosureV1([], "VIR-E-EFFECT-FIXPOINT: transitive effect closure did not converge")
     VerificationEffectClosureV1(closure, "")
 
@@ -198,16 +203,31 @@ fn verification_mir_functions_by_symbol_v1(module: MirModule) -> [MirFunction]:
     var functions: [MirFunction] = []
     for symbol in module.functions.keys():
         functions.push(module.functions[symbol])
-    var i = 0
-    while i < functions.len():
-        var j = i + 1
-        while j < functions.len():
-            if functions[j].symbol.id < functions[i].symbol.id:
-                val temporary = functions[i]
-                functions[i] = functions[j]
-                functions[j] = temporary
-            j = j + 1
-        i = i + 1
+    val total = functions.len()
+    var width = 1
+    while width < total:
+        var next: [MirFunction] = []
+        var start = 0
+        while start < total:
+            val mid = if start + width < total: start + width else: total
+            val end = if start + width + width < total: start + width + width else: total
+            var left = start
+            var right = mid
+            while left < mid or right < end:
+                var take_left = false
+                if left < mid and right < end:
+                    take_left = functions[left].symbol.id <= functions[right].symbol.id
+                elif left < mid:
+                    take_left = true
+                if take_left:
+                    next.push(functions[left])
+                    left = left + 1
+                else:
+                    next.push(functions[right])
+                    right = right + 1
+            start = end
+        functions = next
+        width = width + width
     functions
 
 fn verification_effect_nodes_from_mir_module_v1(
@@ -215,10 +235,14 @@ fn verification_effect_nodes_from_mir_module_v1(
 ) -> VerificationEffectNodeExtractionV1:
     val functions = verification_mir_functions_by_symbol_v1(module)
     var internal_names: [text] = []
+    var internal_name_set: Dict<text, bool> = {}
+    var symbol_by_name: Dict<text, text> = {}
     for function in functions:
         val name = function.name
-        if internal_names.contains(name):
+        if internal_name_set.has(name):
             return VerificationEffectNodeExtractionV1([], "VIR-E-EFFECT-CALL-NAME: duplicate internal function name " + name)
+        internal_name_set[name] = true
+        symbol_by_name[name] = function.symbol.id.to_string()
         internal_names.push(name)
     internal_names.sort()
     var nodes: [VerificationEffectNodeV1] = []
@@ -227,6 +251,7 @@ fn verification_effect_nodes_from_mir_module_v1(
             function, internal_names)
         if not manifest.closed(): return VerificationEffectNodeExtractionV1([], manifest.diagnostic)
         var callees: [text] = []
+        var callee_set: Dict<text, bool> = {}
         var unresolved: [text] = []
         for block in function.blocks:
             for instruction in block.instructions:
@@ -235,10 +260,11 @@ fn verification_effect_nodes_from_mir_module_v1(
                         val name = verification_mir_direct_call_name_v1(callee)
                         if (name != "" and name != "rt_enum_new" and
                                 name != "rt_enum_discriminant" and name != "rt_enum_payload"):
-                            val callee_symbol = verification_module_symbol_for_name_v1(module, name)
+                            val callee_symbol = if symbol_by_name.has(name): symbol_by_name[name] else: ""
                             if callee_symbol == "":
                                 unresolved.push("direct:" + name)
-                            elif not callees.contains(callee_symbol):
+                            elif not callee_set.has(callee_symbol):
+                                callee_set[callee_symbol] = true
                                 callees.push(callee_symbol)
                     case MirInstKind.CallIndirect(_, _, _, _):
                         unresolved.push("indirect:" + function.symbol.id.to_string())
@@ -266,9 +292,11 @@ pub fn verification_effect_closure_from_resolved_mir_module_v2(
         return VerificationEffectClosureV1([], call_closure.diagnostic)
     val functions = verification_mir_functions_by_symbol_v1(module)
     var internal_names: [text] = []
+    var internal_name_set: Dict<text, bool> = {}
     for function in functions:
-        if internal_names.contains(function.name):
+        if internal_name_set.has(function.name):
             return VerificationEffectClosureV1([], "VIR-E-EFFECT-CALL-NAME: duplicate internal function name " + function.name)
+        internal_name_set[function.name] = true
         internal_names.push(function.name)
     internal_names.sort()
     var nodes: [VerificationEffectNodeV1] = []
@@ -277,6 +305,7 @@ pub fn verification_effect_closure_from_resolved_mir_module_v2(
             function, internal_names)
         if not manifest.closed(): return VerificationEffectClosureV1([], manifest.diagnostic)
         var callees: [text] = []
+        var callee_set: Dict<text, bool> = {}
         for block_index in 0..function.blocks.len():
             val block: MirBlock = function.blocks[block_index]
             for instruction_index in 0..block.instructions.len():
@@ -288,7 +317,9 @@ pub fn verification_effect_closure_from_resolved_mir_module_v2(
                                 instruction_index):
                             case Ok(symbol): symbol
                             case Err(message): return VerificationEffectClosureV1([], message)
-                        if not callees.contains(callee): callees.push(callee)
+                        if not callee_set.has(callee):
+                            callee_set[callee] = true
+                            callees.push(callee)
                     case MirInstKind.CallIndirect(_, _, _, _):
                         return VerificationEffectClosureV1([], "VIR-E-EFFECT-INDIRECT: unresolved indirect calls cannot enter resolved closure")
                     case _: continue

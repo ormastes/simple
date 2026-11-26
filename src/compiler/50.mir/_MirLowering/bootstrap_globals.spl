@@ -361,22 +361,65 @@ fn bootstrap_register_flat_function_values():
             function_index = function_index + 1
         module_index = module_index + 1
 
+fn _bootstrap_sorted_unique_i64(values: [i64]) -> [i64]:
+    var out: [i64] = []
+    for v in values:
+        var seen = false
+        for e in out:
+            if e == v:
+                seen = true
+                break
+        if not seen:
+            out.push(v)
+    var i = 1
+    while i < out.len():
+        val cur = out[i]
+        var j = i
+        while j > 0 and out[j - 1] > cur:
+            out[j] = out[j - 1]
+            j = j - 1
+        out[j] = cur
+        i = i + 1
+    out
+
 fn bootstrap_register_imported_exact_externs_v1(lowering_in: MirLowering, module_name: text) -> MirLowering:
     # Preserve the established entrypoint. The flat store has names, not paths.
     bootstrap_register_imported_exact_externs_with_context_v1(lowering_in, module_name, -1)
 
 fn bootstrap_register_imported_exact_externs_with_context_v1(lowering_in: MirLowering,
         module_name: text, consumer_index: i64) -> MirLowering:
+    bootstrap_register_imported_exact_externs_indexed_v1(lowering_in, module_name, consumer_index, {}, false)
+
+fn bootstrap_register_imported_exact_externs_indexed_v1(lowering_in: MirLowering,
+        module_name: text, consumer_index: i64,
+        callable_owner_index: Dict<text, [i64]>, has_index: bool) -> MirLowering:
     var lowering = lowering_in
     val consumer_raw_name = if consumer_index >= 0 and consumer_index < bootstrap_hir_module_count():
         bootstrap_hir_module_name_at(consumer_index)
     else: module_name
     val consumers = mir_imported_extern_consumers_v1(lowering.symbols, module_name)
     val owners = mir_imported_extern_owner_keys_v1(consumers)
+    if owners.len() == 0:
+        return lowering
+    var matched_providers: [i64] = []
+    if has_index:
+        for key in owners.keys():
+            if callable_owner_index.has(key):
+                for idx in callable_owner_index[key]:
+                    matched_providers.push(idx)
+        matched_providers = _bootstrap_sorted_unique_i64(matched_providers)
+    else:
+        var pi = 0
+        while pi < bootstrap_hir_module_count():
+            val provider_raw_name = bootstrap_hir_module_name_at(pi)
+            val provider_name = bootstrap_mir_logical_module_name(provider_raw_name)
+            val key = mir_provider_callable_key(provider_name, "")
+            if owners.has(key):
+                matched_providers.push(pi)
+            pi = pi + 1
     var visited: Dict<text, bool> = {}
     var first_indices: Dict<text, i64> = {}
-    var provider_index = 0
-    while provider_index < bootstrap_hir_module_count():
+    for provider_index in matched_providers:
         val provider_raw_name = bootstrap_hir_module_name_at(provider_index)
         val provider_name = bootstrap_mir_logical_module_name(provider_raw_name)
         val key = mir_provider_callable_key(provider_name, "")
@@ -394,10 +437,19 @@ fn bootstrap_register_imported_exact_externs_with_context_v1(lowering_in: MirLow
                     declarations.push(bootstrap_hir_module_function_at(provider_index, index))
                     index = index + 1
                 lowering.record_imported_exact_externs_v1(provider_name, declarations, consumers)
-        provider_index = provider_index + 1
     lowering
 
 fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: MirTargetContext, is_entry: bool) -> (MirModule, i64):
+    _bootstrap_lower_flat_hir_module_to_mir_indexed(module_index, target_context, is_entry, {}, {}, false)
+
+fn _bootstrap_lower_flat_hir_module_to_mir_indexed(
+    module_index: i64,
+    target_context: MirTargetContext,
+    is_entry: bool,
+    callable_owner_index: Dict<text, [i64]>,
+    layout_owner_index: Dict<text, [i64]>,
+    has_provider_index: bool
+) -> (MirModule, i64):
     val module_name = bootstrap_hir_module_name_at(module_index)
     val logical_module_name = bootstrap_mir_logical_module_name(module_name)
     val symbols = bootstrap_flat_symbol_table(module_index)
@@ -436,7 +488,7 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     lowering.current_function_names = bootstrap_mir_store_function_value_names()
     lowering.callable_link_names = bootstrap_mir_store_callable_link_names()
     lowering.callable_text_value_abi = bootstrap_mir_store_callable_text_value_abi()
-    lowering = bootstrap_register_imported_exact_externs_with_context_v1(lowering, logical_module_name, module_index)
+    lowering = bootstrap_register_imported_exact_externs_indexed_v1(lowering, logical_module_name, module_index, callable_owner_index, has_provider_index)
     # Register this module's own enum/struct type defs so `E.V` reclassifies to
     # an enum-variant const (not a field-load on an undefined base) and `S(..)`
     # reclassifies to an inline aggregate construct (not a call to an undefined
@@ -463,8 +515,22 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         demanded_owners[owner] = true
     var found_globals: Dict<text, bool> = {}
     if demanded_owners.len() > 0:
-        var provider_index = 0
-        while provider_index < bootstrap_hir_module_count():
+        var demanded_provider_indices: [i64] = []
+        if has_provider_index:
+            for owner in demanded_owners.keys():
+                if layout_owner_index.has(owner):
+                    for idx in layout_owner_index[owner]:
+                        demanded_provider_indices.push(idx)
+            demanded_provider_indices = _bootstrap_sorted_unique_i64(demanded_provider_indices)
+        else:
+            var pi = 0
+            while pi < bootstrap_hir_module_count():
+                val provider_name = bootstrap_hir_module_name_at(pi)
+                val provider_owner = mir_layout_canonical_module_name(provider_name)
+                if demanded_owners.has(provider_owner):
+                    demanded_provider_indices.push(pi)
+                pi = pi + 1
+        for provider_index in demanded_provider_indices:
             val provider_name = bootstrap_hir_module_name_at(provider_index)
             val provider_owner = mir_layout_canonical_module_name(provider_name)
             if demanded_owners.has(provider_owner):
@@ -475,7 +541,6 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
                     provider_constant_index = provider_constant_index + 1
                 val provider_symbols = bootstrap_flat_symbol_table(provider_index)
                 found_globals = lowering.register_provider_global_bindings(provider_name, provider_symbols, provider_constants, demands, found_globals, callable_demands)
-            provider_index = provider_index + 1
         lowering.reject_missing_global_providers(demands, found_globals)
     # Decl-level @cfg (grouped arms): compute winners for both functions and constants before lowering either.
     # Collect functions and constants with cfg_group != 0 for winner computation.
@@ -600,14 +665,39 @@ pub fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: tex
     val entry_function_count = bootstrap_hir_module_function_count(entry_index)
     eprint("[bootstrap-flat-entry] index={entry_index} modules={bootstrap_hir_module_count()} functions={entry_function_count}\n")
 
-    val (entry_module, entry_instruction_total) = bootstrap_lower_flat_hir_module_to_mir(entry_index, target_context, true)
+    val total_hir_modules = bootstrap_hir_module_count()
+    var callable_owner_index: Dict<text, [i64]> = {}
+    var layout_owner_index: Dict<text, [i64]> = {}
+    var index_i = 0
+    while index_i < total_hir_modules:
+        val raw_name = bootstrap_hir_module_name_at(index_i)
+        val logical_name = bootstrap_mir_logical_module_name(raw_name)
+        val callable_key = mir_provider_callable_key(logical_name, "")
+        if callable_owner_index.has(callable_key):
+            var list = callable_owner_index[callable_key]
+            list.push(index_i)
+            callable_owner_index[callable_key] = list
+        else:
+            callable_owner_index[callable_key] = [index_i]
+        val layout_key = mir_layout_canonical_module_name(raw_name)
+        if layout_owner_index.has(layout_key):
+            var list = layout_owner_index[layout_key]
+            list.push(index_i)
+            layout_owner_index[layout_key] = list
+        else:
+            layout_owner_index[layout_key] = [index_i]
+        index_i = index_i + 1
+
+    val (entry_module, entry_instruction_total) = _bootstrap_lower_flat_hir_module_to_mir_indexed(
+        entry_index, target_context, true, callable_owner_index, layout_owner_index, true)
     if entry_instruction_total == 0:
         eprint("error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)\n")
         exit(1)
     module_index = 0
-    while module_index < bootstrap_hir_module_count():
+    while module_index < total_hir_modules:
         if module_index != entry_index:
-            val _extra_result = bootstrap_lower_flat_hir_module_to_mir(module_index, target_context, false)
+            val _extra_result = _bootstrap_lower_flat_hir_module_to_mir_indexed(
+                module_index, target_context, false, callable_owner_index, layout_owner_index, true)
         module_index = module_index + 1
     entry_module
 

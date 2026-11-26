@@ -568,9 +568,18 @@ fn elf_static_contents(inputs: ElfStaticInputs) -> [[u8]]:
     pass records the placed (object, section) pairs; each output then walks
     that flat list. Taking a buffer out of a nested array and putting it
     back copied it per append in native builds."""
-    var place_out: [i64] = []
     var place_obj: [i64] = []
     var place_sec: [i64] = []
+    # Flat singly-linked lists per output section index so each output walks
+    # only its own input sections in O(outs + total_secs).
+    var head_for_out: [i64] = []
+    var tail_for_out: [i64] = []
+    var ki: i64 = 0
+    while ki < inputs.outs.len():
+        head_for_out.push(-1)
+        tail_for_out.push(-1)
+        ki = ki + 1
+    var next_place: [i64] = []
     var oi: i64 = 0
     while oi < inputs.objects.len():
         val obj = inputs.objects[oi]
@@ -579,9 +588,15 @@ fn elf_static_contents(inputs: ElfStaticInputs) -> [[u8]]:
             val target = inputs.sec_out[oi][si]
             if target >= 0 and inputs.outs[target].sh_type != SHT_NOBITS_E and
                     not elf_merge_section(obj, si):
-                place_out.push(target)
+                val pi = place_obj.len()
                 place_obj.push(oi)
                 place_sec.push(si)
+                next_place.push(-1)
+                if head_for_out[target] < 0:
+                    head_for_out[target] = pi
+                else:
+                    next_place[tail_for_out[target]] = pi
+                tail_for_out[target] = pi
             si = si + 1
         oi = oi + 1
     # Each buffer is allocated once at its final size and filled with
@@ -599,16 +614,15 @@ fn elf_static_contents(inputs: ElfStaticInputs) -> [[u8]]:
             buf = if trap: elf_u8_filled(inputs.outs[k].size, 0xccu8) else: elf_u8_zeros(inputs.outs[k].size)
             if inputs.outs[k].name == ".rodata" and inputs.merge.data.len() > 0:
                 buf.write_span(inputs.merge.data, 0, 0, inputs.merge.data.len())
-            var pi: i64 = 0
-            while pi < place_out.len():
-                if place_out[pi] == k:
-                    val obj = inputs.objects[place_obj[pi]]
-                    val sec = obj.sections[place_sec[pi]]
-                    # sections[si].sh_addr is the FILE offset (elf_parser convention)
-                    if sec.sh_size > 0:
-                        buf.write_span(obj.raw, inputs.sec_off[place_obj[pi]][place_sec[pi]],
-                            sec.sh_addr, sec.sh_size)
-                pi = pi + 1
+            var pi = head_for_out[k]
+            while pi >= 0:
+                val obj = inputs.objects[place_obj[pi]]
+                val sec = obj.sections[place_sec[pi]]
+                # sections[si].sh_addr is the FILE offset (elf_parser convention)
+                if sec.sh_size > 0:
+                    buf.write_span(obj.raw, inputs.sec_off[place_obj[pi]][place_sec[pi]],
+                        sec.sh_addr, sec.sh_size)
+                pi = next_place[pi]
         out.push(buf)
         k = k + 1
     out
@@ -2447,6 +2461,9 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     # in order, so RISC-V keeps the in-loop apply; every other target defers.
     val defer_apply = not elf_target_is_riscv(target)
     val fast_s = elf_ref_values_fast(ctx, lay, refs, req.jobs)
+    var tls_dyn_set: {i64: bool} = {}
+    for jt in sc.tls_dynamic:
+        tls_dyn_set[jt] = true
     var apply_jobs: [i64] = []
     var j: i64 = 0
     while j < refs.len():
@@ -2455,7 +2472,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             j = j + 1
             continue
         val k = r.out_sec
-        if sc.tls_dynamic.contains(j):
+        if tls_dyn_set.has(j):
             if r.out_off < 0 or r.out_off + 8 > contents[k].len():
                 return Err("dynamic TLS relocation field is outside its output section")
             var tls_byte: i64 = 0

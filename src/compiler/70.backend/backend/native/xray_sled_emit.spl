@@ -149,11 +149,14 @@ fn xray_insert_sleds_x86_64(module: MachModule, instrumented: [text]) -> XraySle
 fn xray_insert_sleds_with(module: MachModule, instrumented: [text], ret_opcode: i64, sled_opcode: i64) -> XraySledPlan:
     if instrumented.len() == 0:
         return XraySledPlan(module: module, sites: [])
+    var instrumented_set: Dict<text, bool> = {}
+    for name in instrumented:
+        instrumented_set[name] = true
     var functions: [MachFunction] = []
     var sites: [XraySledSite] = []
     var function_id = 0
     for func in module.functions:
-        if instrumented.contains(func.name) and func.blocks.len() > 0:
+        if instrumented_set.has(func.name) and func.blocks.len() > 0:
             function_id = function_id + 1
             val (rewritten, func_sites) = xray_function_with_sleds(func, function_id, sites.len() + 1, ret_opcode, sled_opcode)
             functions.push(rewritten)
@@ -184,6 +187,14 @@ fn xray_locate_sleds_for(isa: i64, encoded: [EncodedFunction], planned: [XraySle
     val reloc_type = if x86: XRAY_SLED_PLT32_V1 else: XRAY_SLED_CALL26_V1
     val call_at = if x86: XRAY_SLED_REL32_OFFSET_V1 else: XRAY_SLED_BL_OFFSET_V1
     val align = if x86: 2 else: 4
+    var sites_by_fn: Dict<text, [XraySledSite]> = {}
+    for site in planned:
+        if sites_by_fn.has(site.function_name):
+            var list = sites_by_fn[site.function_name]
+            list.push(site)
+            sites_by_fn[site.function_name] = list
+        else:
+            sites_by_fn[site.function_name] = [site]
     var located: [XraySledSite] = []
     for func in encoded:
         var offsets: [i64] = []
@@ -191,8 +202,9 @@ fn xray_locate_sleds_for(isa: i64, encoded: [EncodedFunction], planned: [XraySle
             if reloc.symbol_name == XRAY_TRAMPOLINE_SYMBOL_V1 and reloc.reloc_type == reloc_type:
                 offsets.push(reloc.offset - call_at)
         var index = 0
-        for site in planned:
-            if site.function_name == func.name:
+        if sites_by_fn.has(func.name):
+            val fn_sites = sites_by_fn[func.name]
+            for site in fn_sites:
                 if index >= offsets.len():
                     return Err("xray: sled {site.site_id} of '{func.name}' has no trampoline relocation")
                 val offset = offsets[index]
