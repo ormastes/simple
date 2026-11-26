@@ -48,6 +48,19 @@ var g_float_max_y1: i32 = -2147483648
 # entry, so it can only reach the box it was set for.
 var g_origin_frac_milli: i32 = 0
 
+# The last left float placed: its index and
+# the milli-px its whole-px `g_float_x1` drops. A left float placed against
+# that edge starts from the exact edge (Chrome 159: two `0.4em` left floats).
+# ponytail: one float remembered, left floats only; float_ctx keeps whole px.
+var g_float_frac_i: i32 = -1
+var g_float_frac_err: i32 = 0
+
+# Milli-px past the whole-px left edge `edge` that a left float placed there
+# really starts at.
+fn float_ctx_left_edge_err(edge: i32) -> i32:
+    val i = g_float_frac_i
+    if i >= g_float_base and i < float_ctx_count() and g_float_side[i] == 1 and g_float_x1[i] == edge: g_float_frac_err else: 0
+
 fn float_ctx_reset():
     g_float_side = []
     g_float_x0 = []
@@ -56,6 +69,7 @@ fn float_ctx_reset():
     g_float_y1 = []
     g_float_base = 0
     g_float_max_y1 = -2147483648
+    g_float_frac_i = -1
 
 fn float_ctx_count() -> i32:
     g_float_side.len() as i32
@@ -73,6 +87,8 @@ fn float_ctx_add(side: i32, x0: i32, x1: i32, y0: i32, y1: i32):
 fn float_ctx_truncate(n: i32):
     if n >= float_ctx_count():
         return
+    if g_float_frac_i >= n:
+        g_float_frac_i = -1
     var side: [i32] = []
     var x0: [i32] = []
     var x1: [i32] = []
@@ -1565,6 +1581,22 @@ fn box_x_snap(n: i32, c: i32, fx: i32) -> i32:
     box_line_start_err_record(n, c, err_x)
     sx
 
+# A box placed at whole px: clears what `box_x_snap` and its width record may
+# have left from an earlier layout pass of the same box (lazy tables: free
+# while nothing was recorded).
+fn box_x_snap_clear(n: i32, c: i32):
+    box_device_dx_record(n, c, 0)
+    box_line_start_err_record(n, c, 0)
+    box_device_extra_w_record(n, c, 0)
+
+# Sub-pixel part (milli-px) that `resolve_horizontal_margin` drops from a
+# style's left / right margin against `cb_w`; 0 for an auto margin.
+fn margin_l_err_milli(cst: Style, cb_w: i32) -> i32:
+    if cst.margin_l_auto: 0 else: resolve_horizontal_margin_milli(cst.margin_l, cst.margin_l_pct, cst.margin_l_milli, cb_w) - resolve_horizontal_margin(cst.margin_l, cst.margin_l_pct, cb_w) * 1000
+
+fn margin_r_err_milli(cst: Style, cb_w: i32) -> i32:
+    if cst.margin_r_auto: 0 else: resolve_horizontal_margin_milli(cst.margin_r, cst.margin_r_pct, cst.margin_r_milli, cb_w) - resolve_horizontal_margin(cst.margin_r, cst.margin_r_pct, cb_w) * 1000
+
 fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], st: Style) -> LayoutResult:
     var out_bx = bx
     var out_by = by
@@ -2351,7 +2383,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             )
             val grid_margin_l = if grid_child_style.margin_l_auto: 0 else: resolve_horizontal_margin(grid_child_style.margin_l, grid_child_style.margin_l_pct, grid_child_width)
             val grid_margin_r = if grid_child_style.margin_r_auto: 0 else: resolve_horizontal_margin(grid_child_style.margin_r, grid_child_style.margin_r_pct, grid_child_width)
-            val grid_child_x = (
+            var grid_child_x = (
                 ix + grid_track_offset(
                     grid_columns, st.column_gap_px, grid_column
                 ) + grid_margin_l
@@ -2401,6 +2433,24 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 grid_item_w = 0
             if grid_auto_w and (grid_child_style.min_width_px < 0 or grid_child_style.max_width_px < 0):
                 grid_item_w = constrained_outer_width(nodes[grid_child], resolved_grid_child_style, grid_item_w)
+            # Fractional margins against the grid area: the item paints from its
+            # snapped device edge, as a block child does; a stretched auto-width
+            # item also snaps its right edge.
+            val grid_ml_err = margin_l_err_milli(grid_child_style, grid_child_width)
+            val grid_mr_err = margin_r_err_milli(grid_child_style, grid_child_width)
+            if grid_ml_err != 0 or grid_mr_err != 0:
+                box_x_snap_clear(nodes.len() as i32, grid_child)
+                val grid_left = (box_line_start_err_at(i) as i32) + grid_ml_err
+                val grid_sx = box_x_snap(nodes.len() as i32, grid_child, grid_left)
+                grid_child_x = grid_child_x + grid_sx
+                if grid_auto_w and grid_child_style.min_width_px == 0 and grid_child_style.max_width_px == 0:
+                    val grid_right = (box_line_start_err_at(i) as i32) + grid_item_w * 1000 - grid_mr_err
+                    grid_item_w = snap_milli_px(grid_right) - grid_sx
+                    if grid_item_w < 0:
+                        grid_item_w = 0
+                    val grid_k = layout_device_scale()
+                    if grid_k > 1:
+                        box_device_extra_w_record(nodes.len() as i32, grid_child, box_device_top_px(grid_right * grid_k) - box_device_top_px(grid_left * grid_k) - grid_k * grid_item_w)
             # Stretch only an auto-size, non-replaced item (in one column or
             # spanning several), when block-axis auto margins do not own the
             # free space. Rows that are all FIXED are already final, so the
@@ -2989,6 +3039,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         val ordered_flex_children = ordered_row_children
         val ordered_flex_child_count = ordered_flex_children.len()
         var sum_explicit = 0
+        var margin_err_total = 0
+        var margin_has_frac = false
         var auto_weight = 0
         var auto_main_margin_count = 0
         var shrink_scaled_total = 0
@@ -3048,6 +3100,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     auto_main_margin_count = auto_main_margin_count + 1
                 else:
                     sum_explicit = sum_explicit + pmr
+                # What the whole-px margins above drop; the free space is that much smaller.
+                val pml_err = margin_l_err_milli(pcst, iw)
+                val pmr_err = margin_r_err_milli(pcst, iw)
+                margin_err_total = margin_err_total + pml_err + pmr_err
+                if pml_err != 0 or pmr_err != 0:
+                    margin_has_frac = true
             ps_i = ps_i + 1
         var gaps_total = 0
         if nonabs_count > 1:
@@ -3118,6 +3176,26 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         # right; edges are snapped from the exact position instead (Chrome
         # LayoutUnit, pixel-snapped edge = round(position)).
         var frac_adj_milli = 0
+        # Fractional margins (`10%`, `0.4em`): the pen starts at the container's
+        # own line-start error, and whatever takes the free space gives back
+        # what the whole-px margins dropped (Chrome 159): an end / center offset,
+        # the growers (by flex-grow weight) or the auto margins (evenly).
+        # ponytail: space-between / -around / -evenly rows, shrinking rows and rows
+        # whose exact margins leave no free space keep whole-px margins (base
+        # behaviour), so their last edge stays where it was.
+        val margin_frac_row = margin_has_frac and shrink_deficit == 0 and (main_free_space as i64) * 1000 >= (margin_err_total as i64) and not (distributable_space > 0 and st.justify_content.starts_with("space-"))
+        val grow_err_weight = if margin_frac_row and main_free_space > 0: grow_definite_total + auto_weight else: 0
+        val auto_margin_err_n = if margin_frac_row and main_free_space > 0 and grow_err_weight == 0: auto_main_margin_count else: 0
+        if margin_frac_row:
+            frac_adj_milli = box_line_start_err_at(i) as i32
+            if distributable_space > 0 and auto_main_margin_count == 0 and (st.justify_content == "flex-end" or st.justify_content == "end"):
+                frac_adj_milli = frac_adj_milli - margin_err_total
+            elif distributable_space > 0 and auto_main_margin_count == 0 and (st.justify_content == "center" or st.justify_content == "safe-center" or st.justify_content == "unsafe-center"):
+                frac_adj_milli = frac_adj_milli - margin_err_total / 2
+        var grow_err_used_w = 0
+        var grow_err_assigned = 0
+        var auto_margin_err_used = 0
+        var auto_margin_err_assigned = 0
         var max_child_h = 0
         var flex_max_outer_milli = 0
         var flex_child_count = 0
@@ -3175,6 +3253,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 if flex_child_count > 0:
                     cx = cx + st.column_gap_px + justify_gap_extra
                 cx = cx + (if cst.margin_l_auto: auto_main_margin_px else: cml)
+                if margin_frac_row:
+                    frac_adj_milli = frac_adj_milli + margin_l_err_milli(cst, iw)
+                    if cst.margin_l_auto and auto_margin_err_n > 0:
+                        auto_margin_err_used = auto_margin_err_used + 1
+                        val am_l_after = margin_err_total * auto_margin_err_used / auto_margin_err_n
+                        frac_adj_milli = frac_adj_milli - (am_l_after - auto_margin_err_assigned)
+                        auto_margin_err_assigned = am_l_after
+                # The flex-grow weight this item takes a free-space share by (0 if none).
+                var grow_w_item = 0
                 # auto-width child gets its weighted share; %-width resolves against
                 # the container inner width; px-width children ignore this.
                 var remaining_w = iw - (cx - ix) - cmr
@@ -3190,6 +3277,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     val grow_share_after = (definite_grow_space * (grow_definite_used + cst.flex_grow) + grow_definite_total / 2) / grow_definite_total
                     grown_outer_w = flex_item_definite_base_w(nodes[fc], cst, iw) + grow_share_after - grow_definite_assigned
                     grow_definite_used = grow_definite_used + cst.flex_grow
+                    grow_w_item = cst.flex_grow
                     grow_definite_assigned = grow_share_after
                     remaining_w = grown_outer_w
                     force_used_w = true
@@ -3238,6 +3326,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         val cumulative_target = (auto_avail * (flex_weight_used + grow) + auto_weight - 1) / auto_weight
                         remaining_w = cumulative_target - flex_width_assigned
                         flex_weight_used = flex_weight_used + grow
+                        grow_w_item = grow
                         flex_width_assigned = cumulative_target
                 elif cst.width_px == 0 and not cst.width_zero and cst.flex_basis_px > 0 and cst.flex_grow == 0:
                     # Sized by flex-basis alone. The measuring pass counted this
@@ -3253,6 +3342,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         remaining_w = cumulative_target - flex_width_assigned
                         flex_weight_used = flex_weight_used + grow
                         flex_width_assigned = cumulative_target
+                        grow_w_item = grow
                 elif cst.width_px < 0:
                     remaining_w = iw
                 elif cst.flex_basis_px > 0:
@@ -3273,10 +3363,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # Explicit CSS min-width floors every flex sizing branch: a
                 # min-width'd item (taskbar sections' min-width: 180px) keeps
                 # its floor and the row overflows, exactly as Chromium lays it.
+                # Width floor the free-space give-back below must not cut into.
+                var w_floor_px = 1
                 if cst.min_width_px > 0:
                     val min_w_outer = if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.min_width_px else: cst.min_width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
                     if remaining_w < min_w_outer:
                         remaining_w = min_w_outer
+                        w_floor_px = min_w_outer
                 if remaining_w < 1:
                     remaining_w = 1
                 val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
@@ -3338,10 +3431,26 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 var draw_x = cx
                 var draw_w = remaining_w
                 var frac_snapped = false
+                # A grower gives back its weighted share of what the whole-px
+                # margins dropped from the free space, never below its min-width
+                # floor (ponytail: a share a floored item cannot take is dropped).
+                if grow_err_weight > 0 and grow_w_item > 0:
+                    grow_err_used_w = grow_err_used_w + grow_w_item
+                    val grow_err_after = margin_err_total * grow_err_used_w / grow_err_weight
+                    val grow_share = grow_err_after - grow_err_assigned
+                    grow_err_assigned = grow_err_after
+                    if remaining_w * 1000 + item_frac_delta_milli - grow_share >= w_floor_px * 1000:
+                        item_frac_delta_milli = item_frac_delta_milli - grow_share
+                # A fractional row redoes its records each pass (an earlier pass at
+                # another width may have snapped this item).
+                if margin_has_frac:
+                    box_x_snap_clear(nodes.len() as i32, fc)
                 if (frac_adj_milli != 0 or item_frac_delta_milli != 0) and not row_flex_main_reversed(st):
                     val exact_left_milli = cx * 1000 + frac_adj_milli
                     val exact_right_milli = exact_left_milli + remaining_w * 1000 + item_frac_delta_milli
-                    draw_x = (exact_left_milli + 500) / 1000
+                    # A row with fractional margins also moves the item to its
+                    # device column at k > 1 (`box_x_snap`), as block children do.
+                    draw_x = if margin_frac_row: cx + box_x_snap(nodes.len() as i32, fc, frac_adj_milli) else: (exact_left_milli + 500) / 1000
                     # Only an item with its own remainder has a known exact
                     # width; any other (an `<img>` sized by its own layout)
                     # keeps its whole-px width, so only its left edge moves.
@@ -3350,6 +3459,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         if draw_w < 1:
                             draw_w = 1
                         frac_snapped = true
+                        val k = layout_device_scale()
+                        if margin_frac_row and k > 1:
+                            box_device_extra_w_record(nodes.len() as i32, fc, box_device_top_px(exact_right_milli * k) - box_device_top_px(exact_left_milli * k) - k * draw_w)
                 # Fractional block-axis start (Chrome LayoutUnit): a plainly placed item
                 # starts at the container start fraction plus its top margin in milli-px,
                 # and hands that fraction to its own cursor. Aligned items keep whole px.
@@ -3392,6 +3504,28 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     )
                     out_bx = shifted.bx
                     out_by = shifted.by
+                    if margin_frac_row:
+                        # The reflected margin box negates the forward pen's
+                        # fraction; the container's own start error stays. An item
+                        # with an exact width (a grower's give-back) snaps both edges.
+                        val rev_err0 = box_line_start_err_at(i) as i32
+                        val rev_left = 2 * rev_err0 - frac_adj_milli - item_frac_delta_milli + margin_l_err_milli(cst, iw) - margin_r_err_milli(cst, iw)
+                        val rev_sx = box_x_snap(nodes.len() as i32, fc, rev_left)
+                        if rev_sx != 0:
+                            val rev_shift = offset_layout_subtree(child_index, fc, rev_sx, 0, out_bx, out_by)
+                            out_bx = rev_shift.bx
+                            out_by = rev_shift.by
+                        if item_frac_delta_milli != 0:
+                            val rev_right = rev_left + remaining_w * 1000 + item_frac_delta_milli
+                            var rev_w = snap_milli_px(rev_right) - rev_sx
+                            if rev_w < 1:
+                                rev_w = 1
+                            out_bw[fc] = rev_w
+                            # The forward pen still advances by the whole-px width.
+                            frac_snapped = true
+                            val rev_k = layout_device_scale()
+                            if rev_k > 1:
+                                box_device_extra_w_record(nodes.len() as i32, fc, box_device_top_px(rev_right * rev_k) - box_device_top_px(rev_left * rev_k) - rev_k * rev_w)
                 val used_h = cst.margin_t + child.height + cst.margin_b
                 if used_h > max_child_h:
                     max_child_h = used_h
@@ -3406,6 +3540,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 cx = cx + (if frac_snapped: remaining_w else: out_bw[fc]) + (if cst.margin_r_auto: auto_main_margin_px else: cmr)
                 flex_child_count = flex_child_count + 1
                 frac_adj_milli = frac_adj_milli + item_frac_delta_milli
+                if margin_frac_row:
+                    frac_adj_milli = frac_adj_milli + margin_r_err_milli(cst, iw)
+                    if cst.margin_r_auto and auto_margin_err_n > 0:
+                        auto_margin_err_used = auto_margin_err_used + 1
+                        val am_r_after = margin_err_total * auto_margin_err_used / auto_margin_err_n
+                        frac_adj_milli = frac_adj_milli - (am_r_after - auto_margin_err_assigned)
+                        auto_margin_err_assigned = am_r_after
             fc_i = fc_i + 1
         # An auto-height single line is as tall as its tallest item; align
         # each item in it the way the wrap path does per line (Flexbox 9.4
@@ -3563,12 +3704,38 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 else:
                     child_w
                 val col_child_margin_w = cml + col_child_outer_w + cmr
+                val col_ml_err = margin_l_err_milli(resolved_cst, iw)
+                val col_mr_err = margin_r_err_milli(resolved_cst, iw)
+                # Exact left edge (milli-px past ix) with fractional margins.
+                var col_exact_x = cml * 1000 + col_ml_err
+                var col_aligned = false
                 if col_item_align == "center" and iw > col_child_margin_w:
                     child_x = ix + cml + (iw - col_child_margin_w) / 2
                     child_w = col_child_outer_w
+                    col_exact_x = col_exact_x + (iw * 1000 - col_child_margin_w * 1000 - col_ml_err - col_mr_err) / 2
+                    col_aligned = true
                 elif (col_item_align == "flex-end" or col_item_align == "end") and iw > col_child_margin_w:
                     child_x = ix + cml + iw - col_child_margin_w
                     child_w = col_child_outer_w
+                    col_exact_x = (iw - cmr - col_child_outer_w) * 1000 - col_mr_err
+                    col_aligned = true
+                # Fractional margins: the item paints from its snapped device
+                # edge, as an in-flow block child does; a stretched auto-width
+                # item also snaps its right edge.
+                if col_ml_err != 0 or col_mr_err != 0:
+                    box_x_snap_clear(nodes.len() as i32, flex_c)
+                    val col_err0 = box_line_start_err_at(i) as i32
+                    val col_left = col_err0 + col_exact_x - (child_x - ix) * 1000
+                    val col_sx = box_x_snap(nodes.len() as i32, flex_c, col_left)
+                    child_x = child_x + col_sx
+                    if not col_aligned and resolved_cst.width_px == 0 and not resolved_cst.width_zero and resolved_cst.min_width_px <= 0 and resolved_cst.max_width_px <= 0:
+                        val col_right = col_err0 + child_w * 1000 - col_mr_err
+                        child_w = snap_milli_px(col_right) - col_sx
+                        if child_w < 1:
+                            child_w = 1
+                        val col_k_scale = layout_device_scale()
+                        if col_k_scale > 1:
+                            box_device_extra_w_record(nodes.len() as i32, flex_c, box_device_top_px(col_right * col_k_scale) - box_device_top_px(col_left * col_k_scale) - col_k_scale * child_w)
                 # A definite main size grows or shrinks the item (Flexbox 9.7). An
                 # auto-height item with content never ends below its content.
                 val col_t = if col_k < col_targets.len(): col_targets[col_k] else: -1
@@ -3855,10 +4022,18 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     if inline_x > inline_start_x and inline_x + float_outer_w > line_iw:
                         float_min_y = cy + inline_line_h
                 val float_y = float_ctx_place_y(float_min_y, float_outer_w, cst.clear_mode, ix, ix + iw)
-                val float_x = if cst.float_mode == 1:
-                    float_ctx_left_edge(float_y, float_y + 1, ix) + fml
-                else:
-                    float_ctx_right_edge(float_y, float_y + 1, ix + iw) - fmr - float_w
+                val float_edge = if cst.float_mode == 1: float_ctx_left_edge(float_y, float_y + 1, ix) else: float_ctx_right_edge(float_y, float_y + 1, ix + iw)
+                var float_x = if cst.float_mode == 1: float_edge + fml else: float_edge - fmr - float_w
+                # Fractional margins (or a fractional left-float edge): the float
+                # paints from its snapped device edge, as a block child does.
+                val fml_err = margin_l_err_milli(cst, iw)
+                val fmr_err = margin_r_err_milli(cst, iw)
+                val float_edge_err = if cst.float_mode == 1: (if float_edge == ix: box_line_start_err_at(i) as i32 else: float_ctx_left_edge_err(float_edge)) else: 0
+                val float_frac = fml_err != 0 or fmr_err != 0 or (float_edge != ix and float_edge_err != 0)
+                if fml_err != 0 or fmr_err != 0 or float_edge_err != 0:
+                    box_x_snap_clear(nodes.len() as i32, c)
+                if float_frac:
+                    float_x = float_x + box_x_snap(nodes.len() as i32, c, if cst.float_mode == 1: float_edge_err + fml_err else: 0 - fmr_err)
                 val fchild = layout_with_style(nodes, styles, child_index, c, float_x, float_y + fmt, float_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, float_style)
                 out_bx = fchild.bx
                 out_by = fchild.by
@@ -3869,6 +4044,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 out_intrinsic_widths = fchild.intrinsic_widths
                 shrink_box_device_extra_w(nodes, styles, child_index, c, cst, out_bw[c])
                 float_ctx_add(cst.float_mode, float_x - fml, float_x + out_bw[c] + fmr, float_y, float_y + fmt + out_bh[c] + fmb)
+                if cst.float_mode == 1:
+                    g_float_frac_i = float_ctx_count() - 1
+                    g_float_frac_err = if float_frac: float_edge * 1000 + float_edge_err + fml * 1000 + fml_err + out_bw[c] * 1000 + fmr * 1000 + fmr_err - (float_x + out_bw[c] + fmr) * 1000 else: 0
                 if in_inline_run:
                     # The open line is shortened by the new float; what it
                     # already holds moves right of a left float.
