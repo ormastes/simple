@@ -1,8 +1,9 @@
 # @req REQ-SSPEC-COMPILER
 # @tag: unit, compiler, mir, generics
 #
-# GREEN since the call-site encode of bare-T method params (Dict-valued generic classes).
-# Scope items 2-3 of the bug doc (T? / T returns, bare-T fields) remain open.
+# Fixed 2026-11-26: Store<T> Result<T, E> / T? returns and Box<T>.get() -> T
+# now instantiate receiver type arguments at the call/match site so the caller
+# does not double-decode (>> 3 / >> 6). AttrI64StoreV1 stays (mixed raw/Dict).
 #
 # Erased <-> concrete i64 boundary of a generic-CLASS method
 # (doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md,
@@ -47,9 +48,7 @@ struct Shaped:
     ir: text
     errors: [text]
 
-fn shape(body: text) -> Shaped:
-    val src = PRELUDE + body
-    val file = "testdata/gmeb_probe.spl"
+fn shape_src(src: text, file: text) -> Shaped:
     var hl = HirLowering.with_filename(file)
     val hir = hl.lower_module(parse_full_frontend(src, file, MODULE, Logger(level: 0)))
     var errors: [text] = []
@@ -64,6 +63,9 @@ fn shape(body: text) -> Shaped:
         errors.push("mir: " + e.message)
     val ir = MirToLlvm.create(MODULE, CodegenTarget.X86_64, nil).translate_module(mir)
     Shaped(ir: ir, errors: errors)
+
+fn shape(body: text) -> Shaped:
+    shape_src(PRELUDE + body, "testdata/gmeb_probe.spl")
 
 fn function_body(ir: text, fn_name: text) -> [text]:
     var out: [text] = []
@@ -121,3 +123,60 @@ describe "generic-class method: erased <-> concrete i64 Dict<K, T> boundary":
         val encodes = count_calls(function_body(s.ir, "Store.set"), "rt_value_int_wide") +
             count_calls(function_body(s.ir, "probe"), "rt_value_int_wide")
         expect(encodes).to_equal(2)
+
+    it "caller does not double-decode Result<T, text> Ok payload on Store<i64>":
+        val typed_probe = "fn probe(v: i64) -> i64:\n" +
+            "    val h: Dict<i64, i64> = {}\n" +
+            "    var s = Store(hash: h)\n" +
+            "    s.set(1, v)\n" +
+            "    match s.get(1):\n" +
+            "        case Ok(x):\n" +
+            "            val typed_x: i64 = x\n" +
+            "            typed_x\n" +
+            "        case Err(_): -1\n"
+        val s = shape(typed_probe)
+        expect(s.errors.len()).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe"), "rt_value_int_wide")).to_equal(1)
+        expect(count_calls(function_body(s.ir, "probe"), "rt_value_as_int_wide")).to_equal(0)
+
+    it "a T? Optional return (Store.get_opt) keeps caller encode and single decode":
+        val opt_src = "class OptStore<T>:\n" +
+            "    hash: Dict<i64, T>\n" +
+            "\n" +
+            "impl OptStore<T>:\n" +
+            "    fn get_opt(node: i64) -> T?:\n" +
+            "        self.hash.get(node)\n" +
+            "\n" +
+            "    me set(node: i64, value: T):\n" +
+            "        self.hash[node] = value\n" +
+            "\n" +
+            "fn probe_opt(v: i64) -> i64:\n" +
+            "    val h: Dict<i64, i64> = {}\n" +
+            "    var s = OptStore(hash: h)\n" +
+            "    s.set(1, v)\n" +
+            "    match s.get_opt(1):\n" +
+            "        case Some(x):\n" +
+            "            val typed_x: i64 = x\n" +
+            "            typed_x\n" +
+            "        case nil: -1\n"
+        val s = shape_src(opt_src, "testdata/gmeb_opt_probe.spl")
+        expect(s.errors.len()).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_opt"), "rt_value_int_wide")).to_equal(1)
+        expect(count_calls(function_body(s.ir, "probe_opt"), "rt_value_as_int_wide")).to_equal(0)
+
+    it "a non-Dict Box<i64>.get() -> T caller keeps raw field word without rt_value_as_int_wide":
+        val box_src = "class Box<T>:\n" +
+            "    value: T\n" +
+            "\n" +
+            "impl Box<T>:\n" +
+            "    fn get() -> T:\n" +
+            "        self.value\n" +
+            "\n" +
+            "fn probe_box(v: i64) -> i64:\n" +
+            "    val b = Box(value: v)\n" +
+            "    val x: i64 = b.get()\n" +
+            "    x\n"
+        val s = shape_src(box_src, "testdata/gmeb_box_probe.spl")
+        expect(s.errors.len()).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_box"), "rt_value_int_wide")).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_box"), "rt_value_as_int_wide")).to_equal(0)

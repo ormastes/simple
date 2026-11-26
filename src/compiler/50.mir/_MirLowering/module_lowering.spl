@@ -2674,10 +2674,10 @@ impl MirLowering:
         a generic-class method's bare `T` params were invisible to the caller
         and arrived raw while the erased body's readers decode. Publish which
         params are bare `T` ('1' per slot, receiver first) so the call site
-        can encode them. A method returning `T` / `T?` (anything but
-        `Result<T, E>`) vetoes its whole class: its tail re-boxes the decoded
-        word and no caller decodes it yet (scope item 2), so an encoded
-        argument would read back x8."""
+        can encode them. A method returning bare `T` or `[T]` (anything other
+        than `Result<T, E>` or `T?`) vetoes its whole class: its tail re-boxes
+        the decoded word unless the caller decodes it, so an encoded argument
+        would read back x8."""
         var owner = ""
         var class_marker = ""
         if val owner_info = module_symbols.get_symbol_raw(fn_symbol.id):
@@ -2687,7 +2687,7 @@ impl MirLowering:
         if owner == "": return
         var returns_bare_t = false
         match fn_return_type.kind:
-            case HirTypeKind.Result(_, _): ()
+            case HirTypeKind.Result(_, _) | HirTypeKind.Optional(_): ()
             case _: returns_bare_t = self.hir_type_mentions_type_param_v1(fn_return_type, module_symbols)
         if returns_bare_t:
             bootstrap_fn_ret_err_shape_register(owner + "#erased-ret-veto", "1")
@@ -3372,6 +3372,7 @@ impl MirLowering:
         while local_meta_i < local_class_values.len():
             val class_def: HirClass = local_class_values[local_meta_i]
             self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, true)
+            self.register_struct_type_param_names(class_def.name, class_def.type_params)
             # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
             val optional_class_symbol: HirSymbol? = module.symbols.get_symbol_raw(class_def.symbol.id)
             if val present_class_symbol = optional_class_symbol:
@@ -3384,6 +3385,7 @@ impl MirLowering:
                 val canonical_class_key = mir_class_identity_raw(module.symbols, class_def.symbol.id)
                 if canonical_class_key != class_def.name:
                     self.register_composite_field_metadata(canonical_class_key, class_def.fields, module.symbols, true)
+                    self.register_struct_type_param_names(canonical_class_key, class_def.type_params)
                 val class_attr = if class_def.has_layout_attr: class_def.layout_attr else: layoutattr_default_()
                 self.register_composite_layout_identity(class_symbol, class_def.fields, class_attr)
             local_meta_i = local_meta_i + 1
