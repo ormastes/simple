@@ -5034,3 +5034,26 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
   exact float up. Snapping to LayoutUnits does not help: DejaVu Sans Mono
   `x<code>Tab</code>` sits on a half LayoutUnit (2361.5/64) and Chrome uses the
   float there. The real fix is exact font-unit pen origins in layout.
+## 2026-11-26 — paint-region: 1x disc list markers use Chrome's measured coverage
+
+- **Survey (1x, origin 113d9f09559, 20 px tiles).** css-paint has 6,498 mismatched px and forms-media 5,749. Almost all of it is text raster (owned by lcdround and gray-raster). The regions that are not text:
+
+  | region | page | px |
+  |---|---|---|
+  | `disc` bullets (5x5) | every inventory, ~7-14 per bullet | 56 css-paint + 42 forms-media in view |
+  | radio ring (13 px) | forms-media | 74 |
+  | checkbox ring | forms-media | 25 |
+  | table grid, card edges, frame | css-paint | 0 |
+
+  The radio is the biggest single region. The disc is the biggest recurring class, so this lane took the disc.
+- **Chrome rule.** At 1x Chrome's disc is Skia's oval. It is fatter on the diagonals than an exact circle, and at odd sides it is heavier at the bottom and right: a 5 px disc has top corners `dd` and bottom corners `c2`.
+  - An exact-area circle model, with 4, 8, 16 or 64 sub-scanlines and several sample offsets, still misses about 35 of 126 px across sides 4..7.
+  - We painted a rounded square with radius side/2, which is 2 at side 5: 14 of 25 px off per bullet.
+- **Fix.** `chrome_disc_spans` in `form_control_chrome.spl` carries Chrome's measured coverage for sides 4..7, which covers 12px..24px faces. It lowers through `_html_draw_ir_chrome_span_commands`, the same span path as the native controls.
+  - Other sides keep the rounded box.
+  - k > 1 is unchanged.
+  - Only Draw IR paints list markers; the staging raster does not.
+  - Pinned by `list_disc_marker_device_scale_chrome159_spec` AC-3.
+- **Open, unclaimed.** A `ul` with its own 20px or 24px font-size sits 4 or 12 rows higher than Chrome at 1x. The li text moves with the marker, so it is the list block's em margin, not the marker.
+- **Known gap (review 2026-11-26).** `Style` only tracks `list_style_none`, so a `square` or `circle` list marker still paints the disc. It did before this change too, as a radius side/2 box; it now gets the disc coverage. Fixing it needs `list-style-type` parsed into `Style`, which touches the decl_apply, declarations and style-copy paths. Not done here.
+- **Tables are faithful, not mirrored.** Row 4 of the 7 px table is left-heavy while rows 2 and 5 are right-heavy. That is Chrome's own capture (`3b .. 42`), not a typo. AC-4 pins the 4 px and 7 px discs.
