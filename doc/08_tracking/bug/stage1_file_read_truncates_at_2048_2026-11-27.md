@@ -1,7 +1,17 @@
 # Stage1-built stage2 truncates std.io_runtime file_read near 2048 bytes
 
-Status: open (workaround active: 00.common manifest reordered so `project.name`
-lands in the first bytes; compiler defect NOT fixed)
+Status: REFUTED 2026-11-27. There is no read truncation. Root cause and
+evidence are in `stage2_test_runner_libunit_project_name_missing_2026-11-27.md`:
+the Rust seed rebinds text `.slice(a, b)` to `compiler.frontend.core.types.str_slice`
+(code-point `s[a:b]`), and two em dashes ahead of `project:` shifted the cut by
+4 bytes. Measured on the failing Stage 2 binary: under `gdb`, its own
+`file_read` returns all 2489 bytes of a pre-reorder copy, and its strip
+function then returns 344 bytes starting `ect:` instead of 348 starting
+`project:`. "Name beyond byte 2048" was a
+coincidence of that one file. The manifest reorder below does avoid the failure,
+but only because strip returns the source unsliced when line 1 is content; it
+may be reverted once the `str_slice` workaround is in a rebuilt Stage 2. The
+original text follows unchanged.
 
 ## Symptom
 
