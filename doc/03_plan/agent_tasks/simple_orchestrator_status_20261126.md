@@ -26,6 +26,32 @@ changes state and record the source revision and supporting evidence.
   journal fixture while the operator prepares the installed-host fixture.
   Capture native receipts against each PR's verified head.
 
+## Handoff — 2026-11-26 evening (Claude session)
+
+All evidence below comes from the Rust seed interpreter. It is diagnostic only and is not native qualification.
+
+- **Landed on `release/1.0.0`:**
+  - #12035: endpoint routing reads only `schema`/`server_config` from a tolerant host file.
+  - #12040: the V4 pane binding strict node budget is now 17. It was 16, so every valid binding was refused.
+  - #12049: the helper-deadline and gateway-draft node budgets are fixed, and two stale private-import baseline rows are pruned.
+- **The Codex Linux stack** (`work/orchestrator-parallel-compose-20261126` at `de58e1997d6`) is carried as `work/orchestrator-linux-stack-20261126`. On top of it are:
+  - the node-budget fix;
+  - the `remote_pane_view_v1` 35-byte oracle;
+  - the three enrolled-host system specs reporting `pending("BLOCKED: ...")`, which is exit 6, not a failure;
+  - the SSH loopback verdicts in `doc/03_plan/sys_test/server_contexts.md`;
+  - a fix so the smux V6 owner releases `agent_pane_target` on detach or cancel. A stronger-model review found this as a P1: the next run was refused as a conflict.
+- **Ran locally:**
+  - Podman session smoke: 5/5, with the entrypoint fixture image.
+  - caret-serve/caret-client loopback: status, crashed, cleanup preview and shutdown.
+  - Controller journal intent, cancel and foreign-controller refusal.
+  - SSH loopback (user sshd on 127.0.0.1:2299): key auth and host-key pinning hold. The round trip is BLOCKED because the seed interpreter lacks `rt_stdin_read`/`rt_stdout_write`, so it needs a compiled `simple-orchestrator` peer.
+- **Review P2 items left open:**
+  - `agent_run_admission_v1` and `controller_agent_pane_bind_target_v4` have no consumer outside their specs.
+  - The remote pane target, turn and dispatch paths are asserted by source-text `index_of` only, so they need state-machine unit specs.
+  - Provision reports `installed: false` when the install published but cleanup failed. It still fails closed, and a retry reports `Existing`.
+- **Uncapped strict lists** (the owner decides a cap or budget): `remote_run_author_v1` (`expectedTests` + `toolchainInputs` exceed about 227), `storage_view_v1` meta volumes, the `cs_container_lifecycle_v1` host-worktree argv, `caret_session_protocol_v1` crashed records (170 or more), and `wire_envelope_v1` (budget equals the encoder cap, but whether they count the same is unverified).
+- **Still operator-blocked** (needs root): the enrolled `linux-service` Host fixture per `continuation_20261116/verify_queue/linux_fixture_preflight.md`, plus a qualified self-hosted `SIMPLE_BIN`. The self-hosted CLI build was still in its frontend after 5 h.
+
 ## On the release branch
 
 - Linux has an OCI lifecycle provider wired into CI. The Linux Host V4 service
