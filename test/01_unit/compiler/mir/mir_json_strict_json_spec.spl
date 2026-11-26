@@ -1,0 +1,117 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# Bug: mir_json_hole_followed_by_closers_unbalanced_2026-11-26.
+#
+# In an interpolating literal EVERY `}}` is one literal `}` (and `{{` one
+# `{`), whether or not it follows a hole, so `"{\"A\":{\"t\":{t}}}"` prints
+# `{"A":{"t":7}`. Two literal closers must be spelled `}}}}`.
+
+use std.spec.step
+use std.common.json.parser.{json_parse_strict_bounded_with_error, json_parse_limits_default}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType, MirTypeKind}
+use compiler.mir.mir_instructions.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirExecutionDomain, MirTransferMode, MirTransferPayload}
+use compiler.mir.mir_json.{serialize_mir_type, serialize_mir_inst_kind, serialize_const_value}
+
+val LB = "{{"
+val RB = "}}"
+val BS = "\\"
+val Q = "\""
+
+fn json_error(value: text) -> text:
+    val (_v, err) = json_parse_strict_bounded_with_error(value, json_parse_limits_default())
+    err
+
+# Seed meaning of a literal body starting at `start` (just after the opening
+# quote): holes become `0`, `{{`/`}}` one brace, `{` before `\` or a quote a
+# literal brace, a lone `}` itself. Returns (decoded, index of closing quote).
+fn decode_seed_literal(src: text, start: i64) -> (text, i64):
+    var out = ""
+    var i = start
+    val n = src.len()
+    while i < n:
+        val c = src[i:i + 1]
+        val nx = if i + 1 < n: src[i + 1:i + 2] else: ""
+        if c == Q:
+            return (out, i)
+        if c == BS:
+            out = out + nx
+            i = i + 2
+        elif (c == LB and nx == LB) or (c == RB and nx == RB):
+            out = out + c
+            i = i + 2
+        elif c == LB and (nx == BS or nx == Q):
+            out = out + c
+            i = i + 1
+        elif c == LB:
+            var depth = 1
+            var inq = false
+            var j = i + 1
+            while j < n and depth > 0:
+                val cj = src[j:j + 1]
+                if cj == BS:
+                    j = j + 1
+                elif cj == Q:
+                    inq = not inq
+                elif not inq and cj == LB:
+                    depth = depth + 1
+                elif not inq and cj == RB:
+                    depth = depth - 1
+                j = j + 1
+            out = out + "0"
+            i = j
+        else:
+            out = out + c
+            i = i + 1
+    (out, n)
+
+# Self-contained JSON object literals (`"{\"...` alone on its line, not a
+# concatenation part) whose seed meaning is not strict JSON.
+fn unbalanced_object_literals(path: text) -> [text]:
+    val opener = Q + LB + BS + Q
+    var bad: [text] = []
+    var no = 0
+    for line in file_read(path).split("\n"):
+        no = no + 1
+        val at = line.index_of(opener)
+        if at >= 0 and not line.trim().starts_with("#") and not line.contains(" + "):
+            val (decoded, end) = decode_seed_literal(line, at + 1)
+            val rest = line[end + 1:line.len()].trim()
+            if (rest == "" or rest == ")") and json_error(decoded) != "":
+                bad.push("{path}:{no}")
+    bad
+
+describe "mir_json emits strict JSON":
+    # @manual scenario evidence
+    it "serializes nested types as strict JSON":
+        # @req REQ-SSPEC-UNIT
+        step("pointer, reference, array and dict types")
+        expect(json_error(serialize_mir_type(MirType(kind: MirTypeKind.Ptr(MirType.i64(), true))))).to_equal("")
+        expect(json_error(serialize_mir_type(MirType(kind: MirTypeKind.Ref(MirType.i64(), false))))).to_equal("")
+        expect(json_error(serialize_mir_type(MirType(kind: MirTypeKind.Array(MirType.i64(), 4))))).to_equal("")
+        expect(json_error(serialize_mir_type(MirType(kind: MirTypeKind.Dict(MirType.i64(), MirType.i64()))))).to_equal("")
+
+    it "serializes instructions as strict JSON":
+        # @req REQ-SSPEC-UNIT
+        step("alloc, copy, move, transfer-in and debug-value")
+        expect(json_error(serialize_mir_inst_kind(MirInstKind.Alloc(LocalId(id: 1), MirType.i64())))).to_equal("")
+        expect(json_error(serialize_mir_inst_kind(MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1))))).to_equal("")
+        expect(json_error(serialize_mir_inst_kind(MirInstKind.Move(LocalId(id: 2), LocalId(id: 1))))).to_equal("")
+        expect(json_error(serialize_mir_inst_kind(MirInstKind.TransferIn(LocalId(id: 3), MirExecutionDomain.Thread, MirTransferMode.Copy, MirTransferPayload.InlineCopy)))).to_equal("")
+        expect(json_error(serialize_mir_inst_kind(MirInstKind.DebugValue(LocalId(id: 4), "x")))).to_equal("")
+
+    it "serializes a struct constant as strict JSON":
+        # @req REQ-SSPEC-UNIT
+        step("struct const with one field")
+        var fields: Dict<text, MirConstValue> = {}
+        fields["a"] = MirConstValue.Int(1)
+        expect(json_error(serialize_const_value(MirConstValue.Struct(fields)))).to_equal("")
+
+    it "keeps every self-contained JSON object literal balanced":
+        # @req REQ-SSPEC-UNIT
+        step("seed meaning of each object literal parses as strict JSON")
+        expect(unbalanced_object_literals("src/compiler/50.mir/mir_json.spl")).to_equal([])
+        expect(unbalanced_object_literals("src/app/sspec_maintain/main.spl")).to_equal([])
+        expect(unbalanced_object_literals("src/lib/nogc_sync_mut/lsp/main_wasi.spl")).to_equal([])
