@@ -20,7 +20,7 @@ later hosted runtime fallback as successful qualification.
 Actual focused regression passed on Linux using:
 
 ```sh
-python3 scripts/test/test-hosted-cargo-working-directory.py
+python3 scripts/test/test-hosted-cargo-working-directory.py [deleted 2026-11-26]
 ```
 
 The test extracts and compiles the actual production function with a source-root

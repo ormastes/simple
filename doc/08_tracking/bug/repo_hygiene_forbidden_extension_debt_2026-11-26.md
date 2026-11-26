@@ -146,17 +146,17 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `doc/08_tracking/bug/evidence/target_profile_2026_11_14/extract.py` | 37 | KEEP (2026-11-26, dead-rest lane): retained evidence script, cited by bug/research docs as provenance; deleting it breaks those links |
 | `doc/08_tracking/bug/evidence/target_profile_2026_11_14/formal-stages1-3.sh` | 124 | KEEP (2026-11-26, dead-rest lane): retained formal-gate evidence, linked by compile_target_profile_optimization_coupling_2026_11_14.md; deleting it breaks provenance |
 | `doc/08_tracking/bug/evidence/target_profile_2026_11_14/run_probe.py` | 36 | KEEP (2026-11-26, dead-rest lane): retained evidence script, cited by bug/research docs as provenance; deleting it breaks those links |
-| `scripts/bootstrap/cache-identity-model-check.py` | 128 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/lib/executable_batch_policy.py` | 95 | cited only from doc/ or the baseline |
+| `scripts/bootstrap/cache-identity-model-check.py` | 128 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/lib/executable_batch_policy.py` | 95 | live, kept: imported or driven by a live tool (executable_batch_policy, adaptive-executable-batch.py, lib/executable-batch-lease.shs) or a live .shs caller; port with that tool |
 | `scripts/bootstrap/tests/archive-root-exclusions-test.py` | 82 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/authority-generation-retention-test.py` | 109 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/bootstrap/tests/bootstrap-test-wave-test.py` | 168 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/bootstrap-test-wave-test.py` | 168 | recent, owner active (touched since 2026-11-23); left in place |
 | `scripts/bootstrap/tests/bounded-error-summary-test.py` | 84 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/bounded-live-diagnostics-test.py` | 198 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/collect-windows-phase2-objects-test.py` | 255 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/bootstrap/tests/executable-batch-lease-test.py` | 39 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/executable-batch-owner-test.py` | 61 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/executable-batch-test.py` | 25 | cited only from doc/ or the baseline |
+| `scripts/bootstrap/tests/executable-batch-lease-test.py` | 39 | live, kept: imported or driven by a live tool (executable_batch_policy, adaptive-executable-batch.py, lib/executable-batch-lease.shs) or a live .shs caller; port with that tool |
+| `scripts/bootstrap/tests/executable-batch-owner-test.py` | 61 | live, kept: imported or driven by a live tool (executable_batch_policy, adaptive-executable-batch.py, lib/executable-batch-lease.shs) or a live .shs caller; port with that tool |
+| `scripts/bootstrap/tests/executable-batch-test.py` | 25 | live, kept: imported or driven by a live tool (executable_batch_policy, adaptive-executable-batch.py, lib/executable-batch-lease.shs) or a live .shs caller; port with that tool |
 | `scripts/bootstrap/tests/freebsd-command-telemetry-test.py` | 211 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/full-inventory-selection-test.py` | 92 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/hello-sanity-matrix-env-test.py` | 77 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
@@ -169,13 +169,13 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/bootstrap/tests/module-progress-test.py` | 143 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/phase1-whole-jobs-test.py` | 136 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/phase1-whole-json-command-test.py` | 80 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/bootstrap/tests/phase1-whole-stream-test.py` | 47 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/phase1-whole-stream-test.py` | 47 | recent, owner active (touched since 2026-11-23); left in place |
 | `scripts/bootstrap/tests/phase1-whole-tests-test.py` | 74 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/phase-ladder-hello-windows-test.py` | 73 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/bootstrap/tests/phase-ladder-prior-failure-test.py` | 39 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/phase-ladder-prior-failure-test.py` | 39 | recent, owner active (touched since 2026-11-23); left in place |
 | `scripts/bootstrap/tests/phase-ladder-resume-test.py` | 262 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/bootstrap/tests/phase-ladder-strict-seed-test.py` | 365 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/phase-ladder-windows-runtime-test.py` | 38 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/phase-ladder-strict-seed-test.py` | 365 | recent, owner active (touched since 2026-11-23); left in place |
+| `scripts/bootstrap/tests/phase-ladder-windows-runtime-test.py` | 38 | recent, owner active (touched since 2026-11-23); left in place |
 | `scripts/bootstrap/tests/product-first-case-test.py` | 59 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/product-generated-snapshot-test.py` | 152 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/repository-native-row-test.py` | 90 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
@@ -192,7 +192,7 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/bootstrap/tests/tool-validator-import-test.py` | 33 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/watchdog-source-path-test.py` | 190 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/windows-collector-zero-timeout-test.py` | 107 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/bootstrap/tests/windows-output-root-env-test.py` | 80 | cited only from doc/ or the baseline |
+| `scripts/bootstrap/tests/windows-output-root-env-test.py` | 80 | recent, owner active (touched since 2026-11-23); left in place |
 | `scripts/check/assemble-parse-closure-native-probe.py` | 46 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-arm64-boot-dtb-handoff.py` | 254 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-arm64-net-tx-ring-cursor.py` | 141 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
@@ -201,12 +201,12 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/check/check-bootstrap-path-access.py` | 103 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-bootstrap-positioned-authority.py` | 868 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-bug-claim-lock-owner.py` | 172 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/check/check-coff-partial-link.py` | 104 | cited only from doc/ or the baseline |
-| `scripts/check/check-coff-projection.py` | 55 | zero-ref tool, touched after 2026-11-22 |
+| `scripts/check/check-coff-partial-link.py` | 104 | recent, owner active (touched since 2026-11-23); left in place |
+| `scripts/check/check-coff-projection.py` | 55 | recent, owner active (touched since 2026-11-23); left in place |
 | `scripts/check/check-core-stdin-line.py` | 82 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-env-guard-materialized-aliases.py` | 280 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/check/check-focused-native-output.py` | 103 | cited only from doc/ or the baseline |
-| `scripts/check/check-ladder-scv-evidence.py` | 84 | zero-ref tool, touched after 2026-11-22 |
+| `scripts/check/check-focused-native-output.py` | 103 | recent, owner active (touched since 2026-11-23); left in place |
+| `scripts/check/check-ladder-scv-evidence.py` | 84 | live, kept: imported or driven by a live tool (executable_batch_policy, adaptive-executable-batch.py, lib/executable-batch-lease.shs) or a live .shs caller; port with that tool |
 | `scripts/check/check-materializer-startup-perf.py` | 184 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-mcp-script-mode-perf-contract.py` | 110 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-mir-immediate-diagnostic.py` | 62 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
@@ -215,10 +215,10 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/check/check-runner-self-coverage.py` | 60 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-rust-atomic-updates.py` | 53 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/check-stage2-scv-cold-init.py` | 114 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/check/check-windows-cross-caller.py` | 75 | cited only from doc/ or the baseline |
-| `scripts/check/check-windows-cross-import-authority.py` | 90 | zero-ref tool, touched after 2026-11-22 |
+| `scripts/check/check-windows-cross-caller.py` | 75 | recent, owner active (touched since 2026-11-23); left in place |
+| `scripts/check/check-windows-cross-import-authority.py` | 90 | recent, owner active (touched since 2026-11-23); left in place |
 | `scripts/check/check-windows-host-capacity.py` | 105 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/check/check-windows-private-root-sdk.py` | 52 | zero-ref tool, touched after 2026-11-22 |
+| `scripts/check/check-windows-private-root-sdk.py` | 52 | recent, owner active (touched since 2026-11-23); left in place |
 | `scripts/check/check-windows-remove-tree.py` | 126 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/runtime-value-get-type-projection.py` | 81 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/target-profile-projection.py` | 37 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
@@ -227,13 +227,13 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/check/tests/cold_hir_path_diagnostic_contract_test.py` | 83 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/tests/test_prepush_selftest_isolation.py` | 85 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/check/test-stage4-retained-manual.py` | 515 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/debug/rsp_watch.py` | 172 | cited only from doc/ or the baseline |
-| `scripts/release/tests/candidate-release-routing-test.py` | 140 | cited only from doc/ or the baseline |
-| `scripts/test/test-arm32-authenticated-syscall-abi.py` | 187 | cited only from doc/ or the baseline |
-| `scripts/test/test-hosted-cargo-working-directory.py` | 82 | cited only from doc/ or the baseline |
-| `scripts/test/test-rss-observation-budget.py` | 36 | zero-ref test; may test live code |
-| `scripts/test/test-rss-proc-stat-diagnostic.py` | 25 | cited only from doc/ or the baseline |
-| `scripts/test/test-rss-proc-stat-record.py` | 91 | cited only from doc/ or the baseline |
+| `scripts/debug/rsp_watch.py` | 172 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/release/tests/candidate-release-routing-test.py` | 140 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/test/test-arm32-authenticated-syscall-abi.py` | 187 | recent, owner active (touched since 2026-11-23); left in place |
+| `scripts/test/test-hosted-cargo-working-directory.py` | 82 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/test/test-rss-observation-budget.py` | 36 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/test/test-rss-proc-stat-diagnostic.py` | 25 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/test/test-rss-proc-stat-record.py` | 91 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `test/00_quick/bootstrap/stage3_cgroupfs_kernel.py` | 127 | DECISION (d) keep: root-only Linux kernel regression for live scripts/bootstrap/lib/stage3-cgroupfs.py; not runnable or verifiable on this Windows host; follows the scripts/ lane decision on that helper |
 | `test/00_unit/scripts/stage4_retained_self_evidence_test.py` | 219 | DECISION (d) keep: tests live scripts/check/lib/stage4-retained-self-evidence.py (scripts/ lane owns it); port or delete together with that helper |
 | `test/01_unit/app/devhub/mail_cli_shared_config_test.bash` | 98 | DECISION (d) keep: tests live tools/mail-cli/lib/config.shs and auth.shs; real bash test, port is tracked by todo 467 with the mail CLI |

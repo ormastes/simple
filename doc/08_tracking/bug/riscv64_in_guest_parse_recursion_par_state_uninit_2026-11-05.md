@@ -489,12 +489,12 @@ bug_db.sdn untouched.
 
 ---
 
-## 2026-11-06 — RSP WATCHPOINT LANE (PR #7031+1): the writer caught live; the tool is now in-tree at scripts/debug/rsp_watch.py
+## 2026-11-06 — RSP WATCHPOINT LANE (PR #7031+1): the writer caught live; the tool is now in-tree at scripts/debug/rsp_watch.py [deleted 2026-11-26]
 
 Built the record's prescribed tool: a scripted RSP client against QEMU's
 gdbstub (`-S -gdb tcp:<port>`). **Z2/Z3 hardware watchpoints ARE accepted by
 this QEMU riscv64 stub** — no gdb binary needed. The client
-(`scripts/debug/rsp_watch.py`, landed with a header of hard-won protocol
+(`scripts/debug/rsp_watch.py [deleted 2026-11-26]`, landed with a header of hard-won protocol
 notes) anchors after the parser module's dynamic init, derives the par_state
 block range from the live global, and arms a block write-watch plus
 decrease-filters on all three runtime bump cursors.
@@ -626,7 +626,7 @@ In-guest cycles: 1.
 The #7042 tail's next blocker was `scause=5, load from 0x38 at
 desugar_module+0x1a68` — `func.is_async` on `func = nil`, where
 `func = module.functions["main"]` answered nil. RSP watchpoint session
-(scripts/debug/rsp_watch.py) measured the frame LIVE at the fault: all four
+(scripts/debug/rsp_watch.py [deleted 2026-11-26]) measured the frame LIVE at the fault: all four
 in-frame dicts had len=0. Every dict WRITE in-guest was being silently
 dropped; the reads were honest.
 
