@@ -202,6 +202,17 @@ pub fn llvm_llc_not_found_message_v1(base_msg: text, probe_diag: text) -> text:
         return base_msg
     "{base_msg}\nTool probe detail: {detail}"
 
+fn _llvm_resolve_object_tools_v1() -> (text, text, text):
+    # Capture llc probe diagnostic before find_clang() clears or overwrites it.
+    val llc = llvm_object_llc_v1()
+    val llc_probe_diag = if llc == "": last_tool_probe_diagnostic() else: ""
+    val clang = if llc == "": find_clang() else: ""
+    val probe_diag = if llc == "" and clang == "":
+        if llc_probe_diag != "": llc_probe_diag else: last_tool_probe_diagnostic()
+    else:
+        ""
+    (llc, clang, probe_diag)
+
 pub fn llvm_object_llc_v1() -> text:
     """llc for IR -> object, or "" when clang is the tool (the default)."""
     # Strict admission keeps its admitted llc: the strict `cc` role is the
@@ -377,8 +388,7 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     if codegen_error != "":
         return Err(codegen_error)
     # clang compiles the IR by default; llc only when no clang resolves.
-    val llc = llvm_object_llc_v1()
-    val clang = if llc == "": find_clang() else: ""
+    val (llc, clang, probe_diag) = _llvm_resolve_object_tools_v1()
     if llc == "" and clang == "":
         var probed_lines: [text] = []
         for path in tool_probe_locations("llc"):
@@ -391,7 +401,7 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
             "  Arch: pacman -S llvm\n" +
             "  Windows: choco install llvm\n" +
             probed,
-            last_tool_probe_diagnostic()
+            probe_diag
         ))
     val (ir_path, bitcode_path, obj_path) = llvm_debug_artifact_paths()
     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
@@ -613,12 +623,11 @@ pub fn compile_ir_to_object_path(
     val bitcode_path = stage_dir + "/module.bc"
     val staged_obj_path = stage_dir + "/module.o"
     # clang compiles the IR by default; llc only when no clang resolves.
-    val llc = llvm_object_llc_v1()
-    val clang = if llc == "": find_clang() else: ""
+    val (llc, clang, probe_diag) = _llvm_resolve_object_tools_v1()
     if llc == "" and clang == "":
         return llvm_object_stage_fail(
             stage_dir, diagnostic_path,
-            llvm_llc_not_found_message_v1("llc not found", last_tool_probe_diagnostic()),
+            llvm_llc_not_found_message_v1("llc not found", probe_diag),
             1)
     val bootstrap_io = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
     val wrote_ir = if bootstrap_io:

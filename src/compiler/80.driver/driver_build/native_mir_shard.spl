@@ -27,7 +27,7 @@ use std.io_runtime.{file_exists, file_read, file_size_raw, dir_exists, dir_list_
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_atomic_write_bytes}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_hash_sha256_or_empty}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1, disk_bound_cap_bytes}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1}
 use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_sweep_with_lease}
 
 # Native cache scope retention (driver_aot_native_output.spl) removes scope
@@ -604,8 +604,10 @@ fn _append_root_shard_ledgers_v1(items: [text], root: text) -> [text]:
     if dir == "" or not dir_exists(dir):
         return out
     val latest = "{dir}/mir-run-latest"
-    if file_exists(latest) or dir_exists(latest):
-        out = _append_unique_nonempty_v1(out, latest)
+    if file_exists(latest) and not dir_exists(latest):
+        val target = file_read(latest).trim()
+        if target != "":
+            out = _append_unique_nonempty_v1(out, target)
     for entry in dir_list_or_empty(dir):
         if entry.starts_with("mir-queue-"):
             val qdir = "{dir}/{entry}"
@@ -662,6 +664,6 @@ pub fn native_cache_scope_midbuild_sweep_v1(lease: NativeCacheLease, current: te
     val active_ledgers = native_mir_shard_active_ledger_paths_v1(
         lease.cache_root, hir_cache_dir, mir_queue, mir_link)
     val _marked = native_cache_protect_active_shard_ledgers_v1(active_ledgers)
-    val default_keep = native_cache_scopes_keep_default_v1(mir_shard_count_raw)
-    val keep = disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", default_keep)
+    val explicit_keep = env_get_nullable("SIMPLE_NATIVE_CACHE_SCOPES_KEEP") ?? ""
+    val keep = native_cache_scopes_keep_for_v1(explicit_keep, mir_shard_count_raw)
     native_cache_sweep_with_lease(lease, current, keep, min_age_s)
