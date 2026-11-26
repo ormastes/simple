@@ -83,7 +83,7 @@ fn _sffi_enum_payload<T>(value: T) -> i64:
 fn _sffi_tuple_get<T>(tuple: i64, index: i64) -> T?:
     compiler_value_tuple_at<T>(tuple, index)
 
-# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19 reason=erased_generic_required_getter_int_boxes_record_handles_even_with_explicit_return_use_concrete_payload_owners
+# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19 reason=ROOT-FIXED+STAGE2-GATED retire_after_stage2_seed=162c481782f; erased_generic_required_getter_int_boxes_record_handles_even_with_explicit_return_use_concrete_payload_owners
 @always_inline
 fn _sffi_hir_expr_payload_req(tuple: i64, index: i64) -> HirExpr:
     val payload: HirExpr? = _sffi_tuple_get<HirExpr>(tuple, index)
@@ -3419,7 +3419,17 @@ impl MirLowering:
         val disc = _sffi_enum_discriminant<MirTypeKind>(result_type.kind)
         val is_integer = self.mir_type_is_integer(result_type)
         if is_integer:
-            if disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64) or disc == _sffi_enum_discriminant(MirTypeKind.U64):
+            if disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.U64):
+                val unbox_u64_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_value_as_u64"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ), call_origin: MirCallOrigin.Runtime)
+                val unboxed_u64 = b.emit_call(unbox_u64_fn, [mir_operand_copy(raw)], MirType.i64())
+                if val unboxed_u64_local = unboxed_u64:
+                    val decoded_u64 = b.emit_cast(mir_operand_copy(unboxed_u64_local), result_type)
+                    self.builder = b
+                    return decoded_u64
+            if disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64):
                 # Mirror of box_runtime_value's I64/U64 arm: a wide value that
                 # did not fit the 61-bit tagged immediate is heap-boxed, so a
                 # bare `>> 3` would read back a shredded pointer. Narrower
@@ -5228,7 +5238,9 @@ impl MirLowering:
                 result = self.coerce_native_trait_object(result, rv, found_return)
                 match found_return.kind:
                     case HirTypeKind.Optional(_):
+                        val pre_ret_det = if _erased_lambda_opt_ret_inner_v1 == None and _erased_lambda_opt_ret_auto_v1: self.option_inner_hir_type_for_local(rv, result) else: None
                         result = self.ensure_option_handle(result, found_return)
+                        result = self.encode_lambda_erased_opt_return_if_needed_v1(result, rv, pre_ret_det)
                     case HirTypeKind.Any:
                         result = self.box_runtime_value(result)
                     case HirTypeKind.TypeParam(_, _):
@@ -7741,9 +7753,13 @@ impl MirLowering:
                     val runtime_left_tagged = left_is_any_value or self.is_runtime_value_local(runtime_eq_left.id)
                     val runtime_right_tagged = right_is_any_value or self.is_runtime_value_local(runtime_eq_right.id)
                     if runtime_left_tagged and not runtime_right_tagged:
-                        runtime_eq_right = self.box_runtime_value(runtime_eq_right)
+                        val r_ty = self.local_mir_type_of(runtime_eq_right)
+                        val r_is_u64 = if val rt = r_ty: rt.kind == MirTypeKind.U64 else: false
+                        runtime_eq_right = if r_is_u64: self.box_u64_runtime_value(runtime_eq_right) else: self.box_runtime_value(runtime_eq_right)
                     elif runtime_right_tagged and not runtime_left_tagged:
-                        runtime_eq_left = self.box_runtime_value(runtime_eq_left)
+                        val l_ty = self.local_mir_type_of(runtime_eq_left)
+                        val l_is_u64 = if val lt = l_ty: lt.kind == MirTypeKind.U64 else: false
+                        runtime_eq_left = if l_is_u64: self.box_u64_runtime_value(runtime_eq_left) else: self.box_runtime_value(runtime_eq_left)
                     val runtime_eq_func = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_native_eq"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
@@ -9410,9 +9426,31 @@ impl MirLowering:
                                             case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
                                             case _: exists_expr_inner_is_concrete = true
                                 case _: ()
+                    if not exists_expr_inner_is_concrete:
+                        match base.kind:
+                            case HirExprKind.Call(base_callee, _, base_type_args):
+                                if base_type_args.len() > 0:
+                                    var base_callee_sym = SymbolId(id: -1)
+                                    match base_callee.kind:
+                                        case HirExprKind.Var(s) | HirExprKind.NamedVar(s, _): base_callee_sym = s
+                                        case _: ()
+                                    if base_callee_sym.id >= 0:
+                                        if val base_ret_hir = self.resolved_call_hir_return_type(base_callee_sym):
+                                            match base_ret_hir.kind:
+                                                case HirTypeKind.Optional(ret_opt_inner):
+                                                    val tp_name = self.erased_type_param_name_v1(ret_opt_inner)
+                                                    if tp_name != "":
+                                                        if val bound_inner = self.resolve_callee_type_param_binding_v1(base_callee_sym, tp_name, base_type_args):
+                                                            if not self.hir_type_mentions_type_param(bound_inner, self.symbols):
+                                                                match bound_inner.kind:
+                                                                    case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                                                                    case _: exists_expr_inner_is_concrete = true
+                                                case _: ()
+                            case _: ()
                     if not exists_expr_inner_is_concrete and self.static_optional_payload_is_type_param(base) and not self.native_trait_concrete_option_locals.contains(base_local.id):
                         if val erased_inner = self.option_inner_hir_type_for_local(base, base_local):
                             match erased_inner.kind:
+                                case HirTypeKind.Int(64, false): some_value = self.box_u64_runtime_value(some_value)
                                 case HirTypeKind.Int(_, _): some_value = self.box_runtime_value(some_value)
                                 case _: ()
                 b_then = self.builder

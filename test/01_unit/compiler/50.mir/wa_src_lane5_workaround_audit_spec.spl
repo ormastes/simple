@@ -214,11 +214,20 @@ describe "WA-S5 compiler & SCV workaround audit":
             "    panic(\"none\")\n" +
             "fn get_req<T>(t: i64, i: i64) -> T:\n" +
             "    tuple_at<T>(t, i).unwrap()\n" +
-            "fn use_all(t: i64) -> i64:\n" +
-            "    val a: i64 = req_unwrap<i64>(Some(42))\n" +
-            "    val b: i64 = req_if<i64>(Some(77))\n" +
+            "fn res_ok<T, E>(r: Result<T, E>) -> T:\n" +
+            "    match r:\n" +
+            "        case Ok(x): x\n" +
+            "        case Err(_): panic(\"err\")\n" +
+            "fn use_req_int() -> i64:\n" +
+            "    req_unwrap<i64>(Some(42))\n" +
+            "fn use_req_if_int() -> i64:\n" +
+            "    req_if<i64>(Some(77))\n" +
+            "fn use_get_rec(t: i64) -> i64:\n" +
             "    val r: ProbeRec = get_req<ProbeRec>(t, 0)\n" +
-            "    a + b + r.x\n"
+            "    r.x\n" +
+            "fn use_res_int() -> i64:\n" +
+            "    val r: Result<i64, text> = Ok(77)\n" +
+            "    res_ok<i64, text>(r)\n"
         val r = lower_lane5_src(probe_src)
         expect(r.errors).to_equal([])
         for g_name in ["req_unwrap", "req_if", "get_req"]:
@@ -226,14 +235,25 @@ describe "WA-S5 compiler & SCV workaround audit":
             assert_true(g_mir != "")
             expect(g_mir).to_contain("rt_unwrap_or_self")
             expect_not(g_mir.contains("rt_value_int_wide"))
-        val use_ir = fn_slice(SliceQuery(src: r.ir, header: "use_all(", stop: "\n}"))
-        expect(use_ir).to_contain("@rt_value_int_wide(")
-        expect(use_ir).to_contain("@rt_value_as_int_wide(")
+        val res_mir = find_lane5_mir_fn(r.mir_fns, "res_ok")
+        assert_true(res_mir != "")
+        expect(res_mir).to_contain("rt_value_int_wide")
+        val req_int_ir = fn_slice(SliceQuery(src: r.ir, header: "use_req_int(", stop: "\n}"))
+        expect(req_int_ir).to_contain("@rt_value_int_wide(")
+        expect(req_int_ir).to_contain("@rt_value_as_int_wide(")
+        val req_if_ir = fn_slice(SliceQuery(src: r.ir, header: "use_req_if_int(", stop: "\n}"))
+        expect(req_if_ir).to_contain("@rt_value_int_wide(")
+        expect(req_if_ir).to_contain("@rt_value_as_int_wide(")
+        val get_rec_ir = fn_slice(SliceQuery(src: r.ir, header: "use_get_rec(", stop: "\n}"))
+        expect_not(get_rec_ir.contains("@rt_value_int_wide("))
+        expect_not(get_rec_ir.contains("@rt_value_as_int_wide("))
+        val res_int_ir = fn_slice(SliceQuery(src: r.ir, header: "use_res_int(", stop: "\n}"))
+        expect(res_int_ir).to_contain("@rt_value_as_int_wide(")
         val ed = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
         val cg = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
-        expect(ed).to_contain("@workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19")
+        expect(ed).to_contain("@workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19 reason=ROOT-FIXED+STAGE2-GATED")
         expect(ed).to_contain("fn _sffi_hir_expr_payload_req(tuple: i64, index: i64) -> HirExpr:")
-        expect(cg).to_contain("@workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19")
+        expect(cg).to_contain("@workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19 reason=ROOT-FIXED+STAGE2-GATED")
         expect(cg).to_contain("fn _sffi_local_id_payload_req(tuple: i64, index: i64) -> LocalId:")
         expect(cg).to_contain("fn _sffi_mir_const_value_payload_req(tuple: i64, index: i64) -> MirConstValue:")
         expect(cg).to_contain("fn _sffi_mir_type_payload_req(tuple: i64, index: i64) -> MirType:")
