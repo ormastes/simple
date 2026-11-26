@@ -1,0 +1,63 @@
+# Pure-container fixture (lane P4): runs inside pure_container_run_v1 and reports
+# what the confined child could and could not do. Usage:
+#   simple run pure_probe.spl args: base <exit-code>
+#   simple run pure_probe.spl args: peer <peer-file> <lower-relative-file>
+# SIMPLE_CONTAINER_LOWER and SIMPLE_CONTAINER_UPPER come from the runtime.
+use std.nogc_sync_mut.io_runtime.{get_args, env_get, file_read, file_write, file_exists, exit}
+
+fn probe_verdict(allowed: bool) -> text:
+    if allowed: "allow" else: "deny"
+
+fn probe_parse(value: text) -> i64:
+    var total = 0
+    var index = 0
+    while index < value.byte_len():
+        val digit = value.char_code_at(index) - 48
+        if digit < 0 or digit > 9: return 0
+        total = total * 10 + digit
+        index = index + 1
+    total
+
+fn probe_read(path: text) -> text:
+    if file_exists(path): file_read(path) else: "<missing>"
+
+fn probe_write(path: text, content: text) -> bool:
+    file_write(path, content) and file_exists(path)
+
+fn probe_base(lower: text, upper: text, tmp: text, code: i64):
+    print("LOWER-READ " + probe_read(lower + "/bin/tool.txt"))
+    print("UPPER-WRITE " + probe_verdict(probe_write(upper + "/out.txt", "upper-bytes")))
+    print("UPPER-READBACK " + probe_read(upper + "/out.txt"))
+    print("SCRATCH-WRITE " + probe_verdict(probe_write(tmp + "/scratch.txt", "scratch-bytes")))
+    print("LOWER-WRITE " + probe_verdict(probe_write(lower + "/bin/tool.txt", "tampered")))
+    print("LOWER-AFTER " + probe_read(lower + "/bin/tool.txt"))
+    if code > 0: exit(code)
+
+fn probe_peer(lower: text, peer_file: text, lower_rel: text, code: i64):
+    print("CONTROL-READ " + probe_read(lower + "/" + lower_rel))
+    print("PEER-READ " + probe_verdict(file_exists(peer_file) and file_read(peer_file) != ""))
+    if code > 0: exit(code)
+
+fn main():
+    val args = get_args()
+    var start = -1
+    var index = 0
+    while index < args.len():
+        if args[index] == "args:": start = index + 1
+        index = index + 1
+    val lower = env_get("SIMPLE_CONTAINER_LOWER").replace("\\", "/")
+    val upper = env_get("SIMPLE_CONTAINER_UPPER").replace("\\", "/")
+    val tmp = env_get("TEMP").replace("\\", "/")
+    if start < 0 or start >= args.len() or lower == "" or upper == "":
+        print("PROBE-ERROR usage")
+        exit(2)
+        return
+    if args[start] == "base" and start + 1 < args.len():
+        probe_base(lower, upper, tmp, probe_parse(args[start + 1]))
+    elif args[start] == "peer" and start + 2 < args.len():
+        probe_peer(lower, args[start + 1], args[start + 2], 0)
+    else:
+        print("PROBE-ERROR mode")
+        exit(2)
+
+main()

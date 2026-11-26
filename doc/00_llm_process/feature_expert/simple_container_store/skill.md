@@ -86,3 +86,19 @@ Provider: `std.nogc_async_mut.container.providers.windows.docker_runtime_v1`
   so the run goes through the provider the adapter delegates to.
 - `native-build` of a driver with the Nov-25 seed did not finish in 35+ min
   (compiler runs interpreted); do not use it as the live-spec route.
+
+## Pure-Simple runtime (lane P4)
+`std.nogc_sync_mut.container.pure_runtime_v1`: `pure_container_qualify_v1` (the only
+evidence source: `sosix_contain_qualify_v1` + `sosix_contain_memory_cap_evidence_v1` ->
+`pure_container_evidence_from_qualify_v1`, bound to the `state_root`/`view_root` pair) and
+`pure_container_run_v1(spec)` (admission with `spec.evidence`, rootfs materialize, read grant
+on `lower/`, write grants on `upper/` and attempt scratch, `sosix_contain_start_v1`, collect,
+then dematerialize -> view destroy -> scratch removal; lifecycle via `contained_lifecycle_v1`,
+scratch via `attempt_dir_plan_v1`). Non-pub stages `_prepare_v1/_execute_v1/_teardown_v1`
+let a caller hold a container (spec `pure_simple_container_v1_spec`).
+`std.common.contracts.container.pure_sandbox_observed_v1` maps support + evidence onto the
+shared `SandboxObservedCapabilityV1` (Windows: no file/network guarantee, so both evidence
+profiles stay refused). The one report builder is `pure_container_capability_report_v1`;
+lane E's `windows_container_capability_report_v1` is gone.
+Design: `doc/04_architecture/platform/container/pure_simple_container.md` §7, plan
+`doc/03_plan/platform/container/pure_simple_container_plan.md` (P4).

@@ -1,5 +1,7 @@
 # Windows job-object hard memory cap probe: measured Enforced verdict and the
-# capability report that affirms memory_hard_limit only from it.
+# single capability report builder (pure_container_capability_report_v1) that
+# affirms memory_hard_limit only from it (lane P4 removed the overlapping
+# windows_container_capability_report_v1; accounting now comes from SOSIX support).
 # Skips (returns early) when not on Windows or when the seed binary is missing.
 # ponytail: skipped specs count as passes and the non-Windows test never runs on
 # Windows; both are test-runner limitations, left as is.
@@ -21,7 +23,9 @@ use std.spec.{describe, it, expect}
 use std.platform.{is_windows, get_current_dir, get_temp_dir}
 use std.nogc_sync_mut.io_runtime.{file_exists, getpid, time_now_monotonic_ms}
 use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1, ContainerCapabilityReportV1, container_capability_requirement_v1_empty, container_capability_v1_admission_reason, CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1}
-use std.nogc_sync_mut.io.windows_memory_cap_probe_v1.{WindowsJobMemoryBytesV1, WindowsProbeExitCodeV1, WindowsProbeFlagV1, WindowsProbeTimeoutMsV1, WindowsMemoryCapProbeRequestV1, WindowsMemoryCapObservationV1, WindowsMemoryCapVerdictV1, windows_memory_cap_probe_run_v1, windows_memory_cap_verdict_v1, windows_container_capability_report_v1}
+use std.nogc_sync_mut.io.windows_memory_cap_probe_v1.{WindowsJobMemoryBytesV1, WindowsProbeExitCodeV1, WindowsProbeFlagV1, WindowsProbeTimeoutMsV1, WindowsMemoryCapProbeRequestV1, WindowsMemoryCapObservationV1, WindowsMemoryCapVerdictV1, windows_memory_cap_probe_run_v1, windows_memory_cap_verdict_v1}
+use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, pure_container_capability_report_v1}
+use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1}
 
 val RUN_SUFFIX = getpid().to_string() + "_" + time_now_monotonic_ms().to_string()
 val PROBE_PROGRAM = "C:/dev/keep/seeds/simple-local-20261125.exe"
@@ -69,8 +73,18 @@ fn is_enforced(verdict: WindowsMemoryCapVerdictV1) -> bool:
         WindowsMemoryCapVerdictV1.Enforced: true
         _: false
 
+# Evidence as the qualify producer would carry it for the memory axis; only memory is set here.
+fn memory_report(under: WindowsMemoryCapObservationV1, over: WindowsMemoryCapObservationV1, baseline: WindowsMemoryCapObservationV1) -> ContainerCapabilityReportV1:
+    val evidence = PureContainerEvidenceV1(host_os: "windows", host_arch: "x86_64", guest_abi: "windows",
+        root_view_kind: PURE_CONTAINER_ROOT_VIEW_SPLIT_V1,
+        memory_cap_enforced: ContainerCapabilityFlagV1(is_enforced(windows_memory_cap_verdict_v1(under, over, baseline))),
+        write_confinement_observed: ContainerCapabilityFlagV1(false), base_fully_linked: ContainerCapabilityFlagV1(false),
+        launch_observed: ContainerCapabilityFlagV1(false), cleanup_observed: ContainerCapabilityFlagV1(false),
+        roots_digest: "", evidence_revision: "memcap-spec")
+    pure_container_capability_report_v1(sosix_contain_support_v1(), evidence)
+
 fn real_report() -> ContainerCapabilityReportV1:
-    windows_container_capability_report_v1(under_run.unwrap(), over_run.unwrap(), baseline_run.unwrap(), "windows-job-v1")
+    memory_report(under_run.unwrap(), over_run.unwrap(), baseline_run.unwrap())
 
 describe "windows memory cap probe":
     it "runs the under-cap workload to completion within the cap":
@@ -141,18 +155,20 @@ describe "windows memory cap probe":
         expect(container_capability_v1_admission_reason(report, requirement)).to_equal("")
         expect(report.host_os).to_equal("windows")
         expect(report.host_arch != "").to_equal(true)
+        expect(report.memory_accounting).to_equal(CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1)
         expect(report.isolation_kind).to_equal(CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1)
         expect(report.memory_limit_update.value).to_equal(false)
         expect(report.memory_reclaim.value).to_equal(false)
-        expect(report.evidence_revision.starts_with("job-commit:")).to_equal(true)
+        expect(report.memory_hard_limit.value).to_equal(true)
+        expect(report.evidence_revision).to_equal("memcap-spec")
 
     it "rejects the report derived from a non-enforcing observation set":
         if not probe_ready(): return
         val completed = fake_over(over_run.unwrap(), 310000000, 0, "ALLOC_OK 256")
-        val report = windows_container_capability_report_v1(under_run.unwrap(), completed, baseline_run.unwrap(), "windows-job-v1")
+        val report = memory_report(under_run.unwrap(), completed, baseline_run.unwrap())
         var requirement = container_capability_requirement_v1_empty()
         requirement.required_memory_hard_limit = ContainerCapabilityFlagV1(true)
-        expect(report.memory_accounting).to_equal("")
+        expect(report.memory_hard_limit.value).to_equal(false)
         expect(container_capability_v1_admission_reason(report, requirement)).to_equal("memory-hard-limit-missing")
 
     it "fails closed on a non-Windows host":
