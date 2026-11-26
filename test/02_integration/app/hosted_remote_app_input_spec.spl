@@ -1,0 +1,132 @@
+# Hosted event router: input over a remote-owned window reaches that
+# client's bounded queue, never the in-process UISession; input over a local
+# window is still dispatched locally and queues nothing.
+# Tracks: wm_host_external_content_owner_2026-07-29
+#
+# Production HostCompositor (headless backend, the same construction
+# hosted_entry.spl uses), production HostGuiEventRouter, production
+# wm_remote_app_host systems. Synthetic WINDOW_EVENT_* scalars stand in for
+# the host event source.
+
+use std.spec.{describe, it, expect}
+use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_request_new}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async}
+use common.io.window_event.{WINDOW_EVENT_KEY, WINDOW_EVENT_POINTER_BUTTON, WINDOW_EVENT_POINTER_MOVE, WINDOW_ACTION_PRESS}
+use common.ui.builder.{build_tree, column, text_field, with_height}
+use common.window_protocol.geometry.{Size}
+use nogc_sync_mut.ui.session.{UISession}
+use os.compositor.host_compositor_core.{HostCompositor}
+use os.compositor.host_gui_event_router.{HostGuiEventRouter}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+use app.play.wm_daemon_client.{WMD_SURFACE_EVENTS}
+use app.play.wm_remote_app_client.{wm_remote_app_open_request, wm_remote_app_window_from_response, wm_remote_app_present_request}
+use app.play.wm_remote_app_host.{wm_remote_app_state_new, wm_remote_app_route, wm_remote_app_deliver_input}
+use os.hosted.hosted_remote_app_pump.{
+    HostedRemoteAppPump,
+    hosted_remote_app_pump_with_state,
+    hosted_remote_app_pump_forward_input,
+}
+
+fn solid(width: i32, height: i32, color: u32) -> [u32]:
+    var pixels: [u32] = []
+    var i: i64 = 0
+    while i < width.to_i64() * height.to_i64():
+        pixels.push(color)
+        i = i + 1
+    pixels
+
+fn session_for_routing() -> UISession:
+    UISession.new(build_tree(column("root", [with_height(text_field("name", "", "Name"), 24)])))
+
+fn drain(comp: HostCompositor, pump: HostedRemoteAppPump, window_id: i64) -> DaemonResponse:
+    var req = daemon_request_new(WMD_SURFACE_EVENTS)
+    req.set_field("id", "{window_id}")
+    req.set_field("pid", "{getpid()}")
+    wm_remote_app_route(comp, pump.state, req).resp
+
+describe "hosted router forwards input to remote-owned windows":
+    it "queues pointer and key input for a remote window and keeps local input local":
+        var comp = HostCompositor.new_headless(Size(width: 1024 as u64, height: 720 as u64))
+        # Local window (in-process UISession) at (500,300,300,200).
+        comp.apply_bridge_request(1, 10, COMP_CREATE_WINDOW.to_i64(), 0, "Local", 500, 300, 300, 200, "", 99, "local.demo")
+        val local_id = comp.windows[0].id
+        var router = HostGuiEventRouter.new(local_id)
+        var session = session_for_routing()
+
+        var state = wm_remote_app_state_new("/tmp/hosted_remote_input_spec_{getpid()}")
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        expect(window.ok).to_equal(true)
+        val presented = wm_remote_app_route(comp, state, wm_remote_app_present_request(window, solid(200, 120, 0xFF12AB34u32), 1, getpid()))
+        comp = presented.comp
+        state = presented.state
+        expect(presented.resp.get_field("accepted")).to_equal("true")
+        var pump = hosted_remote_app_pump_with_state(state)
+
+        # Pointer move over the remote window's content.
+        val rx = ((opened.resp.get_field("content_x").to_i64() ?? 0) + 17) * 1000
+        val ry = ((opened.resp.get_field("content_y").to_i64() ?? 0) + 9) * 1000
+        val moved = hosted_remote_app_pump_forward_input(comp, pump, WINDOW_EVENT_POINTER_MOVE, 0, 0, rx, ry)
+        pump = moved.pump
+        expect(moved.routed).to_equal(window.window_id)
+        expect(router.route_scalar(WINDOW_EVENT_POINTER_MOVE, 0, 0, 0, rx, ry, 0, 0, comp, session)).to_equal(false)
+        # Left press over it.
+        val pressed = hosted_remote_app_pump_forward_input(comp, pump, WINDOW_EVENT_POINTER_BUTTON, 0, WINDOW_ACTION_PRESS, rx, ry)
+        pump = pressed.pump
+        expect(pressed.routed).to_equal(window.window_id)
+        expect(router.route_scalar(WINDOW_EVENT_POINTER_BUTTON, 0, WINDOW_ACTION_PRESS, 0, rx, ry, 0, 0, comp, session)).to_equal(false)
+        # Key while the remote window holds focus.
+        val keyed = hosted_remote_app_pump_forward_input(comp, pump, WINDOW_EVENT_KEY, 65, WINDOW_ACTION_PRESS, 0, 0)
+        pump = keyed.pump
+        expect(keyed.routed).to_equal(window.window_id)
+        expect(router.route_scalar(WINDOW_EVENT_KEY, 65, WINDOW_ACTION_PRESS, 0, 0, 0, 0, 0, comp, session)).to_equal(false)
+
+        val queued = drain(comp, pump, window.window_id)
+        expect(queued.get_field("count")).to_equal("3")
+        expect(queued.get_field("ev0")).to_equal("move|17|9|0|0")
+        expect(queued.get_field("ev1")).to_equal("button|17|9|0|1")
+        expect(queued.get_field("ev2")).to_equal("key|0|0|65|1")
+
+    it "leaves a local window's input with the local session":
+        var comp = HostCompositor.new_headless(Size(width: 1024 as u64, height: 720 as u64))
+        comp.apply_bridge_request(1, 10, COMP_CREATE_WINDOW.to_i64(), 0, "Local", 500, 300, 300, 200, "", 99, "local.demo")
+        val local_id = comp.windows[0].id
+        var router = HostGuiEventRouter.new(local_id)
+        var session = session_for_routing()
+        var state = wm_remote_app_state_new("/tmp/hosted_remote_input_spec_{getpid()}")
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val presented = wm_remote_app_route(comp, state, wm_remote_app_present_request(window, solid(200, 120, 0xFF12AB34u32), 1, getpid()))
+        comp = presented.comp
+        state = presented.state
+        var pump = hosted_remote_app_pump_with_state(state)
+
+        # (600,400) is inside the local window's content rect (504..796, 332..496).
+        val moved = hosted_remote_app_pump_forward_input(comp, pump, WINDOW_EVENT_POINTER_MOVE, 0, 0, 600000, 400000)
+        pump = moved.pump
+        expect(moved.routed).to_equal(0)
+        expect(router.route_scalar(WINDOW_EVENT_POINTER_MOVE, 0, 0, 0, 600000, 400000, 0, 0, comp, session)).to_equal(true)
+        expect(router.last_local_x).to_equal(96)
+        expect(router.last_local_y).to_equal(68)
+        val pressed = hosted_remote_app_pump_forward_input(comp, pump, WINDOW_EVENT_POINTER_BUTTON, 0, WINDOW_ACTION_PRESS, 600000, 400000)
+        pump = pressed.pump
+        expect(pressed.routed).to_equal(0)
+        expect(router.route_scalar(WINDOW_EVENT_POINTER_BUTTON, 0, WINDOW_ACTION_PRESS, 0, 600000, 400000, 0, 0, comp, session)).to_equal(true)
+        # The click focused the local window, so a key stays local too.
+        val keyed = hosted_remote_app_pump_forward_input(comp, pump, WINDOW_EVENT_KEY, 65, WINDOW_ACTION_PRESS, 0, 0)
+        pump = keyed.pump
+        expect(keyed.routed).to_equal(0)
+        expect(router.route_scalar(WINDOW_EVENT_KEY, 65, WINDOW_ACTION_PRESS, 0, 0, 0, 0, 0, comp, session)).to_equal(true)
+        # Only move/button/key rows exist; anything else is refused.
+        val wheel = wm_remote_app_deliver_input(pump.state, window.window_id, "wheel", 1, 1, 0, 0)
+        expect(wheel.routed).to_equal(0)
+        pump.state = wheel.state
+
+        val queued = drain(comp, pump, window.window_id)
+        expect(queued.get_field("count")).to_equal("0")
+        process_spawn_async("rm", ["-rf", "/tmp/hosted_remote_input_spec_{getpid()}"])

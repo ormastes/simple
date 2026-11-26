@@ -1,6 +1,6 @@
 # Nativeall omits binary stdin and terminal status facade exports
 
-- Severity: P1; status: open, fix implemented with broader verification pending.
+- Severity: P1; status: resolved (exports and staticlib/runtime/JIT provider verification completed 2026-11-26, BF-3).
 - Source owner: `src/compiler_rust/runtime/src/value/sffi/io_print.rs`.
 - Session: `01a1afac/nativeall-stdio`; target: `release/1.0.0`.
 
@@ -98,3 +98,12 @@ audit artifacts remain in the sibling scalar worktree evidence directory.
 
 Provider input/output/cache-read/cache-create token counts, comparable cohort
 average and ratio are unavailable; no estimated or zero-filled usage is claimed.
+
+## Broader Verification (2026-11-26, BF-3)
+
+Verified all four stdio/terminal facade exports (`rt_stdin_read`, `rt_stdin_read_all`, `rt_term_write`, `rt_term_flush`) are defined, registered, and resolved across `simple-native-all`, `simple-runtime`, and Cranelift JIT:
+
+- `cargo build -p simple-native-all -j 2` + `llvm-nm --defined-only simple_native_all-b8cfe4fd23fad308.lib`: confirmed `T rt_stdin_read`, `T rt_stdin_read_all`, `T rt_term_flush`, and `T rt_term_write` are exported from the built archive.
+- `cargo test -p simple-runtime -j 2 --features runtime-symbol-table nativeall_stdio_ -- --test-threads=1`: `9 passed; 0 failed; 1494 filtered out`.
+- `cargo test -p simple-compiler -j 2 --test runtime_symbol_registration_gate`: `1 passed; 0 failed`.
+- `cargo test -p simple-compiler -j 2 --test jit_text_and_worklist_parity` (`bug2_stdio_facade_symbols_register_in_static_jit_provider`): confirmed `static_provider()` resolves all 4 symbols after `register_static_runtime_symbols()`.

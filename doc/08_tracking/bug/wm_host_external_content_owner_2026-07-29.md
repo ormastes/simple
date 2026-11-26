@@ -1,6 +1,9 @@
 # Host external content ownership
 
-Status: rendering overwrite fixed; remote application presentation remains RED.
+Status: rendering overwrite fixed; remote application presentation implemented
+and verified on the resident headless WM daemon lane only (2026-11-26). Owner decision
+2026-11-26: in scope for release 1.0.0. Open items are listed at
+the end.
 
 ## Root cause
 
@@ -16,13 +19,88 @@ changes that owner, lifecycle mutations preserve it, and releasing the frame
 restores the creation default. BrowserRenderer eligibility now depends only on
 the scalar owner.
 
-The no-stub pure-Simple Stage-2 owner probe linked and exited `0`. The real
-host-compositor closure also compiled into an archive with zero failures.
+## Remote application presentation (2026-11-26)
 
-## Remaining gate
+Plan: `doc/03_plan/ui/wm_remote_app/remote_app_presentation_plan.md`.
 
-The hosted remote client transport still has no deployed native server poll,
-and the window protocol has no pixel-present command. External GUI/pixel input
-also has no remote event receiver. In-process frame admission is therefore not
-remote-application proof; add the scalar host bridge and bounded present slot
-before claiming that lane live.
+The compositor needed no change. What was missing sat outside the process, and
+is now a transport around the resident headless WM (`app.play.wm_daemon`):
+
+- `src/lib/nogc_sync_mut/ui/wm_remote_surface.spl` — the shared present slot:
+  one `MAP_SHARED` file of exactly `w*h*4` ARGB32 bytes, no header.
+- `src/app/play/wm_remote_app_client.spl` — what an application links.
+- `src/app/play/wm_remote_app_host.spl` — WM-side systems over a table of
+  surface rows: open, present (full or damage rectangle), input routing with a
+  bounded queue, frame probe, liveness reap.
+- Verbs 6..10 in `wm_daemon_client.spl`; the serve loop routes them.
+
+The present message is the publication point: the WM reads the slot only while
+handling it and the client waits for the reply before writing again, so there
+is no concurrent access, no lock and no atomic. No new `rt_*` symbol.
+
+Evidence on this host (aarch64 Linux, seed
+`cargo-target-wr-seed1126b/release/simple`, sha256 `fb80903917d6d5f5…`):
+
+- `test/03_system/gui/wm_host_platform/wm_remote_app_two_process_spec.spl` —
+  three real processes. WM pid 866470, client pid 871200, controller pid
+  866317. The client fills 200x120 with `0xFF12AB34`; the WM's framebuffer
+  readback holds exactly 24000 pixels of that colour, all inside the window's
+  content rect; framebuffer hash `1312651653978070631` before,
+  `1312651653979251297` after. No client: 0. Corrupted checksum: refused
+  (`checksum-mismatch`), 0. Client killed: window and slot gone, 0.
+- `test/02_integration/app/wm_remote_app_presentation_spec.spl` — 6 examples
+  through the production route in one process (present, checksum refusal,
+  stale revision / not-owner, damage, input, reap).
+- Red first: without the new modules the spec fails to resolve
+  `app.play.wm_remote_app_client`. Mutation: making the client skip the slot
+  write turns 3 of the 6 examples red.
+
+## Wave 2 (2026-11-26)
+
+- Resize: `surface-resize` reallocates the slot; a WM-side resize queues one
+  `configure|w|h` event (`wm_remote_app_resize_spec.spl`, 4 examples).
+- Windowed host: `src/os/hosted/hosted_remote_app_pump.spl` serves the verbs
+  when `SIMPLE_HOSTED_WM_REMOTE_APPS=1`; proven with the production
+  compositor in `hosted_remote_app_pump_spec.spl` and across three
+  processes in `hosted_remote_app_pump_two_process_spec.spl` (24000/24000).
+- Input: the hosted event router resolves move/button/key for pixel-owned
+  windows and the pump queues them (`hosted_remote_app_input_spec.spl`).
+- Continuous render path covered by the two-process spec (render=0 probes).
+- Review hardening: private-snapshot slot read (no SIGBUS), per-instance
+  0700 slot directory, pid sanity and surface caps, input sender and kind
+  validation; the trust boundary (user id) is stated in the plan.
+
+## Still open
+
+1. `hosted_entry.spl`'s own winit loop has not executed with the pump: no
+   display server on the verification host, and the file does not load in
+   the interpreter for unrelated, pre-existing reasons. The windowed host
+   presents through its Engine2d raster, which the frame probe does not
+   read.
+2. The client pid is client-supplied (no peer credential in the file
+   transport); see the plan's trust boundary.
+
+Separately observed, not caused by this change: on the release-head seed the
+compositor module graph does not lower through the JIT
+(`SPL-UNIT-002: Count Add <scalar>`), so `simple play daemon …` only runs with
+`SIMPLE_EXECUTION_MODE=interpreter`, and the transport's round trip is bounded
+by `daemon_sdk`'s 100 ms client poll.
+
+## Linux aarch64 re-check (2026-11-26, lane wm-lane-20261126)
+
+release/1.0.0 79445b063c4, seed
+`/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple`:
+`simple run test/fixtures/wm_host_content_owner_probe.spl` exits 0 (negative control: flipping its first comparison exits 1), so the
+scalar owner helpers (`host_content_owner_default`/`_for_frame`/`_requires_browser_renderer`) still behave; no frame evidence was captured. None of the remaining pieces exists
+in `src/os`: no pixel-present window-protocol command, no bounded present
+slot or scalar host bridge, no remote GUI/pixel event receiver, and no
+deployed native server poll. Building them is feature work, not a bug fix.
+The row stays open on the 2026-11-04 owner question: is remote application
+presentation in scope for 1.0.0, or should it move to a feature request?
+
+Note 2026-11-26 (later the same day): the re-check above predates the remote
+application presentation feature (wave 1, now on release/1.0.0) and is
+superseded by the "Remote application presentation", "Wave 2" and "Still
+open" sections earlier in this document. The owner decided the same day that
+the feature is in scope for 1.0.0; the present command, shared slot, event
+receiver and request pump it lists as missing now exist.

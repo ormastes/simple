@@ -113,3 +113,14 @@ built from this source.
   `[parse-closure] parent_walks=1` + ~26 s in-process worker.
 - **Pass criterion for a fixed binary:** the same command prints the first `.o` in <= 10 s
   wall (warm), with rc=0. Executable pin: `test/03_system/app/compiler/feature/first_object_latency_stage2_spec.spl`.
+
+## 2026-11-26 (`BF-8` Verification)
+
+- Shard fan-out clamp `native_build_shard_count_for_closure_v1` /
+  `native_build_small_closure_max_v1` (`src/app/cli/native_build_shard_admission.spl`, wired in
+  `src/app/cli/native_build_main.spl:2866-2880`) verified via
+  `test/01_unit/compiler/held_verify/stage2_matrix_noop_and_parse_shard_spec.spl` (`6/6` pass).
+- Remaining ~276 s single-module compile breakdown (pre-driver SCV + worker `native_compile`/link)
+  is split into `doc/08_tracking/bug/stage2_one_module_build_276s_vs_10s_first_object_2026-11-19.md`.
+- Shard `doc/08_tracking/bug/db/first_object_latency_stage2_2026-11-01.sdn` updated to
+  `fix-implemented-verification-pending` for the shard fan-out clamp awaiting Stage 3 latency measurement.

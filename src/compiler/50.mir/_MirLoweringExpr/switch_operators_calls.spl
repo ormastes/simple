@@ -2816,8 +2816,23 @@ impl MirLowering:
         are never bypassed by raw `Dict` reads."""
         self.find_local(symbol_id)
 
+    fn hir_type_is_uninstantiated_or_typeparam_v1(ty: HirType) -> bool:
+        if self.hir_type_mentions_type_param(ty, self.symbols):
+            return true
+        match ty.kind:
+            case HirTypeKind.Named(sym, args):
+                if args.len() == 0:
+                    if self.lookup_owner_type_param_names_v1(sym).len() > 0:
+                        return true
+                    if val sym_info = self.symbols.get_symbol_raw(sym.id):
+                        if sym_info.generic_param_count > 0:
+                            return true
+            case _: ()
+        false
+
     me symbol_expr_type(symbol_id: i64, expr: HirExpr) -> HirType?:
         """Resolve a symbol's inferred local type before falling back to raw symbol type."""
+        var weak_local: HirType? = None
         val bound_local = self.symbol_bound_local(symbol_id)
         if bound_local.id >= 0:
             match self.find_local_hir_type(bound_local.id):
@@ -2826,7 +2841,11 @@ impl MirLowering:
                         match local_type.kind:
                             case HirTypeKind.Infer(_, _): ()
                             case HirTypeKind.Error: ()
-                            case _: return Some(local_type)
+                            case _:
+                                if self.hir_type_is_uninstantiated_or_typeparam_v1(local_type):
+                                    weak_local = Some(local_type)
+                                else:
+                                    return Some(local_type)
                 case _: ()
         val sym = self.symbols.get_symbol_raw(symbol_id)
         if val found = sym:
@@ -2836,20 +2855,27 @@ impl MirLowering:
                     match found_type.kind:
                         case HirTypeKind.Infer(_, _): ()
                         case HirTypeKind.Error: ()
-                        case _: return Some(found_type)
-        None
+                        case _:
+                            if not self.hir_type_is_uninstantiated_or_typeparam_v1(found_type) or weak_local == None:
+                                return Some(found_type)
+        weak_local
 
     me enum_match_expr_type(expr: HirExpr) -> HirType?:
         """Recover a match scrutinee type without depending on lowering order."""
         # Flat/cache transport retains a placeholder even when no expression
         # type was inferred. Only the presence bit admits that metadata.
+        var weak_explicit: HirType? = None
         if expr.has_type_ and expr.type_ != None:
             val explicit_type = expr.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
             if explicit_type != None and explicit_type != 0:
                 match explicit_type.kind:
                     case HirTypeKind.Infer(_, _): ()
                     case HirTypeKind.Error: ()
-                    case _: return Some(explicit_type)
+                    case _:
+                        if self.hir_type_is_uninstantiated_or_typeparam_v1(explicit_type):
+                            weak_explicit = Some(explicit_type)
+                        else:
+                            return Some(explicit_type)
         match expr.kind:
             case Var(symbol):
                 # Function-local provenance belongs to this binding; a raw
@@ -3048,7 +3074,7 @@ impl MirLowering:
                                 return Some(declared_field)
                         case _: ()
             case _: ()
-        None
+        weak_explicit
 
     me method_call_receiver_declared_type_v1(receiver: HirExpr) -> HirType?:
         """Declared receiver type for method calls, including indexed container reads."""
@@ -3394,6 +3420,9 @@ impl MirLowering:
                             # de667f5662e). Accept the expression only when it is an
                             # exact, concrete instantiation of the retained type and
                             # its own ownership proof is complete.
+                            if val expr_t = expression_type:
+                                if self.hir_type_mentions_type_param(expr_t, self.symbols) and not self.hir_type_mentions_type_param(retained, self.symbols) and not retained_proof.contains("!unknown"):
+                                    return Some(retained)
                             if val instantiated = expression_type:
                                 if instantiated != None and hir_type_instantiates_to(retained, instantiated) and not self.function_signature_ownership_proof(instantiated, self.symbols).contains("!unknown"):
                                     return expression_type
@@ -3458,6 +3487,9 @@ impl MirLowering:
                         # ambiguous. A typed expression still wins.
                         if expression_type == None:
                             return Some(retained)
+                        if val expr_named = expression_type:
+                            if self.hir_type_mentions_type_param(expr_named, self.symbols) and not self.hir_type_mentions_type_param(retained, self.symbols):
+                                return Some(retained)
                     case _: ()
         expression_type
 
@@ -7369,6 +7401,20 @@ impl MirLowering:
                                     case _: ()
                         case _:
                             ()
+                    if self.is_class_erased_container_owner_v1(struct_name):
+                        match field_hir_types[fi].kind:
+                            case HirTypeKind.TypeParam(tp_name, _):
+                                if construct_bindings.has(tp_name):
+                                    val concrete_tp: HirType = construct_bindings[tp_name]
+                                    if not self.hir_type_mentions_type_param(concrete_tp, self.symbols):
+                                        if self.nil_locals.contains(v.id) or self.local_is_str(v):
+                                            v = self.box_runtime_value(v)
+                                        elif val present_mt = self.local_mir_type_of(v):
+                                            match present_mt.kind:
+                                                case MirTypeKind.F64 | MirTypeKind.F32:
+                                                    v = self.bitcast_float_enum_payload(v)
+                                                case _: ()
+                            case _: ()
                 val field_operand = if chosen_moves: mir_operand_move(v) else: mir_operand_copy(v)
                 ops = ops.push(field_operand)
                 val arg_struct = self.struct_value_syms.get(v.id)

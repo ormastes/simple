@@ -7,13 +7,49 @@ use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 use std.common.sdn.value.SdnValue
 
-# The ordinary host reader is intentionally tolerant for machine defaults.
-# Endpoint routing consumes the strict decoded value without flattening or
-# reparsing quoted strings through the tolerant machine-default line reader.
+# The ordinary host reader (std.common.config_core.host_config) is
+# intentionally tolerant and owns every other host key, e.g. the generated
+# unquoted `cpu_features: neon,sve`. Endpoint routing strictly decodes only the
+# two `host_config:` fields it consumes, so an unrelated tolerant value cannot
+# disable routing while a malformed or duplicated endpoint still fails closed.
+fn server_host_reference_child_key_v1(body: text) -> bool:
+    for key in ["schema", "server_config"]:
+        if body.starts_with(key + ":") or body.starts_with("\"" + key + "\":"):
+            return true
+    false
+
+fn server_host_reference_projection_v1(source: text) -> text:
+    var out = ""
+    var in_host = false
+    var child_indent = ""
+    for raw in source.split("\n"):
+        val line = raw.trim_end()
+        val body = line.trim()
+        if body == "" or body.starts_with("#"):
+            continue
+        val indent = line.substring(0, line.byte_len() - line.trim_start().byte_len())
+        if indent == "":
+            val rest = if body.starts_with("host_config:"): body.substring(12, body.byte_len()).trim() else: "x"
+            in_host = rest == "" or rest.starts_with("#")
+            child_indent = ""
+            if in_host:
+                out = out + "host_config:\n"
+        elif in_host:
+            if child_indent == "":
+                child_indent = indent
+            # Only direct children; a nested `server_config:` is not the endpoint.
+            if indent == child_indent and server_host_reference_child_key_v1(body):
+                out = out + line + "\n"
+    out
+
 pub fn server_host_reference_v1(source: text) -> Result<text, text>:
     val limits = SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 3,
         max_nodes: 256, max_rows: 0, max_cells: 0, max_columns: 128)
-    val parsed = sdn_parse_strict_v1(source, limits)
+    if source.byte_len() > 65536: return Err("server-host-config-invalid")
+    val projected = server_host_reference_projection_v1(source)
+    # A host_config block with neither consumed key carries no reference.
+    if projected == "host_config:\n": return Ok("")
+    val parsed = sdn_parse_strict_v1(projected, limits)
     if parsed.is_err(): return Err("server-host-config-invalid")
     val root = match parsed.unwrap().value:
         case SdnValue.Dict(fields): fields

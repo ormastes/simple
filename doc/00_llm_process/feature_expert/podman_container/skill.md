@@ -144,6 +144,19 @@ everything under the owner label.
   only repaints on input, and the dummy agent shows the same, so this is a
   capture limit of the smoke, not a container problem.
 
+## Command-override regression run (2026-11-26, seed interpreter)
+
+- `podman_session_live_spec.spl` with `SIMPLE_PODMAN_SMOKE=1` and
+  `SIMPLE_PODMAN_ENTRYPOINT_IMAGE=localhost/simple-podman-entrypoint-regression:local`:
+  5/5, executed=5, nothing left running. Diagnostic only: the runner was the Rust
+  seed, so self-hosted qualification is still open.
+- Trap: without `SIMPLE_PODMAN_SMOKE=1` the suite is 5/5 green and runs no
+  container. Read the `PODMAN SMOKE NOT RUN` lines before trusting a PASS.
+- Trap: orchestrator config discovery strict-parsed the whole
+  `~/.config/simple/host.sdn`, so the generated `cpu_features: neon,sve,sve2`
+  made every `caret-serve` fail with `server-host-config-invalid`. Fixed by
+  decoding only `host_config.schema` and `host_config.server_config`.
+
 ## host_cleanup_spec: five stacked causes (0/10 -> 10/10)
 
 Each one hid the next; none was the first visible error's fault.

@@ -1,0 +1,559 @@
+#![allow(primitive_api)] # surface rows mirror the daemon_sdk text wire fields and the compositor's i32/i64 window geometry
+# Remote application presentation: window-manager side.
+#
+# Business layer in the ECS style: `WmRemoteAppState.rows` is a table of plain
+# surface rows and every function here is a system that takes the compositor
+# and the table and hands both back (the same return-the-object rule
+# wm_daemon_route follows). No row holds a mapping or a handle, so nothing
+# here can outlive a client. The compositor itself is used only through its
+# existing public surface (create/focus/destroy, external content frame
+# admission, render, readback).
+# Plan: doc/03_plan/ui/wm_remote_app/remote_app_presentation_plan.md
+
+use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_response_new}
+use std.nogc_sync_mut.io.process_ops.{process_is_running}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io_runtime.{mkdir_p}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_list, dir_remove}
+use std.nogc_sync_mut.ui.wm_remote_surface.{
+    wm_remote_surface_byte_len,
+    wm_remote_surface_create,
+    wm_remote_surface_read,
+    wm_remote_surface_read_rect,
+    wm_remote_surface_remove,
+}
+use std.nogc_sync_mut.ui.theme_package.{default_theme_id}
+use common.ui.wm_chrome_theme.{active_wm_theme_id}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_PIXEL_SURFACE, WmContentFrame, wm_content_frame_checksum}
+use os.compositor.host_compositor_core.{HostCompositor}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_FOCUS, COMP_RESIZE}
+use app.play.wm_daemon_client.{WMD_SURFACE_OPEN, WMD_SURFACE_PRESENT, WMD_SURFACE_EVENTS, WMD_SURFACE_INPUT, WMD_FRAME_PROBE, WMD_SURFACE_RESIZE}
+
+val WM_REMOTE_APP_ID: text = "remote-app"
+val WM_REMOTE_APP_EVENT_QUEUE_MAX: i64 = 64
+# The client pid in a request is supplied by the client: the daemon_sdk file
+# transport carries no peer credential. It is a liveness handle and a guard
+# against accidents between clients, not authentication; the trust boundary
+# is the user id (0700 slot directory). These caps bound what one confused
+# or runaway client can pin.
+pub val WM_REMOTE_APP_MAX_SURFACES_PER_CLIENT: i64 = 16
+val WM_REMOTE_APP_MAX_SURFACES: i64 = 64
+val WM_REMOTE_APP_INSTANCE_PREFIX: text = "inst-"
+# Window chrome around the content rect; the same constants the compositor's
+# frame admission and the hosted event router use.
+val WM_REMOTE_APP_CONTENT_LEFT: i32 = 4
+val WM_REMOTE_APP_CONTENT_TOP: i32 = 32
+val WM_REMOTE_APP_CHROME_W: i32 = 8
+val WM_REMOTE_APP_CHROME_H: i32 = 36
+
+pub struct WmRemoteSurfaceRow:
+    window_id: i64
+    slot_path: text
+    width: i32
+    height: i32
+    client_pid: i64
+    last_revision: i64
+    events: [text]
+    dropped_events: i64
+    # Reason of the most recent refused present, "" after an accepted one.
+    last_refusal: text
+    # Set by a resize: the compositor still retains a frame of the old size,
+    # so the next present must be a full frame, not a delta against it.
+    needs_full_frame: bool
+    # Content size last announced to the client with a `configure` event.
+    announced_width: i32
+    announced_height: i32
+
+pub struct WmRemoteAppState:
+    surface_dir: text
+    # Private per-daemon-instance directory (mkdtemp, 0700, random name) that
+    # holds the slots. "" until the first surface is opened.
+    instance_dir: text
+    rows: [WmRemoteSurfaceRow]
+
+pub struct WmRemoteRouteOutcome:
+    resp: DaemonResponse
+    comp: HostCompositor
+    state: WmRemoteAppState
+
+pub struct WmRemoteReapOutcome:
+    comp: HostCompositor
+    state: WmRemoteAppState
+    reaped: i64
+
+pub fn wm_remote_app_state_new(surface_dir: text) -> WmRemoteAppState:
+    WmRemoteAppState(surface_dir: surface_dir, instance_dir: "", rows: [])
+
+pub fn wm_remote_app_kind(kind: i64) -> bool:
+    (kind == WMD_SURFACE_OPEN or kind == WMD_SURFACE_PRESENT or
+        kind == WMD_SURFACE_EVENTS or kind == WMD_SURFACE_INPUT or
+        kind == WMD_FRAME_PROBE or kind == WMD_SURFACE_RESIZE)
+
+fn _row_index(state: WmRemoteAppState, window_id: i64) -> i64:
+    var i: i64 = 0
+    while i < state.rows.len().to_i64():
+        if state.rows[i].window_id == window_id:
+            return i
+        i = i + 1
+    -1
+
+fn _window_index(comp: HostCompositor, window_id: i64) -> i64:
+    var i: i64 = 0
+    while i < comp.windows.len().to_i64():
+        if comp.windows[i].id == window_id:
+            return i
+        i = i + 1
+    -1
+
+fn _field_i64(req: DaemonRequest, key: text, fallback: i64) -> i64:
+    req.get_field(key).to_i64() ?? fallback
+
+fn _theme_id() -> text:
+    val active = active_wm_theme_id()
+    if active != "": active else: default_theme_id()
+
+fn _refuse(req: DaemonRequest, reason: text) -> DaemonResponse:
+    var resp = daemon_response_new(req.id, 1)
+    resp.set_field("accepted", "false")
+    resp.set_field("reason", reason)
+    resp
+
+fn _open(comp_in: HostCompositor, state_in: WmRemoteAppState, req: DaemonRequest) -> WmRemoteRouteOutcome:
+    var comp = comp_in
+    var state = state_in
+    val width = _field_i64(req, "w", 0).to_i32()
+    val height = _field_i64(req, "h", 0).to_i32()
+    val pid = _field_i64(req, "pid", 0)
+    if pid <= 1 or not process_is_running(pid):
+        return WmRemoteRouteOutcome(resp: _refuse(req, "bad-pid"), comp: comp, state: state)
+    var held: i64 = 0
+    for existing in state.rows:
+        if existing.client_pid == pid:
+            held = held + 1
+    if (held >= WM_REMOTE_APP_MAX_SURFACES_PER_CLIENT or
+        state.rows.len().to_i64() >= WM_REMOTE_APP_MAX_SURFACES):
+        return WmRemoteRouteOutcome(resp: _refuse(req, "too-many-surfaces"), comp: comp, state: state)
+    if wm_remote_surface_byte_len(width, height) == 0:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "bad-geometry"), comp: comp, state: state)
+    if state.instance_dir == "":
+        if not mkdir_p(state.surface_dir):
+            return WmRemoteRouteOutcome(resp: _refuse(req, "surface-dir"), comp: comp, state: state)
+        val made = secure_temp_dir(state.surface_dir, WM_REMOTE_APP_INSTANCE_PREFIX)
+        if made.is_err():
+            return WmRemoteRouteOutcome(resp: _refuse(req, "surface-dir"), comp: comp, state: state)
+        state.instance_dir = made.unwrap()
+    val id = comp.next_window_id
+    val slot = "{state.instance_dir}/window_{id}.argb32"
+    if not wm_remote_surface_create(slot, width, height):
+        return WmRemoteRouteOutcome(resp: _refuse(req, "bad-geometry"), comp: comp, state: state)
+    val cascade = (state.rows.len().to_i64() * 24).to_i32()
+    comp.apply_bridge_request(
+        0, 0, COMP_CREATE_WINDOW.to_i64(), id, req.get_field("title"),
+        40 + cascade, 60 + cascade,
+        width + WM_REMOTE_APP_CHROME_W, height + WM_REMOTE_APP_CHROME_H,
+        "", pid, WM_REMOTE_APP_ID)
+    val index = _window_index(comp, id)
+    # The compositor may clamp a new window; a slot that no longer matches
+    # the content rect could never be admitted, so refuse it up front.
+    if (index < 0 or
+        comp.windows[index].w - WM_REMOTE_APP_CHROME_W != width or
+        comp.windows[index].h - WM_REMOTE_APP_CHROME_H != height or
+        not comp.require_external_content_frame(id)):
+        if index >= 0:
+            comp.destroy_window(id)
+        wm_remote_surface_remove(slot)
+        return WmRemoteRouteOutcome(resp: _refuse(req, "window-refused"), comp: comp, state: state)
+    state.rows.push(WmRemoteSurfaceRow(
+        window_id: id, slot_path: slot, width: width, height: height,
+        client_pid: pid, last_revision: 0, events: [], dropped_events: 0,
+        last_refusal: "",
+        needs_full_frame: false, announced_width: width, announced_height: height))
+    var resp = daemon_response_new(req.id, 0)
+    resp.set_field("window_id", "{id}")
+    resp.set_field("slot", slot)
+    resp.set_field("w", "{width}")
+    resp.set_field("h", "{height}")
+    resp.set_field("content_x", "{comp.windows[index].x + WM_REMOTE_APP_CONTENT_LEFT}")
+    resp.set_field("content_y", "{comp.windows[index].y + WM_REMOTE_APP_CONTENT_TOP}")
+    WmRemoteRouteOutcome(resp: resp, comp: comp, state: state)
+
+fn _damage_rect(text_rect: text) -> [i64]:
+    var out: [i64] = []
+    val parts = text_rect.split(",")
+    if parts.len() != 4:
+        return out
+    for part in parts:
+        out.push(part.to_i64() ?? -1)
+    out
+
+fn _present(comp: HostCompositor, state: WmRemoteAppState, req: DaemonRequest) -> WmRemoteRouteOutcome:
+    """Admit one published frame and remember on the surface row why the
+    last one was refused, so an observer can tell "refused" from "not yet
+    presented"."""
+    val out = _present_frame(comp, state, req)
+    val index = _row_index(out.state, _field_i64(req, "id", 0))
+    if index < 0:
+        return out
+    var next = out.state
+    var row = next.rows[index]
+    row.last_refusal = if out.resp.status == 0: "" else: out.resp.get_field("reason")
+    next.rows[index] = row
+    WmRemoteRouteOutcome(resp: out.resp, comp: out.comp, state: next)
+
+fn _snapshot_path(state: WmRemoteAppState, window_id: i64) -> text:
+    "{state.instance_dir}/.read_{window_id}"
+
+fn _present_frame(comp_in: HostCompositor, state_in: WmRemoteAppState, req: DaemonRequest) -> WmRemoteRouteOutcome:
+    var comp = comp_in
+    var state = state_in
+    val id = _field_i64(req, "id", 0)
+    val index = _row_index(state, id)
+    if index < 0 or _window_index(comp, id) < 0:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "unknown-window"), comp: comp, state: state)
+    var row = state.rows[index]
+    if _field_i64(req, "pid", 0) != row.client_pid:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "not-owner"), comp: comp, state: state)
+    val window = comp.windows[_window_index(comp, id)]
+    val content_w = window.w - WM_REMOTE_APP_CHROME_W
+    val content_h = window.h - WM_REMOTE_APP_CHROME_H
+    # Refused both when the message disagrees with the slot and when the
+    # window manager resized the window and the client has not yet resized
+    # its surface. The refusal carries the size the client has to adopt.
+    if (_field_i64(req, "w", 0) != row.width.to_i64() or
+        _field_i64(req, "h", 0) != row.height.to_i64() or
+        content_w != row.width or content_h != row.height):
+        var mismatch = _refuse(req, "size-mismatch")
+        mismatch.set_field("w", "{content_w}")
+        mismatch.set_field("h", "{content_h}")
+        return WmRemoteRouteOutcome(resp: mismatch, comp: comp, state: state)
+    val revision = _field_i64(req, "rev", 0)
+    if revision <= row.last_revision:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "stale-revision"), comp: comp, state: state)
+    if req.get_field("written") != "true":
+        return WmRemoteRouteOutcome(resp: _refuse(req, "slot-not-written"), comp: comp, state: state)
+    val checksum = _field_i64(req, "checksum", 0).to_u64()
+    val damage_text = req.get_field("damage")
+    var frame = WmContentFrame(
+        window_id: "{id}", scene_revision: 1, content_revision: revision,
+        origin_kind: WM_CONTENT_ORIGIN_PIXEL_SURFACE,
+        width: row.width, height: row.height, pixels: [], checksum: 0u64,
+        parent_window_id: "", offset_x: 0, offset_y: 0, theme_id: _theme_id())
+    if damage_text == "":
+        val pixels = wm_remote_surface_read(row.slot_path, _snapshot_path(state, id), row.width, row.height)
+        if pixels.len().to_i64() != row.width.to_i64() * row.height.to_i64():
+            return WmRemoteRouteOutcome(resp: _refuse(req, "slot-unreadable"), comp: comp, state: state)
+        # The message's checksum is what the compositor verifies against the
+        # pixels it was handed; a mismatch leaves the retained frame in place.
+        frame.pixels = pixels
+        frame.checksum = checksum
+        if not comp.set_external_content_frame(id, frame):
+            val reason = if wm_content_frame_checksum(pixels) != checksum: "checksum-mismatch" else: "frame-refused"
+            return WmRemoteRouteOutcome(resp: _refuse(req, reason), comp: comp, state: state)
+    else:
+        if row.needs_full_frame:
+            return WmRemoteRouteOutcome(resp: _refuse(req, "full-frame-required"), comp: comp, state: state)
+        val rect = _damage_rect(damage_text)
+        if rect.len() != 4 or row.last_revision <= 0:
+            return WmRemoteRouteOutcome(resp: _refuse(req, "bad-damage"), comp: comp, state: state)
+        val pixels = wm_remote_surface_read_rect(
+            row.slot_path, _snapshot_path(state, id), row.width, row.height,
+            rect[0], rect[1], rect[2], rect[3])
+        if pixels.len().to_i64() == 0:
+            return WmRemoteRouteOutcome(resp: _refuse(req, "bad-damage"), comp: comp, state: state)
+        if wm_content_frame_checksum(pixels) != checksum:
+            return WmRemoteRouteOutcome(resp: _refuse(req, "checksum-mismatch"), comp: comp, state: state)
+        frame.base_content_revision = row.last_revision
+        frame.damage_rects = rect
+        frame.damage_pixels = pixels
+        if not comp.set_external_content_frame(id, frame):
+            return WmRemoteRouteOutcome(resp: _refuse(req, "frame-refused"), comp: comp, state: state)
+    row.last_revision = revision
+    row.needs_full_frame = false
+    state.rows[index] = row
+    var resp = daemon_response_new(req.id, 0)
+    resp.set_field("accepted", "true")
+    resp.set_field("rev", "{revision}")
+    WmRemoteRouteOutcome(resp: resp, comp: comp, state: state)
+
+fn _resize(comp_in: HostCompositor, state_in: WmRemoteAppState, req: DaemonRequest) -> WmRemoteRouteOutcome:
+    """Give window `id` a slot of a new size. Handled as a client message, so
+    the client is by construction not writing the slot while it is replaced.
+    When the window does not already have that content size (the client
+    asked first) the window is resized to match; when it does (the client
+    is acknowledging a `configure`) only the slot changes."""
+    var comp = comp_in
+    var state = state_in
+    val id = _field_i64(req, "id", 0)
+    val index = _row_index(state, id)
+    var window_index = _window_index(comp, id)
+    if index < 0 or window_index < 0:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "unknown-window"), comp: comp, state: state)
+    var row = state.rows[index]
+    if _field_i64(req, "pid", 0) != row.client_pid:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "not-owner"), comp: comp, state: state)
+    val width = _field_i64(req, "w", 0).to_i32()
+    val height = _field_i64(req, "h", 0).to_i32()
+    if wm_remote_surface_byte_len(width, height) == 0:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "bad-geometry"), comp: comp, state: state)
+    val before = comp.windows[window_index]
+    if (before.w - WM_REMOTE_APP_CHROME_W != width or
+        before.h - WM_REMOTE_APP_CHROME_H != height):
+        comp.apply_bridge_request(
+            0, 0, COMP_RESIZE.to_i64(), id, "", before.x, before.y,
+            width + WM_REMOTE_APP_CHROME_W, height + WM_REMOTE_APP_CHROME_H,
+            "", row.client_pid, WM_REMOTE_APP_ID)
+        window_index = _window_index(comp, id)
+        # The compositor may clamp; the slot is only replaced once the
+        # window really has the requested content size.
+        if (window_index < 0 or
+            comp.windows[window_index].w - WM_REMOTE_APP_CHROME_W != width or
+            comp.windows[window_index].h - WM_REMOTE_APP_CHROME_H != height):
+            var clamped = _refuse(req, "window-refused")
+            if window_index >= 0:
+                clamped.set_field("w", "{comp.windows[window_index].w - WM_REMOTE_APP_CHROME_W}")
+                clamped.set_field("h", "{comp.windows[window_index].h - WM_REMOTE_APP_CHROME_H}")
+            return WmRemoteRouteOutcome(resp: clamped, comp: comp, state: state)
+    if not wm_remote_surface_create(row.slot_path, width, height):
+        return WmRemoteRouteOutcome(resp: _refuse(req, "slot-unwritable"), comp: comp, state: state)
+    row.width = width
+    row.height = height
+    row.needs_full_frame = true
+    row.announced_width = width
+    row.announced_height = height
+    state.rows[index] = row
+    var resp = daemon_response_new(req.id, 0)
+    resp.set_field("window_id", "{id}")
+    resp.set_field("slot", row.slot_path)
+    resp.set_field("w", "{width}")
+    resp.set_field("h", "{height}")
+    WmRemoteRouteOutcome(resp: resp, comp: comp, state: state)
+
+fn _events(comp: HostCompositor, state_in: WmRemoteAppState, req: DaemonRequest) -> WmRemoteRouteOutcome:
+    var state = state_in
+    val index = _row_index(state, _field_i64(req, "id", 0))
+    if index < 0:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "unknown-window"), comp: comp, state: state)
+    var row = state.rows[index]
+    if _field_i64(req, "pid", 0) != row.client_pid:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "not-owner"), comp: comp, state: state)
+    var resp = daemon_response_new(req.id, 0)
+    resp.set_field("count", "{row.events.len()}")
+    resp.set_field("dropped", "{row.dropped_events}")
+    var i: i64 = 0
+    while i < row.events.len().to_i64():
+        resp.set_field("ev{i}", row.events[i])
+        i = i + 1
+    row.events = []
+    row.dropped_events = 0
+    state.rows[index] = row
+    WmRemoteRouteOutcome(resp: resp, comp: comp, state: state)
+
+fn _enqueue(row_in: WmRemoteSurfaceRow, event: text) -> WmRemoteSurfaceRow:
+    var row = row_in
+    if row.events.len().to_i64() >= WM_REMOTE_APP_EVENT_QUEUE_MAX:
+        var kept: [text] = []
+        var i: i64 = 1
+        while i < row.events.len().to_i64():
+            kept.push(row.events[i])
+            i = i + 1
+        row.events = kept
+        row.dropped_events = row.dropped_events + 1
+    row.events.push(event)
+    row
+
+fn _input(comp_in: HostCompositor, state_in: WmRemoteAppState, req: DaemonRequest) -> WmRemoteRouteOutcome:
+    """Deliver one input event to the remote client that owns the target.
+
+    Pointer events go to the top-most window whose content rect contains the
+    point (later entries of `windows` are drawn above earlier ones, the same
+    order the hosted event router resolves). Key events go to the focused
+    window. `routed` is the receiving window id, or 0 when no remote client
+    owns the target.
+
+    This verb is the injection seam (automation, tests). It only lets a
+    client inject into a window it owns, and only the three known kinds,
+    so one client cannot type into another and a crafted `kind` cannot
+    forge extra fields in the `kind|x|y|key|action` row."""
+    var comp = comp_in
+    var state = state_in
+    val kind = req.get_field("kind")
+    if kind != "move" and kind != "button" and kind != "key":
+        return WmRemoteRouteOutcome(resp: _refuse(req, "bad-kind"), comp: comp, state: state)
+    val key = _field_i64(req, "key", 0)
+    val action = _field_i64(req, "action", 0)
+    var target: i64 = 0
+    var local_x: i64 = 0
+    var local_y: i64 = 0
+    if kind == "key":
+        for window in comp.windows:
+            if window.focused and not window.minimized:
+                target = window.id
+    else:
+        val x = _field_i64(req, "x", -1)
+        val y = _field_i64(req, "y", -1)
+        for window in comp.windows:
+            val left = (window.x + WM_REMOTE_APP_CONTENT_LEFT).to_i64()
+            val top = (window.y + WM_REMOTE_APP_CONTENT_TOP).to_i64()
+            val width = (window.w - WM_REMOTE_APP_CHROME_W).to_i64()
+            val height = (window.h - WM_REMOTE_APP_CHROME_H).to_i64()
+            if (not window.minimized and x >= left and x < left + width and
+                y >= top and y < top + height):
+                target = window.id
+                local_x = x - left
+                local_y = y - top
+    var resp = daemon_response_new(req.id, 0)
+    val index = if target > 0: _row_index(state, target) else: -1
+    if index < 0:
+        resp.set_field("routed", "0")
+        return WmRemoteRouteOutcome(resp: resp, comp: comp, state: state)
+    if _field_i64(req, "pid", 0) != state.rows[index].client_pid:
+        return WmRemoteRouteOutcome(resp: _refuse(req, "not-owner"), comp: comp, state: state)
+    if kind == "button" and action != 0:
+        comp.apply_bridge_request(0, 0, COMP_FOCUS.to_i64(), target, "", 0, 0, 0, 0, "", 0, WM_REMOTE_APP_ID)
+    state.rows[index] = _enqueue(state.rows[index], "{kind}|{local_x}|{local_y}|{key}|{action}")
+    resp.set_field("routed", "{target}")
+    WmRemoteRouteOutcome(resp: resp, comp: comp, state: state)
+
+fn _probe(comp_in: HostCompositor, state: WmRemoteAppState, req: DaemonRequest) -> WmRemoteRouteOutcome:
+    """Report what the backend actually holds: framebuffer hash, how many
+    pixels have `color`, and how many of those lie inside window `id`'s
+    content rect. Renders one frame through the production compositor
+    first, unless `render=0` asks for the framebuffer as the serve loop's
+    own continuous render left it."""
+    var comp = comp_in
+    if req.get_field("render") != "0":
+        comp.render_frame()
+    val pixels = comp.pure_simple_pixel_buffer()
+    val color = _field_i64(req, "color", -1)
+    val index = _window_index(comp, _field_i64(req, "id", 0))
+    var left: i64 = 0
+    var top: i64 = 0
+    var right: i64 = 0
+    var bottom: i64 = 0
+    if index >= 0:
+        left = (comp.windows[index].x + WM_REMOTE_APP_CONTENT_LEFT).to_i64()
+        top = (comp.windows[index].y + WM_REMOTE_APP_CONTENT_TOP).to_i64()
+        right = left + (comp.windows[index].w - WM_REMOTE_APP_CHROME_W).to_i64()
+        bottom = top + (comp.windows[index].h - WM_REMOTE_APP_CHROME_H).to_i64()
+    val stride = comp.width.to_i64()
+    var count: i64 = 0
+    var content_count: i64 = 0
+    var i: i64 = 0
+    while i < pixels.len().to_i64():
+        if pixels[i].to_i64() == color:
+            count = count + 1
+            val px = i % stride
+            val py = i / stride
+            if px >= left and px < right and py >= top and py < bottom:
+                content_count = content_count + 1
+        i = i + 1
+    var resp = daemon_response_new(req.id, 0)
+    resp.set_field("pixels", "{pixels.len()}")
+    resp.set_field("width", "{comp.width}")
+    resp.set_field("height", "{comp.height}")
+    resp.set_field("hash", "{wm_content_frame_checksum(pixels)}")
+    resp.set_field("count", "{count}")
+    resp.set_field("content_count", "{content_count}")
+    resp.set_field("windows", "{comp.windows.len()}")
+    resp.set_field("surfaces", "{state.rows.len()}")
+    # Process identities, so a caller can prove the pixels crossed a process
+    # boundary: this window manager, and the client that owns window `id`.
+    resp.set_field("wm_pid", "{getpid()}")
+    val row_index = _row_index(state, _field_i64(req, "id", 0))
+    resp.set_field("client_pid", if row_index >= 0: "{state.rows[row_index].client_pid}" else: "0")
+    resp.set_field("slot", if row_index >= 0: state.rows[row_index].slot_path else: "")
+    resp.set_field("last_refusal", if row_index >= 0: state.rows[row_index].last_refusal else: "")
+    WmRemoteRouteOutcome(resp: resp, comp: comp, state: state)
+
+pub fn wm_remote_app_route(comp: HostCompositor, state: WmRemoteAppState, req: DaemonRequest) -> WmRemoteRouteOutcome:
+    """Route one remote-application request. Callers MUST adopt the returned
+    `comp` and `state`."""
+    if req.kind == WMD_SURFACE_OPEN:
+        return _open(comp, state, req)
+    if req.kind == WMD_SURFACE_PRESENT:
+        return _present(comp, state, req)
+    if req.kind == WMD_SURFACE_EVENTS:
+        return _events(comp, state, req)
+    if req.kind == WMD_SURFACE_INPUT:
+        return _input(comp, state, req)
+    if req.kind == WMD_SURFACE_RESIZE:
+        return _resize(comp, state, req)
+    if req.kind == WMD_FRAME_PROBE:
+        return _probe(comp, state, req)
+    WmRemoteRouteOutcome(resp: _refuse(req, "unknown-kind"), comp: comp, state: state)
+
+pub fn wm_remote_app_reap(comp_in: HostCompositor, state_in: WmRemoteAppState) -> WmRemoteReapOutcome:
+    """Sweep the surface table. A surface whose client process is gone, or
+    whose window was closed some other way, is dropped: the window is
+    destroyed, the slot deleted, the row forgotten (a dead client must not
+    leave a frozen window on screen). A surviving surface whose window the
+    window manager resized gets one `configure|w|h|0|0` event per new size."""
+    var comp = comp_in
+    var kept: [WmRemoteSurfaceRow] = []
+    var reaped: i64 = 0
+    for row in state_in.rows:
+        val window_index = _window_index(comp, row.window_id)
+        val has_window = window_index >= 0
+        if has_window and process_is_running(row.client_pid):
+            val content_w = comp.windows[window_index].w - WM_REMOTE_APP_CHROME_W
+            val content_h = comp.windows[window_index].h - WM_REMOTE_APP_CHROME_H
+            if content_w != row.announced_width or content_h != row.announced_height:
+                var announced = _enqueue(row, "configure|{content_w}|{content_h}|0|0")
+                announced.announced_width = content_w
+                announced.announced_height = content_h
+                kept.push(announced)
+            else:
+                kept.push(row)
+        else:
+            if has_window:
+                comp.destroy_window(row.window_id)
+            wm_remote_surface_remove(row.slot_path)
+            reaped = reaped + 1
+    WmRemoteReapOutcome(
+        comp: comp,
+        state: WmRemoteAppState(surface_dir: state_in.surface_dir, instance_dir: state_in.instance_dir, rows: kept),
+        reaped: reaped)
+
+pub fn wm_remote_app_shutdown(state: WmRemoteAppState) -> i64:
+    """Daemon stop: delete every slot and this instance's private directory.
+    Returns the number of slots removed. Windows die with the compositor."""
+    var removed: i64 = 0
+    for row in state.rows:
+        if wm_remote_surface_remove(row.slot_path):
+            removed = removed + 1
+    if state.instance_dir != "":
+        dir_remove(state.instance_dir, true)
+    removed
+
+pub fn wm_remote_app_sweep_stale(surface_dir: text) -> i64:
+    """Daemon start, after the singleton lock is held: every instance
+    directory under `surface_dir` belongs to a daemon that is gone. Remove
+    them so a crashed daemon does not leak slots. Only entries carrying the
+    instance prefix are touched."""
+    var removed: i64 = 0
+    if surface_dir == "":
+        return removed
+    for entry in dir_list(surface_dir):
+        if entry.starts_with(WM_REMOTE_APP_INSTANCE_PREFIX):
+            if dir_remove("{surface_dir}/{entry}", true):
+                removed = removed + 1
+    removed
+
+pub struct WmRemoteInputDelivery:
+    state: WmRemoteAppState
+    routed: i64
+
+pub fn wm_remote_app_deliver_input(state_in: WmRemoteAppState, window_id: i64, kind: text, local_x: i64, local_y: i64, key: i64, action: i64) -> WmRemoteInputDelivery:
+    """Queue one already-resolved event (target window and content-local
+    point decided by the host's event router) on the client that owns
+    `window_id`, in the same `kind|local_x|local_y|key|action` row the
+    surface-input verb queues. `routed` is the window id, or 0 when no remote
+    client owns that window. Callers MUST adopt the returned state."""
+    var state = state_in
+    val index = _row_index(state, window_id)
+    val known_kind = kind == "move" or kind == "button" or kind == "key"
+    if not known_kind or window_id <= 0 or index < 0:
+        return WmRemoteInputDelivery(state: state, routed: 0)
+    state.rows[index] = _enqueue(state.rows[index], "{kind}|{local_x}|{local_y}|{key}|{action}")
+    WmRemoteInputDelivery(state: state, routed: window_id)

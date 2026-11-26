@@ -1,12 +1,39 @@
-# SOSIX containment: macos variant. Typed refusal until this host's lane defines its
-# mechanism; nothing here ever reports success (architecture 4.2).
+# SOSIX containment: macos variant (review-only; no macOS host has run any of this).
+# Mapped: the request's directory sets lower to a Seatbelt (SBPL) profile through the pure
+# emitter (std.common.container_policy.seatbelt_profile_v1) and the compiled profile is admitted
+# by the Darwin sandbox policy admission check (container_policy.darwin_sandbox_policy_v1). Never mapped, so each
+# is a typed refusal naming the gap: the sandboxed spawn (sandbox_init is irreversible and
+# process-wide, so it needs a minimal worker that applies it immediately before exec; no such
+# worker exists), poll/cancel/collect (they need a lease from that spawn), canary qualification,
+# the memory cap, and host network (SBPL here expresses only no-network or one broker socket).
+# Nothing here ever reports success (architecture 4.2); support reports every axis false.
 use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainSupportV1, SosixContainAdmissionV1, SosixContainLeaseV1, SosixContainPollV1, SosixContainFlagV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1, sosix_contain_support_none_v1}
 use std.nogc_sync_mut.sosix.containment_types_v1.{SosixContainMemoryProbeV1, SosixContainMemoryEvidenceV1}
+use std.common.container_policy.seatbelt_profile_v1.{SeatbeltFsGrantInputV1, SeatbeltPolicyInputV1, seatbelt_profile_compile_v1, SEATBELT_ACCESS_READ_DATA_V1, SEATBELT_ACCESS_READ_METADATA_V1, SEATBELT_ACCESS_WRITE_V1, SEATBELT_SCOPE_SUBPATH_V1, SEATBELT_NETWORK_NONE_V1}
+use std.common.container_policy.darwin_sandbox_policy_v1.{sosix_darwin_sandbox_profile_admissible_v1}
+
+# The Seatbelt lowering of a request's filesystem grants. Network is not lowered here: host
+# network is unexpressible (a gap), and no process is launched, so the profile is checked only.
+fn _macos_profile_refusal_v1(request: SosixContainRequestV1) -> text:
+    var grants: [SeatbeltFsGrantInputV1] = []
+    for dir in request.readonly_dirs:
+        grants.push(SeatbeltFsGrantInputV1(path: dir, scope: SEATBELT_SCOPE_SUBPATH_V1, access: SEATBELT_ACCESS_READ_DATA_V1))
+        grants.push(SeatbeltFsGrantInputV1(path: dir, scope: SEATBELT_SCOPE_SUBPATH_V1, access: SEATBELT_ACCESS_READ_METADATA_V1))
+    for dir in request.writable_dirs:
+        grants.push(SeatbeltFsGrantInputV1(path: dir, scope: SEATBELT_SCOPE_SUBPATH_V1, access: SEATBELT_ACCESS_WRITE_V1))
+    val policy = SeatbeltPolicyInputV1(grants: grants, protected_roots: [], network_profile: SEATBELT_NETWORK_NONE_V1, direct_network: false, broker_endpoint: nil)
+    match seatbelt_profile_compile_v1(policy):
+        case Err(_reason): "containment-seatbelt-profile-refused"
+        case Ok(profile):
+            if sosix_darwin_sandbox_profile_admissible_v1(profile.profile_text.bytes()): ""
+            else: "containment-seatbelt-profile-inadmissible"
 
 pub fn sosix_contain_support_v1() -> SosixContainSupportV1:
-    sosix_contain_support_none_v1("macos-unimplemented")
+    sosix_contain_support_none_v1("macos-seatbelt-unverified")
 
 pub fn sosix_contain_start_v1(request: SosixContainRequestV1) -> SosixContainAdmissionV1:
+    val refusal = _macos_profile_refusal_v1(request)
+    if refusal != "": return SosixContainAdmissionV1.RejectedBeforeStart(refusal)
     SosixContainAdmissionV1.RejectedBeforeStart("containment-unimplemented-macos")
 
 pub fn sosix_contain_poll_v1(lease: SosixContainLeaseV1) -> Result<SosixContainPollV1, text>:

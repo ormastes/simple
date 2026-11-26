@@ -156,3 +156,11 @@ both `check_primitive_api_with_lines` and the audit path, exactly the split the
 --mode=interpreter` => 13 examples, 0 failures (AC-D1 rows green, AC-D2
 extern-pass-through rows green). The "Open 2026-09-16" header is stale;
 closed.
+
+## Re-verification 2026-11-26 (`work/bf-1-compiler-hir-sem-20261126`)
+
+Re-executed both primitive-API lint system specs on `origin/release/1.0.0`
+(`SIMPLE_LIB=src`, `--mode=interpreter --timeout 60`):
+- `test/system/code_quality/primitive_api_lint_spec.spl`: 13 examples, 0 failures
+- `test/03_system/quality/code_quality/primitive_api_lint_spec.spl`: 9 examples, 0 failures
+Disposition: `ALREADY-FIXED-VERIFIED`.

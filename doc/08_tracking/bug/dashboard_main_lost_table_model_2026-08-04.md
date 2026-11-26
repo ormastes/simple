@@ -153,3 +153,12 @@ Behavioral re-run of the spec is environment-blocked on this host: the pinned
 tracked Rust seed rejects the `@representation_boundary` decorator used by
 test-runner infrastructure at HEAD (`test_runner_client.spl:9`), failing all
 spec runs repo-wide. Fix stands as verified by inspection; bug remains closed.
+
+## Verification note (2026-11-26, BF-5 lane, `origin/release/1.0.0`)
+
+Behaviorally re-verified on Windows using `wa3_shared_bin\simple.exe` (`89b32c2e80d`, `SIMPLE_LIB=C:\dev\wt\bf-5-app-mcp-cli\src`, `--mode=interpreter`):
+- `test/01_unit/app/dashboard/dashboard_table_model_spec.spl`: `5/5` passed (`outcome=OK`)
+- `test/01_unit/app/dashboard/dashboard_serve_spec.spl`: `6/6` passed (`outcome=OK`)
+- `test/01_unit/app/dashboard_framework_policy_spec.spl`: `9/9` passed (`outcome=OK`)
+
+Status remains `FIXED`.

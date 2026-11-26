@@ -244,3 +244,32 @@ ae0b53c9e3d src/os/services/netstack/_TcpConnection/state_machine.spl
 ae0b53c9e3d src/os/tls13/mod.spl
 e15126aa84f src/app/office/slides/render.spl
 ```
+
+## 2026-11-26 Re-Audit against `origin/release/1.0.0` (`79445b063c4`, `BF-8`)
+
+Re-ran the August fix audit (`since=2026-08-01..until=2026-08-27 --no-merges --grep='^fix' -- src`)
+against `HEAD` (`79445b063c4`) including `-M` rename detection:
+- **Global August diff census:** `196 MISSING`, `7475 MODIFIED`, `703 PRESENT`, `133 REVERTED`
+  (the `152` matched sha+path pairs from the 2026-11-15 list break down as `20` no longer
+  `REVERTED` [`6` `PRESENT` restored identically, `14` `MODIFIED` since 2026-11-15], and `132`
+  still `REVERTED`, plus `1` rename hit `3d18917817b src/lib/nogc_sync_mut/ffi/codegen/__init__.spl`).
+- **Resolved (`PRESENT`, `6`):** `7d7bb413700 src/os/crypto/aes_xts.spl`,
+  `16044b91b7b src/os/drivers/audio/hda_pci_binding.spl`, `fe24dc9* src/os/tls13/hkdf.spl`,
+  `cf3144c* src/os/crypto/ocb3.spl`, `be9ccb4* src/os/apps/sshd/ssh_pty.spl`,
+  `9f4b24f* src/app/interpreter/ffi/ast_ffi.spl`.
+- **`src/compiler/20.hir/` status:** `0` files remain `REVERTED` (`e52f3e4de26` in
+  `src/compiler/20.hir/hir_lowering/_Items/verification_contract_lowering.spl` superseded by
+  `21444791b15` `return None`).
+- **Still `REVERTED` in `src/compiler/` (`6` entries, ALL outside `BF-8` `20.hir` ownership):**
+  - `e7ceed097be src/compiler/00.common/assurance/nat_normalizer_receipt.spl` (4 bare `int` annotations remain)
+  - `4558514d53f src/compiler/30.types/__init__.spl` (duplicate dim_* exports / stale `bidirectional_checking`, `BF-1` lane)
+  - `b2623c437f8` & `e52061bb710 src/compiler/70.backend/irdsl/parser.spl` (`split(":", 2)` / `var result`, `BF-2` lane)
+  - `7731b4c1394 src/compiler/PHASE_FILES.md`
+  - `c5588d34c6f src/compiler/80.driver/driver_api_core.spl` (`Span` / `SdnValue` facade imports, `BF-2` lane)
+- **Critical security/crypto fix still `REVERTED` (`src/os/`, outside `BF-8`):**
+  - `4d6616c2426 src/os/crypto/ed25519.spl` still carries fabricated RFC 8032 TEST 2 signature bytes
+    `0x9c, 0x7e, 0x94` at lines 618-621 (`src/lib/common/crypto/ed25519.spl` already has the real vector).
+- **By top-level directory among the `133 REVERTED` entries:** `src/os` (67), `src/app` (36),
+  `src/lib` (20), `src/compiler` (6), `src/runtime` (3), `src/FILE.md` (1).
+- **Status kept `open`** honestly pending remaining non-`20.hir` owners; host invariant check wired in
+  `test/01_unit/compiler/held_verify/mir_optional_field_and_august_audit_spec.spl` (`4/4` pass).

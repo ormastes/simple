@@ -1858,7 +1858,28 @@ const char *rt_cuda_device_name(int64_t device) {
 }
 #undef SIMPLE_GPU_THREAD_LOCAL
 
-/* `func_name: text` is (bytes, byte length), exactly as launch_kernel_ex. */
+/* `func_name: text` arrives as ONE C string. Scope: the pure-Simple
+ * compiler, literal names. Its native codegen splits a text argument into
+ * (bytes, len) only for names listed in src/compiler/50.mir/text_extern_abi.spl,
+ * and this one is not, so it gets the single-word rt_interp_cstr form.
+ * The Rust seed's native codegen passes the tagged value word for unlisted
+ * text args. Both pure-Simple lanes, --runtime-path included, link the C
+ * runtime's NUL-terminated rt_interp_cstr. The Rust rt_interp_cstr is not
+ * terminated (rt_interp_cstr_built_name_unterminated_runtime_path_2026-11-26).
+ * The Rust provider reads a C string. */
+int64_t rt_cuda_module_get_function(int64_t module, const char *func_name) {
+    typedef int64_t (*Fn)(int64_t, const char *);
+    SimpleGpuCallPinV1 pin;
+    int64_t result;
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_module_get_function", &pin))
+        return -3;
+    result = ((Fn)pin.symbol)(module, func_name);
+    simple_gpu_call_release_v1(&pin);
+    return result;
+}
+
+/* `func_name: text` is (bytes, byte length): rt_cuda_launch_kernel has a
+ * text_extern_abi.spl row, so native codegen splits it. */
 int64_t rt_cuda_launch_kernel(int64_t module, const uint8_t *func_name_ptr, uint64_t func_name_len,
                               int64_t grid_x, int64_t grid_y, int64_t grid_z,
                               int64_t block_x, int64_t block_y, int64_t block_z,

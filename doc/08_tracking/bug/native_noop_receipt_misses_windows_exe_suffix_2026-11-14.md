@@ -52,3 +52,14 @@ The matrix's own artifact check (`bootstrap-phase-verification.shs:1224`,
 Bash: MSYS `stat` resolves `simple_test_runner` to `simple_test_runner.exe`
 (checked against the retained outputs dir). So once the driver stops failing,
 nothing else in the row rejects the `.exe` spelling.
+
+## 2026-11-26 (`BF-8` Verification)
+
+- `native_noop_built_output_v1` in `src/compiler/80.driver/cache/native_noop_admission.spl:112-116`
+  and `driver_orchestration.spl:616` confirmed on `origin/release/1.0.0`.
+- `test/01_unit/compiler/driver/native_noop_windows_exe_output_spec.spl`: `2/2` pass.
+- `test/01_unit/compiler/held_verify/stage2_matrix_noop_and_parse_shard_spec.spl`: `6/6` pass
+  (verifies `<out>.exe` resolution, `"ok"` publication, cache hit, cache invalidation upon `.exe`
+  mutation, `"output-missing"` on missing path, and `driver_orchestration.spl` wiring).
+- Shard `doc/08_tracking/bug/db/native_noop_receipt_misses_windows_exe_suffix_2026-11-14.sdn` set to
+  `fix-implemented-verification-pending` pending Stage 2 bootstrap verification.

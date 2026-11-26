@@ -1,0 +1,388 @@
+# Remote application presentation through the resident headless WM.
+#
+# Tracks: wm_host_external_content_owner_2026-07-29
+#
+# Drives the production route (`wm_remote_app_route`) against the production
+# `HostCompositor` + headless backend. The pixels cross a real `MAP_SHARED`
+# slot file; only the request/response file hop is skipped here. The
+# two-process proof is scripts/check/check-wm-remote-app-presentation.shs.
+
+use std.spec.{describe, it, expect}
+use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_request_new}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.file_ops.{file_size}
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.io_runtime.{file_write}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_kill, process_wait}
+use app.play.wm_daemon.{wm_daemon_build_handle}
+use app.play.wm_daemon_client.{WMD_SURFACE_EVENTS, WMD_SURFACE_INPUT, WMD_FRAME_PROBE}
+use app.play.wm_remote_app_client.{
+    WmRemoteAppWindow,
+    wm_remote_app_open_request,
+    wm_remote_app_window_from_response,
+    wm_remote_app_present_request,
+    wm_remote_app_damage_request,
+}
+use app.play.wm_remote_app_host.{
+    WmRemoteAppState,
+    wm_remote_app_state_new,
+    wm_remote_app_route,
+    wm_remote_app_reap,
+    wm_remote_app_shutdown,
+    WM_REMOTE_APP_MAX_SURFACES_PER_CLIENT,
+}
+
+val KNOWN: u32 = 0xFF12AB34u32
+val OTHER: u32 = 0xFF00C853u32
+
+fn solid(width: i32, height: i32, color: u32) -> [u32]:
+    var pixels: [u32] = []
+    var i: i64 = 0
+    while i < width.to_i64() * height.to_i64():
+        pixels.push(color)
+        i = i + 1
+    pixels
+
+fn probe_request(color: u32, window_id: i64) -> DaemonRequest:
+    var req = daemon_request_new(WMD_FRAME_PROBE)
+    req.set_field("color", "{color.to_i64()}")
+    req.set_field("id", "{window_id}")
+    req
+
+fn field_i64(resp: DaemonResponse, key: text) -> i64:
+    resp.get_field(key).to_i64() ?? -1
+
+fn surface_dir() -> text:
+    "/tmp/wm_remote_app_spec_{getpid()}"
+
+describe "remote application presentation in the hosted WM":
+    it "composites pixels a client wrote into the shared slot":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        expect(window.ok).to_equal(true)
+        expect(file_size(window.slot_path)).to_equal(200 * 120 * 4)
+
+        val before = wm_remote_app_route(comp, state, probe_request(KNOWN, window.window_id))
+        comp = before.comp
+        state = before.state
+        expect(field_i64(before.resp, "count")).to_equal(0)
+
+        val presented = wm_remote_app_route(comp, state, wm_remote_app_present_request(window, solid(200, 120, KNOWN), 1, getpid()))
+        comp = presented.comp
+        state = presented.state
+        expect(presented.resp.get_field("accepted")).to_equal("true")
+
+        val after = wm_remote_app_route(comp, state, probe_request(KNOWN, window.window_id))
+        comp = after.comp
+        state = after.state
+        expect(field_i64(after.resp, "content_count")).to_equal(200 * 120)
+        expect(field_i64(after.resp, "count")).to_equal(200 * 120)
+        expect(after.resp.get_field("hash") != before.resp.get_field("hash")).to_equal(true)
+
+    it "refuses a present whose checksum does not match the slot and keeps the prior frame":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 64, 48, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        var bad = wm_remote_app_present_request(window, solid(64, 48, KNOWN), 1, getpid())
+        bad.set_field("checksum", "12345")
+        val refused = wm_remote_app_route(comp, state, bad)
+        comp = refused.comp
+        state = refused.state
+        expect(refused.resp.get_field("accepted")).to_equal("false")
+        expect(refused.resp.get_field("reason")).to_equal("checksum-mismatch")
+        val probe = wm_remote_app_route(comp, state, probe_request(KNOWN, window.window_id))
+        expect(field_i64(probe.resp, "count")).to_equal(0)
+
+    it "refuses a stale revision and a client that did not open the window":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 64, 48, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val first = wm_remote_app_route(comp, state, wm_remote_app_present_request(window, solid(64, 48, KNOWN), 5, getpid()))
+        comp = first.comp
+        state = first.state
+        expect(first.resp.get_field("accepted")).to_equal("true")
+        val stale = wm_remote_app_route(comp, state, wm_remote_app_present_request(window, solid(64, 48, OTHER), 5, getpid()))
+        comp = stale.comp
+        state = stale.state
+        expect(stale.resp.get_field("reason")).to_equal("stale-revision")
+        val foreign = wm_remote_app_route(comp, state, wm_remote_app_present_request(window, solid(64, 48, OTHER), 6, getpid() + 1))
+        expect(foreign.resp.get_field("reason")).to_equal("not-owner")
+
+    it "applies a damage rectangle onto the retained frame":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 64, 48, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val first = wm_remote_app_route(comp, state, wm_remote_app_present_request(window, solid(64, 48, KNOWN), 1, getpid()))
+        comp = first.comp
+        state = first.state
+        var next = solid(64, 48, KNOWN)
+        var y: i64 = 4
+        while y < 14:
+            var x: i64 = 8
+            while x < 28:
+                next[y * 64 + x] = OTHER
+                x = x + 1
+            y = y + 1
+        val delta = wm_remote_app_route(comp, state, wm_remote_app_damage_request(window, next, 2, getpid(), 8, 4, 20, 10))
+        comp = delta.comp
+        state = delta.state
+        expect(delta.resp.get_field("accepted")).to_equal("true")
+        val probe_other = wm_remote_app_route(comp, state, probe_request(OTHER, window.window_id))
+        comp = probe_other.comp
+        state = probe_other.state
+        expect(field_i64(probe_other.resp, "content_count")).to_equal(20 * 10)
+        val probe_known = wm_remote_app_route(comp, state, probe_request(KNOWN, window.window_id))
+        expect(field_i64(probe_known.resp, "content_count")).to_equal(64 * 48 - 20 * 10)
+
+    it "routes pointer input to the owning client in window-local coordinates":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val origin_x = (opened.resp.get_field("content_x").to_i64() ?? -1)
+        val origin_y = (opened.resp.get_field("content_y").to_i64() ?? -1)
+        var input = daemon_request_new(WMD_SURFACE_INPUT)
+        input.set_field("kind", "button")
+        input.set_field("pid", "{getpid()}")
+        input.set_field("x", "{origin_x + 17}")
+        input.set_field("y", "{origin_y + 9}")
+        input.set_field("key", "0")
+        input.set_field("action", "1")
+        val routed = wm_remote_app_route(comp, state, input)
+        comp = routed.comp
+        state = routed.state
+        expect(field_i64(routed.resp, "routed")).to_equal(window.window_id)
+
+        var outside = daemon_request_new(WMD_SURFACE_INPUT)
+        outside.set_field("kind", "button")
+        outside.set_field("x", "{origin_x + 5000}")
+        outside.set_field("y", "{origin_y + 5000}")
+        outside.set_field("key", "0")
+        outside.set_field("action", "1")
+        val missed = wm_remote_app_route(comp, state, outside)
+        comp = missed.comp
+        state = missed.state
+        expect(field_i64(missed.resp, "routed")).to_equal(0)
+
+        var drain = daemon_request_new(WMD_SURFACE_EVENTS)
+        drain.set_field("id", "{window.window_id}")
+        drain.set_field("pid", "{getpid()}")
+        val events = wm_remote_app_route(comp, state, drain)
+        comp = events.comp
+        state = events.state
+        expect(field_i64(events.resp, "count")).to_equal(1)
+        expect(events.resp.get_field("ev0")).to_equal("button|17|9|0|1")
+        val again = wm_remote_app_route(comp, state, drain)
+        expect(field_i64(again.resp, "count")).to_equal(0)
+
+    it "destroys the window and deletes the slot when the client process dies":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val child = process_spawn_async("sleep", ["30"])
+        expect(child > 0).to_equal(true)
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 64, 48, child))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val alive = wm_remote_app_reap(comp, state)
+        comp = alive.comp
+        state = alive.state
+        expect(alive.reaped).to_equal(0)
+        expect(comp.windows.len()).to_equal(1)
+        expect(process_kill(child)).to_equal(true)
+        process_wait(child, 2000)
+        val dead = wm_remote_app_reap(comp, state)
+        comp = dead.comp
+        state = dead.state
+        expect(dead.reaped).to_equal(1)
+        expect(comp.windows.len()).to_equal(0)
+        expect(state.rows.len()).to_equal(0)
+        expect(file_exists(window.slot_path)).to_equal(false)
+
+fn button_at(x: i64, y: i64, sender_pid: i64) -> DaemonRequest:
+    var input = daemon_request_new(WMD_SURFACE_INPUT)
+    input.set_field("kind", "button")
+    input.set_field("pid", "{sender_pid}")
+    input.set_field("x", "{x}")
+    input.set_field("y", "{y}")
+    input.set_field("key", "0")
+    input.set_field("action", "1")
+    input
+
+describe "remote application presentation: refusals and bounds":
+    it "refuses inadmissible geometry without creating a window":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val zero = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 0, 48, getpid()))
+        comp = zero.comp
+        state = zero.state
+        expect(zero.resp.get_field("reason")).to_equal("bad-geometry")
+        val huge = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 9000, 10, getpid()))
+        comp = huge.comp
+        state = huge.state
+        expect(huge.resp.get_field("reason")).to_equal("bad-geometry")
+        expect(comp.windows.len()).to_equal(0)
+        expect(state.rows.len()).to_equal(0)
+
+    it "refuses a client pid that cannot be a live application":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val init = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 64, 48, 1))
+        comp = init.comp
+        state = init.state
+        expect(init.resp.get_field("reason")).to_equal("bad-pid")
+        val child = process_spawn_async("sleep", ["30"])
+        expect(process_kill(child)).to_equal(true)
+        process_wait(child, 2000)
+        val dead = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 64, 48, child))
+        comp = dead.comp
+        state = dead.state
+        expect(dead.resp.get_field("reason")).to_equal("bad-pid")
+        expect(comp.windows.len()).to_equal(0)
+
+    it "caps the number of surfaces one client may hold":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        var opened: i64 = 0
+        while opened < WM_REMOTE_APP_MAX_SURFACES_PER_CLIENT:
+            val ok = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 16, 16, getpid()))
+            comp = ok.comp
+            state = ok.state
+            expect(ok.resp.status).to_equal(0)
+            opened = opened + 1
+        val over = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 16, 16, getpid()))
+        comp = over.comp
+        state = over.state
+        expect(over.resp.get_field("reason")).to_equal("too-many-surfaces")
+        expect(state.rows.len().to_i64()).to_equal(WM_REMOTE_APP_MAX_SURFACES_PER_CLIENT)
+
+    it "survives a slot truncated after the client wrote it and keeps the prior frame":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 64, 48, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val first = wm_remote_app_route(comp, state, wm_remote_app_present_request(window, solid(64, 48, KNOWN), 1, getpid()))
+        comp = first.comp
+        state = first.state
+        expect(first.resp.get_field("accepted")).to_equal("true")
+        val next = wm_remote_app_present_request(window, solid(64, 48, OTHER), 2, getpid())
+        expect(file_write(window.slot_path, "abc")).to_equal(true)
+        val refused = wm_remote_app_route(comp, state, next)
+        comp = refused.comp
+        state = refused.state
+        expect(refused.resp.get_field("reason")).to_equal("slot-unreadable")
+        val probe = wm_remote_app_route(comp, state, probe_request(KNOWN, window.window_id))
+        expect(field_i64(probe.resp, "content_count")).to_equal(64 * 48)
+        expect(probe.resp.get_field("last_refusal")).to_equal("slot-unreadable")
+
+    it "refuses a damage rectangle that does not fit the surface":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 64, 48, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val first = wm_remote_app_route(comp, state, wm_remote_app_present_request(window, solid(64, 48, KNOWN), 1, getpid()))
+        comp = first.comp
+        state = first.state
+        val outside = wm_remote_app_route(comp, state, wm_remote_app_damage_request(window, solid(64, 48, OTHER), 2, getpid(), 60, 4, 20, 10))
+        comp = outside.comp
+        state = outside.state
+        expect(outside.resp.get_field("reason")).to_equal("bad-damage")
+        var malformed = wm_remote_app_damage_request(window, solid(64, 48, OTHER), 3, getpid(), 0, 0, 8, 8)
+        malformed.set_field("damage", "0,0,8")
+        val bad = wm_remote_app_route(comp, state, malformed)
+        comp = bad.comp
+        state = bad.state
+        expect(bad.resp.get_field("reason")).to_equal("bad-damage")
+        val probe = wm_remote_app_route(comp, state, probe_request(OTHER, window.window_id))
+        expect(field_i64(probe.resp, "count")).to_equal(0)
+
+    it "drops the oldest event once the queue holds 64":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val origin_x = (opened.resp.get_field("content_x").to_i64() ?? -1)
+        val origin_y = (opened.resp.get_field("content_y").to_i64() ?? -1)
+        var sent: i64 = 0
+        while sent < 65:
+            val routed = wm_remote_app_route(comp, state, button_at(origin_x + sent, origin_y + 3, getpid()))
+            comp = routed.comp
+            state = routed.state
+            sent = sent + 1
+        var drain = daemon_request_new(WMD_SURFACE_EVENTS)
+        drain.set_field("id", "{window.window_id}")
+        drain.set_field("pid", "{getpid()}")
+        val events = wm_remote_app_route(comp, state, drain)
+        expect(field_i64(events.resp, "count")).to_equal(64)
+        expect(field_i64(events.resp, "dropped")).to_equal(1)
+        expect(events.resp.get_field("ev0")).to_equal("button|1|3|0|1")
+        expect(events.resp.get_field("ev63")).to_equal("button|64|3|0|1")
+
+    it "accepts injected input only from the window's owner and only known kinds":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val origin_x = (opened.resp.get_field("content_x").to_i64() ?? -1)
+        val origin_y = (opened.resp.get_field("content_y").to_i64() ?? -1)
+        val foreign = wm_remote_app_route(comp, state, button_at(origin_x + 5, origin_y + 5, getpid() + 1))
+        comp = foreign.comp
+        state = foreign.state
+        expect(foreign.resp.get_field("reason")).to_equal("not-owner")
+        var forged = button_at(origin_x + 5, origin_y + 5, getpid())
+        forged.set_field("kind", "button|9|9|9|9\nkey")
+        val bad_kind = wm_remote_app_route(comp, state, forged)
+        comp = bad_kind.comp
+        state = bad_kind.state
+        expect(bad_kind.resp.get_field("reason")).to_equal("bad-kind")
+        var drain = daemon_request_new(WMD_SURFACE_EVENTS)
+        drain.set_field("id", "{window.window_id}")
+        drain.set_field("pid", "{getpid()}")
+        val events = wm_remote_app_route(comp, state, drain)
+        expect(field_i64(events.resp, "count")).to_equal(0)
+
+    it "names slots per daemon instance and removes them on shutdown":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 64, 48, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        var comp2 = wm_daemon_build_handle().compositor
+        var state2 = wm_remote_app_state_new(surface_dir())
+        val opened2 = wm_remote_app_route(comp2, state2, wm_remote_app_open_request("Remote", 64, 48, getpid()))
+        state2 = opened2.state
+        val window2 = wm_remote_app_window_from_response(opened2.resp)
+        # Same window id in two daemon instances, different slot files: a client
+        # left over from the first cannot write into the second's window.
+        expect(window.window_id).to_equal(window2.window_id)
+        expect(window.slot_path != window2.slot_path).to_equal(true)
+        expect(state.instance_dir != "" and state.instance_dir != state2.instance_dir).to_equal(true)
+        expect(wm_remote_app_shutdown(state)).to_equal(1)
+        expect(file_exists(window.slot_path)).to_equal(false)
+        expect(file_exists(state.instance_dir)).to_equal(false)
+        expect(file_exists(window2.slot_path)).to_equal(true)
+        expect(wm_remote_app_shutdown(state2)).to_equal(1)

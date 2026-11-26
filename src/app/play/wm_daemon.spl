@@ -22,6 +22,8 @@ use std.daemon_sdk.client.{daemon_ensure_running, daemon_submit_and_wait, daemon
 use std.daemon_sdk.protocol.{read_daemon_requests, write_daemon_response, clear_processed_requests}
 use app.play.wm_daemon_client.{wm_daemon_config, wm_daemon_is_running, WMD_WINDOWS_LIST, WMD_WINDOW_OPEN, WMD_WINDOW_CLOSE, WMD_WINDOW_FOCUS, WMD_STATUS, wm_daemon_windows_from_response}
 use app.play.wm_daemon_ensure.{wm_daemon_ensure_healthy}
+use app.play.wm_daemon_client.{wm_daemon_surface_dir}
+use app.play.wm_remote_app_host.{wm_remote_app_state_new, wm_remote_app_kind, wm_remote_app_route, wm_remote_app_reap, wm_remote_app_shutdown, wm_remote_app_sweep_stale}
 # Imports host_compositor_core directly (NOT host_compositor_entry, which
 # also re-exports host_compositor_bootstrap.* -- the SDL2/Cocoa/Win32
 # alternate-backend + background-provider modules). The resident daemon only
@@ -39,6 +41,8 @@ use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.sffi.system.{sleep_ms}
 
 val WM_DAEMON_IDLE_SLEEP_MS: i64 = 16
+# Client-liveness sweep period while remote surfaces exist (~0.5 s).
+val WM_DAEMON_REAP_CYCLES: i64 = 32
 
 # ============================================================================
 # Compositor lifecycle + request routing
@@ -207,6 +211,11 @@ fn _wm_daemon_serve() -> i64:
         print "wm daemon: lock held by another instance"
         return 1
     wm_daemon_reset_stop()
+    # This process holds the daemon lock: any slot directory left under the
+    # surface directory belongs to a daemon that is gone.
+    wm_remote_app_sweep_stale(wm_daemon_surface_dir())
+    var remote = wm_remote_app_state_new(wm_daemon_surface_dir())
+    var cycle: i64 = 0
     _wm_daemon_start_micros = time_now_unix_micros()
     _wm_daemon_last_cycle_micros = _wm_daemon_start_micros
     print "wm daemon: serving (headless)"
@@ -219,10 +228,23 @@ fn _wm_daemon_serve() -> i64:
         val requests = read_daemon_requests(config.request_dir)
         var processed_ids: [text] = []
         for req in requests:
+            if wm_remote_app_kind(req.kind):
+                val remote_out = wm_remote_app_route(comp, remote, req)
+                comp = remote_out.comp
+                remote = remote_out.state
+                write_daemon_response(remote_out.resp, config.response_dir)
+                processed_ids.push(req.id)
+                continue
             val out = wm_daemon_route(comp, req)
             comp = out.comp
             write_daemon_response(out.resp, config.response_dir)
             processed_ids.push(req.id)
+        # Zero remote clients costs this one length check per cycle.
+        cycle = cycle + 1
+        if remote.rows.len() > 0 and (processed_ids.len() > 0 or cycle % WM_DAEMON_REAP_CYCLES == 0):
+            val swept = wm_remote_app_reap(comp, remote)
+            comp = swept.comp
+            remote = swept.state
         if processed_ids.len() > 0:
             clear_processed_requests(config.request_dir, processed_ids)
         if render:
@@ -231,6 +253,7 @@ fn _wm_daemon_serve() -> i64:
                 wm_opt = Some(wm)
         _wm_daemon_last_cycle_micros = time_now_unix_micros()
         sleep_ms(WM_DAEMON_IDLE_SLEEP_MS)
+    wm_remote_app_shutdown(remote)
     runner.shutdown()
     0
 

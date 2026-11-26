@@ -180,3 +180,7 @@ miscompiled multi-character extractions).
 methods without backing symbols, the F64-BOX item) were never the
 "ready now" scope and stay tracked in this doc as a backlog for scoped
 follow-up lanes.
+
+## JIT Verification (2026-11-26, BF-3)
+
+- `cargo test -p simple-compiler -j 2 --test jit_text_and_worklist_parity`: `bug5_dispatch_worklist_clean_lowering_methods_in_jit` passed via `lower_to_mir_jit` + `JitCompiler::new_static()`, verifying `[3, 1, 2].sort_desc()` (non-mutating), `sorted()`, `[1, 2].zip([10, 20, 30])`, `take(2)` / clamped `take(-1)`, `skip(1)`, `drop(1)`, `appended`, `prepended`, `substr(1, 3)`, `substring(1, 4)`, and `char_count()`.

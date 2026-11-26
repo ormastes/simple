@@ -1,6 +1,6 @@
 # decorator_fn_arm_drops_implicit_return_2026-11-14
 
-- **Severity:** P3. **Status:** open.
+- **Severity:** P3. **Status:** resolved (verified 2026-11-26, BF-3).
 - **Found by:** `test_private_access_closure_guard_paths_2026-11-14` (decorator fixture).
 
 ## Symptom
@@ -39,3 +39,9 @@ lost on that path, so the decorator returns nil and `inner` is rebound to nil.
 The fixture in `test_private_access_matrix_spec.spl` uses an explicit `return`
 so it tests the visibility rule only. Fixing the return value means routing
 the arm through the normal function body path, which is a separate change.
+
+## Verification (2026-11-26, BF-3)
+
+Already resolved in `src/compiler_rust/compiler/src/interpreter_eval.rs` (delegates `Value::Function` calls in `call_value_with_args` through `execute_function_body`, with regression test `test/01_unit/interpreter/decorator_fn_implicit_return_spec.spl` in tree).
+
+- Verified `cargo test -p simple-compiler -j 2 --lib call_value_with_args_function_preserves_implicit_tail_return`: `1 passed; 0 failed; 5059 filtered out`.

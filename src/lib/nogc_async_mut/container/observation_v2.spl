@@ -12,7 +12,7 @@ fn observation_text_v2(value: text) -> bool:
         not value.contains("\n") and not value.contains("\r") and not value.contains("\t")
 
 fn observation_backend_v2(backend: text) -> Result<ContainerBackendIdentityV1, text>:
-    match container_backend_admit_effects_v1(backend):
+    match container_backend_admit_owner_v1(backend):
         case Ok(identity): Ok(identity)
         case Err(reason): Err("container-api-" + reason)
 
@@ -28,6 +28,11 @@ pub fn container_observation_validate_v2(backend: text, value: ContainerHostObse
         if not observation_text_v2(value.native_boot_id): return Err("container-api-native-boot-required")
         if value.boot_observation != "" and not observation_text_v2(value.boot_observation):
             return Err("container-api-boot-observation-invalid")
+    elif value.continuity_assurance == "caller-scope-v1":
+        # Never native: only the pure backend reports it, and boot identity is the owner scope text.
+        if backend != CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1 or not observation_text_v2(value.native_boot_id) or
+                value.boot_observation != "":
+            return Err("container-api-caller-scope-invalid")
     elif value.continuity_assurance == "machine-boot-counter-v1":
         if value.native_boot_id != "" or not observation_text_v2(value.boot_observation):
             return Err("container-api-weak-boot-observation-invalid")
@@ -49,4 +54,5 @@ pub fn simple_container_observe_v2(backend: text, policy_bytes: text) -> Result<
         case ContainerBackendIdentityV1.MacOsSeatbeltProcess:
             Err("container-api-" + CONTAINER_BACKEND_UNQUALIFIED_SEATBELT_V1)
         case ContainerBackendIdentityV1.SimplePureProcess:
-            Err("container-api-" + CONTAINER_BACKEND_UNQUALIFIED_SIMPLE_PURE_V1)
+            # The pure backend is observed through its opened owner (simple_container_observation_v2), not a text policy.
+            Err("container-api-pure-observation-requires-owner")

@@ -19,7 +19,7 @@ use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
 use compiler.hir.hir_lowering._Expressions.accessor_forwarding.*
 use compiler.hir.hir_lowering._Expressions.collection_factory_types.{collection_factory_type_concrete}
-use compiler.hir.hir_lowering.pattern_enum_substitution.{substitute_declared_pattern_type, declared_pattern_slot_type_is_concrete}
+use compiler.hir.hir_lowering.pattern_enum_substitution.{substitute_declared_pattern_type, declared_pattern_slot_type_is_concrete, declared_pattern_slot_type_is_resolved}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering._Expressions.cfg_when_marker.{cfg_when_marker_cond, cfg_when_chain_is_marker}
 use compiler.hir.hir_lowering._Expressions.call_arity.*
@@ -542,7 +542,149 @@ impl HirLowering:
                     case _: return substituted
             case _: return declared
 
-    me owner_type_param_names_raw(raw_owner_symbol_id: i64) -> [text]:
+    fn hir_infer_type_param_bindings(formal: HirType, actual: HirType, names: [text], bindings: Dict<text, HirType>) -> Dict<text, HirType>:
+        var out = bindings
+        match actual.kind:
+            case HirTypeKind.Error | HirTypeKind.Infer(_, _):
+                return out
+            case _: ()
+        match formal.kind:
+            case HirTypeKind.TypeParam(name, _):
+                for expected_name in names:
+                    if expected_name == name and not out.has(name):
+                        out[name] = actual
+                        return out
+                out
+            case HirTypeKind.Optional(f_inner) | HirTypeKind.Array(f_inner, _) | HirTypeKind.Slice(f_inner) | HirTypeKind.Unique(f_inner) | HirTypeKind.Shared(f_inner) | HirTypeKind.Weak(f_inner) | HirTypeKind.Isolated(f_inner) | HirTypeKind.Ref(f_inner, _) | HirTypeKind.Ptr(f_inner, _):
+                match actual.kind:
+                    case HirTypeKind.Optional(a_inner) | HirTypeKind.Array(a_inner, _) | HirTypeKind.Slice(a_inner) | HirTypeKind.Unique(a_inner) | HirTypeKind.Shared(a_inner) | HirTypeKind.Weak(a_inner) | HirTypeKind.Isolated(a_inner) | HirTypeKind.Ref(a_inner, _) | HirTypeKind.Ptr(a_inner, _):
+                        return self.hir_infer_type_param_bindings(f_inner, a_inner, names, out)
+                    case _: ()
+            case HirTypeKind.Dict(fk, fv) | HirTypeKind.Result(fk, fv):
+                match actual.kind:
+                    case HirTypeKind.Dict(ak, av) | HirTypeKind.Result(ak, av):
+                        out = self.hir_infer_type_param_bindings(fk, ak, names, out)
+                        return self.hir_infer_type_param_bindings(fv, av, names, out)
+                    case _: ()
+            case HirTypeKind.Tuple(felems) | HirTypeKind.Union(felems):
+                match actual.kind:
+                    case HirTypeKind.Tuple(aelems) | HirTypeKind.Union(aelems):
+                        if felems.len() == aelems.len():
+                            var ti = 0
+                            while ti < felems.len():
+                                out = self.hir_infer_type_param_bindings(felems[ti], aelems[ti], names, out)
+                                ti = ti + 1
+                    case _: ()
+            case HirTypeKind.Named(f_owner, f_args):
+                match actual.kind:
+                    case HirTypeKind.Named(_, a_args):
+                        if f_args.len() == a_args.len():
+                            var ni = 0
+                            while ni < f_args.len():
+                                out = self.hir_infer_type_param_bindings(f_args[ni], a_args[ni], names, out)
+                                ni = ni + 1
+                    case _: ()
+            case HirTypeKind.Function(f_params, f_ret, _):
+                match actual.kind:
+                    case HirTypeKind.Function(a_params, a_ret, _):
+                        if f_params.len() == a_params.len():
+                            var fi = 0
+                            while fi < f_params.len():
+                                out = self.hir_infer_type_param_bindings(f_params[fi], a_params[fi], names, out)
+                                fi = fi + 1
+                        out = self.hir_infer_type_param_bindings(f_ret, a_ret, names, out)
+                    case _: ()
+            case _: ()
+        out
+
+    fn hir_arg_inferred_type_for_static_call(arg_expr: HirExpr) -> HirType:
+        if arg_expr.has_type_:
+            match arg_expr.type_.kind:
+                case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                case _: return arg_expr.type_
+        val bound = self.binding_kind_type(arg_expr.kind, arg_expr.span)
+        match bound.kind:
+            case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+            case _: return bound
+        match arg_expr.kind:
+            case HirExprKind.IntLit(_, _): HirType(kind: HirTypeKind.Int(64, true), span: arg_expr.span)
+            case HirExprKind.FloatLit(_, _): HirType(kind: HirTypeKind.Float(64), span: arg_expr.span)
+            case HirExprKind.BoolLit(_): HirType(kind: HirTypeKind.Bool, span: arg_expr.span)
+            case HirExprKind.StringLit(_, _): HirType(kind: HirTypeKind.Str, span: arg_expr.span)
+            case _: HirType(kind: HirTypeKind.Error, span: arg_expr.span)
+
+    fn hir_collect_type_param_names(ty: HirType, names: [text]) -> [text]:
+        var out = names
+        match ty.kind:
+            case HirTypeKind.TypeParam(name, _):
+                for existing in out:
+                    if existing == name:
+                        return out
+                return out.push(name)
+            case HirTypeKind.Optional(inner) | HirTypeKind.Array(inner, _) | HirTypeKind.Slice(inner) | HirTypeKind.Unique(inner) | HirTypeKind.Shared(inner) | HirTypeKind.Weak(inner) | HirTypeKind.Isolated(inner) | HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) | HirTypeKind.Tensor(inner, _, _):
+                return self.hir_collect_type_param_names(inner, out)
+            case HirTypeKind.Dict(k, v) | HirTypeKind.Result(k, v):
+                out = self.hir_collect_type_param_names(k, out)
+                return self.hir_collect_type_param_names(v, out)
+            case HirTypeKind.Tuple(elems) | HirTypeKind.Union(elems):
+                for e in elems:
+                    out = self.hir_collect_type_param_names(e, out)
+                return out
+            case HirTypeKind.Named(_, args):
+                for a in args:
+                    out = self.hir_collect_type_param_names(a, out)
+                return out
+            case HirTypeKind.Function(params, ret, _):
+                for p in params:
+                    out = self.hir_collect_type_param_names(p, out)
+                return self.hir_collect_type_param_names(ret, out)
+            case _: ()
+        out
+
+    fn callable_has_leading_self_param(callee_sym: SymbolId) -> bool:
+        if not callee_sym.is_valid():
+            return false
+        if self.lowered_impl_functions.contains_key(callee_sym.id):
+            val impl_fn: HirFunction = self.lowered_impl_functions[callee_sym.id]
+            if impl_fn.params.len() > 0 and (impl_fn.params[0].name == "self" or impl_fn.params[0].name == "me"):
+                return true
+            return false
+        if val sym = self.symbols.get_symbol_raw(callee_sym.id):
+            return sym.kind == SymbolKind.Method
+        false
+
+    fn infer_generic_callable_return_from_args(fn_type: HirType, type_param_names: [text], args: [HirCallArg], callee_sym: SymbolId = SymbolId(id: -1), declared_ret_override: HirType? = None) -> HirType?:
+        match fn_type.kind:
+            case HirTypeKind.Function(params, ret_raw, _):
+                val ret = declared_ret_override ?? ret_raw
+                var names = type_param_names
+                if names.len() == 0:
+                    for p in params:
+                        names = self.hir_collect_type_param_names(p, names)
+                    names = self.hir_collect_type_param_names(ret, names)
+                if names.len() == 0:
+                    return None
+                var bindings: Dict<text, HirType> = {}
+                val offset = if self.callable_has_leading_self_param(callee_sym) and params.len() > args.len(): 1 else: 0
+                var ai = 0
+                while ai < args.len() and (ai + offset) < params.len():
+                    val arg_t: HirCallArg = args[ai]
+                    val actual_arg_ty = self.hir_arg_inferred_type_for_static_call(arg_t.value)
+                    bindings = self.hir_infer_type_param_bindings(params[ai + offset], actual_arg_ty, names, bindings)
+                    ai = ai + 1
+                var actuals: [HirType] = []
+                for tp_name in names:
+                    if not bindings.has(tp_name):
+                        return None
+                    actuals = actuals.push(bindings[tp_name])
+                val substituted = substitute_declared_pattern_type(ret, names, actuals)
+                if not declared_pattern_slot_type_is_resolved(substituted):
+                    return None
+                return Some(substituted)
+            case _: ()
+        None
+
+    fn owner_type_param_names_raw(raw_owner_symbol_id: i64) -> [text]:
         # Same key order as field_type_for_owner_raw: module-qualified first.
         var empty: [text] = []
         if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
@@ -555,53 +697,68 @@ impl HirLowering:
                 return self.struct_type_param_names_by_name[owner_name]
         empty
 
-    me instantiated_direct_call_return_kind(kind: HirExprKind) -> HirType?:
-        """Instantiate a generic free/extern function's declared return type with explicit turbofish type_args."""
+    fn instantiated_direct_call_return_kind(kind: HirExprKind) -> HirType?:
+        """Instantiate a generic free/extern function's declared return type with explicit turbofish type_args or inferred argument types."""
         match kind:
-            case HirExprKind.Call(callee, _, call_type_args):
-                val applied: [HirType] = call_type_args
-                if applied.len() == 0:
-                    return None
+            case HirExprKind.Call(callee, args, call_type_args):
                 val callee_symbol = _hir_expr_symbol_or_invalid(callee.kind)
                 if not callee_symbol.is_valid():
                     return None
+                val applied: [HirType] = call_type_args
                 val sym_key = callee_symbol.id.to_text()
                 val tp_key = "#fn_tp#" + sym_key
                 val ret_key = "#fn_ret#" + sym_key
-                if not self.struct_type_param_names_by_name.has(tp_key) or not self.class_method_return_types_by_name.has(ret_key):
-                    return None
-                val names = self.struct_type_param_names_by_name[tp_key]
-                if names.len() != applied.len():
-                    return None
-                val declared = self.class_method_return_types_by_name[ret_key]
-                val substituted = substitute_declared_pattern_type(declared, names, applied)
-                if not declared_pattern_slot_type_is_concrete(substituted):
-                    return None
-                return Some(substituted)
+                if applied.len() > 0:
+                    if not self.struct_type_param_names_by_name.has(tp_key) or not self.class_method_return_types_by_name.has(ret_key):
+                        return None
+                    val names = self.struct_type_param_names_by_name[tp_key]
+                    if names.len() != applied.len():
+                        return None
+                    val declared = self.class_method_return_types_by_name[ret_key]
+                    val substituted = substitute_declared_pattern_type(declared, names, applied)
+                    if not declared_pattern_slot_type_is_concrete(substituted):
+                        return None
+                    return Some(substituted)
             case _: ()
         None
 
-    me instantiated_method_call_return_kind(kind: HirExprKind) -> HirType?:
+    fn instantiated_method_call_return_kind(kind: HirExprKind) -> HirType?:
         # Bug generic_method_return_subst_2026_11_09: method-call sibling of
         # instantiate_field_type_for_base. `b.poll()` on `b: Box<text?>` must
         # see the declared `Poll<T>` as `Poll<text?>`, or `match b.poll():
-        # case Poll.Ready(v)` has no subject owner. Substitute only with a
-        # fully resolved, declaration-ordered argument list; otherwise leave
-        # the call untyped (the pre-existing behaviour).
+        # case Poll.Ready(v)` has no subject owner. Also handles imported generic
+        # classes (lookup_method_in_type_raw) and static generic calls such as
+        # `Future.from_value(task())` when the receiver is the type symbol.
         match kind:
-            case HirExprKind.MethodCall(receiver, method, _, _):
+            case HirExprKind.MethodCall(receiver, method, args, resolution):
                 var receiver_type: HirType? = None
                 if receiver.has_type_:
-                    receiver_type = receiver.type_
-                else:
+                    match receiver.type_.kind:
+                        case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                        case _: receiver_type = Some(receiver.type_)
+                if receiver_type == None:
                     val receiver_symbol = _hir_expr_symbol_or_invalid(receiver.kind)
-                    if not receiver_symbol.is_valid():
-                        return None
-                    receiver_type = self.symbols.get_symbol_type_raw(receiver_symbol.id)
+                    if receiver_symbol.is_valid():
+                        if val sym_rec = self.symbols.get_symbol_raw(receiver_symbol.id):
+                            if sym_rec.kind == SymbolKind.Class or sym_rec.kind == SymbolKind.Struct or sym_rec.kind == SymbolKind.Enum:
+                                val names = self.owner_type_param_names_raw(receiver_symbol.id)
+                                if val static_sym = self.symbols.lookup_static_method_raw(receiver_symbol.id, method):
+                                    if val fn_sym_ty = self.symbols.get_symbol_type_raw(static_sym.id):
+                                        return self.infer_generic_callable_return_from_args(fn_sym_ty, names, args, static_sym)
+                            receiver_type = sym_rec.type_
+                if receiver_type == None:
+                    val bound_rec = self.binding_kind_type(receiver.kind, receiver.span)
+                    match bound_rec.kind:
+                        case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                        case _: receiver_type = Some(bound_rec)
                 if val owner_type = receiver_type:
                     match owner_type.kind:
                         case HirTypeKind.Named(owner, arguments):
                             if arguments.len() == 0:
+                                val names = self.owner_type_param_names_raw(owner.id)
+                                if val static_sym = self.symbols.lookup_static_method_raw(owner.id, method):
+                                    if val fn_sym_ty = self.symbols.get_symbol_type_raw(static_sym.id):
+                                        return self.infer_generic_callable_return_from_args(fn_sym_ty, names, args, static_sym)
                                 return None
                             val names = self.owner_type_param_names_raw(owner.id)
                             if names.len() != arguments.len():
@@ -612,10 +769,17 @@ impl HirLowering:
                                     case HirTypeKind.Error: return None
                                     case _: return Some(substituted)
                         case _: ()
+                match resolution:
+                    case MethodResolution.StaticMethod(owner_id, static_method_id):
+                        if owner_id.is_valid() and static_method_id.is_valid():
+                            val names = self.owner_type_param_names_raw(owner_id.id)
+                            if val fn_sym_ty = self.symbols.get_symbol_type_raw(static_method_id.id):
+                                return self.infer_generic_callable_return_from_args(fn_sym_ty, names, args, static_method_id)
+                    case _: ()
             case _: ()
         None
 
-    me class_method_return_type_raw(raw_owner_symbol_id: i64, method: text) -> HirType?:
+    fn class_method_return_type_raw(raw_owner_symbol_id: i64, method: text) -> HirType?:
         # Same key order as owner_type_param_names_raw: module-qualified first.
         if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
             val owner_name: text = owner_symbol.name
@@ -626,6 +790,12 @@ impl HirLowering:
             val bare_key: text = owner_name + "::" + method
             if self.class_method_return_types_by_name.has(bare_key):
                 return Some(self.class_method_return_types_by_name[bare_key])
+        if val method_id = self.symbols.lookup_method_in_type_raw(raw_owner_symbol_id, method):
+            if val method_sym_ty = self.symbols.get_symbol_type_raw(method_id.id):
+                match method_sym_ty.kind:
+                    case HirTypeKind.Function(_, ret, _):
+                        return Some(ret)
+                    case _: ()
         None
 
     fn resolve_method_call_arity_symbol_id(resolution: MethodResolution, receiver: HirExpr, method_name: text) -> i64:

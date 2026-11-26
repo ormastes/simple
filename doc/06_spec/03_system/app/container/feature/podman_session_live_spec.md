@@ -1,9 +1,18 @@
 # Podman session live regression manual
 
-Qualification: **NOT_RUN** for the 2026-11-14 command override change. No
-runtime, build, or engine qualification was attempted; the parent session's
-qualification iteration cap is exhausted. Source assertions are not live
-evidence. An ungated green suite is not engine evidence either.
+Qualification: self-hosted runtime **NOT_RUN** for the 2026-11-14 command
+override change. Source assertions are not live evidence. An ungated green
+suite is not engine evidence either: without `SIMPLE_PODMAN_SMOKE=1` every case
+prints `PODMAN SMOKE NOT RUN` and passes vacuously.
+
+Diagnostic engine run, 2026-11-26 (aarch64, rootless Podman 4.9.3): the Rust
+bootstrap seed interpreter (sha256 prefix `fb80903917d6d5f5`, not the qualified
+self-hosted runtime) ran this spec with both opt-ins and the fixture image
+`87966450df85` built from the command below:
+`5 total, 5 passed, 0 failed`, `executed=5`, no container left afterwards.
+Opt-in without the fixture setting failed the first case as designed (4/5).
+The fixture discriminates: `podman run --rm <fixture> /bin/printf '<%s>' x`
+without the entrypoint override prints nothing and exits 1.
 
 The legacy `PodmanSessionSpecV1.command` is an exact executable/argv vector.
 The session builder emits `--entrypoint`, an empty argument, the image, then

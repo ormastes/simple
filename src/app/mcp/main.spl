@@ -25,9 +25,11 @@ use .mcp_log_options
 # Linear stdio framing primitives in src/runtime/runtime_native.c (matching
 # src/app/md_lsp/md_lsp_main.spl). Note: C-runtime-only ABI — not registered in
 # the Rust seed interpreter (src/compiler_rust/.../interpreter_extern/mod.rs);
-# MCP server runs via the native-compiled binary.
+# when running under the seed interpreter or JIT, route through
+# .main_stdio_fallback so both native and interpreter lanes stay functional.
 extern fn rt_stdin_read_line_text() -> text
 extern fn rt_stdin_read_chars_text(n: i64) -> text
+use .main_stdio_fallback.{mcp_needs_stdin_fallback, mcp_fallback_read_line, mcp_fallback_read_chars}
 use app.protocol.wire_stdout.{wire_stdout_write as print_raw}
 use std.nogc_sync_mut.sffi.diag.{stdout_flush as sosix_stdout_flush}
 
@@ -279,9 +281,13 @@ fn _mcp_initialize_result() -> text:
     result
 
 fn _mcp_read_line() -> text:
+    if mcp_needs_stdin_fallback():
+        return mcp_fallback_read_line()
     rt_stdin_read_line_text()
 
 fn _mcp_read_chars(count: i64) -> text:
+    if mcp_needs_stdin_fallback():
+        return mcp_fallback_read_chars(count)
     rt_stdin_read_chars_text(count)
 
 # Delegates to the canonical framing primitives in app.protocol.framing.

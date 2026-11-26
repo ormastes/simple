@@ -433,6 +433,7 @@ All three entries are covered by the native request/plan digest.
 | `simple orchestrator server-*` | Linked command route | NOT_RUN |
 | Standalone `simple-orchestrator server-*` | Shared config and SSH controller route | NOT_RUN |
 | Caret `orchestrator server-*`, consumer `caret` | Shared route and existing reply validators | NOT_RUN |
+| `simple-orchestrator caret-serve` / `caret-client` loopback | Local 127.0.0.1 listener, token-authenticated client | Seed-interpreter diagnostic 2026-11-26: start, status, crashed, cleanup-old preview, shutdown and post-shutdown `not-running` observed; `launch` (spawns an LLM agent) NOT_RUN; self-hosted NOT_RUN |
 | `agent` consumer context | Strict selection and container address projection | NOT_RUN |
 | Linux SSH client | Owned framed stdin/capture, strict host keys | NOT_RUN |
 | Windows SSH client | Owned stdin adapter; protected external key-path projection unavailable | Fail closed; NOT_RUN |

@@ -1,0 +1,46 @@
+# Windows Docker probe -> ContainerCapabilityReportV1 adapter (architecture
+# pure_simple_container 10). Affirms only what the engine probe observed plus
+# the policy's own image/kernel pin; every field the probe cannot see stays
+# false. Per-request admission and the scoped engine authority are still
+# checked at the leaf (windows_docker_request_reason_v1); a matching report is
+# never permission to launch.
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1,
+    ContainerCapabilityFlagV1, container_capability_report_v1_empty,
+    CONTAINER_CLIENT_AUTHORITY_DELEGATED_V1, CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1,
+    CONTAINER_ISOLATION_KIND_NATIVE_V1}
+use std.common.contracts.container.runtime_v1.RuntimeProbeV1
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.WindowsDockerPolicyV1
+use std.common.crypto.sha256.sha256_text
+
+const _DOCKER_UNOBSERVED_V1 = "docker-engine-unobserved"
+
+fn _docker_observed_v1(probe: RuntimeProbeV1) -> bool:
+    probe.engine_present and probe.healthy
+
+# Empty when the engine was observed healthy; otherwise the probe's own reason,
+# so a refusal names why Docker was not available (for example
+# docker-hosted-launch-not-enabled) instead of a generic mismatch.
+pub fn windows_docker_unavailable_reason_v1(probe: RuntimeProbeV1) -> text:
+    if _docker_observed_v1(probe): return ""
+    if probe.reason != "": return probe.reason
+    _DOCKER_UNOBSERVED_V1
+
+pub fn windows_docker_capability_report_v1(probe: RuntimeProbeV1, policy: WindowsDockerPolicyV1,
+        host_arch: text) -> ContainerCapabilityReportV1:
+    var report = container_capability_report_v1_empty()
+    val observed = _docker_observed_v1(probe)
+    val pinned = policy.engine_id != "" and policy.expected_image_id != "" and
+        policy.image_os_version != "" and policy.expected_kernel_version != ""
+    report.host_os = "windows"
+    report.host_arch = host_arch
+    report.guest_abi = "windows"
+    report.isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_V1
+    report.client_authority = if observed: CONTAINER_CLIENT_AUTHORITY_DELEGATED_V1 else: CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1
+    report.launch_qualified = ContainerCapabilityFlagV1(observed and pinned)
+    report.provider_version = probe.provider
+    if observed and pinned:
+        report.evidence_revision = "docker:" + sha256_text(policy.engine_id + "\n" + policy.expected_image_id + "\n" +
+            policy.image_os_version + "\n" + policy.expected_kernel_version + "\n" + probe.provider)
+    report
+
+export windows_docker_capability_report_v1, windows_docker_unavailable_reason_v1

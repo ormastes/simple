@@ -1,7 +1,7 @@
 # JIT: `T? as u64` inside `unsafe` on a boxed `Some` yields a garbage word
 
 - **id:** jit_unsafe_optional_as_cast_garbage_2026_11_09
-- **status:** open
+- **status:** resolved (verified 2026-11-26, BF-3)
 - **severity:** P2 — wrong value, but only reachable inside `unsafe:` after
   `optional_as_cast_yields_zero_2026_11_09` made the safe-code form a compile error
 - **found:** 2026-11-09, while verifying that fix on a seed built from its branch
@@ -39,3 +39,10 @@ the carrier. Add a `compile_and_run` test with the program above asserting
 ## Related
 
 - `optional_as_cast_yields_zero_2026_11_09` — the safe-code form, now rejected.
+
+## Verification (2026-11-26, BF-3)
+
+Already fixed in `src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs` (`rt_unwrap_or_trap` + `unbox_scalar_for_raw_slot`). Verified on 2026-11-26:
+
+- `cargo test -p simple-compiler -j 2 --test compile_and_run unsafe_option`: `5 passed; 0 failed; 48 filtered out` (`unsafe_optional_u64_as_cast_extracts_payload`, `unsafe_optional_as_cast_to_wider_int_converts_payload`, `unsafe_optional_i64_as_cast_extracts_payload`, `unsafe_optional_text_as_cast_decodes_payload`, `unsafe_option_enum_i64_as_cast_extracts_payload`).
+- `cargo test -p simple-compiler -j 2 --test jit_text_and_worklist_parity`: `bug3_unsafe_optional_as_cast_jit_variants_and_interpolation` passed under `lower_to_mir_jit` + `JitCompiler::new_static()`, covering `u64? as u64`, `"{r as u64}"` interpolation, `i64? as u64`, `u64? as i64`, and `f64? as f64`.

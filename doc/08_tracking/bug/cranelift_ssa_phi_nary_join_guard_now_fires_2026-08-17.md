@@ -325,3 +325,10 @@ seed-smoke evidence (2/2 green post-fix, 0/2 pre-fix) plus current source
 inspection. The llvm-lib twin restriction
 (`llvm_lib_translate_expr.spl:714`) remains a separately-scoped lane, as
 recorded above. Status: CLOSED.
+
+## Verification 2026-11-26 (bf-2 lane, Windows host)
+
+- Executed `test/01_unit/compiler/backend/cranelift_ssa_phi_nary_join_spec.spl --mode=interpreter`
+  with `wa3_shared_bin/simple.exe` (`SIMPLE_LIB=C:\dev\wt\bf-2-compiler-mir-backend\src`):
+  4/4 passed (including 3-predecessor `i64`, `Unit`, and orphan-local phi joins
+  through the real Cranelift provider JIT).

@@ -1,0 +1,333 @@
+# SOSIX app sandbox (lane W2, AppContainer). Every Windows example returns early unless
+# is_windows(); a skipped example is not evidence, so the measured values are recorded here.
+# Run with a seed that carries the userenv externs:
+#   C:/dev/keep/seeds/simple-local-20261126b.exe test <this spec>
+#
+# Children are copies of the seed running test/fixtures/container/app_sandbox_probe.spl (the
+# owner quotes every arg, so cmd.exe cannot be the child). The seed copy and the probe sit in
+# a staging dir granted READ to the container SID; the child cwd is a second dir granted
+# MODIFY; nothing else is granted.
+#
+# Measured 2026-11-26 on the Windows 11 evidence host with simple-local-20261126b.exe (9 of 9):
+#   exit-code transport: child exit 7 comes back as exit_code 7, reason ""
+#   read denial:    TARGET deny (user.txt, Everyone has read+execute; the plain process reads it)
+#                   CONTROL allow (granted.txt in the granted work dir, same child run)
+#   write/read of the granted dir: TARGET allow, the file is read back by the parent
+#   network denial: TCP to 127.0.0.1:<port> of an in-process listener: child deny, plain process allow
+#                   DNS example.com: child deny, plain process allow
+#   timeout: a sleeping child at wall 1500 ms -> reason app-sandbox-timeout, timed_out, tree killed
+#   teardown: the count of Packages/sosix-* folders is equal before and after (per-run names; a
+#             profile the spec creates raises it by one); ACE counts of the stage and work dirs
+#             are equal before and after (every grant revoked)
+use std.spec.{describe, it, expect}
+use std.platform.{is_windows, get_current_dir, get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{env_get, file_read, file_exists, file_copy, file_write, file_delete, getpid, time_now_monotonic_ms, process_run}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir}
+use std.common.contracts.sosix.containment_v1.{SosixContainMillisV1}
+use std.nogc_sync_mut.sosix.app_container_types_v1.{SosixAppSandboxRequestV1, SosixAppSandboxResultV1}
+use std.nogc_sync_mut.sosix.app_container_v1.{sosix_app_sandbox_identity_v1, sosix_app_sandbox_run_v1}
+use std.nogc_sync_mut.sosix.linux.app_container_v1.{sosix_app_sandbox_identity_v1 as linux_identity, sosix_app_sandbox_run_v1 as linux_run}
+use std.nogc_sync_mut.sosix.macos.app_container_v1.{sosix_app_sandbox_run_v1 as macos_run}
+use std.nogc_sync_mut.sosix.freebsd.app_container_v1.{sosix_app_sandbox_run_v1 as freebsd_run}
+use std.nogc_sync_mut.sosix.simpleos.app_container_v1.{sosix_app_sandbox_run_v1 as simpleos_run}
+use std.nogc_sync_mut.io.windows_appcontainer_abi.{CreateAppContainerProfile, DeleteAppContainerProfile, FreeSid}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_get_module_file_name_w}
+use std.nogc_sync_mut.io.dir_ops.dir_list
+use std.common.char_from_code_pure.{char_from_code}
+use std.nogc_sync_mut.sosix.network.{sosix_tcp_bind, sosix_tcp_listen, sosix_tcp_local_addr, sosix_tcp_close}
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_wide_v1, sec_read_ptr_v1, sec_u16_v1, sec_put_u32_v1, sec_get_dacl_v1, sec_set_entries_v1, sec_set_dacl_v1, sec_access_entry_v1, sec_sid_from_text_v1, sec_put_u32_v1 as sec_put_mode}
+
+
+val SEED = running_binary()
+val RUN_TAG = getpid().to_string() + "_" + time_now_monotonic_ms().to_string()
+val OFFLINE_HOST = "example.com"
+
+# Path of the binary running this spec (GetModuleFileNameW of the process), ASCII only; "" off Windows.
+fn running_binary() -> text:
+    if not is_windows(): return ""
+    val buffer = sec_alloc_v1(1040)
+    if buffer == 0: return ""
+    val count = windows_abi_get_module_file_name_w(0, buffer, 520)
+    var out = ""
+    var index = 0
+    while index < count and index < 520:
+        val unit = sec_u16_v1(buffer + index * 2)
+        if unit == 0 or unit > 127: break
+        out = out + char_from_code(unit)
+        index = index + 1
+    sec_free_v1(buffer)
+    out.replace("\\", "/")
+
+# Explicit skip off Windows (printed, never a silent pass); on Windows a missing seed FAILS.
+fn windows_ready() -> bool:
+    if not is_windows():
+        print("SKIP: app sandbox examples require Windows")
+        return false
+    expect(file_exists(SEED)).to_equal(true)
+    true
+
+fn ready() -> bool:
+    is_windows() and file_exists(SEED)
+
+fn root() -> text:
+    get_current_dir().replace("\\", "/")
+
+fn temp() -> text:
+    get_temp_dir().replace("\\", "/")
+
+val BASE = temp() + "/app_sandbox_" + RUN_TAG
+val STAGE = BASE + "/stage"
+val WORK = BASE + "/work"
+val OUTSIDE = BASE + "/outside"
+
+# Everyone (S-1-1-0) gets read+execute on `path`: the file is then readable by a plain
+# medium-integrity user, which is the case the AppContainer must still deny.
+fn grant_everyone_read(path: text) -> bool:
+    val sid = sec_sid_from_text_v1("S-1-1-0")
+    val slot = sec_alloc_v1(8)
+    val entries = sec_alloc_v1(48)
+    var done = false
+    if sid != 0 and slot != 0 and entries != 0:
+        val native = path.replace("/", "\\")
+        val descriptor = sec_get_dacl_v1(native, slot)
+        if descriptor != 0:
+            sec_access_entry_v1(entries, 0, 0x1200A9, 3, sid)
+            val merged = sec_set_entries_v1(1, entries, sec_read_ptr_v1(slot))
+            if merged != 0: done = sec_set_dacl_v1(native, merged)
+            sec_local_free_v1(merged)
+        sec_local_free_v1(descriptor)
+    sec_free_v1(entries)
+    sec_free_v1(slot)
+    sec_local_free_v1(sid)
+    done
+
+# Number of ACEs in the DACL of a path; -1 when unreadable.
+fn ace_count(path: text) -> i64:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return -1
+    val descriptor = sec_get_dacl_v1(path.replace("/", "\\"), slot)
+    var count = -1
+    if descriptor != 0:
+        val dacl = sec_read_ptr_v1(slot)
+        if dacl != 0: count = sec_u16_v1(dacl + 4)
+    sec_local_free_v1(descriptor)
+    sec_free_v1(slot)
+    count
+
+fn setup() -> bool:
+    if not ready(): return false
+    val made = dir_create_all(STAGE) and dir_create_all(WORK) and dir_create_all(OUTSIDE)
+    val staged = file_copy(SEED, STAGE + "/seed.exe") and file_copy(root() + "/test/fixtures/container/app_sandbox_probe.spl", STAGE + "/probe.spl")
+    val files = file_write(OUTSIDE + "/user.txt", "user-private-readable") and file_write(WORK + "/granted.txt", "granted-readable")
+    made and staged and files and grant_everyone_read(OUTSIDE)
+
+val SETUP_OK = setup()
+val WORK_ACES_BEFORE = if SETUP_OK: ace_count(WORK) else: -1
+val STAGE_ACES_BEFORE = if SETUP_OK: ace_count(STAGE) else: -1
+
+fn request_ro(scope: text, args: [text], tag: text, wall: i64, readonly_dirs: [text]) -> SosixAppSandboxRequestV1:
+    SosixAppSandboxRequestV1(scope: scope, program: STAGE + "/seed.exe",
+        args: ["run", STAGE + "/probe.spl", "args:"] + args, directory: WORK,
+        readonly_dirs: readonly_dirs, writable_dirs: [WORK],
+        stdout_path: BASE + "/" + tag + ".out", stderr_path: BASE + "/" + tag + ".err",
+        wall: SosixContainMillisV1(wall))
+
+fn request(scope: text, args: [text], tag: text, wall: i64) -> SosixAppSandboxRequestV1:
+    request_ro(scope, args, tag, wall, [STAGE])
+
+fn run(scope: text, args: [text], tag: text) -> SosixAppSandboxResultV1:
+    sosix_app_sandbox_run_v1(request(scope, args, tag, 120000))
+
+fn out_of(tag: text) -> text:
+    file_read(BASE + "/" + tag + ".out")
+
+# The same probe under the caller's own medium-integrity token: the positive control.
+fn plain(args: [text]) -> text:
+    val (out, _err, _code) = process_run(SEED, ["run", STAGE + "/probe.spl", "args:"] + args)
+    out
+
+fn packages_dir() -> text:
+    env_get("LOCALAPPDATA").unwrap_or("").replace("\\", "/") + "/Packages"
+
+# Number of sandbox profile folders (sosix-*) currently on disk.
+fn profile_count() -> i64:
+    var count = 0
+    for entry in dir_list(packages_dir()):
+        if entry.starts_with("sosix-"): count = count + 1
+    count
+
+# GRANT (1) or REVOKE (4) read+execute for an arbitrary SID pointer on path; "" on success.
+fn sid_read_ace(path: text, sid: i64, mode: i64) -> bool:
+    val slot = sec_alloc_v1(8)
+    val entries = sec_alloc_v1(48)
+    var done = false
+    if slot != 0 and entries != 0:
+        val native = path.replace("/", "\\")
+        val descriptor = sec_get_dacl_v1(native, slot)
+        if descriptor != 0:
+            sec_access_entry_v1(entries, 0, 0x1200A9, 3, sid)
+            sec_put_mode(entries + 4, mode)
+            val merged = sec_set_entries_v1(1, entries, sec_read_ptr_v1(slot))
+            if merged != 0: done = sec_set_dacl_v1(native, merged)
+            sec_local_free_v1(merged)
+        sec_local_free_v1(descriptor)
+    sec_free_v1(entries)
+    sec_free_v1(slot)
+    done
+
+# Models a crashed run: a profile NAMED AFTER THE SCOPE (the old per-scope scheme) holds a leaked
+# read grant on LEAK_DIR. Returns the two child verdicts; the leak is revoked and the profile deleted.
+fn leaked_grant_probe() -> [text]:
+    val leak = BASE + "/leak"
+    val made = dir_create_all(leak) and file_write(leak + "/secret.txt", "leaked-secret")
+    val name = sec_wide_v1("sosix-w2-leak")
+    val slot = sec_alloc_v1(8)
+    var outs: [text] = ["setup-failed", "setup-failed"]
+    if made and name != 0 and slot != 0 and CreateAppContainerProfile(name, name, name, 0, 0u32, slot) == 0:
+        val sid = sec_read_ptr_v1(slot)
+        if sid_read_ace(leak, sid, 1):
+            val denied = run_ro("w2-leak", ["read", leak + "/secret.txt", WORK + "/granted.txt"], "leak", [STAGE])
+            val allowed = run_ro("w2-leak", ["read", leak + "/secret.txt", WORK + "/granted.txt"], "leakctl", [STAGE, leak])
+            outs = [denied.reason + "|" + out_of("leak"), allowed.reason + "|" + out_of("leakctl")]
+            val _revoked = sid_read_ace(leak, sid, 4)
+        val _freed = FreeSid(sid)
+        val _deleted = DeleteAppContainerProfile(name)
+    sec_free_v1(slot)
+    sec_free_v1(name)
+    outs
+
+fn run_ro(scope: text, args: [text], tag: text, readonly_dirs: [text]) -> SosixAppSandboxResultV1:
+    sosix_app_sandbox_run_v1(request_ro(scope, args, tag, 120000, readonly_dirs))
+
+val PROFILES_BEFORE = if SETUP_OK: profile_count() else: -1
+val exit_run = if SETUP_OK: run("w2-exit", ["exit", "7"], "exit") else: sosix_app_sandbox_run_v1(request("w2-exit", [], "skip", 1000))
+val read_run = if SETUP_OK: run("w2-read", ["read", OUTSIDE + "/user.txt", WORK + "/granted.txt"], "read") else: exit_run
+val write_run = if SETUP_OK: run("w2-write", ["write", WORK + "/child_wrote.txt"], "write") else: exit_run
+val WORK_ACES_AFTER = if SETUP_OK: ace_count(WORK) else: -1
+val STAGE_ACES_AFTER = if SETUP_OK: ace_count(STAGE) else: -1
+
+val LISTENER_FD = if SETUP_OK: sosix_tcp_bind("127.0.0.1:0") else: -1
+val LISTENER_OK = LISTENER_FD >= 0
+val LISTENER_ADDR = if LISTENER_OK: sosix_tcp_local_addr(LISTENER_FD).unwrap_or("") else: ""
+val tcp_run = if LISTENER_ADDR != "": run("w2-tcp", ["tcp", LISTENER_ADDR], "tcp") else: exit_run
+val dns_run = if SETUP_OK: run("w2-dns", ["dns", OFFLINE_HOST], "dns") else: exit_run
+val timeout_run = if SETUP_OK: sosix_app_sandbox_run_v1(request("w2-sleep", ["sleep"], "sleep", 1500)) else: exit_run
+val LEAK_OUTS = if SETUP_OK: leaked_grant_probe() else: ["skipped", "skipped"]
+# A grant that fails midway: STAGE is granted, then a system dir this (non-elevated) user cannot
+# write a DACL on is refused. Teardown must still revoke STAGE and delete the profile.
+val FAIL_DIR = "C:/Windows/System32/drivers/etc"
+val fail_run = if SETUP_OK: run_ro("w2-fail", ["exit", "0"], "fail", [STAGE, FAIL_DIR]) else: exit_run
+val STAGE_ACES_AFTER_FAIL = if SETUP_OK: ace_count(STAGE) else: -1
+val PROFILES_AFTER = if SETUP_OK: profile_count() else: -1
+
+describe "sosix app sandbox identity and refusals":
+    it "names the identity app-sandbox and the other hosts refuse with a typed reason":
+        expect(sosix_app_sandbox_identity_v1()).to_equal("app-sandbox")
+        expect(linux_identity()).to_equal("app-sandbox")
+        val any = request("x", [], "refuse", 1000)
+        expect(linux_run(any).reason).to_equal("app-sandbox-unimplemented-linux")
+        expect(macos_run(any).reason).to_equal("app-sandbox-unimplemented-macos")
+        expect(freebsd_run(any).reason).to_equal("app-sandbox-unimplemented-freebsd")
+        expect(simpleos_run(any).reason).to_equal("app-sandbox-unimplemented-simpleos")
+        expect(linux_run(any).exit_code.value).to_equal(-1)
+
+    it "refuses a bad scope, a directory that is not granted, a missing program and a zero wall":
+        if not windows_ready(): return
+        expect(sosix_app_sandbox_run_v1(request("Bad Scope", ["exit", "0"], "r1", 1000)).reason).to_equal("app-sandbox-scope-invalid")
+        val ungranted = SosixAppSandboxRequestV1(scope: "w2-refuse", program: SEED, args: [], directory: OUTSIDE,
+            readonly_dirs: [STAGE], writable_dirs: [WORK], stdout_path: BASE + "/r2.out", stderr_path: BASE + "/r2.err",
+            wall: SosixContainMillisV1(1000))
+        expect(sosix_app_sandbox_run_v1(ungranted).reason).to_equal("app-sandbox-directory-not-granted")
+        val missing = SosixAppSandboxRequestV1(scope: "w2-refuse", program: STAGE + "/absent.exe", args: [], directory: WORK,
+            readonly_dirs: [STAGE], writable_dirs: [WORK], stdout_path: BASE + "/r3.out", stderr_path: BASE + "/r3.err",
+            wall: SosixContainMillisV1(1000))
+        expect(sosix_app_sandbox_run_v1(missing).reason).to_equal("app-sandbox-request-invalid")
+        expect(sosix_app_sandbox_run_v1(request("w2-refuse", ["exit", "0"], "r4", 0)).reason).to_equal("app-sandbox-request-invalid")
+        expect(file_exists(BASE + "/r4.out")).to_equal(false)
+
+describe "sosix app sandbox launch and teardown":
+    it "runs the child, returns its exit code and leaves no profile or grant behind":
+        if not windows_ready(): return
+        expect(exit_run.reason).to_equal("")
+        expect(exit_run.exit_code.value).to_equal(7)
+        expect(exit_run.timed_out.value).to_equal(false)
+        # Every per-run profile folder is gone; a profile the spec creates itself is visible in the
+        # same count (positive control), so the equality is not a path typo.
+        expect(PROFILES_BEFORE >= 0).to_equal(true)
+        expect(PROFILES_AFTER).to_equal(PROFILES_BEFORE)
+        val control = sec_wide_v1("sosix-w2-control")
+        val slot = sec_alloc_v1(8)
+        expect(CreateAppContainerProfile(control, control, control, 0, 0u32, slot)).to_equal(0)
+        expect(profile_count()).to_equal(PROFILES_BEFORE + 1)
+        expect(DeleteAppContainerProfile(control)).to_equal(0)
+        expect(profile_count()).to_equal(PROFILES_BEFORE)
+        sec_free_v1(slot)
+        sec_free_v1(control)
+        expect(WORK_ACES_AFTER).to_equal(WORK_ACES_BEFORE)
+        expect(STAGE_ACES_AFTER).to_equal(STAGE_ACES_BEFORE)
+
+    it "kills a child past its wall and reports the timeout":
+        if not windows_ready(): return
+        expect(timeout_run.timed_out.value).to_equal(true)
+        expect(timeout_run.reason).to_equal("app-sandbox-timeout")
+
+describe "sosix app sandbox read denial":
+    it "cannot read a user file that Everyone can read, while it reads its granted file":
+        if not windows_ready(): return
+        expect(read_run.reason).to_equal("")
+        # Positive control of the target: a plain medium-integrity process reads it.
+        expect(file_read(OUTSIDE + "/user.txt")).to_equal("user-private-readable")
+        val out = out_of("read")
+        expect(out.contains("TARGET deny")).to_equal(true)
+        expect(out.contains("CONTROL allow")).to_equal(true)
+
+    it "reads and writes its granted dir":
+        if not windows_ready(): return
+        expect(write_run.reason).to_equal("")
+        expect(out_of("write").contains("TARGET allow")).to_equal(true)
+        expect(file_read(WORK + "/child_wrote.txt")).to_equal("app-sandbox-probe")
+
+describe "sosix app sandbox network denial":
+    # Loopback is denied to an AppContainer even WITH network capabilities (it needs a loopback
+    # exemption), so this canary alone does not prove the network claim; the DNS example below
+    # is the one that carries it.
+    it "cannot open a TCP connection to a loopback listener the plain process can":
+        if not windows_ready(): return
+        expect(LISTENER_ADDR != "").to_equal(true)
+        expect(tcp_run.reason).to_equal("")
+        expect(out_of("tcp").contains("TARGET deny")).to_equal(true)
+        expect(plain(["tcp", LISTENER_ADDR]).contains("TARGET allow")).to_equal(true)
+
+    it "cannot resolve DNS where the plain process can":
+        if not windows_ready(): return
+        expect(dns_run.reason).to_equal("")
+        expect(out_of("dns").contains("TARGET deny")).to_equal(true)
+        expect(plain(["dns", OFFLINE_HOST]).contains("TARGET allow")).to_equal(true)
+
+describe "sosix app sandbox cleanup":
+    it "closes the listener and removes the staging tree":
+        if not windows_ready(): return
+        if LISTENER_FD >= 0: expect(sosix_tcp_close(LISTENER_FD)).to_equal(true)
+        expect(dir_remove_all(BASE)).to_equal(true)
+
+describe "sosix app sandbox per-run identity and failed grants":
+    it "does not honour a grant leaked to a profile named after the same scope":
+        if not windows_ready(): return
+        # Under the old per-scope profile name the leaked ACE would have matched this run's SID.
+        val denied = LEAK_OUTS[0]
+        expect(denied.starts_with("|")).to_equal(true)
+        expect(denied.contains("TARGET deny")).to_equal(true)
+        expect(denied.contains("CONTROL allow")).to_equal(true)
+        # Positive control: the same dir, granted to THIS run's SID, is readable.
+        expect(LEAK_OUTS[1].starts_with("|")).to_equal(true)
+        expect(LEAK_OUTS[1].contains("TARGET allow")).to_equal(true)
+
+    it "tears down after a grant fails: profile gone, ACEs restored, child never ran":
+        if not windows_ready(): return
+        if not is_dir(FAIL_DIR):
+            print("SKIP: " + FAIL_DIR + " absent")
+            return
+        expect(fail_run.reason).to_equal("app-sandbox-dacl-write-failed")
+        expect(fail_run.exit_code.value).to_equal(-1)
+        expect(STAGE_ACES_AFTER_FAIL).to_equal(STAGE_ACES_BEFORE)
+        expect(PROFILES_AFTER).to_equal(PROFILES_BEFORE)

@@ -1,0 +1,173 @@
+# Two-process proof: a separate application process draws known pixels, the
+# hosted window manager composites them, and the framebuffer is read back.
+#
+# Tracks: wm_host_external_content_owner_2026-07-29
+#
+# Three real processes: this spec (controller), the WM (production serve loop,
+# production HostCompositor + headless backend) and the client. The pixels
+# reach the WM only through the shared slot file and the present message.
+#
+# What this does NOT prove: that a pixel reached a physical screen. The
+# backend is headless; the readback is the compositor's own framebuffer.
+#
+# Assertions are exact counts, and each has a negative control: no client
+# gives 0, a corrupted checksum is refused and still gives 0, and killing the
+# client removes the window again.
+
+use std.spec.{describe, it, expect}
+use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_config_new, daemon_request_new}
+use std.daemon_sdk.client.{daemon_submit_and_wait}
+use std.daemon_sdk.lock.{is_daemon_running}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_kill, process_wait, process_is_running}
+use std.nogc_sync_mut.sffi.system.{sleep_ms}
+use std.nogc_sync_mut.io_runtime.{file_exists, mkdir_p}
+use std.io_runtime.{host_os}
+use std.nogc_sync_mut.spec.engine_probe.{self_exe_path}
+use app.play.wm_daemon_client.{WMD_FRAME_PROBE}
+
+val KNOWN: i64 = 0xFF12AB34
+val CONTENT_PIXELS: i64 = 200 * 120
+
+fn simple_exe() -> text:
+    val configured = env_get("SIMPLE_BIN")
+    if configured != "":
+        return configured
+    # The binary running this spec is the one whose WM is under test.
+    self_exe_path() ?? "bin/simple"
+
+fn spawn_logged(fixture: text, log: text, base: text, corrupt: text) -> i64:
+    # `exec` keeps the spawned pid as the pid of the Simple process itself.
+    # The environment is passed explicitly: the compositor module graph does
+    # not lower through the seed JIT, so both children run interpreted.
+    process_spawn_async("sh", [
+        "-c",
+        "exec env SIMPLE_WM_DAEMON_DIR=\"$3\" WM_REMOTE_CLIENT_CORRUPT=\"$4\" SIMPLE_WM_DAEMON_RENDER=1 SIMPLE_EXECUTION_MODE=interpreter \"$0\" run \"$1\" > \"$2\" 2>&1",
+        simple_exe(), fixture, log, base, corrupt])
+
+fn probe(config: DaemonConfig, window_id: i64) -> DaemonResponse:
+    var req = daemon_request_new(WMD_FRAME_PROBE)
+    req.set_field("color", "{KNOWN}")
+    req.set_field("id", "{window_id}")
+    daemon_submit_and_wait(req, config, 60000)
+
+fn probe_unrendered(config: DaemonConfig, window_id: i64) -> DaemonResponse:
+    # Reads the framebuffer without rendering: whatever is there was put
+    # there by the serve loop's continuous render (SIMPLE_WM_DAEMON_RENDER=1).
+    var req = daemon_request_new(WMD_FRAME_PROBE)
+    req.set_field("color", "{KNOWN}")
+    req.set_field("id", "{window_id}")
+    req.set_field("render", "0")
+    daemon_submit_and_wait(req, config, 60000)
+
+fn field(resp: DaemonResponse, key: text) -> i64:
+    resp.get_field(key).to_i64() ?? -1
+
+fn wait_for_surfaces(config: DaemonConfig, window_id: i64, wanted: i64, timeout_ms: i64) -> DaemonResponse:
+    var waited: i64 = 0
+    var last = probe(config, window_id)
+    while field(last, "surfaces") != wanted and waited < timeout_ms:
+        sleep_ms(500)
+        waited = waited + 500
+        last = probe(config, window_id)
+    last
+
+describe "remote application presentation across processes":
+    it "composites a separate process's pixels and drops them when it dies":
+        # Linux host lane only (mmap slot, /proc, sh); elsewhere no claim is made.
+        if host_os() != "linux":
+            return
+        val base = "/tmp/wm_remote_app_two_process_{getpid()}"
+        expect(mkdir_p(base)).to_equal(true)
+        expect(file_exists(simple_exe())).to_equal(true)
+        val config = daemon_config_new("{base}/daemon.lock", "{base}/requests", "{base}/responses")
+
+        val wm_pid = spawn_logged("test/fixtures/wm_remote_app_wm_host_probe.spl", "{base}/wm.log", base, "0")
+        expect(wm_pid > 0).to_equal(true)
+        var waited: i64 = 0
+        while not is_daemon_running(config.lock_path) and waited < 180000:
+            sleep_ms(500)
+            waited = waited + 500
+        expect(is_daemon_running(config.lock_path)).to_equal(true)
+        if not is_daemon_running(config.lock_path):
+            return
+
+        # Negative control 1: no client, no known pixels.
+        val empty = probe(config, 1)
+        expect(field(empty, "wm_pid")).to_equal(wm_pid)
+        expect(field(empty, "pixels")).to_equal(1024 * 768)
+        expect(field(empty, "count")).to_equal(0)
+        expect(field(empty, "surfaces")).to_equal(0)
+
+        # Negative control 2: a present whose checksum does not match the
+        # slot is refused; the window exists but shows none of the pixels.
+        val bad_pid = spawn_logged("test/fixtures/wm_remote_app_client_probe.spl", "{base}/client_bad.log", base, "1")
+        val refused = wait_for_surfaces(config, 1, 1, 120000)
+        expect(field(refused, "surfaces")).to_equal(1)
+        # Wait for the refusal itself, not for a fixed time: the window
+        # manager records why it refused this surface's last present, so
+        # "count is 0" below cannot be "the client has not presented yet".
+        var still_refused = probe(config, 1)
+        waited = 0
+        while still_refused.get_field("last_refusal") != "checksum-mismatch" and waited < 90000:
+            sleep_ms(500)
+            waited = waited + 500
+            still_refused = probe(config, 1)
+        expect(still_refused.get_field("last_refusal")).to_equal("checksum-mismatch")
+        expect(field(still_refused, "client_pid")).to_equal(bad_pid)
+        expect(field(still_refused, "count")).to_equal(0)
+        expect(process_kill(bad_pid)).to_equal(true)
+        process_wait(bad_pid, 5000)
+        val cleared = wait_for_surfaces(config, 1, 0, 30000)
+        expect(field(cleared, "surfaces")).to_equal(0)
+        expect(field(cleared, "windows")).to_equal(0)
+
+        # The real thing: a second client process presents valid pixels.
+        val client_pid = spawn_logged("test/fixtures/wm_remote_app_client_probe.spl", "{base}/client.log", base, "0")
+        expect(client_pid != wm_pid and client_pid != getpid() and wm_pid != getpid()).to_equal(true)
+        # Continuous path first: from here until the assertion only
+        # non-rendering probes are sent, so the pixels can only have been
+        # composited by the serve loop's own per-cycle render.
+        var continuous = probe_unrendered(config, 2)
+        waited = 0
+        while field(continuous, "content_count") != CONTENT_PIXELS and waited < 150000:
+            sleep_ms(500)
+            waited = waited + 500
+            continuous = probe_unrendered(config, 2)
+        expect(field(continuous, "content_count")).to_equal(CONTENT_PIXELS)
+        print "evidence continuous_render content_count={continuous.get_field(\"content_count\")} hash={continuous.get_field(\"hash\")}"
+        var shown = wait_for_surfaces(config, 2, 1, 120000)
+        waited = 0
+        while field(shown, "content_count") != CONTENT_PIXELS and waited < 60000:
+            sleep_ms(500)
+            waited = waited + 500
+            shown = probe(config, 2)
+        print "evidence wm_pid={wm_pid} client_pid={client_pid} controller_pid={getpid()} hash_before={empty.get_field("hash")} hash_after={shown.get_field("hash")} count={shown.get_field("count")} content_count={shown.get_field("content_count")}"
+        expect(field(shown, "client_pid")).to_equal(client_pid)
+        expect(field(shown, "content_count")).to_equal(CONTENT_PIXELS)
+        expect(field(shown, "count")).to_equal(CONTENT_PIXELS)
+        expect(shown.get_field("hash") != empty.get_field("hash")).to_equal(true)
+        val slot = shown.get_field("slot")
+        expect(slot.starts_with("{base}/surfaces/inst-")).to_equal(true)
+        expect(shown.get_field("last_refusal")).to_equal("")
+        expect(file_exists(slot)).to_equal(true)
+
+        # Client death: window, pixels and slot all go away.
+        expect(process_kill(client_pid)).to_equal(true)
+        process_wait(client_pid, 5000)
+        val gone = wait_for_surfaces(config, 2, 0, 30000)
+        expect(field(gone, "windows")).to_equal(0)
+        expect(field(gone, "count")).to_equal(0)
+        # Not compared with the first empty frame: the desktop chrome is not
+        # byte-stable across wall-clock time, so only "the presented frame is
+        # no longer what is on screen" is asserted.
+        expect(gone.get_field("hash") != shown.get_field("hash")).to_equal(true)
+        expect(file_exists(slot)).to_equal(false)
+
+        var stop = daemon_request_new(-1)
+        daemon_submit_and_wait(stop, config, 30000)
+        process_wait(wm_pid, 10000)
+        expect(process_is_running(wm_pid)).to_equal(false)
+        # Stopping the daemon removes its private slot directory.
+        expect(file_exists(slot.replace("/window_2.argb32", ""))).to_equal(false)

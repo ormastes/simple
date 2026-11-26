@@ -1,0 +1,47 @@
+# Regression coverage for bug option_pattern_accepted_on_non_option_scrutinee_2026-07-27.
+"""Regression specs verifying loop/conditional Option patterns and receiver guards."""
+# @tag: unit, compiler, type_infer
+
+use std.spec.*
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source}
+
+fn diag_joined(source: text, path: text) -> text:
+    val res = simple_semantic_check_source(source, path)
+    res.diagnostics.join("\n")
+
+describe "while val / if val Option patterns and receiver guards":
+    """Verifies while-val, if-val, Option.None, and Option-method receiver checks."""
+    it "rejects while val Some(w) on an i64 scrutinee instead of aborting on While":
+        val src = "fn f(n: i64) -> i64:\n    while val Some(w) = n:\n        return w\n    0\n"
+        val joined = diag_joined(src, "while_val_some_i64.spl")
+        expect(joined).to_contain("SPL-PAT-001")
+        expect(joined).to_contain("Option pattern 'Some' requires an optional scrutinee")
+
+    it "accepts while val Some(w) on a genuine i64? scrutinee":
+        val src = "fn f(opt: i64?) -> i64:\n    while val Some(w) = opt:\n        return w\n    0\n"
+        val res = simple_semantic_check_source(src, "while_val_some_opt.spl")
+        expect(res.diagnostics.len()).to_equal(0)
+
+    it "rejects if val Some(k) on an i64 scrutinee":
+        val src = "fn f(n: i64) -> i64:\n    if val Some(k) = n:\n        return k\n    0\n"
+        val joined = diag_joined(src, "if_val_some_i64.spl")
+        expect(joined).to_contain("SPL-PAT-001")
+
+    it "rejects Option.None pattern on an i64 scrutinee":
+        val src = "fn f(n: i64) -> i64:\n    match n:\n        case Option.None:\n            0\n        case _:\n            n\n"
+        val joined = diag_joined(src, "opt_none_i64.spl")
+        expect(joined).to_contain("SPL-PAT-001")
+
+    it "rejects Option methods on non-optional tuple and array receivers":
+        val arr_src = "fn f(xs: [i64]) -> i64:\n    xs.unwrap_or(0)\n"
+        val arr_diag = diag_joined(arr_src, "arr_unwrap_or.spl")
+        expect(arr_diag).to_contain("Option method 'unwrap_or' requires an optional receiver")
+
+        val tup_src = "fn g(pair: (i64, text)) -> bool:\n    pair.is_some()\n"
+        val tup_diag = diag_joined(tup_src, "tup_is_some.spl")
+        expect(tup_diag).to_contain("Option method 'is_some' requires an optional receiver")
+
+    it "accepts Option methods on genuine i64? receivers":
+        val src = "fn f(opt: i64?) -> i64:\n    if opt.is_some():\n        return opt.unwrap_or(0)\n    0\n"
+        val res = simple_semantic_check_source(src, "opt_methods_valid.spl")
+        expect(res.diagnostics.len()).to_equal(0)

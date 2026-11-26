@@ -84,3 +84,24 @@ It is not a regression.
   worktree.
 - `native-build` without `--threads 1` failed with `closure identity differs`
   between the two HIR workers when the entry was outside the tracked tree.
+
+## 2026-11-26 (`BF-8` Audit, Defensive Fix & Verification)
+
+- **Root fix confirmed on `origin/release/1.0.0`:**
+  - `src/compiler/20.hir/hir_lowering/context_helpers.spl:171-199` (`HirLowering.begin_module`)
+    resets `lambda_param_hint` (`HirTypeKind.Error`), `struct_type_param_names_by_name`,
+    `class_method_return_types_by_name`, `impl_textual_method_keys`, and `registering_import_symbols`.
+  - `src/compiler/80.driver/watcher/watcher_client.spl` no longer carries `_watcher_no_mtime`;
+    `accessor_warned_keys` no longer exists in `src/`.
+- **Additional defensive fix landed (`context_helpers.spl:197`):**
+  - Added `self.registering_lexical_import = false` reset in `HirLowering.begin_module` beside
+    `self.registering_import_symbols = false` (`tldr_entry_only` / `tldr_imports` intentionally
+    kept untouched because `driver_hir_pipeline_lowering.spl:1983-1997` sets them before looping).
+- **Verified checks:**
+  - `test/01_unit/compiler/hir/hir_lowering/begin_module_detaches_module_owners_spec.spl`: `7/7` pass
+  - `test/01_unit/compiler/held_verify/struct_dict_key_and_hir_scope_reset_spec.spl`: `3/3` pass
+    (reproduces `ha.spl` `names.join(",")` -> `begin_module("hb.spl")` -> `hb_apply(xs, fn(p: text) -> i64: 0)`,
+    checks `lambda_param_hint`, `registering_lexical_import`, `impl_textual_method_keys`, `walk_hir_block`,
+    `hir_module_encode_retained_v1`, and `mir_verify_module`).
+- Shard `doc/08_tracking/bug/db/hir_lambda_param_hint_outlives_module_scope_2026-11-14.sdn` set to
+  `fix-implemented-verification-pending` pending Stage 2 rebuild verification past `#9056`.

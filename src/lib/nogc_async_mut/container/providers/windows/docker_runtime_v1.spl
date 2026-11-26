@@ -33,7 +33,7 @@ use std.common.contracts.container.runtime_v1.{RuntimeProviderV1,
     RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_REJECTED}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded_environment_v1, process_run_bounded_environment_admitted_v1, process_runtime_is_aot_native_v1}
 use std.nogc_sync_mut.sosix.process.{sosix_process_run_bounded, sosix_process_bounded_timed_out}
-use std.nogc_sync_mut.sosix.host.{env_get as sosix_env_get, secure_temp_dir as sosix_secure_temp_dir, dir_list as sosix_dir_list, dir_exists as sosix_dir_exists, dir_remove_all as sosix_dir_remove_all}
+use std.nogc_sync_mut.sosix.host.{env_get, secure_temp_dir, dir_list, dir_exists, dir_remove_all}
 use std.nogc_sync_mut.io.env_ops.{env_vars}
 use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
@@ -244,7 +244,7 @@ impl WindowsDockerRuntimeProviderV1:
         # exclusively created, empty per-run --config directory, removed on every
         # path. The native path below stays the product lane.
         if not process_runtime_is_aot_native_v1():
-            if sosix_env_get("SIMPLE_DOCKER_HOSTED_LIVE") != "1": return Err("docker-hosted-launch-not-enabled")
+            if env_get("SIMPLE_DOCKER_HOSTED_LIVE") != "1": return Err("docker-hosted-launch-not-enabled")
             if command.args.len() < 2 or command.args[0] != "--host": return Err("docker-hosted-command-shape-invalid")
             val inherited = env_vars()
             if inherited.is_none(): return Err("docker-hosted-environment-unobservable")
@@ -252,13 +252,13 @@ impl WindowsDockerRuntimeProviderV1:
                 val upper = name.to_upper()
                 if upper.starts_with("DOCKER_") or upper == "HTTP_PROXY" or upper == "HTTPS_PROXY" or upper == "NO_PROXY" or upper == "ALL_PROXY":
                     return Err("docker-hosted-environment-selector-present:" + upper)
-            val config = match sosix_secure_temp_dir(self.policy.temp_directory, "simple-docker-cfg-"):
+            val config = match secure_temp_dir(self.policy.temp_directory, "simple-docker-cfg-"):
                 case Ok(path): path
                 case Err(reason): return Err("docker-hosted-config-dir-failed:" + reason)
             # A failed listing is indistinguishable from empty, so require the
             # directory to exist as well before trusting an empty listing.
-            if not sosix_dir_exists(config) or sosix_dir_list(config).len() != 0:
-                if not sosix_dir_remove_all(config): return Err("docker-hosted-config-dir-cleanup-unproven")
+            if not dir_exists(config) or dir_list(config).len() != 0:
+                if not dir_remove_all(config): return Err("docker-hosted-config-dir-cleanup-unproven")
                 return Err("docker-hosted-config-dir-not-empty")
             var failure = ""
             var captured = ("", "", 0)
@@ -275,7 +275,7 @@ impl WindowsDockerRuntimeProviderV1:
                 elif captured.2 != 0: failure = "docker-command-failed-" + captured.2.to_text()
             # ponytail: the deadline is rechecked only before sosix_process_run_bounded;
             # its slot wait is private to process_ops, so expiry during that wait is not seen.
-            val cleaned = sosix_dir_remove_all(config)
+            val cleaned = dir_remove_all(config)
             if failure != "": return Err(failure)
             if not cleaned: return Err("docker-hosted-config-dir-cleanup-unproven")
             return Ok(captured)

@@ -91,3 +91,10 @@ Stage3 command:
 ```sh
 env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <stage3-simple> native-build --entry test/03_system/native/theme_package_aggregate_return.spl -o /tmp/b && /tmp/b; echo rc=$?
 ```
+
+## Triage 2026-11-26 (BF-5 lane, `origin/release/1.0.0`)
+
+Still `OPEN` and blocked on `src/compiler/**` + a Stage 3 native-build host.
+- Re-verified `test/03_system/native/theme_package_aggregate_return.spl` under `wa3_shared_bin\simple.exe` (`89b32c2e80d`) interpreter: exits `rc=42`.
+- `src/os/compositor/host_wm_theme_bootstrap.spl` and `src/app/test/aetheric_host_web_gui_producer.spl` still use the `aetheric_dark_theme_render_snapshot()` startup bypass.
+- Fixing the underlying `MirTypeKind.Struct` native aggregate return ABI across module boundaries belongs to `src/compiler/**` (untouched per BF-5 lane file ownership; `native-build` is also unavailable/unrunnable in this Windows Rust-seed-only lane, and app-side workarounds are explicitly rejected by this bug record).

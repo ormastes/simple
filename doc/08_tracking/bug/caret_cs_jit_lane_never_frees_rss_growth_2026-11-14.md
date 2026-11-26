@@ -3,7 +3,7 @@
 - **Date:** 2026-11-14
 - **Severity:** P1 (two live `cs` sessions reached 17.7 GB and 13.0 GB RSS after 22 h,
   starved the host, and made a bootstrap Stage 2 fail its RSS cap)
-- **Status:** open. Root cause attributed. Operational mitigation verified. Seed fix not attempted.
+- **Status:** resolved (Cranelift JIT / MIR string reclamation gaps fixed and regression-tested 2026-11-26, BF-3).
 - **Owner layer:** Rust seed codegen. Measured on the Cranelift JIT lane; LLVM `emit_drop` (`llvm/emitter.rs`) is also a no-op, so ahead-of-time native builds probably leak the same way (not measured). Not `src/app/llm_caret`.
 - **Related:** `seed_jit_array_copy_never_freed_2026-10-19.md` (same mechanism, array-copy case),
   `doc/01_research/compiler/memory_model/engine_memory_model_study_2026-11-14.md` P14
@@ -114,3 +114,20 @@ growth, proportional to its allocation rate.
 - `bin/cs` exports `CARET_ENTRY=src/app/llm_caret/cs_main.spl`, but the source
   fallback in `bin/caret` ignores it and always runs `src/app/llm_caret/main.spl`.
 - `CsDashboard.log` has no limit (it grows per command). It is not the cause above.
+
+## Resolution & Verification (2026-11-26, BF-3)
+
+Fixed remaining Cranelift JIT (`lower_to_mir_jit`) string reclamation gaps on top of the `MirInst::Drop` / `string_overwrite_locals` / `block_release_locals` landing:
+
+- `src/compiler_rust/compiler/src/mir/lower/array_move.rs`:
+  - Extracted shared `StringReadScan` / `scan_pure_string_consumer` used by both `ReleaseScan` (`block_release_locals`) and `StringOverwriteScan` (`string_overwrite_locals`) so read-only non-aliasing string consumers (`+` concat, `< <= > >= == !=`, `print`/`println`/`eprint*`/`rt_string_concat`/`rt_value_to_string`/`rt_value_format_string`/`rt_term_write`, and pure scalar string methods such as `starts_with`/`ends_with`/`contains`/`find`/`index_of`/`parse_*`/`char_code_at`/`byte_at`) no longer disqualify `keep` / `line` locals from reclamation.
+  - Permitted self-referential overwrites (`body = body + ...` without nested block expressions) in `StringOverwriteScan` and non-defer `HirStmt::Return(Some(Local))` / top-level tail `HirStmt::Expr(Local)` returns (such as `cs_live_paint`).
+- `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`:
+  - Removed the stale `!expr_mentions_local(value, *local_idx)` gate on `release_old_string` (since `value` is already evaluated before loading `old`, storing `store_val`, and dropping `old`).
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs`:
+  - Emitted `MirInst::Drop` (`TypeId::STRING`) under `block_array_release` for fresh intermediate string operands of `rt_string_concat` / `rt_value_to_string` / `rt_value_format_string` (interpolated f-strings) and fresh temporary strings produced/passed to `print`/`println`/`eprint`/`eprintln`/`print_raw`/`eprint_raw`/`dprint`.
+
+Verified (debug profile, `-j 2`):
+- `compiler/tests/jit_caret_string_rss_reclaim.rs`: `5 passed; 0 failed` (O(1) retained `RuntimeString` count across 5,000 loop iterations with `keep = "x" + i.to_text()` + `"end " + keep`, interpolated f-strings, `body = body + ...` self-append + explicit/tail return, block-scoped strings + 200x `println("frame_" + i.to_text())`, and aliasing/`defer` soundness).
+- `compiler/tests/jit_array_field_release.rs`: `8 passed; 0 failed`.
+- `simple-compiler --lib array_release_tests`: `32 passed; 0 failed; 5028 filtered out`.
