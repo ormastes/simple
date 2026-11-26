@@ -117,3 +117,31 @@ pure-Simple \`bin/release/<triple>/simple\` (the empty-stderr assertion in
 \`multicore_green_fanout_spec.spl\` is still correct and still cannot pass on the
 seed's mandatory banner). Bootstrap deployment is outside a P3 lane's grant; no
 change attempted.
+
+## 2026-11-26 (Linux aarch64, DGX GB10): row stays OPEN
+
+Tip `79445b063c4`, Rust seed sha256 prefix `fb80903917d6d5f5`.
+
+- **The font fixture is fixed, but by `ce3953a93ef`, not `1fc1852855a`.** The
+  addenda above credit the bytes API (`load_font_bytes`), and that is wrong.
+  The bytes API takes the provenance-gated lane, which rejects the
+  unregistered fixture (identity `""`), so `1fc1852855a` produced the
+  all-zero rows. `ce3953a93ef` writes the fixture to disk and calls
+  `load_font`, the unmanaged lane. Measured now: `cold_p50_ns=19808476
+  warm_p50_ns=16662376 bitmap_checksum=772523490`. The font loads and the
+  bitmap block runs.
+- **Six expectations still fail, and none of them is about loading the font.**
+  - `warm*100 <= cold*75` and `warm_hits 651 == 217` are the vector-cache reds
+    in `vector_font_perf_spec_masked_reds_2026-11-15.md`.
+  - The other four (baseline ns > 0, checksum > 0, checksum == 0, ratio < 1)
+    fail because `SIMPLE_2D_BITMAP_BASELINE_NS` / `_CHECKSUM` are not set.
+- **Fanout probe fix.** The OS-thread probe summed `ThreadHandle.join()`
+  values, but `join()` returns `i64?`. The JIT rejected it ("cannot apply
+  `Add` to an optional value") and the interpreter then failed with "cannot
+  convert enum to int", so the probe exited 1. It now uses
+  `.join().unwrap()`. Standalone probe: rc 1 -> 0, with no JIT demotion.
+  After the fix, both failing examples fail only on `expect(stderr).to_equal("")`
+  (the seed banner).
+- **Still blocked:** there is no deployed pure-Simple `bin/release/<triple>/simple`
+  (`bin/release` is absent), and the host-pinned bitmap baseline env is not
+  set.
