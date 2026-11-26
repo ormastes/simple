@@ -1,0 +1,128 @@
+"""
+## Purpose and audience
+Purpose: Pin the 1x LCD (subpixel) ink of ROUND glyphs (16 px Liberation Sans)
+against Chrome 159 at all four Skia quarter pen phases. Straight stems already
+matched Chrome; every curved glyph (o e c s a d q C ...) still differed by about
+seven pixels per glyph on every catalog line. Measured cause: Chrome rasterises
+the hinted glyph path with Skia's analytic AA scan converter (SkScan_AAAPath)
+in 16.16 fixed point: quarter-row strips, per-strip alpha truncation, real
+blitter writes for whole-row strips and saturating run accumulation for partial
+ones. An exact-area accumulator over the same chords is a different raster.
+Skia's own rasteriser (libskia, `SkDrawBase` + `SkA8Blitter_Choose`, as in
+`SkScalerContext::GenerateImageFromPath`) fed this engine's hinted outlines
+reproduces every pixel below; the engine's float area model does not.
+Audience: web renderer / font rasteriser maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, Liberation Sans 16 px,
+`color:#000` on white, `letter-spacing:4px`). One absolutely positioned span per
+glyph at `left: 4 + 36 i`, `top: 4 + 28 row`. Row 0 is the glyph alone (pen
+phase 0); row 1 is `r` + glyph (pen 9.328, phase 1); row 2 is `i` + glyph
+(7.555, phase 2); row 3 is `rr` + glyph (18.656, phase 3).
+
+| phase | d | e | q | C | h |
+|-------|---|---|---|---|---|
+| 0 | (8,10) 172f4f | (43,10) 2f1f07 | (80,10) 000f1f | (117,7) 2f1707 | (152,10) 472f17 |
+| 1 | (17,38) 071f37 | (52,38) 472717 | (89,38) 00070f | (126,35) 3f2717 | (161,38) 5f3f27 |
+| 2 | (16,66) 3f5f87 | (51,66) 0f0700 | (88,66) 172f4f | (124,63) 4f3727 | (160,66) 1f0f07 |
+| 3 | (27,94) 274767 | (62,94) 1f0f00 | (99,94) 071f37 | (135,91) 5f4737 | (171,94) 2f1707 |
+
+Base (exact-area raster) at the same pixels, phase 0: 00001f 1f0700 00000f
+000000 1f0000 — every top-arc row a step or more too heavy at the crest.
+
+Tolerance: 8 levels per channel, the catalog differ's own tolerance
+(src/app/ui/chrome_showcase/pixel_diff.spl TOLERANCE).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-HINT-003 - Draw IR LCD text rasterises each glyph's coverage like Chrome's Skia LCD16 path.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 184
+val H: i32 = 116
+val TOL: i64 = 8
+
+fn _span(left: i32, top: i32, content: text) -> text:
+    "<span style=\"position:absolute;left:{left}px;top:{top}px;font-size:16px;line-height:20px;letter-spacing:4px;color:#000\">{content}</span>"
+
+fn _row(top: i32, prefix: text) -> text:
+    _span(4, top, prefix + "d") + _span(40, top, prefix + "e") + _span(76, top, prefix + "q") + _span(112, top, prefix + "C") + _span(148, top, prefix + "h")
+
+fn _page() -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\">" + _row(4, "") + _row(32, "r") + _row(60, "i") + _row(88, "rr") + "</body></html>"
+
+fn _chan(v: u32, shift: u32) -> i64:
+    ((v >> shift) & 0xFFu32).to_i64()
+
+# Every channel of pixel (x, y) is within TOL of Chrome's `want`.
+fn _near(px: [u32], x: i32, y: i32, want: u32) -> bool:
+    val got = px[y * W + x] & 0xFFFFFFu32
+    var ok = true
+    var shift: u32 = 0u32
+    while shift <= 16u32:
+        var d = _chan(got, shift) - _chan(want, shift)
+        if d < 0: d = 0 - d
+        if d > TOL: ok = false
+        shift = shift + 8u32
+    ok
+
+fn _render() -> [u32]:
+    simple_web_render_html_to_pixels_with_engine2d_backend(_page(), W, H, "cpu_simd")
+
+describe "1x LCD round glyphs against Chrome 159 (Skia analytic AA)":
+    it "AC-1: pen phase 0 top arcs":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render()
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("d (8,10) 172f4f, e (43,10) 2f1f07, q (80,10) 000f1f, C (117,7) 2f1707, h (152,10) 472f17")
+        expect(_near(px, 8, 10, 0x172f4fu32)).to_equal(true)
+        expect(_near(px, 43, 10, 0x2f1f07u32)).to_equal(true)
+        expect(_near(px, 80, 10, 0x000f1fu32)).to_equal(true)
+        expect(_near(px, 117, 7, 0x2f1707u32)).to_equal(true)
+        expect(_near(px, 152, 10, 0x472f17u32)).to_equal(true)
+
+    it "AC-2: pen phase 1 top arcs":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render()
+        step("d (17,38) 071f37, e (52,38) 472717, q (89,38) 00070f, C (126,35) 3f2717, h (161,38) 5f3f27")
+        expect(_near(px, 17, 38, 0x071f37u32)).to_equal(true)
+        expect(_near(px, 52, 38, 0x472717u32)).to_equal(true)
+        expect(_near(px, 89, 38, 0x00070fu32)).to_equal(true)
+        expect(_near(px, 126, 35, 0x3f2717u32)).to_equal(true)
+        expect(_near(px, 161, 38, 0x5f3f27u32)).to_equal(true)
+
+    it "AC-3: pen phase 2 top arcs":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render()
+        step("d (16,66) 3f5f87, e (51,66) 0f0700, q (88,66) 172f4f, C (124,63) 4f3727, h (160,66) 1f0f07")
+        expect(_near(px, 16, 66, 0x3f5f87u32)).to_equal(true)
+        expect(_near(px, 51, 66, 0x0f0700u32)).to_equal(true)
+        expect(_near(px, 88, 66, 0x172f4fu32)).to_equal(true)
+        expect(_near(px, 124, 63, 0x4f3727u32)).to_equal(true)
+        expect(_near(px, 160, 66, 0x1f0f07u32)).to_equal(true)
+
+    it "AC-4: pen phase 3 top arcs":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render()
+        step("d (27,94) 274767, e (62,94) 1f0f00, q (99,94) 071f37, C (135,91) 5f4737, h (171,94) 2f1707")
+        expect(_near(px, 27, 94, 0x274767u32)).to_equal(true)
+        expect(_near(px, 62, 94, 0x1f0f00u32)).to_equal(true)
+        expect(_near(px, 99, 94, 0x071f37u32)).to_equal(true)
+        expect(_near(px, 135, 91, 0x5f4737u32)).to_equal(true)
+        expect(_near(px, 171, 94, 0x2f1707u32)).to_equal(true)
