@@ -1,0 +1,167 @@
+"""
+## Purpose and audience
+Purpose: Regression spec verifying tagged-text MIR-to-LLVM ABI lowering for `rt_http_*` externs and documenting their raw-word tuple unpacking IR.
+Audience: Compiler engineers maintaining `text_extern_abi.spl`, MIR call lowering, and `MirToLlvm`.
+"""
+# @cover src/compiler/50.mir/text_extern_abi.spl
+# @cover src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
+
+use std.spec.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.text_extern_abi.{tagged_text_value_arg_indices, text_arg_indices, runtime_tuple_result_facade}
+
+fn lower_http_to_llvm(source: text, name: text) -> text:
+    val ast = parse_full_frontend(source, name, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(name)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in hir_lowering.errors:
+        errors = errors + "HIR: " + err.message + "\n"
+    for err in mir_lowering.errors:
+        errors = errors + "MIR: " + err.message + "\n"
+    if errors != "":
+        return "LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.llvm.http_extern_abi", CodegenTarget.X86_64, None).translate_module(mir)
+
+fn http_call_line(ir: text, marker: text) -> text:
+    for line in ir.split("\n"):
+        if line.contains("call ") and line.contains(marker):
+            return line
+    ""
+
+fn http_call_arg_tokens(line: text, marker: text) -> [text]:
+    val start_idx = line.find(marker) ?? -1
+    if start_idx < 0:
+        return []
+    val after = line.substring(start_idx + marker.len())
+    val close_idx = after.find(")") ?? -1
+    if close_idx < 0:
+        return []
+    val inner = after.substring(0, close_idx).trim()
+    if inner == "":
+        return []
+    var out: [text] = []
+    for raw_part in inner.split(","):
+        val part = raw_part.trim()
+        val pieces = part.split(" ")
+        if pieces.len() > 0:
+            out = out.push(pieces[pieces.len() - 1])
+    out
+
+describe "HTTP extern MIR-to-LLVM ABI":
+    """Verify rt_http_* extern text args receive tagged handles and document tuple unpacking."""
+    it "registers hosted HTTP C owners in tagged_text_value_arg_indices without ptr/len split or fake tuple facades":
+        expect(tagged_text_value_arg_indices("rt_http_get")).to_equal(Some([0]))
+        expect(tagged_text_value_arg_indices("rt_http_request")).to_equal(Some([0, 1, 3]))
+        expect(tagged_text_value_arg_indices("rt_http_request_v2")).to_equal(Some([0, 1]))
+        expect(tagged_text_value_arg_indices("rt_http_download")).to_equal(Some([0, 1]))
+        expect(tagged_text_value_arg_indices("rt_http_client_request")).to_equal(Some([1, 2, 4]))
+        expect(tagged_text_value_arg_indices("other.rt_http_get")).to_be_nil()
+        expect(tagged_text_value_arg_indices("rt_http_get_extra")).to_be_nil()
+
+        expect(text_arg_indices("rt_http_get")).to_be_nil()
+        expect(text_arg_indices("rt_http_request")).to_be_nil()
+        expect(text_arg_indices("rt_http_request_v2")).to_be_nil()
+        expect(text_arg_indices("rt_http_download")).to_be_nil()
+        expect(text_arg_indices("rt_http_client_request")).to_be_nil()
+
+        # No raw-rt_alloc C facades exist in runtime_native.c for rt_http_* yet;
+        # keep runtime_tuple_result_facade unrouted per census_unrouted().
+        expect(runtime_tuple_result_facade("rt_http_get", 1)).to_equal("")
+        expect(runtime_tuple_result_facade("rt_http_request", 4)).to_equal("")
+        expect(runtime_tuple_result_facade("rt_http_request_v2", 5)).to_equal("")
+        expect(runtime_tuple_result_facade("rt_http_download", 2)).to_equal("")
+        expect(runtime_tuple_result_facade("rt_http_client_request", 5)).to_equal("")
+
+    it "passes ensure_tagged_str handles (not bare rt_interp_cstr results) to rt_http_get and rt_http_request":
+        val source = "extern fn rt_http_get(url: text) -> (i64, text, text)\n" +
+            "extern fn rt_http_request(method: text, url: text, headers: [text], body: text) -> (i64, text, text)\n\n" +
+            "fn probe_http(u: text, b: text) -> i64:\n" +
+            "    val r1 = rt_http_get(u)\n" +
+            "    val r2 = rt_http_request(\"POST\", u, [\"H: 1\"], b)\n" +
+            "    val msg = r2.1\n" +
+            "    val err = r2.2\n" +
+            "    if msg == \"\" and err == \"\":\n" +
+            "        return r1.0\n" +
+            "    r1.0 + r2.0\n"
+        val ir = lower_http_to_llvm(source, "http_get_req_probe.spl")
+        expect_not(ir.starts_with("LOWERING_ERRORS:"))
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+        expect(ir).to_contain("call i64 @rt_string_new(")
+
+        val get_line = http_call_line(ir, "@rt_http_get(")
+        expect_not(get_line == "")
+        val get_args = http_call_arg_tokens(get_line, "@rt_http_get(")
+        expect(get_args.len()).to_equal(1)
+        expect_not(ir.contains(get_args[0] + " = call ptr @rt_interp_cstr("))
+
+        val req_line = http_call_line(ir, "@rt_http_request(")
+        expect_not(req_line == "")
+        val req_args = http_call_arg_tokens(req_line, "@rt_http_request(")
+        expect(req_args.len()).to_equal(4)
+        expect_not(ir.contains(req_args[0] + " = call ptr @rt_interp_cstr("))
+        expect_not(ir.contains(req_args[1] + " = call ptr @rt_interp_cstr("))
+        expect_not(ir.contains(req_args[3] + " = call ptr @rt_interp_cstr("))
+
+        # Raw tuple field GEP unpacking emitted by MirToLlvm for (i64, text, text).
+        expect(ir).to_contain("getelementptr inbounds i64, ptr ")
+        expect(ir).to_contain(", i32 0")
+        expect(ir).to_contain(", i32 1")
+        expect(ir).to_contain(", i32 2")
+
+    it "passes tagged text handles to rt_http_request_v2, rt_http_download, and rt_http_client_request":
+        val source = "extern fn rt_http_request_v2(method: text, url: text, headers: [text], body: [u8], timeout_ms: i64) -> (i64, text, text, [u8], text)\n" +
+            "extern fn rt_http_download(url: text, output_path: text) -> (i64, i64, text)\n" +
+            "extern fn rt_http_client_request(client: i64, method: text, url: text, headers: [text], body: text) -> (i64, text, text)\n\n" +
+            "fn probe_http_more(u: text, out_path: text, body_txt: text) -> i64:\n" +
+            "    val body_bytes: [u8] = [1u8, 2u8]\n" +
+            "    val r_v2 = rt_http_request_v2(\"PUT\", u, [], body_bytes, 1000)\n" +
+            "    val r_dl = rt_http_download(u, out_path)\n" +
+            "    val r_cl = rt_http_client_request(7, \"POST\", u, [], body_txt)\n" +
+            "    r_v2.0 + r_dl.0 + r_cl.0\n"
+        val ir = lower_http_to_llvm(source, "http_v2_dl_cl_probe.spl")
+        expect_not(ir.starts_with("LOWERING_ERRORS:"))
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+        expect(ir).to_contain("call i64 @rt_string_new(")
+
+        val v2_line = http_call_line(ir, "@rt_http_request_v2(")
+        expect_not(v2_line == "")
+        val v2_args = http_call_arg_tokens(v2_line, "@rt_http_request_v2(")
+        expect(v2_args.len()).to_equal(5)
+        expect_not(ir.contains(v2_args[0] + " = call ptr @rt_interp_cstr("))
+        expect_not(ir.contains(v2_args[1] + " = call ptr @rt_interp_cstr("))
+
+        val dl_line = http_call_line(ir, "@rt_http_download(")
+        expect_not(dl_line == "")
+        val dl_args = http_call_arg_tokens(dl_line, "@rt_http_download(")
+        expect(dl_args.len()).to_equal(2)
+        expect_not(ir.contains(dl_args[0] + " = call ptr @rt_interp_cstr("))
+        expect_not(ir.contains(dl_args[1] + " = call ptr @rt_interp_cstr("))
+
+        val cl_line = http_call_line(ir, "@rt_http_client_request(")
+        expect_not(cl_line == "")
+        val cl_args = http_call_arg_tokens(cl_line, "@rt_http_client_request(")
+        expect(cl_args.len()).to_equal(5)
+        expect_not(ir.contains(cl_args[1] + " = call ptr @rt_interp_cstr("))
+        expect_not(ir.contains(cl_args[2] + " = call ptr @rt_interp_cstr("))
+        expect_not(ir.contains(cl_args[4] + " = call ptr @rt_interp_cstr("))
+
+    it "does not apply tagged-text extern boxing to a same-name Source function":
+        val source = "fn rt_http_get(url: text) -> i64:\n" +
+            "    1\n\n" +
+            "fn probe_source(url: text) -> i64:\n" +
+            "    rt_http_get(url)\n"
+        val ir = lower_http_to_llvm(source, "http_source_control.spl")
+        expect_not(ir.starts_with("LOWERING_ERRORS:"))
+        expect(llvm_codegen_error_from_ir(ir)).to_equal("")
+        expect_not(http_call_line(ir, "rt_http_get(") == "")
+        expect(ir.split("call i64 @rt_string_new(").len() - 1).to_equal(0)
+        expect(ir.split("call ptr @rt_interp_cstr(").len() - 1).to_equal(0)

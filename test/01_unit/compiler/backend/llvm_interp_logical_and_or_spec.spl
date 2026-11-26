@@ -1,0 +1,122 @@
+"""
+## Purpose and audience
+Purpose: Regression spec for `native_interp_logical_and_or_llc_type_mismatch_2026-07-16` and full-pipeline MIR-to-LLVM lowering checks for interpolation short-circuit `and`/`or` expressions, inline enum dict payloads, and `int.to_string(radix).upper()`.
+Audience: Compiler engineers maintaining MIR lowering and the LLVM backend.
+"""
+# @cover src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+
+use std.spec.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+fn lower_to_llvm(source: text, name: text) -> text:
+    val ast = parse_full_frontend(source, name, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(name)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in hir_lowering.errors:
+        errors = errors + "HIR: " + err.message + "\n"
+    for err in mir_lowering.errors:
+        errors = errors + "MIR: " + err.message + "\n"
+    if errors != "":
+        return "LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.llvm.interp_and_or", CodegenTarget.X86_64, None).translate_module(mir)
+
+fn build_orphan_boxed_str_const_module() -> MirModule:
+    # Simulates an SSA-alloca-renamed Const(Str, Opaque("str")) local (id 99)
+    # that has no MirLocal entry, stored into a ptr-typed slot.
+    val str_ty = MirType(kind: MirTypeKind.Opaque("str"))
+    val slot_local = MirLocal(id: LocalId(id: 1), name: Some("slot"), type_: str_ty, kind: LocalKind.Temp, is_ghost: false)
+    val ptr_local = MirLocal(id: LocalId(id: 2), name: Some("addr"), type_: MirType.ptr(str_ty, false), kind: LocalKind.Temp, is_ghost: false)
+    val orphan_id = LocalId(id: 99)
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 7),
+        name: "orphan_boxed_str_const",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [slot_local, ptr_local],
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: [
+                    MirInst(kind: MirInstKind.Alloc(LocalId(id: 2), str_ty), span: None),
+                    MirInst(kind: MirInstKind.Const(orphan_id, MirConstValue.Str("v="), str_ty), span: None),
+                    MirInst(kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))), MirOperand(kind: MirOperandKind.Copy(orphan_id))), span: None)
+                ],
+                terminator: MirTerminator.Ret(None)
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: {},
+        layout_phase: None,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: None,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    MirModule(name: "test.llvm.orphan_boxed_str_const", functions: functions, statics: {}, constants: {}, types: {})
+
+describe "LLVM lowering for logical and/or string interpolation":
+    """Verify full-pipeline and orphan-const LLVM IR emission without ptr/i64 mismatches."""
+    it "emits valid pointer-typed constants for t() and t() inside string interpolation":
+        val source = "fn t() -> bool:\n    return true\nfn main() -> i64:\n    print(\"v={{t() and t()}}\")\n    return 0\n"
+        val output = lower_to_llvm(source, "interp_and_repro.spl")
+        expect_not(output.starts_with("LOWERING_ERRORS:"))
+        expect(llvm_codegen_error_from_ir(output)).to_equal("")
+        expect(output).to_contain("rt_string_new_literal")
+        expect(output).to_contain("rt_raw_bool_to_string")
+        expect(output).to_contain("rt_interp_cstr")
+
+    it "emits valid LLVM IR for logical or inside string interpolation":
+        val source = "fn t() -> bool:\n    return true\nfn f() -> bool:\n    return false\nfn main() -> i64:\n    print(\"w={{t() or f()}}\")\n    return 0\n"
+        val output = lower_to_llvm(source, "interp_or_repro.spl")
+        expect_not(output.starts_with("LOWERING_ERRORS:"))
+        expect(llvm_codegen_error_from_ir(output)).to_equal("")
+        expect(output).to_contain("rt_string_new_literal")
+        expect(output).to_contain("rt_raw_bool_to_string")
+
+    it "keeps an orphan Const(Str, Opaque(\"str\")) local pointer-typed across Store":
+        val output = MirToLlvm.create("test.llvm.orphan_boxed_str_const", CodegenTarget.X86_64, None).translate_module(build_orphan_boxed_str_const_module())
+        expect(llvm_codegen_error_from_ir(output)).to_equal("")
+        expect(output).to_contain("%l99 = inttoptr i64")
+        expect(output).to_contain("store ptr %l99, ptr %l2")
+        expect_not(output.contains("inttoptr i64 %l99 to ptr"))
+
+    it "lowers SdnValue.Dict inline literal and int.to_string(16).upper() to LLVM IR without errors":
+        val dict_src = "pub enum SdnValue:\n    Null\n    Int(i64)\n    String(text)\n    Dict(Dict<text, SdnValue>)\nfn make() -> SdnValue:\n    SdnValue.Dict({{\"kind\": SdnValue.String(\"x\"), \"version\": SdnValue.Int(1)}})\n"
+        val dict_ll = lower_to_llvm(dict_src, "sdn_dict_repro.spl")
+        expect_not(dict_ll.starts_with("LOWERING_ERRORS:"))
+        expect(llvm_codegen_error_from_ir(dict_ll)).to_equal("")
+
+        val radix_src = "fn hex_upper(code: i64) -> text:\n    code.to_string(16).upper()\nfn main() -> i64:\n    val s = hex_upper(255)\n    print(s)\n    return 0\n"
+        val radix_ll = lower_to_llvm(radix_src, "radix_upper_repro.spl")
+        expect_not(radix_ll.starts_with("LOWERING_ERRORS:"))
+        expect(llvm_codegen_error_from_ir(radix_ll)).to_equal("")
+        expect(radix_ll).to_contain("rt_char_from_code")
+        expect(radix_ll).to_contain("rt_string_concat")
