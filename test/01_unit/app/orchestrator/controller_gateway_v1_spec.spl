@@ -9,6 +9,8 @@ use std.common.config_core.server_context_types_v1.{ResolvedServerV1, ServerReco
 use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_encode_v6}
 use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.{controller_dispatch_host_effect_key_v3,
     controller_dispatch_host_action_key_v3}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostAgentInvokeRequestV4,
+    host_agent_invoke_request_encode_v4}
 
 fn gateway_request_v1(action: text = "inspect") -> ControllerGatewayRequestV1:
     ControllerGatewayRequestV1(action: action, controller_id: "controller-a", request_uid: "request-a",
@@ -16,6 +18,13 @@ fn gateway_request_v1(action: text = "inspect") -> ControllerGatewayRequestV1:
 
 fn gateway_config_v1(actions: [text]) -> ControllerGatewayConfigV1:
     ControllerGatewayConfigV1(state_root: "/private/controller-a", controller_id: "controller-a", allowed_actions: actions)
+
+fn gateway_invoke_fixture_v1(run_id: text) -> ControllerGatewayRequestV1:
+    var request = gateway_request_v1("agent-invoke")
+    val invoke = host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4(operation_id: run_id,
+        manifest: "manifest bytes for codec coverage")).unwrap()
+    request.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "agent-invoke", frame: invoke)).unwrap()
+    request
 
 fn gateway_ssh_selection_v1(transport: text) -> ResolvedServerV1:
     ResolvedServerV1(consumer: "caret", context: "work", source: "shared",
@@ -65,6 +74,32 @@ describe "Typed selected-server controller boundary":
         val legacy = controller_dispatch_host_action_key_v3("request-a")
         for sub in ["helper-abandon", "handoff-abandon", "retention-release"]:
             expect(controller_dispatch_host_effect_key_v3("request-a", sub)).to_equal(legacy)
+
+    it "requires independent invoke opt-in and correlates the canonical immutable frame":
+        val profile = "version: 1\nstateRoot: /private/controller\ncontrollerId: controller-a\nallowedActions: [agent-invoke]\n"
+        expect(controller_gateway_config_decode_v1(profile).unwrap_err()).to_equal("controller-gateway-agent-invoke-profile")
+        expect(controller_gateway_request_encode_v1(gateway_invoke_fixture_v1("another-run")).unwrap_err()).to_equal("controller-gateway-agent-invoke-operation")
+        var request = gateway_invoke_fixture_v1("request-a")
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val header = controller_gateway_header_v1(source).unwrap()
+        expect(controller_gateway_authorize_v1(gateway_config_v1(["agent-attachment"]), header, source).unwrap_err()).to_equal("controller-gateway-action-denied")
+        expect(controller_gateway_authorize_v1(gateway_config_v1(["agent-invoke"]), header, source).unwrap().source).to_equal(request.source)
+        request.action = "agent-attachment"
+        expect(controller_gateway_request_encode_v1(request).unwrap_err()).to_equal("controller-gateway-agent-attachment-sub")
+        val key = controller_dispatch_host_effect_key_v3("request-a", "agent-invoke")
+        expect(key).to_start_with("controller-agent-invoke-v1/")
+        expect(key == controller_dispatch_host_effect_key_v3("request-a", "agent-attach")).to_equal(false)
+        expect(key == controller_dispatch_host_effect_key_v3("request-a", "agent-detach")).to_equal(false)
+        expect(key == controller_dispatch_host_action_key_v3("request-a")).to_equal(false)
+
+    it "validates the exact invoke reply identity and progress without accepting pane data":
+        val source = controller_gateway_request_encode_v1(gateway_invoke_fixture_v1("request-a")).unwrap()
+        val report = "version: 4\nkind: linux-host-agent-invoke-reply\noperationId: request-a\nassociationDigest: \"" +
+            "a".repeat(64) + "\"\nstage: running\nworkloadIndex: 0\noutcome: \"\"\npending: true\n"
+        expect(controller_gateway_response_v1(source, report).unwrap()).to_contain("pending: true")
+        expect(controller_gateway_response_v1(source, report.replace("request-a", "request-b")).unwrap_err()).to_equal("controller-gateway-agent-invoke-report-operation")
+        expect(controller_gateway_response_v1(source, report.replace("pending: true", "pending: false")).unwrap_err()).to_equal("controller-gateway-agent-invoke-report-invalid")
+        expect(controller_gateway_response_v1(source, report + "paneBytes: unauthorized\n").is_err()).to_equal(true)
 
     it "validates the request before opening an SSH profile and keeps a finished turn settled":
         val invalid = "kind: wrong-request\n"
