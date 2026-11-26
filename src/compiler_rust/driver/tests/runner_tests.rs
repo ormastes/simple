@@ -719,14 +719,14 @@ fn runner_cli_match_destructuring_rejects() {
 #[test]
 fn runner_cli_match_in_imported_module_rejects() {
     let dir = TempDir::new().expect("tempdir");
-    let lib_path = dir.path().join("lib.spl");
+    let module_path = dir.path().join("classifier.spl");
     fs::write(
-        &lib_path,
+        &module_path,
         "pub fn classify(x: i32) -> i32:\n    match x:\n        0 =>\n            return 0\n        _ =>\n            return 1\n",
     )
-    .expect("write lib.spl");
+    .expect("write classifier.spl");
     let main_path = dir.path().join("main.spl");
-    fs::write(&main_path, "use lib\nmain = lib::classify(0)").expect("write main.spl");
+    fs::write(&main_path, "use classifier\nmain = classifier::classify(0)").expect("write main.spl");
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("simple");
     cmd.current_dir(dir.path());
@@ -738,14 +738,14 @@ fn runner_cli_match_in_imported_module_rejects() {
 #[test]
 fn runner_cli_match_in_imported_module_dot_call() {
     let dir = TempDir::new().expect("tempdir");
-    let lib_path = dir.path().join("lib.spl");
+    let module_path = dir.path().join("classifier.spl");
     fs::write(
-        &lib_path,
+        &module_path,
         "pub fn classify(x: i32) -> i32:\n    match x:\n        0 =>\n            return 0\n        _ =>\n            return 1\n",
     )
-    .expect("write lib.spl");
+    .expect("write classifier.spl");
     let main_path = dir.path().join("main.spl");
-    fs::write(&main_path, "use lib\nmain = lib.classify(0)").expect("write main.spl");
+    fs::write(&main_path, "use classifier\nmain = classifier.classify(0)").expect("write main.spl");
 
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("simple");
     cmd.current_dir(dir.path());
