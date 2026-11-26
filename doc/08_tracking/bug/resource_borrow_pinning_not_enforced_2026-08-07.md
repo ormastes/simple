@@ -257,3 +257,17 @@ Verification here is by code inspection only.
 runtime pinning scope described in "What real enforcement would need"
 remains the open remainder; the landed repair narrows the concrete
 extern-boundary hole but, per its own note, infers no closure.
+
+## Verification 2026-11-26 (`work/bf-1-compiler-hir-sem-20261126`)
+
+Re-executed all four resource-borrow unit regressions on `origin/release/1.0.0`
+using the pure-Simple interpreter (`SIMPLE_LIB=src`, `simple.exe test ... --mode=interpreter --timeout 60`):
+- `test/01_unit/compiler/resource/resource_borrow_pinning_spec.spl`: 3 examples, 0 failures
+- `test/01_unit/compiler/resource/foreign_call_borrow_origin_spec.spl`: 8 examples, 0 failures
+- `test/01_unit/compiler/resource/resource_move_while_borrowed_spec.spl`: 3 examples, 0 failures
+- `test/01_unit/compiler/resource/resource_pinning_lifetime_spec.spl`: 6 examples, 0 failures
+
+Dispositions: the `55.borrow` static MIR / `BorrowGraph` / `MirCallOrigin`
+enforcement checks are verified and passing (`ALREADY-FIXED-VERIFIED` for the
+static borrow-checker suite; full runtime pinning / region infrastructure remains
+architectural multi-layer scope outside `55.borrow`).
