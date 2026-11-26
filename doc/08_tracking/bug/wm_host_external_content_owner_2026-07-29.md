@@ -71,3 +71,15 @@ compositor module graph does not lower through the JIT
 (`SPL-UNIT-002: Count Add <scalar>`), so `simple play daemon …` only runs with
 `SIMPLE_EXECUTION_MODE=interpreter`, and the transport's round trip is bounded
 by `daemon_sdk`'s 100 ms client poll.
+
+## Linux aarch64 re-check (2026-11-26, lane wm-lane-20261126)
+
+release/1.0.0 79445b063c4, seed
+`/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple`:
+`simple run test/fixtures/wm_host_content_owner_probe.spl` exits 0 (negative control: flipping its first comparison exits 1), so the
+scalar owner helpers (`host_content_owner_default`/`_for_frame`/`_requires_browser_renderer`) still behave; no frame evidence was captured. None of the remaining pieces exists
+in `src/os`: no pixel-present window-protocol command, no bounded present
+slot or scalar host bridge, no remote GUI/pixel event receiver, and no
+deployed native server poll. Building them is feature work, not a bug fix.
+The row stays open on the 2026-11-04 owner question: is remote application
+presentation in scope for 1.0.0, or should it move to a feature request?
