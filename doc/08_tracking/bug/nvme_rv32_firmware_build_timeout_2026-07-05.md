@@ -2,9 +2,7 @@
 
 **Date:** 2026-07-05
 **Area:** compiler/native-build, SimpleOS rv32, NVMe firmware evidence
-**Status:** OPEN — architectural (self-hosted native-build parse/front-end
-throughput), re-confirmed 2026-08-09 by evidence review, not re-run (see note
-at file end)
+**Status:** fix-implemented-verification-pending — 2026-11-26 BF-7 repaired modular `fw_rv32` duplication/script/BRAM `.nandram` defects; full self-hosted ELF build + QEMU RV32 boot pending target Linux environment (out-of-ownership `src/os/kernel/arch/riscv32/linker.ld` QEMU `.nandram` still separate).
 
 ## Symptom
 
@@ -1652,3 +1650,23 @@ script-side cross-toolchain fix recorded above stands as the current status;
 the architectural blocker (interpreted compiler-graph cold-load per
 `native-build` invocation) remains open. No new build-loop attempt was made
 in this pass.
+
+## Fix Implemented 2026-11-26 (BF-7 lane, work/bf-7-riscv32-fpga-20261126)
+
+- **Status:** `fix-implemented-verification-pending`
+- **Root-cause fixes landed (within BF-7 ownership):**
+  - Restored modular `examples/09_embedded/simpleos_nvme_fw/fw_rv32/` `.spl` sources, `README.md`, and `boot.shs` from `3b4189d3b01` (preserving `nand_slot_drift_check.spl` and `nand_test_slots.spl`), removing the 54+ duplicated helper definitions and shell syntax break introduced during transplant `88aac2ffe28`.
+  - Repaired `examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs` and `fw_rv32/boot.shs`: added `resolve_rv32_toolchain` (GCC or Clang + compiler-rt builtins archive discovery), added fail-closed Rust bootstrap-seed refusal (`exit 127`) matching `fw_rv64/build.shs`, fixed CRLF-safe `check_fw_wiring`, deferred `mkdir -p` until actual build execution (keeping `--status`/`--self-test` clean), anchored `ROOT_DIR` via script path, guarded POSIX `timeout` against Windows `System32\timeout.exe` in `boot.shs`, exported `@export("C", name: "rt_rv32_boot_optional_nvme_fw_selftest")` in the override stub, and expanded `--self-test`.
+  - Restored `.nandram` (`_nandram_start`, `_nandram_end`) in `examples/09_embedded/fpga_riscv/rtl/nvme_fw_rv32_bram.ld`.
+- **Host verification evidence (Windows host):**
+  - `simple.exe run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl` -> `RV32 NVME FW LOGIC OK` (exit `0`).
+  - `sh -n` on `fw_rv32/build.shs` and `fw_rv32/boot.shs` -> exit `0`.
+  - `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs --self-test` -> `STATUS: PASS nvme-rv32-build self-test` (exit `0`).
+  - `sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --self-test` -> `STATUS: PASS nvme-rv32-boot self-test` (exit `0`).
+  - `simple.exe test test/01_unit/os/riscv_bf7/riscv_bf7_firmware_and_gates_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed` (`outcome=OK`, exit `0`).
+- **Remaining target/out-of-scope dependencies:** `src/os/kernel/arch/riscv32/linker.ld` (outside BF-7 ownership) still lacks the QEMU `.nandram` region; final build + QEMU verification requires a Linux host with deployed self-hosted `bin/simple`, RV32 cross-toolchain, and `qemu-system-riscv32`:
+  ```sh
+  NVME_RV32_SIMPLE_BIN=bin/simple sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs
+  sh scripts/check/check-nvme-rv32-minimal-live.shs
+  ```

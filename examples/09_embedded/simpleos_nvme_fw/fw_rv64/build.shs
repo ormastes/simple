@@ -1,7 +1,8 @@
 #!/bin/sh
 # Build a bootable RV64 ELF for the NVMe-firmware direct smoke.
 set -e
-cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)"
+cd "$ROOT_DIR"
 
 MODE="${1:-}"
 ENTRY_DIR="build/os/generated"
@@ -37,8 +38,6 @@ PID_FILE="$LOG_DIR/nvme_fw_rv64_build.pid"
 BG_OUT_LOG="$LOG_DIR/nvme_fw_rv64_background.out"
 BG_ERR_LOG="$LOG_DIR/nvme_fw_rv64_background.err"
 
-mkdir -p "$LOG_DIR" "$ENTRY_DIR"
-
 if [ "$MODE" = "--status" ]; then
   LAST_PHASE="$(grep -ahE '\[native-build\]|\[BOOTSTRAP-PHASE\]|NVME_RV64_BUILD_FAILED' "$OUT_LOG" "$ERR_LOG" "$BG_OUT_LOG" "$BG_ERR_LOG" 2>/dev/null | tail -n 1 || true)"
   LAST_DONE="$(grep -ahE '\[BOOTSTRAP-PHASE\].*:done|NVME_RV64_NATIVE_BUILD_DONE|NVME_RV64_BUILD_FAILED' "$OUT_LOG" "$ERR_LOG" "$BG_OUT_LOG" "$BG_ERR_LOG" 2>/dev/null | tail -n 1 || true)"
@@ -60,6 +59,7 @@ if [ "$MODE" = "--status" ]; then
 fi
 
 if [ "$MODE" = "--background" ]; then
+  mkdir -p "$LOG_DIR" "$ENTRY_DIR"
   if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "NVME_RV64_BUILD_BACKGROUND already-running pid=$(cat "$PID_FILE")"
     exit 0
@@ -70,6 +70,34 @@ if [ "$MODE" = "--background" ]; then
   exit 0
 fi
 
+if [ "$MODE" = "--self-test" ]; then
+  sh -n "$0" || { echo "STATUS: FAIL nvme-rv64-build self-test syntax" >&2; exit 1; }
+  for sec in all primary secondary target target_logic target_core; do
+    case "$sec" in
+      all|primary|secondary|target|target_logic|target_core) ;;
+      *) echo "STATUS: FAIL nvme-rv64-build self-test section=$sec" >&2; exit 1 ;;
+    esac
+  done
+  [ -f "examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic.spl" ] || { echo "STATUS: FAIL nvme-rv64-build self-test missing logic.spl" >&2; exit 1; }
+  [ -f "examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_sections_primary.spl" ] || { echo "STATUS: FAIL nvme-rv64-build self-test missing logic_sections_primary.spl" >&2; exit 1; }
+  if NVME_RV64_SIMPLE_BIN="/nonexistent/simple" sh "$0" --status >/dev/null 2>&1; then
+    :
+  fi
+  echo "STATUS: PASS nvme-rv64-build self-test"
+  exit 0
+fi
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+  echo "NVME_RV64_BUILD_FAILED missing Simple runtime: $SIMPLE_BIN" >&2
+  echo "Set NVME_RV64_SIMPLE_BIN to a self-hosted Simple binary." >&2
+  exit 127
+fi
+if "$SIMPLE_BIN" --version 2>&1 | grep -qiE "bootstrap seed only|Rust-built"; then
+  echo "NVME_RV64_BUILD_FAILED refusing Rust bootstrap seed runtime: $SIMPLE_BIN" >&2
+  exit 127
+fi
+
+mkdir -p "$LOG_DIR" "$ENTRY_DIR"
 rm -f "$DIRECT_ENTRY" "$OUT" "$OBJ" "$START_OBJ" "$START_ASM"
 
 case "$SECTION" in

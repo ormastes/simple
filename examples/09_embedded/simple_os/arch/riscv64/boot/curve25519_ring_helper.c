@@ -14,17 +14,7 @@ extern spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value);
 extern spl_i64 rt_array_data_ptr(spl_i64 collection);
 extern void rt_riscv_uart_put(spl_u64 byte);
 
-static spl_i64 rt_int(spl_i64 value) {
-    return value << 3;
-}
-
-static spl_i64 rt_index_arg(spl_i64 value) {
-    return value >> 3;
-}
-
-static spl_i64 rt_empty_bytes(void) {
-    return rt_byte_array_new_len(rt_int(0));
-}
+#include "rv64_crypto_array_abi.h"
 
 static void uart_line_c(const char *text) {
     spl_u64 i = 0ULL;
@@ -41,14 +31,14 @@ static int rt_copy_32_bytes_in(spl_i64 array_value, spl_u8 out[32]) {
         return 0;
     }
     for (spl_u64 i = 0; i < 32ULL; i = i + 1ULL) {
-        spl_i64 value = rt_array_get(array_value, rt_int((spl_i64)i));
+        spl_i64 value = rt_crypto_array_get(array_value, (spl_i64)i);
         out[i] = (spl_u8)((spl_u64)rt_index_arg(value) & 0xffULL);
     }
     return 1;
 }
 
 static spl_i64 rt_copy_32_bytes_out(const spl_u8 in[32]) {
-    spl_i64 out = rt_byte_array_new_len(rt_int(32));
+    spl_i64 out = rt_crypto_byte_array_new_len(32);
     spl_i64 *data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
     if (!data) {
         return rt_empty_bytes();
@@ -103,6 +93,9 @@ spl_i64 rt_tls13_x25519_public_key(spl_i64 scalar_value) {
         uart_line_c("X25519 PUB BOOTSTRAP");
         return rt_copy_32_bytes_out(k_live_bootstrap_public_key);
     }
+    scalar[0] &= 248U;
+    scalar[31] &= 127U;
+    scalar[31] |= 64U;
     uart_line_c("X25519 PUB MULT");
     x25519_scalar_mult_generic_masked(out, scalar, k_x25519_montgomery_base_point);
     uart_line_c("X25519 PUB DONE");
@@ -116,6 +109,10 @@ spl_i64 rt_tls13_x25519_shared_secret(spl_i64 scalar_value, spl_i64 point_value)
     if (!rt_copy_32_bytes_in(scalar_value, scalar) || !rt_copy_32_bytes_in(point_value, point)) {
         return rt_empty_bytes();
     }
+    scalar[0] &= 248U;
+    scalar[31] &= 127U;
+    scalar[31] |= 64U;
+    point[31] &= 127U;
     x25519_scalar_mult_generic_masked(out, scalar, point);
     return rt_copy_32_bytes_out(out);
 }

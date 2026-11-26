@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)"
+cd "$ROOT_DIR"
+
+CLANG_BIN="${CLANG_BIN:-}"
+if [ -z "$CLANG_BIN" ]; then
+    for cand in clang clang.exe; do
+        if command -v "$cand" >/dev/null 2>&1; then
+            CLANG_BIN="$cand"
+            break
+        fi
+    done
+fi
+[ -n "$CLANG_BIN" ] || { echo "STATUS: BLOCKED verify_rv64_crypto_helpers reason=clang-missing" >&2; exit 2; }
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+COMMON_FLAGS="-O2 -Wall -Wextra"
+RING_INC="-Isrc/compiler_rust/vendor/ring/include -Isrc/compiler_rust/vendor/ring/crypto -Isrc/compiler_rust/vendor/ring -Isrc/compiler_rust/vendor/ring/pregenerated"
+CORE_HELPERS="examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_sha512_helper.c examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_scalar_helper.c examples/09_embedded/simple_os/arch/riscv64/boot/tls13_sha256_helper.c examples/09_embedded/simple_os/arch/riscv64/boot/tls13_aes256_gcm_helper.c"
+X25519_HELPER="examples/09_embedded/simple_os/arch/riscv64/boot/curve25519_ring_helper.c"
+
+EXE_RAW="$TMP_DIR/rv64_crypto_host_raw"
+# shellcheck disable=SC2086
+"$CLANG_BIN" $COMMON_FLAGS $RING_INC \
+    test/01_unit/os/riscv_bf7/rv64_crypto_helpers_host_harness.c \
+    $CORE_HELPERS \
+    -o "$EXE_RAW"
+echo "=== mode=baremetal_raw (ed25519+sha512+sha256+aes256_gcm) ==="
+"$EXE_RAW"
+
+EXE_TAGGED="$TMP_DIR/rv64_crypto_host_tagged"
+# shellcheck disable=SC2086
+"$CLANG_BIN" $COMMON_FLAGS -DHOST_ABI_TAGGED $RING_INC \
+    test/01_unit/os/riscv_bf7/rv64_crypto_helpers_host_harness.c \
+    $CORE_HELPERS \
+    -o "$EXE_TAGGED"
+echo "=== mode=freestanding_tagged (ed25519+sha512+sha256+aes256_gcm) ==="
+"$EXE_TAGGED"
+
+EXE_X25519_RAW="$TMP_DIR/rv64_x25519_raw"
+# shellcheck disable=SC2086
+"$CLANG_BIN" $COMMON_FLAGS -DHOST_ABI_X25519_ONLY $RING_INC \
+    test/01_unit/os/riscv_bf7/rv64_crypto_helpers_host_harness.c \
+    "$X25519_HELPER" \
+    -o "$EXE_X25519_RAW"
+echo "=== mode=baremetal_raw (curve25519_ring_helper) ==="
+"$EXE_X25519_RAW"
+
+EXE_X25519_TAGGED="$TMP_DIR/rv64_x25519_tagged"
+# shellcheck disable=SC2086
+"$CLANG_BIN" $COMMON_FLAGS -DHOST_ABI_TAGGED -DHOST_ABI_X25519_ONLY $RING_INC \
+    test/01_unit/os/riscv_bf7/rv64_crypto_helpers_host_harness.c \
+    "$X25519_HELPER" \
+    -o "$EXE_X25519_TAGGED"
+echo "=== mode=freestanding_tagged (curve25519_ring_helper) ==="
+"$EXE_X25519_TAGGED"
+
+EXE_X86="$TMP_DIR/x86_aes_host"
+# shellcheck disable=SC2086
+"$CLANG_BIN" $COMMON_FLAGS -DHOST_ABI_X86_AES_ONLY \
+    test/01_unit/os/riscv_bf7/rv64_crypto_helpers_host_harness.c \
+    examples/09_embedded/simple_os/arch/x86_64/boot/tls13_aes256_gcm_helper.c \
+    -o "$EXE_X86"
+echo "=== mode=x86_64_aes_wrapper ==="
+"$EXE_X86"
+
+echo "STATUS: PASS verify_rv64_crypto_helpers binaries=5 all_helpers=5"
