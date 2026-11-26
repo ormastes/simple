@@ -11952,18 +11952,41 @@ int8_t rt_typed_bytes_u64_le_set(SplArray* a, int64_t idx, int64_t val) {
 /* Shared guards for the typed `[u32]`/`[u64]`/`[i64]` word lanes. `slot_at`
  * normalises a negative index and bounds-checks it; `slot_push` reserves one
  * more element and claims it. Both return NULL where the lane returns 0. */
+/* A BYTES ([u8]) array has 1-byte elements, so it has no word slot: the
+ * readers decode the byte through typed_words_byte_at, and a typed word write
+ * into one is a runtime error (owner decision; the Rust lane traps the same
+ * way). typed_words_byte_at is a static helper with no rt_ ABI, so it has no
+ * Rust twin; rt_typed_words_byte_write_trap is the dual-lane entry that the
+ * JIT's inlined writers call.
+ * Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27 */
+void rt_typed_words_byte_write_trap(void) {
+    spl_panic("typed word write: a [u8] array cannot be written through a word-typed array parameter ([i64]/[u64]/[u32])");
+}
+
 static int64_t* rt_typed_words_slot_at(SplArray* a, int64_t idx, RtCoreArray** out_array) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return NULL;
+    /* Readers decode BYTES before calling this, so only a writer gets here. */
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) rt_typed_words_byte_write_trap();
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return NULL;
     *out_array = array;
     return &((int64_t*)array->data)[idx];
 }
 
+static int typed_words_byte_at(SplArray* a, int64_t idx, int64_t* out) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array || !(array->flags & RT_CORE_ARRAY_FLAG_BYTES)) return 0;
+    if (idx < 0) idx = array->len + idx;
+    *out = (idx < 0 || idx >= array->len) ? 0 : ((const uint8_t*)array->data)[idx];
+    return 1;
+}
+
 static int64_t* rt_typed_words_slot_push(SplArray* a, RtCoreArray** out_array) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return NULL;
+    /* Readers decode BYTES before calling this, so only a writer gets here. */
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) rt_typed_words_byte_write_trap();
     if (!rt_core_array_reserve(a, array->len + 1)) return NULL;
     *out_array = array;
     return &((int64_t*)array->data)[array->len++];
@@ -11971,6 +11994,8 @@ static int64_t* rt_typed_words_slot_push(SplArray* a, RtCoreArray** out_array) {
 
 int64_t rt_typed_words_u32_at(SplArray* a, int64_t idx) {
     RtCoreArray* array;
+    int64_t byte;
+    if (typed_words_byte_at(a, idx, &byte)) return byte;
     int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
     if (!slot) return 0;
     int64_t value = *slot;
@@ -11998,6 +12023,8 @@ int8_t rt_typed_words_u32_set(SplArray* a, int64_t idx, int64_t val) {
 
 int64_t rt_typed_words_u64_at(SplArray* a, int64_t idx) {
     RtCoreArray* array;
+    int64_t byte;
+    if (typed_words_byte_at(a, idx, &byte)) return byte;
     int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
     if (!slot) return 0;
     return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? *slot : rt_value_as_u64(*slot);
@@ -12026,6 +12053,8 @@ int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
  * array holds raw words and is read/written as such. */
 int64_t rt_typed_words_i64_at(SplArray* a, int64_t idx) {
     RtCoreArray* array;
+    int64_t byte;
+    if (typed_words_byte_at(a, idx, &byte)) return byte;
     int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
     if (!slot) return 0;
     return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? *slot : rt_value_unbox_int(*slot);
@@ -12049,6 +12078,8 @@ int8_t rt_typed_words_i64_set(SplArray* a, int64_t idx, int64_t val) {
 
 int64_t rt_typed_words_u64_raw_data_at(int64_t data_ptr, int64_t idx) {
     if (data_ptr == 0 || idx < 0) return 0;
+    /* Bit 0 set: the hoisted loop pointer of a BYTES array (MIR tags it). */
+    if (data_ptr & 1) return ((const uint8_t*)(uintptr_t)(data_ptr & ~(int64_t)1))[idx];
     return ((int64_t*)(uintptr_t)data_ptr)[idx];
 }
 

@@ -3,7 +3,7 @@
 //! Handles all forms of function calls: user-defined, runtime SFFI, and built-in functions.
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, Block, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
@@ -13,9 +13,9 @@ use crate::mir::{CallTarget, VReg};
 
 use super::core::{compile_builtin_io_call, vreg_is_signed};
 use super::helpers::{
-    adapted_call, array_cap_i64, array_items_base, array_len_i64, call_runtime_1, call_runtime_2, call_runtime_3,
-    create_cstring_constant, decode_byte_from_slot, get_vreg_or_default, inline_runtime_array_len_value,
-    inline_runtime_len_value, store_array_len, string_cp_len_ref,
+    adapted_call, array_cap_i64, array_items_base, array_len_i64, call_runtime_0, call_runtime_1, call_runtime_2,
+    call_runtime_3, create_cstring_constant, decode_byte_from_slot, get_vreg_or_default,
+    inline_runtime_array_len_value, inline_runtime_len_value, store_array_len, string_cp_len_ref,
 };
 use super::{InstrContext, InstrResult};
 
@@ -2177,7 +2177,16 @@ fn compile_inline_typed_words_at<M: Module>(
         let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
         builder.ins().band(ge_zero, lt_len)
     };
-    builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
+    brif_word_path(
+        ctx,
+        builder,
+        in_bounds,
+        ptr_bits,
+        normalized_index,
+        load_block,
+        done_block,
+        zero,
+    );
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(load_block);
@@ -2257,7 +2266,16 @@ fn compile_inline_typed_words_i64_at<M: Module>(
         let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
         builder.ins().band(ge_zero, lt_len)
     };
-    builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
+    brif_word_path(
+        ctx,
+        builder,
+        in_bounds,
+        ptr_bits,
+        normalized_index,
+        load_block,
+        done_block,
+        zero,
+    );
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(load_block);
@@ -2295,6 +2313,121 @@ fn compile_inline_typed_words_i64_at<M: Module>(
     builder.seal_block(done_block);
     ctx.vreg_values.insert(*dest, result);
     Ok(true)
+}
+
+/// A byte-packed `[u8]` has 1-byte elements, so the 8-byte slot loads of the
+/// typed word inliners would read past its data. Such an array only reaches a
+/// `[i64]`/`[u64]`/`[u32]` reader through an untyped caller; send it to the
+/// byte load (the value the runtime readers return). The current
+/// block continues on the word path. FAM targets never byte-pack.
+/// Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+/// The bounds branch of a typed word reader, extended to a byte-packed `[u8]`
+/// (reached through an untyped caller): the word path is taken only when the
+/// index is in bounds AND the array holds word slots, and one cold block tells
+/// out-of-bounds (`oob`) from an in-bounds byte read. Folding the flag test
+/// into the existing branch matters: a separate never-taken flag branch made a
+/// `[u32]` read loop 2.9x slower (1.87 s -> 5.42 s for 1e9 reads, aarch64).
+/// FAM targets never byte-pack.
+/// Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+#[allow(clippy::too_many_arguments)]
+fn brif_word_path<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    in_bounds: Value,
+    header_ptr: Value,
+    normalized_index: Value,
+    word_block: Block,
+    done_block: Block,
+    oob: Value,
+) {
+    if ctx.fam_arrays {
+        builder.ins().brif(in_bounds, word_block, &[], done_block, &[oob]);
+        return;
+    }
+    let is_bytes = byte_packed_condition(builder, header_ptr);
+    let word_path = builder.ins().band_not(in_bounds, is_bytes);
+    let other_block = builder.create_block();
+    builder.ins().brif(word_path, word_block, &[], other_block, &[]);
+    builder.set_cold_block(other_block);
+    builder.switch_to_block(other_block);
+    builder.seal_block(other_block);
+    let bytes_block = builder.create_block();
+    builder.ins().brif(in_bounds, bytes_block, &[], done_block, &[oob]);
+    builder.switch_to_block(bytes_block);
+    builder.seal_block(bytes_block);
+    let base = array_items_base(builder, header_ptr, false);
+    let byte_ptr = builder.ins().iadd(base, normalized_index);
+    let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+    let value = builder.ins().uextend(types::I64, byte);
+    builder.ins().jump(done_block, &[value]);
+}
+
+fn branch_byte_packed_to_byte_load<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    header_ptr: Value,
+    normalized_index: Value,
+    done_block: Block,
+) {
+    if ctx.fam_arrays {
+        return;
+    }
+    let bytes_block = builder.create_block();
+    let words_block = builder.create_block();
+    let is_bytes = byte_packed_condition(builder, header_ptr);
+    builder.ins().brif(is_bytes, bytes_block, &[], words_block, &[]);
+    builder.set_cold_block(bytes_block);
+    builder.switch_to_block(bytes_block);
+    builder.seal_block(bytes_block);
+    let data_ptr = array_items_base(builder, header_ptr, false);
+    let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
+    let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+    let value = builder.ins().uextend(types::I64, byte);
+    builder.ins().jump(done_block, &[value]);
+    builder.switch_to_block(words_block);
+    builder.seal_block(words_block);
+}
+
+/// Hoisted `_data_at` loop pointers carry bit 0 = byte-packed (set by the MIR
+/// loop hoist). Branch a tagged pointer to a 1-byte load; the current block
+/// continues on the word path with bit 0 clear.
+/// Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+fn branch_tagged_byte_ptr_to_byte_load(
+    builder: &mut FunctionBuilder,
+    data_ptr: Value,
+    index: Value,
+    done_block: Block,
+) {
+    let bytes_block = builder.create_block();
+    let words_block = builder.create_block();
+    let tag = builder.ins().band_imm(data_ptr, 1);
+    let is_bytes = builder.ins().icmp_imm(IntCC::NotEqual, tag, 0);
+    builder.ins().brif(is_bytes, bytes_block, &[], words_block, &[]);
+    builder.set_cold_block(bytes_block);
+    builder.switch_to_block(bytes_block);
+    builder.seal_block(bytes_block);
+    let base = builder.ins().band_imm(data_ptr, !1i64);
+    let byte_ptr = builder.ins().iadd(base, index);
+    let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+    let value = builder.ins().uextend(types::I64, byte);
+    builder.ins().jump(done_block, &[value]);
+    builder.switch_to_block(words_block);
+    builder.seal_block(words_block);
+}
+
+/// Finish a straight-line reader that was split by a byte guard.
+fn finish_guarded_read(builder: &mut FunctionBuilder, done_block: Block, word: Value) -> Value {
+    builder.ins().jump(done_block, &[word]);
+    builder.switch_to_block(done_block);
+    builder.seal_block(done_block);
+    builder.block_params(done_block)[0]
+}
+
+fn byte_packed_condition(builder: &mut FunctionBuilder, header_ptr: Value) -> Value {
+    let flags = builder.ins().load(types::I8, MemFlags::new(), header_ptr, 1);
+    let flags64 = builder.ins().uextend(types::I64, flags);
+    let packed = builder.ins().band_imm(flags64, 0x08);
+    builder.ins().icmp_imm(IntCC::NotEqual, packed, 0)
 }
 
 fn u64_packed_condition(builder: &mut FunctionBuilder, header_ptr: Value) -> Value {
@@ -2348,11 +2481,15 @@ fn compile_inline_typed_words_unchecked<M: Module>(
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+    branch_byte_packed_to_byte_load(ctx, builder, ptr_bits, index, done_block);
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
     let word = maybe_packed_u64_load_word(builder, ptr_bits, raw, width);
+    let word = finish_guarded_read(builder, done_block, word);
     ctx.vreg_values.insert(*dest, word);
     Ok(true)
 }
@@ -2373,6 +2510,9 @@ fn compile_inline_typed_words_data_at<M: Module>(
 
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+    branch_tagged_byte_ptr_to_byte_load(builder, data_ptr, index, done_block);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
@@ -2382,6 +2522,7 @@ fn compile_inline_typed_words_data_at<M: Module>(
     } else {
         int_payload
     };
+    let word = finish_guarded_read(builder, done_block, word);
     ctx.vreg_values.insert(*dest, word);
     Ok(true)
 }
@@ -2404,10 +2545,14 @@ fn compile_inline_typed_words_data_at_checked<M: Module>(
     let header_ptr = builder.ins().band(header_or_array, ptr_mask);
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[1]);
     let index = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+    branch_tagged_byte_ptr_to_byte_load(builder, data_ptr, index, done_block);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
     let word = maybe_packed_u64_load_word(builder, header_ptr, raw, 8);
+    let word = finish_guarded_read(builder, done_block, word);
     ctx.vreg_values.insert(*dest, word);
     Ok(true)
 }
@@ -2427,9 +2572,13 @@ fn compile_inline_typed_words_raw_data_at<M: Module>(
 
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+    branch_tagged_byte_ptr_to_byte_load(builder, data_ptr, index, done_block);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    let raw = finish_guarded_read(builder, done_block, raw);
     ctx.vreg_values.insert(*dest, raw);
     Ok(true)
 }
@@ -2482,6 +2631,23 @@ fn compile_inline_typed_words_u32_set<M: Module>(
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(store_block);
+    if !ctx.fam_arrays {
+        // A byte-packed `[u8]` has no 8-byte slot: the store below wrote over
+        // the next 7 bytes. A typed word write into one is a runtime error
+        // (owner decision), as in rt_typed_words_u32_set.
+        // Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+        let words_block = builder.create_block();
+        let trap_block = builder.create_block();
+        let is_bytes = byte_packed_condition(builder, ptr_bits);
+        builder.ins().brif(is_bytes, trap_block, &[], words_block, &[]);
+        builder.set_cold_block(trap_block);
+        builder.switch_to_block(trap_block);
+        builder.seal_block(trap_block);
+        call_runtime_0(ctx, builder, "rt_typed_words_byte_write_trap");
+        builder.ins().jump(done_block, &[false_value]);
+        builder.switch_to_block(words_block);
+        builder.seal_block(words_block);
+    }
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().imul_imm(normalized_index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
@@ -2547,7 +2713,16 @@ fn compile_inline_typed_words_push<M: Module>(
     if returns_value {
         builder.append_block_param(done_block, result_type);
     }
-    builder.ins().brif(has_capacity, store_block, &[], grow_block, &[]);
+    // A byte-packed `[u8]` has 1-byte elements; its capacity counts bytes, so
+    // the in-capacity 8-byte store overran it. The runtime push traps on it.
+    // Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+    let can_store = if ctx.fam_arrays {
+        has_capacity
+    } else {
+        let is_bytes = byte_packed_condition(builder, ptr_bits);
+        builder.ins().band_not(has_capacity, is_bytes)
+    };
+    builder.ins().brif(can_store, store_block, &[], grow_block, &[]);
 
     builder.switch_to_block(store_block);
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);

@@ -164,7 +164,7 @@ pub use collections::{
     rt_typed_words_u64_data_at_checked, rt_typed_words_u64_push, rt_typed_words_u64_push_known_at,
     rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at, rt_typed_words_u64_set,
     rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked, rt_typed_words_i64_at,
-    rt_typed_words_i64_push, rt_typed_words_i64_set,
+    rt_typed_words_i64_push, rt_typed_words_i64_set, rt_typed_words_byte_write_trap,
 };
 pub use collections::note_user_threads_started;
 pub(crate) use collections::{byte_array_bytes, byte_array_write, word_array_le_bytes};

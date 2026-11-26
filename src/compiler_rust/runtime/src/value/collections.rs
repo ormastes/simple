@@ -1857,6 +1857,11 @@ pub extern "C" fn rt_typed_words_u32_at(array: RuntimeValue, index: i64) -> i64 
         if idx < 0 || idx >= len {
             return 0;
         }
+        // A byte-packed `[u8]` reached through an untyped caller holds bytes,
+        // not word slots (seed_jit_u8_array_into_i64_array_param_reads_zero).
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(idx as usize) as i64;
+        }
         if (*arr).is_u64_packed() {
             return (*((*arr).data as *const u64).add(idx as usize) & 0xFFFF_FFFF) as i64;
         }
@@ -1879,6 +1884,9 @@ pub extern "C" fn rt_typed_words_u32_at(array: RuntimeValue, index: i64) -> i64 
 pub extern "C" fn rt_typed_words_u32_unchecked(array: RuntimeValue, index: i64) -> i64 {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe {
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(index as usize) as i64;
+        }
         let raw = (*arr).as_slice()[index as usize];
         if raw.is_int() {
             return raw.as_int() & 0xFFFF_FFFF;
@@ -1951,6 +1959,11 @@ pub extern "C" fn rt_typed_bytes_u8_data_at(data_ptr: i64, index: i64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u32_data_at(data_ptr: i64, index: i64) -> i64 {
+    // Bit 0 set: the hoisted loop pointer of a byte-packed `[u8]` (MIR
+    // lowering tags it; seed_jit_u8_array_into_i64_array_param_reads_zero).
+    if data_ptr & 1 != 0 {
+        return unsafe { *(((data_ptr & !1) as *const u8).add(index as usize)) as i64 };
+    }
     unsafe {
         let raw = *((data_ptr as *const RuntimeValue).add(index as usize));
         if raw.is_int() {
@@ -1969,6 +1982,11 @@ pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
             return 0;
+        }
+        // A byte-packed `[u8]` reached through an untyped caller holds bytes,
+        // not word slots (seed_jit_u8_array_into_i64_array_param_reads_zero).
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(idx as usize) as i64;
         }
         if (*arr).is_u64_packed() {
             return *((*arr).data as *const u64).add(idx as usize) as i64;
@@ -1992,6 +2010,9 @@ pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 
 pub extern "C" fn rt_typed_words_u64_unchecked(array: RuntimeValue, index: i64) -> i64 {
     let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe {
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(index as usize) as i64;
+        }
         if (*arr).is_u64_packed() {
             return *((*arr).data as *const u64).add(index as usize) as i64;
         }
@@ -2005,6 +2026,11 @@ pub extern "C" fn rt_typed_words_u64_unchecked(array: RuntimeValue, index: i64) 
 
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u64_data_at(data_ptr: i64, index: i64) -> i64 {
+    // Bit 0 set: the hoisted loop pointer of a byte-packed `[u8]` (MIR
+    // lowering tags it; seed_jit_u8_array_into_i64_array_param_reads_zero).
+    if data_ptr & 1 != 0 {
+        return unsafe { *(((data_ptr & !1) as *const u8).add(index as usize)) as i64 };
+    }
     unsafe {
         let raw = *((data_ptr as *const RuntimeValue).add(index as usize));
         if raw.is_int() {
@@ -2021,6 +2047,9 @@ pub extern "C" fn rt_typed_words_u64_data_at_checked(header_ptr: i64, data_ptr: 
     }
     unsafe {
         let arr = (header_ptr & !7) as *const RuntimeArray;
+        if (*arr).is_byte_packed() {
+            return *(((data_ptr & !1) as *const u8).add(index as usize)) as i64;
+        }
         if (*arr).is_u64_packed() {
             return *((data_ptr as *const u64).add(index as usize)) as i64;
         }
@@ -2032,6 +2061,11 @@ pub extern "C" fn rt_typed_words_u64_data_at_checked(header_ptr: i64, data_ptr: 
 pub extern "C" fn rt_typed_words_u64_raw_data_at(data_ptr: i64, index: i64) -> i64 {
     if data_ptr == 0 || index < 0 {
         return 0;
+    }
+    // Bit 0 set: the hoisted loop pointer of a byte-packed `[u8]` (MIR
+    // lowering tags it; seed_jit_u8_array_into_i64_array_param_reads_zero).
+    if data_ptr & 1 != 0 {
+        return unsafe { *(((data_ptr & !1) as *const u8).add(index as usize)) as i64 };
     }
     unsafe { *((data_ptr as *const u64).add(index as usize)) as i64 }
 }
@@ -2118,11 +2152,30 @@ pub extern "C" fn rt_bytes_u8_set(array: RuntimeValue, index: i64, value: i64) -
     }
 }
 
+/// A typed word write (`[i64]` / `[u64]` / `[u32]` parameter) that receives a
+/// byte-packed `[u8]` has no 8-byte slot to store into. Writing one would
+/// overrun the byte buffer and refusing it silently drops the value, so it is a
+/// runtime error (owner decision). Reads decode the byte instead.
+/// Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+fn typed_words_byte_write_trap(op: &str) -> ! {
+    eprintln!("error: {op}: a [u8] array cannot be written through a word-typed array parameter ([i64]/[u64]/[u32])");
+    std::process::abort();
+}
+
+/// Cold-branch entry for the JIT's inlined typed word writers.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_byte_write_trap() {
+    typed_words_byte_write_trap("typed word write");
+}
+
 /// Write a u32 element into a `[u32]`-style runtime array without generic index dispatch.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u32_set(array: RuntimeValue, index: i64, value: i64) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap("rt_typed_words_u32_set");
+        }
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
@@ -2138,6 +2191,9 @@ pub extern "C" fn rt_typed_words_u32_set(array: RuntimeValue, index: i64, value:
 pub extern "C" fn rt_typed_words_u64_set(array: RuntimeValue, index: i64, value: i64) -> bool {
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap("rt_typed_words_u64_set");
+        }
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
@@ -2165,6 +2221,11 @@ pub extern "C" fn rt_typed_words_i64_at(array: RuntimeValue, index: i64) -> i64 
         if idx < 0 || idx >= len {
             return 0;
         }
+        // A byte-packed `[u8]` reached through an untyped caller holds bytes,
+        // not word slots (seed_jit_u8_array_into_i64_array_param_reads_zero).
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(idx as usize) as i64;
+        }
         if (*arr).is_u64_packed() {
             return *((*arr).data as *const i64).add(idx as usize);
         }
@@ -2189,7 +2250,7 @@ pub extern "C" fn rt_typed_words_i64_set(array: RuntimeValue, index: i64, value:
             return false;
         }
         if (*arr).is_byte_packed() {
-            return false;
+            typed_words_byte_write_trap("rt_typed_words_i64_set");
         }
         if !(*arr).is_u64_packed() && RuntimeValue::fits_inline_int(value) {
             *(*arr).data.add(idx as usize) = RuntimeValue::from_int(value);
@@ -2212,7 +2273,7 @@ pub extern "C" fn rt_typed_words_i64_push(array: RuntimeValue, value: i64) -> bo
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            return false;
+            typed_words_byte_write_trap("rt_typed_words_i64_push");
         }
         if !(*arr).is_u64_packed() && !RuntimeValue::fits_inline_int(value) {
             pack_tagged_words_in_place(arr);
@@ -2288,7 +2349,7 @@ pub extern "C" fn rt_typed_words_u32_push(array: RuntimeValue, value: i64) -> bo
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            return false;
+            typed_words_byte_write_trap("rt_typed_words_u32_push");
         }
         if (*arr).len >= (*arr).capacity {
             let old_cap = (*arr).capacity;
@@ -2324,7 +2385,7 @@ pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bo
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            return false;
+            typed_words_byte_write_trap("rt_typed_words_u64_push");
         }
         if (*arr).len >= (*arr).capacity {
             let old_cap = (*arr).capacity;
@@ -2363,7 +2424,10 @@ pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bo
 pub extern "C" fn rt_typed_words_u32_push_known_at(array: RuntimeValue, index: i64, value: i64) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
-        if (*arr).is_byte_packed() || index < 0 || index as u64 >= (*arr).capacity {
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap("rt_typed_words_u32_push_known_at");
+        }
+        if index < 0 || index as u64 >= (*arr).capacity {
             return false;
         }
         *(*arr).data.add(index as usize) = RuntimeValue::from_int(value & 0xFFFF_FFFF);
@@ -2377,7 +2441,10 @@ pub extern "C" fn rt_typed_words_u32_push_known_at(array: RuntimeValue, index: i
 pub extern "C" fn rt_typed_words_u64_push_known_at(array: RuntimeValue, index: i64, value: i64) -> bool {
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
-        if (*arr).is_byte_packed() || index < 0 || index as u64 >= (*arr).capacity {
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap("rt_typed_words_u64_push_known_at");
+        }
+        if index < 0 || index as u64 >= (*arr).capacity {
             return false;
         }
         if (*arr).is_u64_packed() {
@@ -2403,6 +2470,9 @@ pub extern "C" fn rt_typed_words_u32_push_known_data_at(
     }
     unsafe {
         let arr = header_ptr as *mut RuntimeArray;
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap("rt_typed_words_u32_push_known_data_at");
+        }
         if index as u64 >= (*arr).capacity {
             return false;
         }
@@ -2425,6 +2495,9 @@ pub extern "C" fn rt_typed_words_u64_push_known_data_at(
     }
     unsafe {
         let arr = header_ptr as *mut RuntimeArray;
+        if (*arr).is_byte_packed() {
+            typed_words_byte_write_trap("rt_typed_words_u64_push_known_data_at");
+        }
         if index as u64 >= (*arr).capacity {
             return false;
         }

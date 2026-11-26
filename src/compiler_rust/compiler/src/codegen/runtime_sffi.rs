@@ -960,6 +960,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_typed_words_u64_set", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_typed_words_i64_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_typed_words_i64_set", &[I64, I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_typed_words_byte_write_trap", &[], &[]),
     RuntimeFuncSpec::new("rt_typed_words_i64_push", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_memory_barrier", &[], &[]),
     RuntimeFuncSpec::new("rt_load_barrier", &[], &[]),

@@ -45,6 +45,32 @@ static int text_is(int64_t s, const char* want) {
 
 static int64_t rv(SplArray* a) { return (int64_t)(uintptr_t)a; }
 
+#ifndef _WIN32
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+/* Run one typed word write on a BYTES array in a child; it must abort. */
+static int word_write_traps(SplArray* bytes, int op) {
+    pid_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        fclose(stderr);
+        switch (op) {
+        case 0: rt_typed_words_i64_set(bytes, 0, 1); break;
+        case 1: rt_typed_words_u64_set(bytes, 0, 1); break;
+        case 2: rt_typed_words_u32_set(bytes, 0, 1); break;
+        case 3: rt_typed_words_i64_push(bytes, 1); break;
+        case 4: rt_typed_words_u64_push(bytes, 1); break;
+        default: rt_typed_words_u32_push(bytes, 1); break;
+        }
+        _exit(0);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return 0;
+    return WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
+}
+#endif
+
 int main(void) {
     const int64_t big = (int64_t)((1ULL << 60) + 5);
     const int64_t bigger = (int64_t)(1ULL << 61);
@@ -90,6 +116,26 @@ int main(void) {
     CHECK(rt_array_len(bytes) == 4);
     const uint8_t want_bytes[] = {56, 66, 67, 200};
     for (int i = 0; i < 4; i++) CHECK(rt_bytes_u8_at(bytes, i) == want_bytes[i]);
+
+    /* ---- 3. typed word readers on a BYTES array read the byte ------------
+     * A [u8] reaching a [i64]/[u64]/[u32] parameter through an untyped caller
+     * was read as 8-byte slots of the byte buffer. Readers (including the
+     * hoisted raw_data_at, whose pointer has bit 0 set for BYTES) decode the
+     * byte; a typed word write into a BYTES array is a runtime error.
+     * Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27 */
+    for (int i = 0; i < 4; i++) {
+        CHECK(rt_typed_words_i64_at(bytes, i) == want_bytes[i]);
+        CHECK(rt_typed_words_u64_at(bytes, i) == want_bytes[i]);
+        CHECK(rt_typed_words_u32_at(bytes, i) == want_bytes[i]);
+    }
+    CHECK(rt_typed_words_i64_at(bytes, -1) == 200);
+    CHECK(rt_typed_words_i64_at(bytes, 4) == 0);
+    int64_t tagged = rt_array_data_ptr(bytes) | 1;
+    for (int i = 0; i < 4; i++) CHECK(rt_typed_words_u64_raw_data_at(tagged, i) == want_bytes[i]);
+#ifndef _WIN32
+    for (int op = 0; op < 6; op++) CHECK(word_write_traps(bytes, op));
+    CHECK(rt_array_len(bytes) == 4 && rt_bytes_u8_at(bytes, 0) == 56 && rt_bytes_u8_at(bytes, 1) == 66);
+#endif
 
     /* ---- 4. wide integers compare, hash and order by value --------------- */
     int64_t a = rt_value_int(big), b = rt_value_int(big);
