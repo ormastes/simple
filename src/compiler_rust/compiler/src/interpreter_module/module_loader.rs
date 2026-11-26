@@ -3091,6 +3091,7 @@ mod private_fn_visibility_tests {
             exports: std::sync::Arc::new(crate::value::ModuleTable::leaf(Default::default())),
             extra: Default::default(),
             private_fns: names.iter().map(|s| s.to_string()).collect(),
+            host_gated: false,
         }))
     }
 

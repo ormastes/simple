@@ -104,15 +104,15 @@ EOF
 
 # run_fixture <bin> <file> <outfile>  -> sets RC (never read through a pipe)
 run_fixture() {
-    timeout "$RUN_TIMEOUT" "$1" run "$2" >"$3" 2>&1
+    ( cd "$REPO_ROOT" && timeout "$RUN_TIMEOUT" "$1" run "$2" >"$3" 2>&1 )
     RC=$?
 }
 
-# check_absent <label> <rc> <log> <failtag>
+# check_absent <label> <rc> <log> <failtag> [symbol]
 # One absent-name fixture must be a hard "does not provide it" error: rc != 0,
 # rc < 128, error names the symbol, body never ran.
 check_absent() {
-    _lbl="$1"; _rc="$2"; _log="$3"; _tag="$4"
+    _lbl="$1"; _rc="$2"; _log="$3"; _tag="$4"; _sym="${5:-uw_probe_zzz_absent}"
     CHECKED=$((CHECKED + 1))
     if [ "$_rc" -eq 0 ]; then
         echo "  [defect] $_lbl: undefined named import accepted, exit 0 (LENIENT)"
@@ -124,8 +124,8 @@ check_absent() {
     elif grep -q 'REACHED' "$_log"; then
         echo "  [defect] $_lbl: body executed (printed REACHED) despite rc=$_rc"
         FAILURES="${FAILURES}${_tag}-body-ran "
-    elif ! grep 'does not provide it' "$_log" | grep -q 'uw_probe_zzz_absent'; then
-        echo "  [defect] $_lbl: rc=$_rc but no \"does not provide it\" error naming uw_probe_zzz_absent"
+    elif ! grep 'does not provide it' "$_log" | grep -q "$_sym"; then
+        echo "  [defect] $_lbl: rc=$_rc but no \"does not provide it\" error naming $_sym"
         head -n 5 "$_log" | sed 's/^/  | /'
         FAILURES="${FAILURES}${_tag}-wrong-diagnostic "
     else
@@ -157,6 +157,11 @@ scan() {
 
     run_fixture "$_bin" "$F_UNREACHED" "$_work/unreached.log"
     check_absent "uw_probe_zzz_absent (off executed path)" "$RC" "$_work/unreached.log" unreached-undefined-import
+
+    # An `export use` facade whose source lacks a re-exported name must fail
+    # its importer too (it used to load as an empty dict, silently).
+    run_fixture "$_bin" "$REPO_ROOT/test/fixtures/export_alias_owner/bad_facade_import.spl" "$_work/facade.log"
+    check_absent "zzz_absent_facade (export use re-export)" "$RC" "$_work/facade.log" facade-reexport-undefined zzz_absent
 }
 
 # --------------------------------------------------------------------------
