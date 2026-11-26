@@ -1,6 +1,6 @@
 # Stage 2 test-runner build: `00.common/simple.sdn: project.name is missing` (2026-11-27)
 
-**Status:** open. Owner: bootstrap lane.
+**Status:** duplicate of `mir_text_bytes_unresolved_inferred_trim_receiver_2026-10-23`. A workaround is on `release/1.0.0` in `9acdac6f849` (2026-11-27 01:58, `src/lib/common/sdn/parser.spl` `parse`). The verifier run below used pinned source `06ba866385d5`, which predates it, so it still carries the miscompile. Rerun the stage-2 verification on a revision that contains `9acdac6f849`. Owner: bootstrap lane.
 
 ## Observed
 
@@ -17,7 +17,7 @@ The stage-2 compiler-tests verification (pinned source `06ba866385d5`, aarch64) 
 - On the Rust seed interpreter, `library_unit_decl_parse_v1("src/compiler/00.common", <that file>)` returns `OK name=simple-compiler-common kind=library`. So the parser source is correct for those bytes.
 - The only packaging path is `library_unit_manifest_closure_v1`, which calls `library_unit_manifest_parse_v1` and then `library_unit_decl_parse_v1` (`src/compiler/80.driver/driver_build/`). Empty content would be refused earlier as `missing manifest`, so the stage-2 path received non-empty text and `root.get_path("project.name")` then `as_str()` produced `""`.
 
-## Open questions (not yet discriminated)
+## Open questions (answered by the duplicate: a stage-2 miscompile of the inferred `trim` receiver in `parse`)
 
 1. A native miscompile of `SdnValue.get_path` / `as_str() ?? ""` in the stage-2 compiler.
 2. `load` returning different, non-empty bytes, for example a different file or a truncated read.
