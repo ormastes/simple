@@ -1,0 +1,67 @@
+"""Native CUDA rt_cuda_launch_kernel_ex probe: load a tiny PTX module and
+launch its entry through launch_kernel_ex (module + name, shared bytes and
+stream), then read the result back. One CUDA_LAUNCH_EX_PROBE line per step;
+runs cleanly with or without a GPU.
+"""
+
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_read_i32, raw_write_i64}
+
+extern fn rt_cuda_init() -> i64
+extern fn rt_cuda_module_load_data(ptx: text) -> i64
+extern fn rt_cuda_module_get_function(module: i64, func_name: text) -> i64
+extern fn rt_cuda_module_unload(module: i64) -> i64
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+extern fn rt_cuda_mem_free(ptr: i64) -> i64
+extern fn rt_cuda_memcpy_dtoh(dst: i64, src: i64, size: i64) -> i64
+extern fn rt_cuda_launch_kernel_ex(module: i64, func_name: text, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64, shared_bytes: i64, stream: i64, args_ptr: i64) -> i64
+extern fn rt_cuda_sync() -> i64
+extern fn rt_cuda_get_error_string(error_code: i64) -> text
+
+val COUNT: i64 = 4
+val SENTINEL: i64 = 305441741
+
+# ponytail: each brace sits in its own literal. Native codegen leaves every
+# escape after a `{` (or `{{`) in the same literal unprocessed, so `\n` would
+# reach the PTX parser as two bytes. Upgrade: inline the braces once
+# native_text_literal_brace_escape_unprocessed_2026-11-26 is fixed.
+fn _ptx() -> text:
+    ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry probe_fill(\n    .param .u64 output,\n    .param .u32 value,\n    .param .u32 count\n) " + "{{" + "\n    .reg .pred %p;\n    .reg .b32 %r<6>;\n    .reg .b64 %rd<4>;\n    mov.u32 %r0, %ctaid.x;\n    mov.u32 %r1, %ntid.x;\n    mov.u32 %r2, %tid.x;\n    mad.lo.u32 %r3, %r0, %r1, %r2;\n    ld.param.u32 %r4, [count];\n    setp.ge.u32 %p, %r3, %r4;\n    @%p bra done;\n    ld.param.u64 %rd0, [output];\n    mul.wide.u32 %rd1, %r3, 4;\n    add.u64 %rd2, %rd0, %rd1;\n    ld.param.u32 %r5, [value];\n    st.global.u32 [%rd2], %r5;\ndone:\n    ret;\n" + "}}" + "\n"
+
+fn main():
+    print "CUDA_LAUNCH_EX_PROBE init={rt_cuda_init()}"
+    val module = rt_cuda_module_load_data(_ptx())
+    val module_rc = if module > 0: 0 else: module
+    print "CUDA_LAUNCH_EX_PROBE module_ok={module > 0} module_rc={module_rc} module_error={rt_cuda_get_error_string(module_rc)}"
+    val function = rt_cuda_module_get_function(module, "probe_fill")
+    val missing = rt_cuda_module_get_function(module, "probe_missing")
+    print "CUDA_LAUNCH_EX_PROBE function_ok={function > 0} missing={missing} missing_error={rt_cuda_get_error_string(missing)}"
+    val bytes = COUNT * 4
+    val device = rt_cuda_mem_alloc(bytes)
+    val values = raw_alloc(24)
+    val args = raw_alloc(24)
+    val host = raw_alloc(bytes)
+    raw_write_i64(values, 0, device)
+    raw_write_i64(values, 8, SENTINEL)
+    raw_write_i64(values, 16, COUNT)
+    raw_write_i64(args, 0, values)
+    raw_write_i64(args, 8, values + 8)
+    raw_write_i64(args, 16, values + 16)
+    # A heap-built name, not a literal: the runtime must see a real C string.
+    val entry = "probe_" + COUNT.to_text().replace("4", "fill")
+    val launch = rt_cuda_launch_kernel_ex(module, entry, 1, 1, 1, 32, 1, 1, 0, 0, args)
+    val synced = rt_cuda_sync()
+    val copied = rt_cuda_memcpy_dtoh(host, device, bytes)
+    var matched: i64 = 0
+    if copied == 0:
+        for i in 0..COUNT:
+            if raw_read_i32(host, i * 4).to_i64() == SENTINEL:
+                matched = matched + 1
+    print "CUDA_LAUNCH_EX_PROBE launch={launch} sync={synced} copy={copied} matched={matched}/{COUNT}"
+    raw_free(host, bytes)
+    raw_free(args, 24)
+    raw_free(values, 24)
+    if device > 0:
+        rt_cuda_mem_free(device)
+    if module > 0:
+        rt_cuda_module_unload(module)
+    print "CUDA_LAUNCH_EX_PROBE done"

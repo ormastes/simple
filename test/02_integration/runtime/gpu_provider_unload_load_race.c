@@ -54,11 +54,11 @@ int64_t rt_vulkan_provider_device_count(void) {
 
 __attribute__((visibility("default")))
 int64_t rt_cuda_launch_kernel_ex(
-        int64_t module, const uint8_t *name, uint64_t name_len,
+        int64_t module, const char *name,
         int64_t grid_x, int64_t grid_y, int64_t grid_z,
         int64_t block_x, int64_t block_y, int64_t block_z,
         int64_t shared_bytes, int64_t stream, int64_t args_ptr) {
-    return module == 11 && name && name_len == 1 && name[0] == 'k' &&
+    return module == 11 && name && strcmp(name, "k") == 0 &&
         grid_x == 1 && grid_y == 2 && grid_z == 3 &&
         block_x == 4 && block_y == 5 && block_z == 6 &&
         shared_bytes == 7 && stream == 8 && args_ptr == 9 ? 91 : -1;
@@ -148,7 +148,7 @@ const char *rt_gpu_provider_path(int64_t backend);
 int64_t rt_gpu_provider_unload(int64_t backend);
 int64_t rt_vulkan_device_count(void);
 int64_t rt_cuda_launch_kernel_ex(
-    int64_t, const uint8_t *, uint64_t, int64_t, int64_t, int64_t,
+    int64_t, const char *, int64_t, int64_t, int64_t,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 uint64_t simple_gpu_test_generation_v1(int64_t backend);
 
@@ -172,7 +172,6 @@ int main(int argc, char **argv) {
     uint64_t first_generation;
     uint64_t next_generation;
     int attempts = 0;
-    static const uint8_t kernel_name[] = {'k'};
 
     if (argc != 5 ||
             setenv("SIMPLE_GPU_RACE_ENTER_MARKER", argv[3], 1) != 0 ||
@@ -223,7 +222,7 @@ int main(int argc, char **argv) {
         return 10;
 
     if (rt_gpu_provider_loaded(SIMPLE_GPU_BACKEND_CUDA) != 1 ||
-            rt_cuda_launch_kernel_ex(11, kernel_name, 1, 1, 2, 3,
+            rt_cuda_launch_kernel_ex(11, "k", 1, 2, 3,
                 4, 5, 6, 7, 8, 9) != 91 ||
             rt_gpu_provider_unload(SIMPLE_GPU_BACKEND_CUDA) != 1)
         return 11;
