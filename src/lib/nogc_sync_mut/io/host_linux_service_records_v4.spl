@@ -256,6 +256,7 @@ pub class LinuxServiceVerifiedEnrollmentV1:
     broker_policy_bytes: text
     authorized_at: i64
     agent_helper_template_bytes: text = ""
+    remote_build_template_bytes: text = ""
 
     pub fn machine_parent() -> text: self.binding.machine_parent
     pub fn binding_digest() -> Result<text, text>: host_linux_service_enrollment_digest_v3(self.binding)
@@ -273,9 +274,13 @@ pub class LinuxServiceVerifiedEnrollmentV1:
 # wall clock, real Ed25519 issuer + approver signatures against `policy_bytes`.
 fn linux_service_enrollment_check_v1(policy_bytes: text, binding: HostLinuxServiceEnrollmentBindingV3,
         credential: HostEnrollmentCredentialV1, configuration_bytes: text, engine_policy_bytes: text,
-        broker_policy_bytes: text, agent_helper_template_bytes: text) -> Result<i64, text>:
+        broker_policy_bytes: text, agent_helper_template_bytes: text, remote_build_template_bytes: text) -> Result<i64, text>:
     host_linux_service_enrollment_encode_v3(binding)?
     val template = host_linux_service_agent_helper_template_v4(binding, agent_helper_template_bytes)?
+    if binding.remote_build_template_digest == "":
+        if remote_build_template_bytes != "": return Err("linux-host-service-remote-build-template-unpinned")
+    else:
+        val remote_template = host_linux_service_remote_build_template_v4(binding, remote_build_template_bytes)?
     if sha256_text(policy_bytes) != binding.policy_digest: return Err("linux-service-enrollment-policy-pin")
     val metadata = host_linux_service_metadata_v4(binding, policy_bytes, configuration_bytes,
         engine_policy_bytes, broker_policy_bytes)?
@@ -289,12 +294,14 @@ fn linux_service_enrollment_check_v1(policy_bytes: text, binding: HostLinuxServi
 # the parent; the owner later re-verifies against its own writer-held bytes.
 pub fn linux_service_enrollment_verify_v1(policy_bytes: text, binding: HostLinuxServiceEnrollmentBindingV3,
         credential: HostEnrollmentCredentialV1, configuration_bytes: text, engine_policy_bytes: text,
-        broker_policy_bytes: text, agent_helper_template_bytes: text) -> Result<LinuxServiceVerifiedEnrollmentV1, text>:
+        broker_policy_bytes: text, agent_helper_template_bytes: text,
+        remote_build_template_bytes: text = "") -> Result<LinuxServiceVerifiedEnrollmentV1, text>:
     val at = linux_service_enrollment_check_v1(policy_bytes, binding, credential, configuration_bytes,
-        engine_policy_bytes, broker_policy_bytes, agent_helper_template_bytes)?
+        engine_policy_bytes, broker_policy_bytes, agent_helper_template_bytes, remote_build_template_bytes)?
     Ok(LinuxServiceVerifiedEnrollmentV1(binding: binding, credential: credential, policy_bytes: policy_bytes,
         configuration_bytes: configuration_bytes, engine_policy_bytes: engine_policy_bytes,
-        broker_policy_bytes: broker_policy_bytes, authorized_at: at, agent_helper_template_bytes: agent_helper_template_bytes))
+        broker_policy_bytes: broker_policy_bytes, authorized_at: at, agent_helper_template_bytes: agent_helper_template_bytes,
+        remote_build_template_bytes: remote_build_template_bytes))
 
 # Re-verification against INSTALLED bytes read by the storage owner through its
 # own writer descriptor. Fresh clock every call: an approval that expired while
@@ -304,7 +311,8 @@ pub fn linux_service_enrollment_installed_v1(proof: LinuxServiceVerifiedEnrollme
     if held_policy.is_none() or held_policy.unwrap() != proof.policy_bytes:
         return Err("linux-service-enrollment-installed-policy-mismatch")
     val at = linux_service_enrollment_check_v1(held_policy.unwrap(), proof.binding, proof.credential,
-        proof.configuration_bytes, proof.engine_policy_bytes, proof.broker_policy_bytes, proof.agent_helper_template_bytes)?
+        proof.configuration_bytes, proof.engine_policy_bytes, proof.broker_policy_bytes, proof.agent_helper_template_bytes,
+        proof.remote_build_template_bytes)?
     if at < proof.authorized_at: return Err("linux-service-enrollment-clock-regressed")
     Ok(())
 
@@ -320,13 +328,16 @@ pub fn linux_service_enrollment_existing_v1(proof: LinuxServiceVerifiedEnrollmen
 
 pub fn linux_service_enrollment_fixed_files_v1(proof: LinuxServiceVerifiedEnrollmentV1) -> Result<[(text, text)], text>:
     val child = proof.child()?
-    Ok([(child + "/linux-service-enrollment-v3.sdn", host_linux_service_enrollment_encode_v3(proof.binding)?),
+    var files = [(child + "/linux-service-enrollment-v3.sdn", host_linux_service_enrollment_encode_v3(proof.binding)?),
         (child + "/linux-service-enrollment-credential-v3.sdn", host_enrollment_credential_encode_v1(proof.credential)?),
         (child + "/authority-policy.sdn", proof.policy_bytes), (child + "/host-config.sdn", proof.configuration_bytes),
         (child + "/engine-policy.sdn", proof.engine_policy_bytes), (child + "/broker-policy.sdn", proof.broker_policy_bytes),
-        (child + "/agent-helper-template.sdn", proof.agent_helper_template_bytes)])
+        (child + "/agent-helper-template.sdn", proof.agent_helper_template_bytes)]
+    if proof.binding.remote_build_template_digest != "":
+        files.push((child + "/remote-build-helper-template.sdn", proof.remote_build_template_bytes))
+    Ok(files)
 
-# Ordered fresh publication DATA: claim, seven fixed children, root manifest last.
+# Ordered fresh publication DATA: claim, fixed children, root manifest last.
 # The nonce is drawn here; no caller chooses claim or manifest bytes.
 pub fn linux_service_enrollment_publication_v1(proof: LinuxServiceVerifiedEnrollmentV1) -> Result<[(text, text)], text>:
     val entropy = sosix_random_hex(32)

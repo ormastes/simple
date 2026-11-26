@@ -19,6 +19,7 @@ valid first proof is the intended owner decision (2026-11-16): an approval that
 expired while the service was down is refused after restart.
 """
 use std.spec.step
+use std.common.crypto.sha256.sha256_text
 use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
 use std.nogc_sync_mut.io.host_linux_service_records_v4.*
 use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
@@ -42,13 +43,13 @@ describe "Signed Linux service enrollment verifier V1":
         expect(proof.machine_parent()).to_equal("/var/lib/simple/hosts")
         step("re-verify against installed bytes held by the storage owner")
         expect(linux_service_enrollment_installed_v1(proof, Some(fixture.policy)).is_ok()).to_equal(true)
-        step("publication DATA is claim, six fixed children, then the root manifest")
+        step("publication DATA is claim, seven fixed children, then the root manifest")
         val items = linux_service_enrollment_publication_v1(proof).unwrap()
-        expect(items.len()).to_equal(8)
+        expect(items.len()).to_equal(9)
         expect(items[0].0).to_equal(proof.claim_name())
-        expect(items[7].0).to_equal(proof.child().unwrap() + "/linux-service-root-v3.sdn")
+        expect(items[8].0).to_equal(proof.child().unwrap() + "/linux-service-root-v3.sdn")
         step("an exact duplicate of this association returns its original admission time")
-        val at = linux_service_enrollment_existing_v1(proof, items[0].1, items[7].1).unwrap()
+        val at = linux_service_enrollment_existing_v1(proof, items[0].1, items[8].1).unwrap()
         expect(at > 0).to_equal(true)
 
     it "refuses an approval that already expired, and refuses a valid proof once its approval expires":
@@ -83,7 +84,7 @@ describe "Signed Linux service enrollment verifier V1":
         other.credential = linux_service_verifier_credential_v1(other.binding, 1, 65, 4102444800000)
         val other_proof = verifier_proof_v1(other).unwrap()
         val other_items = linux_service_enrollment_publication_v1(other_proof).unwrap()
-        expect(linux_service_enrollment_existing_v1(proof, other_items[0].1, other_items[7].1).is_err()).to_equal(true)
+        expect(linux_service_enrollment_existing_v1(proof, other_items[0].1, other_items[8].1).is_err()).to_equal(true)
         step("a credential bound to another association is refused at verification")
         var swapped = fixture
         swapped.credential = other.credential
@@ -138,3 +139,54 @@ describe "Signed Linux service enrollment verifier V1":
         step("the startup byte verifier re-authorizes with a fresh clock and refuses")
         val root = host_linux_service_root_path_v4(expired.binding).unwrap()
         expect(host_linux_service_records_verify_v4(root, sources).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+
+
+    it "should publish the signed remote build template before the root manifest":
+        # @req LINUX-SERVICE-VERIFIER-01
+        step("Sign a binding that pins the canonical remote build template")
+        var fixture = linux_service_verifier_fixture_v1()
+        val remote = fixture.agent_helper_template.replace("linux-host-service-agent-helper-template",
+            "linux-host-service-remote-build-helper-template")
+        fixture.binding.remote_build_template_digest = sha256_text(remote)
+        fixture.credential = linux_service_verifier_credential_v1(fixture.binding, 1, 65, 4102444800000)
+        val proof = linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, fixture.credential,
+            fixture.configuration, fixture.engine_policy, fixture.broker_policy, fixture.agent_helper_template, remote).unwrap()
+        step("Compare exact template bytes and preserve ordered root publication")
+        val files = linux_service_enrollment_fixed_files_v1(proof).unwrap()
+        expect(files.len()).to_equal(8)
+        val expected = (proof.child().unwrap() + "/remote-build-helper-template.sdn", remote)
+        expect(files[7]).to_equal(expected)
+        val items = linux_service_enrollment_publication_v1(proof).unwrap()
+        expect(items.len()).to_equal(10)
+        expect(items[8]).to_equal(expected)
+        expect(items[9].0).to_equal(proof.child().unwrap() + "/linux-service-root-v3.sdn")
+        expect(linux_service_enrollment_existing_v1(proof, items[0].1, items[9].1).is_ok()).to_equal(true)
+        expect(linux_service_enrollment_installed_v1(proof, Some(fixture.policy)).is_ok()).to_equal(true)
+        step("Reopen the publication bytes through the production startup record verifier")
+        val root = host_linux_service_root_path_v4(fixture.binding).unwrap()
+        var sources = HostLinuxServiceRecordSourcesV4(enrollment: items[1].1, credential: items[2].1,
+            policy: items[3].1, configuration: items[4].1, engine_policy: items[5].1, broker_policy: items[6].1,
+            parent_policy: fixture.policy, claim: items[0].1, root_record: items[9].1,
+            agent_helper_template: items[7].1, remote_build_template: items[8].1)
+        val reopened = host_linux_service_records_verify_v4(root, sources).unwrap()
+        expect(reopened.remote_build_template.is_some()).to_equal(true)
+        sources.remote_build_template = ""
+        expect(host_linux_service_records_verify_v4(root, sources).unwrap_err()).to_equal(
+            "linux-host-service-remote-build-helper-template-pin")
+
+    it "should refuse missing changed and unpinned remote build template bytes":
+        # @req LINUX-SERVICE-VERIFIER-01
+        step("Verify an old signed binding cannot carry an additional unpinned file")
+        var fixture = linux_service_verifier_fixture_v1()
+        val remote = fixture.agent_helper_template.replace("linux-host-service-agent-helper-template",
+            "linux-host-service-remote-build-helper-template")
+        val unpinned = linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, fixture.credential,
+            fixture.configuration, fixture.engine_policy, fixture.broker_policy, fixture.agent_helper_template, remote)
+        expect(unpinned.unwrap_err()).to_equal("linux-host-service-remote-build-template-unpinned")
+        step("Check that a signed template pin requires the exact supplied bytes")
+        fixture.binding.remote_build_template_digest = sha256_text(remote)
+        fixture.credential = linux_service_verifier_credential_v1(fixture.binding, 1, 65, 4102444800000)
+        for supplied in ["", remote + "\n"]:
+            val refused = linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, fixture.credential,
+                fixture.configuration, fixture.engine_policy, fixture.broker_policy, fixture.agent_helper_template, supplied)
+            expect(refused.unwrap_err()).to_equal("linux-host-service-remote-build-helper-template-pin")

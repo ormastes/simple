@@ -3,6 +3,12 @@
 # snapshot. Issuer and approver seeds are OpenSSH Ed25519 private files in the protected identity store (dir 0700,
 # file 0600, owner uid, no links: host_identity_store_linux_v1); each signature reads its file, signs through the
 # domain-pinned sign-only entry point and wipes the bytes. No seed, key file, path or signer error detail is logged.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.host_identity_command_v1.{host_identity_failure_v1, host_identity_finish_v1,
+    host_identity_open_failure_v1, host_identity_store_error_v1}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.sdn.value.SdnValue
+use std.nogc_sync_mut.sosix.host.file_read_regular_no_follow_bounded
 use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
 use std.common.contracts.distributed_control_codec_v2.{distributed_grant_digest_v2, distributed_encode_operation_v2}
@@ -10,11 +16,15 @@ use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedA
     distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{distributed_authority_snapshot_key_v2,
     distributed_verify_grant_approval_from_snapshot_v2}
-use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.ControllerDispatchContextV1
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchContextV1,
+    controller_dispatch_context_load_v1, controller_dispatch_grant_clock_v1}
 use std.nogc_sync_mut.daemon_sdk.remote_build_task_class_v1.remote_build_task_class_v1
 use std.nogc_sync_mut.io.host_identity_store_v1.{host_identity_store_open_v1, host_identity_store_read_v1,
-    host_identity_store_close_v1}
+    host_identity_store_close_v1, host_identity_store_publish_v1, HostIdentityStorePublicationV1}
 use app.orchestrator.host_identity_key_v1.{host_identity_private_sign_grant_v1, host_identity_private_sign_approval_v1}
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{
+    HostLinuxServiceEnrollmentBindingV3, host_linux_service_enrollment_digest_v3, host_linux_service_enrollment_decode_v3}
+use std.nogc_sync_mut.io.host_enrollment_v1.{HostEnrollmentCredentialV1, host_enrollment_credential_encode_v1}
 use std.common.crypto.sha256.sha256_text
 use std.common.crypto.secure_memory.secure_zero_u8_slots
 
@@ -170,7 +180,109 @@ pub fn controller_host_action_issue_v1(context: ControllerDispatchContextV1,
     val authority = controller_authority_sign_pair_v1(context, read_key, issuer, approver, grant, request, expires, now)?
     Ok(ControllerHostActionAuthorityV1(operation: request, authority: authority))
 
+# A local administrator selects the operation and approval key. The immutable
+# enrollment, Host identity, memory, environment and action are derived here.
+# Enrollment runs no workload, so its execution duration claim is the minimum.
+# Duration and clock use the existing signed authority V2 millisecond ABI.
+@allow(primitive_api)
+pub fn controller_linux_enrollment_issue_v3(context: ControllerDispatchContextV1,
+        read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>, approver_id: text,
+        binding: HostLinuxServiceEnrollmentBindingV3, operation_id: text, grant_id: text,
+        ttl_ms: i64, now: i64) -> Result<HostEnrollmentCredentialV1, text>:
+    if now <= 0: return Err("dispatch-wall-clock-unavailable")
+    if ttl_ms <= 0 or ttl_ms > CONTROLLER_HOST_ACTION_MAX_TTL_MS_V1 or now > 9223372036854775807 - ttl_ms:
+        return Err("controller-linux-enrollment-ttl")
+    val digest = host_linux_service_enrollment_digest_v3(binding)?
+    val snapshot = context.policy.snapshot
+    if (context.policy.source_digest != binding.policy_digest or
+            context.config.authority_policy_digest != binding.policy_digest or
+            snapshot.policy_revision != binding.policy_revision):
+        return Err("controller-linux-enrollment-policy-mismatch")
+    if context.config.provider_identity_digest != binding.provider_identity_digest:
+        return Err("controller-linux-enrollment-provider-mismatch")
+    val issuer = distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", context.config.controller_id)?
+    val approver = distributed_authority_snapshot_key_v2(snapshot, "human-approver", approver_id)?
+    val expires = now + ttl_ms
+    val kind = "host_enroll_v1"
+    val grant = ExecutionGrantV2(id: grant_id, principal: approver.principal, project: approver.project,
+        host_id: binding.physical_host_id, operations: [kind], environment_digest: binding.provider_identity_digest,
+        policy_revision: snapshot.policy_revision, revocation_epoch: snapshot.revocation_epoch, expires_at: expires,
+        maximum_memory_bytes: binding.physical_memory_bytes, maximum_duration_ms: 1)
+    val operation = OperationEnvelopeV2(version: 2, id: operation_id, payload_digest: digest,
+        principal: approver.principal, project: approver.project, host_id: binding.physical_host_id,
+        operation: kind, environment_digest: binding.provider_identity_digest, policy_revision: snapshot.policy_revision,
+        revocation_epoch: snapshot.revocation_epoch, session_generation: context.policy.session_generation,
+        memory_bytes: binding.physical_memory_bytes, duration_ms: 1)
+    val issued = controller_authority_sign_pair_v1(context, read_key, issuer, approver, grant, operation, expires, now)?
+    Ok(HostEnrollmentCredentialV1(operation: operation, signed: issued.signed, approval: issued.approval))
+
+# Local administrative command. The immutable leaf is assigned by controller
+# identity and operation ID, never by a caller-supplied file name.
+pub fn controller_linux_enrollment_command_v3(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() != 10 or args[0] != "host-linux-enrollment-issue":
+        return host_identity_failure_v1("host-linux-enrollment-issue-usage", 2)
+    for index in 1..args.len():
+        if args[index] == "": return host_identity_failure_v1("host-linux-enrollment-issue-argument-required", 2)
+    if not builder_identifier_valid_v1(args[7]) or not builder_identifier_valid_v1(args[8]):
+        return host_identity_failure_v1("host-linux-enrollment-issue-identity", 2)
+    val ttl = args[9].to_i64() ?? 0
+    if ttl <= 0 or ttl > CONTROLLER_HOST_ACTION_MAX_TTL_MS_V1 or str(ttl) != args[9]:
+        return host_identity_failure_v1("controller-linux-enrollment-ttl", 2)
+    val binding_bytes = file_read_regular_no_follow_bounded(args[6], 16384)
+    if binding_bytes.is_err(): return host_identity_failure_v1("host-linux-enrollment-binding-unreadable", 1)
+    val decoded = host_linux_service_enrollment_decode_v3(binding_bytes.unwrap())
+    if decoded.is_err(): return host_identity_failure_v1(decoded.unwrap_err(), 1)
+    val binding = decoded.unwrap()
+    val context = controller_dispatch_context_load_v1(args[1], args[2])
+    if context.is_err(): return host_identity_failure_v1(context.unwrap_err(), 1)
+    val opened = host_identity_store_open_v1(args[4])
+    if not opened.ready or opened.owner.is_none() or opened.error != "" or opened.cleanup_pending:
+        return host_identity_open_failure_v1(opened)
+    val leaf = sha256_text("simple-linux-enrollment-credential-v3\n" + args[2] + "\n" + args[7]) + ".profile"
+    val prior = host_identity_store_read_v1(opened.owner.unwrap(), leaf, 65536)
+    if prior.cleanup_pending or prior.error != "":
+        return host_identity_store_error_v1("host-linux-enrollment-output-read", prior.owner)
+    if not prior.absent or prior.bytes.is_some():
+        return host_identity_finish_v1({"status": SdnValue.String("existing-enrollment-credential"),
+            "credentialLeaf": SdnValue.String(leaf)}, 1, prior.owner)
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return host_identity_store_error_v1(now.unwrap_err(), prior.owner)
+    val signed = controller_linux_enrollment_issue_v3(context.unwrap(), controller_authority_store_reader_v1(args[3]),
+        args[5], binding, args[7], args[8], ttl, now.unwrap())
+    if signed.is_err(): return host_identity_store_error_v1(signed.unwrap_err(), prior.owner)
+    val credential = signed.unwrap()
+    val encoded = host_enrollment_credential_encode_v1(credential)
+    if encoded.is_err(): return host_identity_store_error_v1(encoded.unwrap_err(), prior.owner)
+    val current = controller_dispatch_context_load_v1(args[1], args[2])
+    if current.is_err() or current.unwrap().config != context.unwrap().config or
+            current.unwrap().policy.source_digest != context.unwrap().policy.source_digest:
+        return host_identity_store_error_v1("host-linux-enrollment-issuer-context-changed", prior.owner)
+    val publish_time = controller_dispatch_grant_clock_v1()
+    if publish_time.is_err(): return host_identity_store_error_v1(publish_time.unwrap_err(), prior.owner)
+    if publish_time.unwrap() < now.unwrap():
+        return host_identity_store_error_v1("host-linux-enrollment-issuer-clock-regressed", prior.owner)
+    val policy = current.unwrap().policy
+    val snapshot = policy.snapshot
+    val rechecked = distributed_verify_grant_approval_from_snapshot_v2(snapshot, credential.signed, credential.approval,
+        credential.operation, publish_time.unwrap(), snapshot.generation, snapshot.policy_revision,
+        snapshot.revocation_epoch, policy.session_generation)
+    if rechecked.is_err(): return host_identity_store_error_v1(rechecked.unwrap_err(), prior.owner)
+    val bytes = encoded.unwrap().bytes()
+    val published = host_identity_store_publish_v1(prior.owner, leaf, bytes)
+    if published.publication != HostIdentityStorePublicationV1.Published or not published.file_synced or
+            published.error != "" or published.cleanup_pending:
+        return host_identity_finish_v1({"status": SdnValue.String("enrollment-credential-publication-unconfirmed"),
+            "credentialLeaf": SdnValue.String(leaf)}, 1, published.owner)
+    val saved = host_identity_store_read_v1(published.owner, leaf, 65536)
+    if saved.error != "" or saved.cleanup_pending or saved.absent or saved.bytes.is_none() or saved.bytes.unwrap() != bytes:
+        return host_identity_store_error_v1("host-linux-enrollment-output-readback", saved.owner)
+    host_identity_finish_v1({"status": SdnValue.String("enrollment-credential-published"),
+        "credentialLeaf": SdnValue.String(leaf), "credentialDigest": SdnValue.String(sha256_text(encoded.unwrap())),
+        "fileSynced": SdnValue.Bool(published.file_synced), "namespaceSynced": SdnValue.Bool(published.namespace_synced),
+        "bindingDigest": SdnValue.String(credential.operation.payload_digest)}, 0, saved.owner)
+
 export ControllerIssuedAuthorityV1, controller_authority_key_leaf_v1, controller_authority_store_reader_v1
 export controller_authority_issue_v1
 export ControllerHostActionAuthorityV1, CONTROLLER_HOST_ACTION_KINDS_V1, controller_host_action_environment_digest_v1
 export controller_host_action_class_v1, controller_host_action_issue_v1
+export controller_linux_enrollment_issue_v3, controller_linux_enrollment_command_v3

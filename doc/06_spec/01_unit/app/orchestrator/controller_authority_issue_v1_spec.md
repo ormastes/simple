@@ -1,0 +1,272 @@
+# Controller authority issuance
+
+Status **AUTHORED_NOT_RUN**. The spec uses deterministic fixture keys and the
+production issuer. It covers the existing remote task scope and the dedicated
+Linux Host enrollment action.
+
+The enrollment cases check that the genuine installed Host verifier accepts
+the issued credential for the exact binding, provider, budget, and expiry.
+They require zero private key reads when the installed context pins differ,
+the role keys lack the enrollment action, or expiry arithmetic would overflow.
+The dispatcher cases check public help and reject invalid input before any
+store open. Protected-store publication and the live controller-to-Host path
+require configured native verification.
+
+<details>
+<summary>Executable SSpec source</summary>
+
+```simple
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.{
+    LinuxServiceVerifierFixtureV1, linux_service_verifier_fixture_v1, linux_service_verifier_fixture_ops_v1}
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_digest_v3
+use std.nogc_sync_mut.io.host_linux_service_records_v4.linux_service_enrollment_verify_v1
+# milestone_0030 D1/D2: controller issue-then-verify of one signed grant and a policy-driven approval.
+# AUTHORED_NOT_RUN. Seeds are deterministic, published test material (never real keys); key files are read through
+# an injected reader so the spec needs no prepared OS store (the store-backed reader is a system concern).
+use std.spec.{describe, it, expect, fail, step}
+use std.io.file_read_text
+use app.orchestrator.command.orchestrator_command_v1
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{distributed_authority_snapshot_create_v2,
+    distributed_verify_grant_approval_from_snapshot_v2}
+use std.nogc_sync_mut.io.local_authority_policy_v1.{LocalAuthorityPolicyV1, local_authority_policy_decode_v1, host_local_context_v1}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, ControllerDispatchContextV1}
+use std.common.crypto.ed25519.pure_ed25519_keypair_from_seed
+use app.orchestrator.host_identity_key_v1.host_identity_private_encode_v1
+use app.orchestrator.controller_authority_issue_v1.{controller_authority_issue_v1, controller_authority_key_leaf_v1, controller_linux_enrollment_issue_v3}
+
+var ISSUE_FIXTURE_READS_V1: i64 = 0
+
+fn issue_seed_v1(offset: i64) -> [u8]:
+    var seed: [u8] = []
+    for i in 0..32: seed.push((i + offset) as u8)
+    seed
+
+fn issue_file_v1(offset: i64) -> [u8]:
+    val seed = issue_seed_v1(offset)
+    host_identity_private_encode_v1(seed, pure_ed25519_keypair_from_seed(seed).1, [9, 8, 7, 6],
+        "public-test-fixture").unwrap()
+
+fn issue_key_v1(identity: text, role: text, offset: i64) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1,
+        public_key: pure_ed25519_keypair_from_seed(issue_seed_v1(offset)).1, principal: "user_1", project: "project_1",
+        host_id: "worker_1", operations: ["build", "host_reservation_v1", "host_execute_v1"],
+        maximum_memory_bytes: 4096, maximum_duration_ms: 4000, policy_revision: 4, revocation_epoch: 2,
+        expires_at: 10000, revoked: false)
+
+fn issue_env_v1(isolation: text) -> ExecutionEnvironmentV2:
+    ExecutionEnvironmentV2(host_id: "worker_1", execution_platform: "linux-x86_64", target_platform: "linux-x86_64",
+        test_runtime: "none", isolation_class: isolation, toolchain_digest: "c".repeat(64), sdk_digest: "d".repeat(64),
+        abi: "sysv", isa: "x86_64", optimization: "release")
+
+fn issue_context_v1() -> ControllerDispatchContextV1:
+    val snapshot = distributed_authority_snapshot_create_v2([issue_key_v1("controller_1", "grant-issuer", 1),
+        issue_key_v1("approver_1", "human-approver", 65)], 9, 4, 2).unwrap()
+    val config = ControllerDispatchConfigV1(controller_id: "controller_1", controller_epoch: 7,
+        target: "retained-host-service-v1", host_root: "/var/lib/simple/host", host_authority_id: "host_authority_1",
+        provider_identity_digest: "e".repeat(64), authority_policy_digest: "f".repeat(64))
+    ControllerDispatchContextV1(config: config,
+        policy: LocalAuthorityPolicyV1(snapshot: snapshot, session_generation: 3, source_digest: "f".repeat(64)))
+
+fn issue_grant_v1(env: ExecutionEnvironmentV2, operations: [text]) -> ExecutionGrantV2:
+    ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: operations, environment_digest: distributed_environment_digest_v2(env).unwrap(),
+        policy_revision: 4, revocation_epoch: 2, expires_at: 5000, maximum_memory_bytes: 2048, maximum_duration_ms: 2000)
+
+fn issue_request_v1(env: ExecutionEnvironmentV2, operation: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: "operation_1", payload_digest: "b".repeat(64), principal: "user_1",
+        project: "project_1", host_id: "worker_1", operation: operation,
+        environment_digest: distributed_environment_digest_v2(env).unwrap(), policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3, memory_bytes: 1024, duration_ms: 1000)
+
+fn issue_reader_v1(key: DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    ISSUE_FIXTURE_READS_V1 = ISSUE_FIXTURE_READS_V1 + 1
+    if key.role == "grant-issuer": return Ok(issue_file_v1(1))
+    if key.role == "human-approver": return Ok(issue_file_v1(65))
+    Err("fixture-key-absent")
+
+# Hands back the approver's file for every role, so the issuer signature cannot match the issuer key.
+fn issue_wrong_reader_v1(key: DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    ISSUE_FIXTURE_READS_V1 = ISSUE_FIXTURE_READS_V1 + 1
+    Ok(issue_file_v1(65))
+
+describe "Controller authority issuance V1 (milestone_0030 D1/D2)":
+    it "issues a grant and approval that verify from the installed snapshot":
+        val env = issue_env_v1("native-container")
+        val context = issue_context_v1()
+        val request = issue_request_v1(env, "build")
+        ISSUE_FIXTURE_READS_V1 = 0
+        val issued = controller_authority_issue_v1(context, issue_reader_v1, "controller_1", "approver_1",
+            issue_grant_v1(env, ["build"]), request, env, 4000, 100)
+        match issued:
+            case Err(reason): fail("expected issued authority: {reason}")
+            case Ok(value):
+                val snapshot = context.policy.snapshot
+                expect(distributed_verify_grant_approval_from_snapshot_v2(snapshot, value.signed, value.approval,
+                    request, 100, 9, 4, 2, 3).is_ok()).to_equal(true)
+                expect(value.signed.issuer_id).to_equal("controller_1")
+                expect(value.approval.approver_id).to_equal("approver_1")
+                expect(ISSUE_FIXTURE_READS_V1).to_equal(2)
+
+    it "runs every verifier check that is not a signature check before reading any key":
+        val env = issue_env_v1("native-container")
+        var stale = issue_request_v1(env, "build")
+        stale.session_generation = 2
+        ISSUE_FIXTURE_READS_V1 = 0
+        val refused = controller_authority_issue_v1(issue_context_v1(), issue_reader_v1, "controller_1", "approver_1",
+            issue_grant_v1(env, ["build"]), stale, env, 4000, 100)
+        expect(refused).to_equal(Err("SESSION_STALE"))
+        expect(ISSUE_FIXTURE_READS_V1).to_equal(0)
+
+    it "refuses an issuer that is not the configured controller before reading any key":
+        val env = issue_env_v1("native-container")
+        ISSUE_FIXTURE_READS_V1 = 0
+        expect(controller_authority_issue_v1(issue_context_v1(), issue_reader_v1, "approver_1", "approver_1",
+            issue_grant_v1(env, ["build"]), issue_request_v1(env, "build"), env, 4000, 100)).to_equal(
+            Err("controller-issuer-not-controller"))
+        expect(ISSUE_FIXTURE_READS_V1).to_equal(0)
+
+    it "signs nothing outside the pre-authorized task class":
+        val process = issue_env_v1("native-process")
+        val env = issue_env_v1("native-container")
+        ISSUE_FIXTURE_READS_V1 = 0
+        expect(controller_authority_issue_v1(issue_context_v1(), issue_reader_v1, "controller_1", "approver_1",
+            issue_grant_v1(process, ["build"]), issue_request_v1(process, "build"), process, 4000, 100)).to_equal(
+            Err("controller-approval-outside-task-class"))
+        # A grant naming no build/test action is not the remote build class.
+        expect(controller_authority_issue_v1(issue_context_v1(), issue_reader_v1, "controller_1", "approver_1",
+            issue_grant_v1(env, ["host_execute_v1"]), issue_request_v1(env, "host_execute_v1"), env, 4000, 100)).to_equal(
+            Err("controller-approval-outside-task-class"))
+        # An operation the approver key was never enrolled for.
+        expect(controller_authority_issue_v1(issue_context_v1(), issue_reader_v1, "controller_1", "approver_1",
+            issue_grant_v1(env, ["build", "test"]), issue_request_v1(env, "test"), env, 4000, 100)).to_equal(
+            Err("controller-approval-outside-task-class"))
+        # A request operation outside the grant, and an approval outliving the grant.
+        expect(controller_authority_issue_v1(issue_context_v1(), issue_reader_v1, "controller_1", "approver_1",
+            issue_grant_v1(env, ["build"]), issue_request_v1(env, "host_execute_v1"), env, 4000, 100)).to_equal(
+            Err("controller-approval-outside-task-class"))
+        expect(controller_authority_issue_v1(issue_context_v1(), issue_reader_v1, "controller_1", "approver_1",
+            issue_grant_v1(env, ["build"]), issue_request_v1(env, "build"), env, 5001, 100)).to_equal(
+            Err("controller-approval-outside-task-class"))
+        expect(ISSUE_FIXTURE_READS_V1).to_equal(0)
+
+    it "refuses an approver identity that is not enrolled under the approver role":
+        val env = issue_env_v1("native-container")
+        expect(controller_authority_issue_v1(issue_context_v1(), issue_reader_v1, "controller_1", "controller_1",
+            issue_grant_v1(env, ["build"]), issue_request_v1(env, "build"), env, 4000, 100)).to_equal(
+            Err("AUTHORITY_KEY_UNAVAILABLE"))
+
+    it "fails closed when the key file holds another key":
+        val env = issue_env_v1("native-container")
+        expect(controller_authority_issue_v1(issue_context_v1(), issue_wrong_reader_v1, "controller_1", "approver_1",
+            issue_grant_v1(env, ["build"]), issue_request_v1(env, "build"), env, 4000, 100)).to_equal(
+            Err("host-identity-sign-key-differs"))
+
+    it "derives distinct protected-store leaves per role, identity and revision":
+        val issuer = issue_key_v1("controller_1", "grant-issuer", 1)
+        var approver = issue_key_v1("controller_1", "human-approver", 65)
+        val leaf = controller_authority_key_leaf_v1(issuer)
+        expect(leaf.byte_len()).to_equal(68)
+        expect(leaf.ends_with(".key")).to_equal(true)
+        expect(leaf == controller_authority_key_leaf_v1(approver)).to_equal(false)
+        approver.role = "grant-issuer"
+        approver.revision = 2
+        expect(leaf == controller_authority_key_leaf_v1(approver)).to_equal(false)
+
+    it "wipes the owning key buffer in place, never a value copy of it":
+        # @req KEYWIPE-02 (milestone_0051; milestone_0050 REVIEW_C follow-up)
+        # A `[u8]` has value semantics and a `mut` wipe writes back to the caller's PLACE. A `val` binding is not a
+        # writable place, and a buffer still held by a second binding (here the store turn's `bytes` Option) is forked by
+        # the wipe, leaving the original seed bytes intact. Pinned by source shape: a callee local cannot be observed.
+        val source = file_read_text("src/app/orchestrator/controller_authority_issue_v1.spl")
+        expect(ca_count(source, "var file = read_key(key)?")).to_equal(1)
+        expect(ca_count(source, "val file =")).to_equal(0)
+        expect(ca_count(source, "if val held = read.bytes")).to_equal(0)
+        expect(ca_count(source, "var read = host_identity_store_read_v1(")).to_equal(1)
+        expect(ca_count(source, "var held = read.bytes.unwrap()")).to_equal(1)
+        expect(ca_count(source, "read.bytes = None")).to_equal(1)
+        expect(ca_count(source, "secure_zero_u8_slots(held)")).to_equal(1)
+        # The turn's Option is released before the refusal wipe, so `held` is the only holder of the bytes.
+        expect(source.index_of("var held = read.bytes.unwrap()") < source.index_of("read.bytes = None")).to_equal(true)
+        expect(source.index_of("read.bytes = None") < source.index_of("secure_zero_u8_slots(held)")).to_equal(true)
+
+fn ca_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+
+fn issue_linux_context_v3(fixture: LinuxServiceVerifierFixtureV1) -> ControllerDispatchContextV1:
+    var context = issue_context_v1()
+    context.config.controller_id = "issuer_1"
+    context.config.authority_policy_digest = fixture.binding.policy_digest
+    context.config.provider_identity_digest = fixture.binding.provider_identity_digest
+    context.policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+    context
+
+describe "Controller issuance for a signed Linux Host enrollment":
+    it "should issue the exact credential that the installed Host verifier accepts":
+        # @req HOST-01
+        step("Derive the enrollment operation and sign it through the existing issuer and approver roles")
+        val fixture = linux_service_verifier_fixture_v1()
+        val context = issue_linux_context_v3(fixture)
+        val now = host_local_context_v1(context.policy).grant_clock
+        ISSUE_FIXTURE_READS_V1 = 0
+        val credential = controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            fixture.binding, "enroll_1", "grant_1", 60000, now).unwrap()
+        expect(ISSUE_FIXTURE_READS_V1).to_equal(2)
+        expect(credential.operation.operation).to_equal("host_enroll_v1")
+        expect(credential.operation.payload_digest).to_equal(host_linux_service_enrollment_digest_v3(fixture.binding).unwrap())
+        expect(credential.operation.environment_digest).to_equal(fixture.binding.provider_identity_digest)
+        expect(credential.operation.memory_bytes).to_equal(fixture.binding.physical_memory_bytes)
+        expect(credential.signed.grant.operations).to_equal(["host_enroll_v1"])
+        expect(credential.approval.expires_at).to_equal(now + 60000)
+        step("Use the actual Host proof verifier with the exact signed bytes and protected-parent policy fixture")
+        val verified = linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, credential,
+            fixture.configuration, fixture.engine_policy, fixture.broker_policy, fixture.agent_helper_template).unwrap()
+        expect(verified.binding_digest().unwrap()).to_equal(credential.operation.payload_digest)
+
+    it "should reject changed policy or provider pins before reading either private key":
+        # @req HOST-01
+        step("Pass a canonical binding whose policy or provider no longer matches the installed controller context")
+        val fixture = linux_service_verifier_fixture_v1()
+        val context = issue_linux_context_v3(fixture)
+        var wrong_policy = fixture.binding
+        wrong_policy.policy_digest = "0".repeat(64)
+        var wrong_provider = fixture.binding
+        wrong_provider.provider_identity_digest = "0".repeat(64)
+        ISSUE_FIXTURE_READS_V1 = 0
+        expect(controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            wrong_policy, "enroll_1", "grant_1", 60000, 1000).unwrap_err()).to_equal("controller-linux-enrollment-policy-mismatch")
+        expect(controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            wrong_provider, "enroll_1", "grant_1", 60000, 1000).unwrap_err()).to_equal("controller-linux-enrollment-provider-mismatch")
+        expect(ISSUE_FIXTURE_READS_V1).to_equal(0)
+
+    it "should require operation-scoped keys and reject expiry arithmetic overflow":
+        # @req HOST-01
+        step("Reuse a valid policy snapshot whose role keys allow build but cannot issue enrollment")
+        val fixture = linux_service_verifier_fixture_ops_v1(1, 65, 4102444800000, "/var/lib/simple/hosts", ["build"])
+        val context = issue_linux_context_v3(fixture)
+        ISSUE_FIXTURE_READS_V1 = 0
+        expect(controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            fixture.binding, "enroll_1", "grant_1", 60000, 1000).unwrap_err()).to_equal("AUTHORITY_OPERATION_DENIED")
+        expect(controller_linux_enrollment_issue_v3(context, issue_reader_v1, "approver_1",
+            fixture.binding, "enroll_1", "grant_1", 10, 9223372036854775800).unwrap_err()).to_equal("controller-linux-enrollment-ttl")
+        expect(ISSUE_FIXTURE_READS_V1).to_equal(0)
+
+
+    it "should route the local issuer command and reject invalid inputs before opening a store":
+        step("Read public help and call the production dispatcher with invalid enrollment issue arguments")
+        val help = orchestrator_command_v1(["--help"])
+        expect(help.output).to_contain("host-linux-enrollment-issue")
+        val missing = orchestrator_command_v1(["host-linux-enrollment-issue"])
+        expect(missing.exit_code).to_equal(2)
+        expect(missing.output).to_contain("host-linux-enrollment-issue-usage")
+        val invalid = orchestrator_command_v1(["host-linux-enrollment-issue", "dispatch", "issuer",
+            "keys", "output", "approver", "binding.sdn", "operation", "grant", "86400001"])
+        expect(invalid.exit_code).to_equal(2)
+        expect(invalid.output).to_contain("controller-linux-enrollment-ttl")
+        expect(invalid.host_identity_cleanup.is_none()).to_equal(true)
+```
+
+</details>
