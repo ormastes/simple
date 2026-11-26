@@ -2,7 +2,7 @@
 
 - **ID:** stage2_codegen_large_array_literal_2026-11-02
 - **Priority:** P1 (blocks phase-3 whole-program build)
-- **Status:** fixed in source (PR #5796, df3a14d194: `unicode_17_0_0.spl` is now text-encoded, no large array literal reaches LLVM codegen; verified 2026-11-02). Caveat: the generic compiler scaling of huge array literals is not changed; revert-ready after stage3 self-build
+- **Status:** ROOT-FIXED+STAGE2-GATED (`unicode_17_0_0.spl` remains text-encoded because frozen Stage 2 bootstrap compilers still OOM on large raw array literals; Stage 3 `MirToLlvm` root fix landed in WA-P2 2026-11-26).
 - **Binary:** frozen stage2 `C:/dev/p3new/stage2.exe` built from `ef0681fc0e1`
 - **Runs:** phase-3 runs 20b and 21 (dynload `--emit-archive`, 32 MIR shards)
 
@@ -84,3 +84,24 @@ undefined), also environmental.
   - `test/01_unit/lib/common/search/unicode_17_0_0_text_tables_spec.spl` (2/2 passed)
   - `test/01_unit/app/devhub/wa_src_lane8_retirement_spec.spl` (5/5 passed — exercises `unicode_table_samples_for_spec`, `unicode_is_alphabetic`, `unicode_canonical_combining_class`)
   - `test/01_unit/compiler/mir/wa_src_lane8_lowering_spec.spl` (4/4 passed — guards that `MirToLlvm` still emits `rt_array_push` per element for `Array` aggregates)
+
+## WA-P2 Root Fix & Verification (2026-11-26)
+
+- **Classification:** `ROOT-FIXED+STAGE2-GATED`
+- **Root Fix (`src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl`, `src/compiler/70.backend/backend/llvm_ir_builder.spl`):**
+  - When `AggregateKind.Array(_)` has `operands.len() >= 16` (`MIR_LLVM_CONST_ARRAY_LOOP_THRESHOLD`) and all elements are homogeneous compile-time `MirOperandKind.Const` values:
+    - Scalar arrays (`Int`, `Bool`, `Float`, `FloatLexeme`, `Zero`, pointer-width integers) emit a module-level `private unnamed_addr constant [N x i64]` table with 8-byte `natural_alignment("i64")` and exact `store_field_bits_verbatim` bit parity plus an O(1)-IR `phi` induction loop calling `rt_array_new(N)` and `rt_array_push`.
+    - String arrays (`Opaque("str")` boxed text or raw `ptr` literals) emit constant string globals plus `[N x ptr]` (target-width pointer alignment) and `[N x i64]` byte lengths (`align 8` for boxed text) and an O(1)-IR `phi` induction loop calling `rt_string_new_literal` + `rt_array_push` (or `ptrtoint` + `rt_array_push`).
+  - Track active MIR block exit labels on `LlvmIRBuilder` (`current_mir_block_id`, `block_exit_labels`, `reset_mir_block_tracking`, `mir_block_exit_label`) across `emit_label("bb<id>")` and inline loop splits (`arr_done_*`), and resolve incoming blocks in `emit_ssa_phi_intrinsic` via `llvm_phi_incoming_block_label` so `__simple_ssa_phi` matches split-block predecessors.
+  - Arrays with `< 16` elements or non-constant operands stay on the existing per-element `rt_array_push` path.
+- **Stage 2 Bootstrap Gate:** Text-encoded memoized tables in `src/lib/common/search/generated/unicode_17_0_0.spl` (and `public_suffix_data.spl` / `html_named_character_references.spl`) remain untouched after upstream PR `#11846` (`307fc728ef9`) replaced their `@workaround` markers with `# Note:` comments, since frozen Stage 2 bootstrap compilers still compile those modules.
+- **Verification (base `60948b5cc58`, `simple.exe --mode=interpreter`):**
+  - `test/01_unit/compiler/backend/llvm_large_const_array_lowering_spec.spl` (9/9 passed, covering `<16`, `256`-element `[i64]`, bit parity, `[text]`, non-const & mixed-kind fallbacks, multi-array block labels, split-block `__simple_ssa_phi` diamond CFG + next-fn reset, and 32-bit `X86`/`Arm` alignment)
+  - Real emitted `MirToLlvm` LLVM IR (64-bit diamond-split `__simple_ssa_phi` + `[text]`, and 32-bit `X86` `--target=i686-unknown-linux-gnu` diamond + `[i64]` + `[text]`) assembled cleanly with `clang.exe -c -x ir` (exit 0 on both)
+  - `test/01_unit/compiler/backend/backend_capability_spec.spl` (21/21 passed)
+  - `test/01_unit/lib/common/search/unicode_17_0_0_text_tables_spec.spl` (2/2 passed)
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/large_literal_build_budget_spec.spl` (4/4 passed)
+  - `test/01_unit/compiler/mir/wa_src_lane8_lowering_spec.spl` (4/4 passed)
+  - `simple.exe lint --fast --jobs=1` on `llvm_ir_builder.spl`, `aggregate_intrinsics.spl`, and `llvm_large_const_array_lowering_spec.spl` (0 errors)
+  - Static guards (`direct-env-runtime-guard.shs --working`, `check-keyword-identifier-bindings.shs`, `SRC_ADDED_NIL=0`, `doc/06_spec/*_spec.spl` == 0) all passed
+  - 11 LLVM backend unit specs (`llvm_ir_builder_spec.spl`, `llvm_ir_builder_target_header_lifetime_spec.spl`, `llvm_aggregate_operand_at_contract_spec.spl`, `llvm_indexed_operand_by_value_spec.spl`, `llvm_aggregate_field_stale_ptr_local_spec.spl`, `llvm_emitter_ssa_violation_guard_spec.spl`, `llvm_const_value_total_match_guard_spec.spl`, `llvm_array_value_copy_single_ssa_def_spec.spl`, `llvm_bootstrap_string_cache_scope_spec.spl`, `llvm_pointer_integer_constant_spec.spl`, `llvm_runtime_decls_unique_spec.spl`) all passed
