@@ -12,6 +12,7 @@ ambiguous" nor borrow the colliding enum.
 # @tag: unit, compiler, mir, enum, stage2
 
 use std.spec.{describe, it, expect}
+use std.env.variables.{env_get, env_has, env_set, env_unset}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{Module}
 use compiler.common.config.{Logger}
@@ -71,6 +72,54 @@ fn variant_tests_in(mir: MirModule, name: text) -> i64:
     variant_tests
 
 
+fn restore_bootstrap_env(had: bool, previous: text) -> bool:
+    if had:
+        return env_set("SIMPLE_BOOTSTRAP", previous)
+    env_unset("SIMPLE_BOOTSTRAP")
+
+fn lower_bootstrap_trait_mir(mod_name: text, mod_path: text, mod_source: text, body: text, trait_name: text) -> (MirModule, text, bool, bool, bool):
+    val had_bootstrap = env_has("SIMPLE_BOOTSTRAP")
+    val prev_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    val set_ok = env_set("SIMPLE_BOOTSTRAP", "1")
+    val consumer_source = "use {mod_name}.*\n\n" + body
+    val log = Logger(level: 0)
+    val prov_ast = parse_full_frontend(mod_source, mod_path, mod_name, log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/boot_main.spl", "app.boot_main", log)
+    var modules: Dict<text, Module> = {}
+    modules[mod_name] = prov_ast
+    val sources = [SourceFile(path: mod_path, content: mod_source, module_name: mod_name)]
+    var out = ""
+    var mir = MirModule(name: "app.boot_main", functions: {}, statics: {}, constants: {}, types: {})
+    var trait_found = false
+    var trait_safe = false
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(surfaces):
+            var prov_lowering = hirlowering_for_module(mod_name, surfaces)
+            var consumer_lowering = hirlowering_for_module("app.boot_main", surfaces)
+            val prov_hir = prov_lowering.lower_module(prov_ast)
+            val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+            var mir_lowering = MirLowering.new(consumer_hir.symbols)
+            var prescan_mods: Dict<text, HirModule> = {}
+            prescan_mods["prov_hir"] = prov_hir
+            prescan_mods["consumer_hir"] = consumer_hir
+            mir_lowering.prescan_module_struct_names(prescan_mods, "prov_hir")
+            mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+            mir = mir_lowering.lower_module(consumer_hir, [prov_hir, consumer_hir])
+            for layout in mir_lowering.native_trait_layouts:
+                if layout.owner.ends_with(trait_name):
+                    trait_found = true
+                    trait_safe = layout.object_safe
+            for e in consumer_lowering.errors:
+                out = out + "hir: " + e.message + "\n"
+            for e in mir_lowering.errors:
+                if e.message.starts_with("non-exhaustive enum match on '"):
+                    continue
+                out = out + "mir: " + e.message + "\n"
+        case Err(err_msg):
+            out = "surface: " + err_msg + "\n"
+    val restore_ok = restore_bootstrap_env(had_bootstrap, prev_bootstrap)
+    (mir, out, set_ok and restore_ok, trait_found, trait_safe)
+
 fn owner_errors(out: text) -> bool:
     out.contains("ambiguous") or out.contains("known non-enum type") or out.contains("OtherVerdict")
 
@@ -114,3 +163,50 @@ describe "typed Result local subject owns bare Ok/Err over a colliding enum":
         val (mir, out) = lower_consumer_mir("fn probe<T>(prototype: T) -> T?:\n    val restored_result: Result<T, text> = wrap<T>(prototype)\n    match restored_result:\n        case Ok(restored): return restored\n        case Err(detail): return None\n")
         expect(out).to_equal("")
         expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "trait dispatch Result local owns bare Ok/Err under SIMPLE_BOOTSTRAP=1":
+        val src = "pub enum OtherVerdict:\n    Ok(n: i64)\n    Err(s: text)\n\npub trait BootLocalSource:\n    fn fetch() -> Result<i64, text>\n"
+        val (mir, out, env_ok, trait_found, trait_safe) = lower_bootstrap_trait_mir(
+            "lib.boot_trait_local", "lib/boot_trait_local.spl", src,
+            "fn probe(s: BootLocalSource) -> i64:\n    val r: Result<i64, text> = s.fetch()\n    match r:\n        case Ok(v): v\n        case Err(_): -2\n",
+            "BootLocalSource")
+        expect(env_ok).to_equal(true)
+        expect(trait_found).to_equal(true)
+        expect(trait_safe).to_equal(true)
+        expect(out).to_equal("")
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "trait dispatch direct Result match owns bare Ok/Err under SIMPLE_BOOTSTRAP=1":
+        val src = "pub enum OtherVerdict:\n    Ok(n: i64)\n    Err(s: text)\n\npub trait BootDirectSource:\n    fn fetch() -> Result<i64, text>\n"
+        val (mir, out, env_ok, trait_found, trait_safe) = lower_bootstrap_trait_mir(
+            "lib.boot_trait_direct", "lib/boot_trait_direct.spl", src,
+            "fn probe(s: BootDirectSource) -> i64:\n    match s.fetch():\n        case Ok(v): v\n        case Err(_): -2\n",
+            "BootDirectSource")
+        expect(env_ok).to_equal(true)
+        expect(trait_found).to_equal(true)
+        expect(trait_safe).to_equal(true)
+        expect(out).to_equal("")
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "trait dispatch Result<Struct, text> local owns bare Ok/Err under SIMPLE_BOOTSTRAP=1":
+        val src = "pub enum OtherVerdict:\n    Ok(n: i64)\n    Err(s: text)\n\npub struct BootSym:\n    id: i64\n\npub trait BootSymSource:\n    fn lookup() -> Result<BootSym, text>\n"
+        val (mir, out, env_ok, trait_found, trait_safe) = lower_bootstrap_trait_mir(
+            "lib.boot_trait_struct", "lib/boot_trait_struct.spl", src,
+            "fn probe(s: BootSymSource) -> i64:\n    val r: Result<BootSym, text> = s.lookup()\n    val sym: BootSym = match r:\n        case Ok(found): found\n        case Err(_): return -1\n    sym.id\n",
+            "BootSymSource")
+        expect(env_ok).to_equal(true)
+        expect(trait_found).to_equal(true)
+        expect(trait_safe).to_equal(true)
+        expect(out).to_equal("")
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "generic trait returning Result<T, text> stays non-object-safe under SIMPLE_BOOTSTRAP=1":
+        val src = "pub trait BootGenSource<T>:\n    fn fetch() -> Result<T, text>\n"
+        val (_mir, out, env_ok, trait_found, trait_safe) = lower_bootstrap_trait_mir(
+            "lib.boot_trait_generic", "lib/boot_trait_generic.spl", src,
+            "fn probe() -> i64:\n    0\n",
+            "BootGenSource")
+        expect(env_ok).to_equal(true)
+        expect(out).to_equal("")
+        expect(trait_found).to_equal(true)
+        expect(trait_safe).to_equal(false)
