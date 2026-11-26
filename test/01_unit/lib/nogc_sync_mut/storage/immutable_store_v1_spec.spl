@@ -9,7 +9,7 @@ use std.common.hash.hash_policy_v1.{hash_policy_v1_digest, HASH_POLICY_V1_XXH3_1
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, StoreGcV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_publish_root, immutable_store_v1_pin, immutable_store_v1_release_pin,
-    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, _isv1_restore_moved, StoreFlagV1, StoreCountV1, StoreGenerationV1}
+    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, StoreFlagV1, StoreCountV1, StoreGenerationV1}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
@@ -448,4 +448,26 @@ describe "immutable_store_v1 crash and failure safety":
         expect(gc.unreachable.len()).to_equal(2)
         expect(gc.unreachable.contains(c.object_key)).to_equal(false)
         expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", StoreGenerationV1(3))).to_equal("")
+        _store_cleanup(root)
+
+    it "reports the root head by following a claim ahead of a lagging pointer":
+        val root = _store_root("roothead")
+        val a = immutable_store_v1_ingest(root, "head a".bytes(), HASH_POLICY_V1_XXH3_128)
+        val b = immutable_store_v1_ingest(root, "head b".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_root_head(root, "main").status).to_equal("missing")
+        expect(immutable_store_v1_root_head(root, "bad name").status).to_equal("corrupt")
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        val pointer = root + "/roots/main.sdn"
+        val gen_one = match file_read_regular_no_follow_bounded(pointer, 65536):
+            case Ok(value): value
+            case Err(_): ""
+        expect(immutable_store_v1_publish_root(root, "main", b.object_key + "\n", StoreGenerationV1(1))).to_equal("")
+        expect(file_write_bytes(pointer, gen_one.bytes())).to_equal(true)
+        val head = immutable_store_v1_root_head(root, "main")
+        expect(head.status).to_equal("ok")
+        expect(head.generation.value).to_equal(2)
+        expect(head.keys.len()).to_equal(1)
+        expect(head.keys[0]).to_equal(b.object_key)
+        expect(file_write_bytes(pointer, "garbage".bytes())).to_equal(true)
+        expect(immutable_store_v1_root_head(root, "main").status).to_equal("corrupt")
         _store_cleanup(root)

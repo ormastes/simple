@@ -312,3 +312,20 @@ Audited the three related `@workaround` guards across `src/compiler/` and verifi
 3. **`riscv64_guest_result_text_payload_empty_2026_11_06` (`KEPT-WITH-REASON`)**:
    - Blocked on the same `baremetal_runtime_core.inc.c:1945-1963` `rt_unwrap_or_trap` gap (plus `is_err()`/`unwrap_err()` on positional `Result` in the OpenSBI guest runtime).
    - Kept the raw-env guard at `src/compiler/50.mir/_MirLowering/module_lowering.spl:3169` and `target_hir_mode_or_legacy()` at `:3220` with `reason=KEPT-WITH-REASON: ...`, replaced the residual `unwrap_err()` at `:3172` with explicit `match mir_symbol_write_ledger_resolve(...)`, and replaced `opened.unwrap()` at `:3222` with a `"legacy"` fast-path + explicit `match mir_symbol_write_ledger_open(...)` (`Ok(ledger)` / `Err(err)`) so `self.symbol_write_ledger` never receives a leaked `RuntimeEnum` wrapper in riscv64 in-guest builds.
+
+## 2026-11-26 Disposition (PR `#11846` + WA-P1 PR `#11863`)
+
+Upstream PR `#11846` (`307fc728ef9`) landed the shared baremetal root fix in `examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:rt_unwrap_or_trap` and retired both dependent `@workaround` guards across `interpreter_expr.spl` and `module_lowering.spl`; PR `#11863` (`work/wa-p1-riscv64-unwrap-20261126` rebased onto `4228b3c72cc1`) hardens test and tracking coverage on top:
+
+1. **Shared Root Cause (`examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:rt_unwrap_or_trap`) — `ROOT-FIXED` (landed in `#11846` / `307fc728ef9`):**
+   - Positional `Result` discriminant arms match `src/runtime/runtime_native.c:21733-21738` and `src/runtime/simple_core/core_values.spl:375-379`: `(e->enum_id == 0u || e->enum_id == 2u) && e->discriminant == 0u` returns `e->payload`, and `(e->enum_id == 0u || e->enum_id == 2u) && e->discriminant == 1u` traps via `serial_puts`, `rt_qemu_exit_failure()`, and infinite `wfi`.
+   - Preserves `Option` (`enum_id == 1u`: `0u || some_hash` / `1u || none_hash`), legacy hashed `Result` (`ok_hash` / `err_hash`), `NIL_VALUE` trapping, and pass-through behavior for non-Option/Result user enums (#6953 parity).
+   - Audited sibling `baremetal_runtime_core.inc.c` / `baremetal_stubs.c` helpers (`rt_enum_check_variant` in `baremetal_stubs.c` already handles `enum_id == 0` and positional `discriminant`; no `rt_try_*` / `rt_is_some` / `rt_is_none` helpers exist in `baremetal_runtime_core.inc.c`).
+2. **`riscv64_interp_ok_wrapper_leak_2026_11_06` (`src/compiler/70.backend/backend/interpreter_expr.spl`) — `ROOT-FIXED+RETIRED` (landed in `#11846` / `307fc728ef9`):**
+   - Retired the `@workaround` marker and explicit `match evaluated_arg` wrapper; restored `val v: Value = evaluated_arg.unwrap()` after the `is_err()`/`unwrap_err()` guard.
+3. **`riscv64_guest_result_text_payload_empty_2026_11_06` (`src/compiler/50.mir/_MirLowering/module_lowering.spl`) — `ROOT-FIXED+RETIRED` (landed in `#11846` / `307fc728ef9`):**
+   - Retired both `@workaround` markers and removed the `target_hir_mode_or_legacy` import / raw `mir_lower_env_get("SIMPLE_TARGET_HIR_MODE")` guard.
+   - Restored strict `mir_target_hir_mode_from_env()`, `mir_symbol_write_ledger_open(...)`, and unconditional `mir_symbol_write_ledger_resolve(self.symbol_write_ledger)` using `.is_err()`, `.unwrap_err()`, and `.unwrap()`.
+4. **Hardening added in PR `#11863`:**
+   - Added host-compilable C contract test `test/01_unit/os/kernel/arch/riscv64_unwrap_or_trap_contract_test.c` + `.shs` (`clang -std=c11 -Wall -Wextra -Werror`) with `_Static_assert`-checked `HeapHeader` (`uint32_t type; uint32_t size;`) / `RuntimeEnum` layout parity covering `NIL_VALUE`, `Option` positional/hashed, positional `Result` (`enum_id=0` and `2`), legacy hashed `Result`, and user enum non-unwrapping.
+   - Enhanced `test/01_unit/compiler/backend/wa_src_lane9_riscv64_guards_spec.spl` with strict `MirLowering` `"legacy"` vs `"typo"` fail-closed coverage, strict `mir_target_hir_mode_from_env()` / `.unwrap()` / `.unwrap_err()` checks, and source pins for `baremetal_runtime_core.inc.c:rt_unwrap_or_trap` and `module_lowering.spl`.

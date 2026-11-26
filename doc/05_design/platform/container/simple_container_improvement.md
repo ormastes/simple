@@ -237,5 +237,15 @@ Identity: ingest uses policy `sha256`, so the store key equals the legacy id. An
 ### Lane B — Phase 2 storage view on the host (after Lane 0)
 This lane provides an immutable base with a private upper layer over store objects, plus filesystem save/load and reference clone, all proven with real temp directories on this Windows host. Its signatures are fixed before dispatch.
 
+Signatures (module `std.nogc_sync_mut.storage.storage_view_v1`; units `ViewBytesV1: i64`, `ViewFlagV1: bool`, `ViewCountV1: i64`; reuses `StoreGenerationV1`):
+
+- `storage_view_v1_create(store, view_root, view_id, base_root, base_generation: StoreGenerationV1, quota: ViewBytesV1) -> ViewHandleV1` (`base_root` "" = empty base; lifecycle journal written first)
+- `storage_view_v1_open(store, view_root, view_id) -> ViewHandleV1`; `storage_view_v1_add_volume(view, name, host_dir, writable: ViewFlagV1) -> ViewHandleV1`
+- `storage_view_v1_write(view, rel_path, bytes) -> ViewWriteV1`; `storage_view_v1_read(view, rel_path) -> ViewReadV1` (upper, then base manifest)
+- `storage_view_v1_save(view, root_name, expected: StoreGenerationV1) -> ViewSaveV1`; `storage_view_v1_load(store, view_root, view_id, root_name) -> ViewHandleV1`
+- `storage_view_v1_clone(src, new_view_id) -> ViewHandleV1` (rejects `clone-dirty-upper`); `storage_view_v1_destroy(view) -> ViewDestroyV1` (idempotent, journal-driven)
+
+Manifest is an SDN object (`kind: container-view-manifest`, sorted unique `{path,key,length}`); the root lists the manifest key first, then all file keys.
+
 ### Blocked on this host (honest stopping line)
 Phase 2 native memory/confinement providers (Docker on Windows per owner engine mapping, Podman, Jail, Seatbelt), Phase 3 SimpleOS shared pages/PMM, Phase 4 non-Windows provider qualification, and Phase 5 benchmarks at scale produce no evidence on this host. Each needs its target host or the QEMU/board lanes (`.claude/rules/board-runnable.md`).

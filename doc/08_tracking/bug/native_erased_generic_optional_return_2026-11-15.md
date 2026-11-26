@@ -196,3 +196,27 @@ arguments. The production `AttributeStoreV1<T>` (`slots: [T?]` + `owner`
 fields) is therefore NOT affected by this change; the `AttrI64StoreV1`
 workaround stays. A `Result<T, E>` read (`Store.get`) was traced balanced: one
 `rt_value_as_int_wide`, key encodes only, payload raw into `Ok`.
+
+## Caller return-type instantiation + `T?` exemption landed (2026-11-26)
+
+1. **`module_lowering.spl` (`register_erased_method_params_v1`)**: exempted
+   `HirTypeKind.Optional(_)` alongside `HirTypeKind.Result(_, _)` from
+   `#erased-ret-veto` (`-> T?` tails only normalize Option handles via
+   `ensure_option_handle` and do not re-box decoded words; bare `-> T` remains
+   vetoed so `generic_method_erased_field_roundtrip_spec.spl` stays coherent).
+   Also registered generic `class` type parameter names under bare, layout, and
+   canonical keys (`module_lowering.spl` & `declaration_providers_v1.spl`).
+2. **`expr_dispatch.spl` / `method_calls_literals.spl` / `switch_operators_calls.spl`**:
+   added `instantiate_method_return_hir_v1` / `remember_method_call_hir_return_v1`
+   and wired them into `InstanceMethod`, `Unresolved`-resolved method, and
+   `enum_match_expr_type` (`MethodCall`) arms so generic-class callers substitute
+   receiver `Named(_, args)` type arguments (`Store<i64>.get` -> `Result<i64, text>`,
+   `Store<i64>.get_opt` -> `i64?`, `Box<i64>.get` -> `i64`) and stop double-decoding
+   (`>> 3` / `>> 6`) already-decoded payloads or raw `Box<T>` field returns.
+3. **`AttrI64StoreV1` (`attribute_schema_v1.spl:300`)**: `KEPT-WITH-REASON`
+   (`mixed_raw_slots_owner_and_tagged_dict_hash_in_AttributeStoreV1`).
+   `AttributeStoreV1<T>` mixes `AttrOwnerV1<T>?` + `[T?]` (raw scalar payloads)
+   and `hash: Dict<i64, T>` (tagged `RuntimeValue` words needed so raw `3` does
+   not alias `rt_dict_get`'s `TAG_NIL` miss sentinel); without specialization, no
+   single caller scalar ABI can serve both placements simultaneously. Also
+   referenced by `src/compiler/10.frontend/core/_AstExpr/nodes.spl`.
