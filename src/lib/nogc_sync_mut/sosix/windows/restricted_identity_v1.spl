@@ -1,0 +1,312 @@
+# Windows restricted identity for contained children (architecture 4.3).
+# Restricted copy of the caller's own primary token: DISABLE_MAX_PRIVILEGE, restricting
+# SIDs {Everyone, Users, logon SID, fixed reader SID, scope SID}, low integrity, and a
+# default DACL of {scope SID, user, SYSTEM}. Needs no privilege. Windows-only; no facade.
+use std.common.contracts.sosix.containment_v1.SosixContainFlagV1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_is_win64_v1, sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_close_handle_v1, sec_read_ptr_v1, sec_write_ptr_v1, sec_u8_v1, sec_u16_v1, sec_u32_v1, sec_put_u8_v1, sec_put_u32_v1, sec_sid_from_text_v1, sec_sid_len_v1, sec_sid_equal_v1, sec_sid_text_v1, sec_open_process_token_v1, sec_token_info_v1, sec_set_token_info_v1, sec_create_restricted_v1, sec_set_entries_v1, sec_access_entry_v1, SEC_LOW_INTEGRITY_RID_V1}
+
+pub unit SosixWindowsTokenV1: i64
+pub unit SosixWindowsAclV1: i64   # address of an ACL inside a live security descriptor
+
+# One fixed prefix; the scope SID is derived from sha256(scope) under it and names no account.
+const _SID_PREFIX = "S-1-5-21-1936224305"
+const _TOKEN_USER = 1
+const _TOKEN_GROUPS = 2
+const _TOKEN_DEFAULT_DACL = 6
+const _TOKEN_RESTRICTED_SIDS = 11
+const _TOKEN_INTEGRITY = 25
+const _GENERIC_ALL = 0x10000000
+# FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_DELETE_CHILD, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_WRITE, GENERIC_ALL.
+const _WRITE_BITS = 0x500D0046
+
+fn _scope_ok(scope: text) -> bool:
+    if scope.byte_len() < 1 or scope.byte_len() > 64: return false
+    for byte in scope.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 122) or byte == 45): return false
+    true
+
+fn _hex_value(byte: i64) -> i64:
+    if byte >= 48 and byte <= 57: return byte - 48
+    if byte >= 97 and byte <= 102: return byte - 87
+    -1
+
+# Four u32 values from the first 32 hex digits of sha256(scope); empty on a malformed digest.
+fn _scope_words(scope: text) -> [i64]:
+    val digest = sha256_text("sosix-scope-sid-v1:{scope}")
+    var words: [i64] = []
+    if digest.byte_len() < 32: return words
+    var acc = 0
+    var count = 0
+    for byte in digest.bytes():
+        if words.len() >= 4: break
+        val value = _hex_value(byte)
+        if value < 0: return []
+        acc = acc * 16 + value
+        count = count + 1
+        if count == 8:
+            words.push(acc)
+            acc = 0
+            count = 0
+    words
+
+pub fn sosix_windows_scope_sid_v1(scope: text) -> Result<text, text>:
+    if not _scope_ok(scope): return Err("scope-invalid")
+    val words = _scope_words(scope)
+    if words.len() != 4: return Err("scope-digest-unavailable")
+    Ok("{_SID_PREFIX}-2-{words[0]}-{words[1]}-{words[2]}-{words[3]}")
+
+# The one fixed SID shared by every container; it only appears in read+execute ACEs.
+pub fn sosix_windows_reader_sid_v1() -> text:
+    "{_SID_PREFIX}-1"
+
+fn _sid_copy(sid: i64, destination: i64):
+    val length = sec_sid_len_v1(sid)
+    var index = 0
+    while index < length:
+        sec_put_u8_v1(destination + index, sec_u8_v1(sid + index))
+        index = index + 1
+
+# SID pointer of the first TokenGroups entry whose attributes carry SE_GROUP_LOGON_ID; 0 if none.
+# The pointer lives inside `groups`.
+fn _logon_sid_in(groups: i64) -> i64:
+    val count = sec_u32_v1(groups)
+    var index = 0
+    while index < count and index < 1024:
+        val entry = groups + 8 + index * 16
+        if (sec_u32_v1(entry + 8) & 0xC0000000) == 0xC0000000:
+            return sec_read_ptr_v1(entry)
+        index = index + 1
+    0
+
+# Access-denied ACE types: denied, denied object, denied callback, denied callback object.
+# Every other type is treated as an allow, including conditional, object and unknown types.
+fn _ace_is_deny(kind: i64) -> bool:
+    kind == 1 or kind == 6 or kind == 10 or kind == 12
+
+# Address of the trustee SID inside an ACE, or 0 when the type's layout is not known.
+# Basic and callback ACEs (0, 1, 9, 10) carry it at +8; object ACEs (5, 6, 11, 12) after
+# a flags word and up to two GUIDs.
+fn _ace_sid(ace: i64, kind: i64) -> i64:
+    if kind == 0 or kind == 1 or kind == 9 or kind == 10: return ace + 8
+    if kind == 5 or kind == 6 or kind == 11 or kind == 12:
+        val flags = sec_u32_v1(ace + 8)
+        var offset = ace + 12
+        if (flags & 1) != 0: offset = offset + 16
+        if (flags & 2) != 0: offset = offset + 16
+        return offset
+    0
+
+# Flag true when any ACE of the DACL names a SID of the scope/reader family (fixed prefix).
+pub fn sosix_windows_dacl_has_scope_ace_v1(acl: SosixWindowsAclV1) -> Result<SosixContainFlagV1, text>:
+    val dacl = acl.value
+    if dacl == 0: return Ok(SosixContainFlagV1(false))
+    val count = sec_u16_v1(dacl + 4)
+    var ace = dacl + 8
+    var index = 0
+    var found = false
+    while index < count and index < 4096:
+        val size = sec_u16_v1(ace + 2)
+        if size < 8: return Err("dacl-unreadable")
+        val sid = _ace_sid(ace, sec_u8_v1(ace))
+        if sid != 0 and sec_sid_text_v1(sid).starts_with("{_SID_PREFIX}-"): found = true
+        ace = ace + size
+        index = index + 1
+    Ok(SosixContainFlagV1(found))
+
+# Flag true when the DACL grants write (data, append, delete, delete-child, WRITE_DAC,
+# WRITE_OWNER, GENERIC_WRITE/ALL) to Everyone, Users, Authenticated Users or the logon SID.
+# Reads every allow ACE; deny ACEs are ignored (conservative toward refusing).
+pub fn sosix_windows_dacl_grants_world_write_v1(acl: SosixWindowsAclV1) -> Result<SosixContainFlagV1, text>:
+    val dacl = acl.value
+    if dacl == 0: return Ok(SosixContainFlagV1(true))
+    val token = sec_open_process_token_v1()
+    if token == 0: return Err("token-open-failed")
+    val groups = sec_token_info_v1(token, _TOKEN_GROUPS)
+    val everyone = sec_sid_from_text_v1("S-1-1-0")
+    val users = sec_sid_from_text_v1("S-1-5-32-545")
+    val authenticated = sec_sid_from_text_v1("S-1-5-11")
+    var verdict = false
+    var failed = groups == 0 or everyone == 0 or users == 0 or authenticated == 0
+    if not failed:
+        val logon = _logon_sid_in(groups)
+        val count = sec_u16_v1(dacl + 4)
+        var ace = dacl + 8
+        var index = 0
+        while index < count and index < 4096:
+            val kind = sec_u8_v1(ace)
+            val size = sec_u16_v1(ace + 2)
+            if size < 8:
+                failed = true
+                break
+            if not _ace_is_deny(kind):
+                val sid = _ace_sid(ace, kind)
+                if sid == 0:
+                    # unknown or unlocatable allow-like ACE: fail closed
+                    verdict = true
+                    break
+                if (sec_u32_v1(ace + 4) & _WRITE_BITS) != 0:
+                    if sec_sid_equal_v1(sid, everyone) or sec_sid_equal_v1(sid, users) or sec_sid_equal_v1(sid, authenticated) or (logon != 0 and sec_sid_equal_v1(sid, logon)):
+                        verdict = true
+                        break
+            ace = ace + size
+            index = index + 1
+    sec_local_free_v1(everyone)
+    sec_local_free_v1(users)
+    sec_local_free_v1(authenticated)
+    sec_free_v1(groups)
+    val _closed = sec_close_handle_v1(token)
+    if failed: return Err("dacl-unreadable")
+    Ok(SosixContainFlagV1(verdict))
+
+# Applies integrity, default DACL, and reads back integrity and restricting SIDs.
+fn _harden(restricted: i64, scope_sid: i64, user_sid: i64) -> text:
+    val low = sec_sid_from_text_v1("S-1-16-4096")
+    if low == 0: return "integrity-sid-unavailable"
+    val low_len = sec_sid_len_v1(low)
+    val label = sec_alloc_v1(16 + low_len)
+    var reason = ""
+    if label == 0:
+        reason = "token-alloc-failed"
+    else:
+        _sid_copy(low, label + 16)
+        sec_write_ptr_v1(label, label + 16)
+        sec_put_u32_v1(label + 8, 0x20)
+        if not sec_set_token_info_v1(restricted, _TOKEN_INTEGRITY, label, 16 + low_len):
+            reason = "token-integrity-set-failed"
+    sec_free_v1(label)
+    sec_local_free_v1(low)
+    if reason != "": return reason
+    val system = sec_sid_from_text_v1("S-1-5-18")
+    val entries = sec_alloc_v1(3 * 48)
+    if system == 0 or entries == 0:
+        sec_local_free_v1(system)
+        sec_free_v1(entries)
+        return "token-alloc-failed"
+    sec_access_entry_v1(entries, 0, _GENERIC_ALL, 0, scope_sid)
+    sec_access_entry_v1(entries, 1, _GENERIC_ALL, 0, user_sid)
+    sec_access_entry_v1(entries, 2, _GENERIC_ALL, 0, system)
+    val acl = sec_set_entries_v1(3, entries, 0)
+    if acl == 0:
+        reason = "token-default-dacl-build-failed"
+    else:
+        val holder = sec_alloc_v1(8)
+        if holder == 0:
+            reason = "token-alloc-failed"
+        else:
+            sec_write_ptr_v1(holder, acl)
+            if not sec_set_token_info_v1(restricted, _TOKEN_DEFAULT_DACL, holder, 8):
+                reason = "token-default-dacl-set-failed"
+        sec_free_v1(holder)
+    sec_local_free_v1(acl)
+    sec_free_v1(entries)
+    sec_local_free_v1(system)
+    reason
+
+fn _sid_listed(groups: i64, count: i64, sid: i64) -> bool:
+    var index = 0
+    while index < count and index < 64:
+        if sec_sid_equal_v1(sec_read_ptr_v1(groups + 8 + index * 16), sid): return true
+        index = index + 1
+    false
+
+# Integrity RID reads back low, and the restricting SIDs are exactly the five expected, by value.
+fn _verify(restricted: i64, expected: [i64]) -> text:
+    val integrity = sec_token_info_v1(restricted, _TOKEN_INTEGRITY)
+    if integrity == 0: return "token-integrity-readback-failed"
+    val sid = sec_read_ptr_v1(integrity)
+    var rid = 0
+    if sid != 0:
+        val subs = sec_u8_v1(sid + 1)
+        if subs >= 1: rid = sec_u32_v1(sid + 8 + (subs - 1) * 4)
+    sec_free_v1(integrity)
+    if rid != SEC_LOW_INTEGRITY_RID_V1: return "token-integrity-not-low"
+    val groups = sec_token_info_v1(restricted, _TOKEN_RESTRICTED_SIDS)
+    if groups == 0: return "token-restricted-sids-readback-failed"
+    val count = sec_u32_v1(groups)
+    var all_found = count == expected.len()
+    for sid in expected:
+        if not _sid_listed(groups, count, sid): all_found = false
+    sec_free_v1(groups)
+    if not all_found: return "token-restricted-sids-mismatch"
+    ""
+
+pub fn sosix_windows_restricted_token_open_v1(scope: text) -> Result<SosixWindowsTokenV1, text>:
+    if not sec_is_win64_v1(): return Err("windows-identity-unsupported-width")
+    val scope_text = sosix_windows_scope_sid_v1(scope)?
+    val base = sec_open_process_token_v1()
+    if base == 0: return Err("token-open-failed")
+    val user = sec_token_info_v1(base, _TOKEN_USER)
+    val groups = sec_token_info_v1(base, _TOKEN_GROUPS)
+    val everyone = sec_sid_from_text_v1("S-1-1-0")
+    val users = sec_sid_from_text_v1("S-1-5-32-545")
+    val reader = sec_sid_from_text_v1(sosix_windows_reader_sid_v1())
+    val scope_sid = sec_sid_from_text_v1(scope_text)
+    val restrict = sec_alloc_v1(5 * 16)
+    var restricted = 0
+    var reason = ""
+    var logon = 0
+    if user != 0 and groups != 0:
+        logon = _logon_sid_in(groups)
+    if user == 0 or groups == 0 or everyone == 0 or users == 0 or reader == 0 or scope_sid == 0 or restrict == 0:
+        reason = "token-setup-failed"
+    elif logon == 0:
+        reason = "token-logon-sid-missing"
+    else:
+        sec_write_ptr_v1(restrict, everyone)
+        sec_write_ptr_v1(restrict + 16, users)
+        sec_write_ptr_v1(restrict + 32, logon)
+        sec_write_ptr_v1(restrict + 48, reader)
+        sec_write_ptr_v1(restrict + 64, scope_sid)
+        restricted = sec_create_restricted_v1(base, 5, restrict)
+        if restricted == 0:
+            reason = "token-restrict-failed"
+        else:
+            reason = _harden(restricted, scope_sid, sec_read_ptr_v1(user))
+            if reason == "":
+                reason = _verify(restricted, [everyone, users, logon, reader, scope_sid])
+            if reason != "":
+                val _c = sec_close_handle_v1(restricted)
+                restricted = 0
+    sec_free_v1(restrict)
+    sec_local_free_v1(scope_sid)
+    sec_local_free_v1(reader)
+    sec_local_free_v1(users)
+    sec_local_free_v1(everyone)
+    sec_free_v1(groups)
+    sec_free_v1(user)
+    val _b = sec_close_handle_v1(base)
+    if reason != "": return Err(reason)
+    _open_tokens.push(restricted)
+    Ok(SosixWindowsTokenV1(restricted))
+
+# Handles this module opened and has not closed. A second close, or a close of a handle this
+# module never issued, answers false without touching the OS (a stale value may be reused).
+var _open_tokens: [i64] = []
+
+pub fn sosix_windows_restricted_token_close_v1(token: SosixWindowsTokenV1) -> SosixContainFlagV1:
+    var kept: [i64] = []
+    var owned = false
+    for handle in _open_tokens:
+        if handle == token.value and not owned:
+            owned = true
+        else:
+            kept.push(handle)
+    if not owned: return SosixContainFlagV1(false)
+    _open_tokens = kept
+    SosixContainFlagV1(sec_close_handle_v1(token.value))
+
+# SDDL text of the caller's logon SID (the one the restricting list carries); Err when absent.
+pub fn sosix_windows_logon_sid_v1() -> Result<text, text>:
+    val token = sec_open_process_token_v1()
+    if token == 0: return Err("token-open-failed")
+    val groups = sec_token_info_v1(token, _TOKEN_GROUPS)
+    var result = Err("token-logon-sid-missing")
+    if groups != 0:
+        val sid = _logon_sid_in(groups)
+        if sid != 0:
+            val sid_text = sec_sid_text_v1(sid)
+            result = if sid_text == "": Err("token-logon-sid-convert-failed") else: Ok(sid_text)
+    sec_free_v1(groups)
+    val _closed = sec_close_handle_v1(token)
+    result
