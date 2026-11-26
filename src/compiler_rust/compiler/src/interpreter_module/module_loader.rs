@@ -506,9 +506,9 @@ struct ProvidedSet {
     extra: std::collections::HashSet<String>,
     /// Top-level `fn`s declared without `pub` and not re-exported.
     private_fns: std::collections::HashSet<String>,
-    /// Module text is host-gated (`@when(`/`@cfg(`): its other-host items were
-    /// stripped, so the unprovided check is skipped; the private rule still runs.
-    host_gated: bool,
+    /// Surface is incomplete: host-gated text (`@when(`/`@cfg(`, other-host items
+    /// stripped) or a plain glob `use x.*`. Unprovided check skipped; private rule runs.
+    surface_incomplete: bool,
 }
 
 impl ProvidedSet {
@@ -917,15 +917,11 @@ fn use_warning_seen(key: String) -> bool {
 
 /// A module whose surface cannot be enumerated statically: it re-exports via a
 /// glob (`export use x.*`) or a bare `export use {..}` that pulls from siblings.
-/// A plain glob import (`use x.*`) is opaque too: the loader publishes what it
-/// pulls in transitively (driver_source_pipeline_impl is two such lines).
-/// Checking such a module would produce false positives, so we skip it.
 fn module_surface_is_opaque(items: &[Node]) -> bool {
     items.iter().any(|item| match item {
         Node::ExportUseStmt(export_stmt) => {
             matches!(export_stmt.target, ImportTarget::Glob) || export_stmt.path.segments.is_empty()
         }
-        Node::UseStmt(use_stmt) => matches!(use_stmt.target, ImportTarget::Glob),
         _ => false,
     })
 }
@@ -942,6 +938,12 @@ fn collect_provided_names(
     if module_surface_is_opaque(items) {
         return None;
     }
+    // A plain glob `use x.*` publishes what it pulls in transitively
+    // (driver_source_pipeline_impl), so only the private rule is checkable.
+    let surface_incomplete = host_gated
+        || items
+            .iter()
+            .any(|item| matches!(item, Node::UseStmt(u) if matches!(u.target, ImportTarget::Glob)));
     // Export names are answered by the shared table itself; collecting them
     // here made this set as wide as the module's transitive import closure.
     let mut provided: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -981,7 +983,7 @@ fn collect_provided_names(
         exports: Arc::clone(exports),
         extra: provided,
         private_fns: private_top_level_fn_names(items),
-        host_gated,
+        surface_incomplete,
     }))
 }
 
@@ -1198,8 +1200,8 @@ fn check_unprovided_use_names(
     let Some(provided) = provided.as_ref() else {
         return Ok(()); // opaque surface - not checkable
     };
-    if provided.host_gated {
-        return Ok(()); // host-gated surface is incomplete on this host
+    if provided.surface_incomplete {
+        return Ok(()); // host-gated or glob-use surface: not checkable
     }
     let Some(requested) = requested_group_import_names(use_stmt) else {
         return Ok(()); // not a `{...}` group import
@@ -3121,7 +3123,7 @@ mod private_fn_visibility_tests {
             exports: std::sync::Arc::new(crate::value::ModuleTable::leaf(Default::default())),
             extra: Default::default(),
             private_fns: names.iter().map(|s| s.to_string()).collect(),
-            host_gated: false,
+            surface_incomplete: false,
         }))
     }
 
@@ -3640,6 +3642,16 @@ mod private_call_visibility_tests {
             let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided);
             assert!(r.is_ok(), "{name}: {r:?}");
         }
+    }
+
+    #[test]
+    fn glob_use_module_keeps_private_rule_and_skips_unprovided() {
+        let provided = facade_provided("use other.*\nfn priv_fn() -> i64:\n    1\n");
+        let set = provided.as_ref().expect("glob use is not opaque");
+        assert!(set.surface_incomplete);
+        assert!(set.private_fns.contains("priv_fn"));
+        let u = use_of("use m.{zzz_from_glob}\n");
+        assert!(super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided).is_ok());
     }
 
     #[test]
