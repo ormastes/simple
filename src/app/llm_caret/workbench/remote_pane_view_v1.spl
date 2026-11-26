@@ -1,0 +1,227 @@
+# Read-only model for completions from the retained, configured SSH gateway.
+# The caller holds the dispatch scope pin and supplies the selection used by
+# the actual carrier. A target receipt is data for signing, never a local pane.
+use app.orchestrator.controller_gateway_v1.{ControllerGatewayRequestV1, controller_gateway_request_encode_v1,
+    controller_gateway_nonzero_reply_v1}
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.config_core.server_context_types_v1.{ResolvedServerV1, server_record_validate_v1}
+use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, host_agent_pane_binding_validate_v4}
+use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneStreamRequestV6,
+    HostAgentPaneTargetReceiptV6, host_agent_pane_stream_request_encode_v6, host_agent_pane_stream_receipt_decode_v6,
+    host_agent_pane_stream_receipt_matches_v6, host_agent_pane_target_receipt_decode_v6}
+use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_encode_v6}
+use std.common.crypto.sha256.sha256_text
+use std.common.encoding.external_text.bytes_to_text_checked
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.value.SdnValue
+use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
+
+pub struct CaretRemotePaneScopeV1:
+    server: ResolvedServerV1
+    profile_path: text
+    controller_id: text
+    scope_digest: text
+    operation_id: text
+    invoke_digest: text
+    binding_uid: text
+    attach_digest: text
+
+pub enum CaretRemotePanePhaseV1:
+    Unclaimed
+    Ready
+    Pending
+    Unconfirmed
+    Refused
+    Eof
+
+pub struct CaretRemotePaneRequestV1:
+    pane: HostAgentPaneStreamRequestV6
+    source: text
+
+pub struct CaretRemotePaneViewV1:
+    scope: CaretRemotePaneScopeV1
+    target: HostAgentPaneTargetReceiptV6
+    phase: CaretRemotePanePhaseV1 = CaretRemotePanePhaseV1.Unclaimed
+    outstanding: Option<CaretRemotePaneRequestV1> = None
+    stream_epoch: i64 = -1
+    last_read_id: i64 = 0
+    latest_source: text = ""
+    latest_receipt_digest: text = ""
+    transcript: [text] = []
+    transcript_bytes: i64 = 0
+    problem: text = ""
+
+pub fn caret_remote_pane_open_v1(scope: CaretRemotePaneScopeV1, binding: HostAgentPaneBindingV4,
+        target_source: text) -> Result<CaretRemotePaneViewV1, text>:
+    server_record_validate_v1(scope.server.record)?
+    if scope.server.consumer != "caret" or scope.server.record.transport != "ssh" or
+            not host_path_is_absolute(scope.profile_path) or scope.profile_path.byte_len() > 4096 or
+            scope.profile_path.contains("\0") or scope.profile_path.contains("\n") or scope.profile_path.contains("\r") or
+            not builder_identifier_valid_v1(scope.controller_id) or not builder_identifier_valid_v1(scope.operation_id) or
+            not builder_identifier_valid_v1(scope.binding_uid) or not builder_digest_valid_v1(scope.scope_digest) or
+            not builder_digest_valid_v1(scope.invoke_digest) or not builder_digest_valid_v1(scope.attach_digest):
+        return Err("caret-remote-pane-scope-invalid")
+    val target = host_agent_pane_target_receipt_decode_v6(target_source)?
+    if target.operation_id != scope.operation_id or target.invoke_digest != scope.invoke_digest:
+        return Err("caret-remote-pane-target-mismatch")
+    val checked = host_agent_pane_binding_validate_v4(binding)?
+    if checked.binding_uid != scope.binding_uid or checked.service_incarnation != target.service_incarnation or
+            checked.service_epoch != target.service_epoch or checked.session_id != target.session_id or
+            checked.window_id != target.window_id or checked.pane_id != target.pane_id:
+        return Err("caret-remote-pane-binding-mismatch")
+    Ok(CaretRemotePaneViewV1(scope: scope, target: target))
+
+fn caret_remote_pane_same_scope_v1(a: CaretRemotePaneScopeV1, b: CaretRemotePaneScopeV1) -> bool:
+    val x = a.server.record
+    val y = b.server.record
+    a.server.consumer == b.server.consumer and a.server.context == b.server.context and a.server.source == b.server.source and
+        x.name == y.name and x.transport == y.transport and x.host == y.host and x.port == y.port and
+        x.container_host == y.container_host and x.auth_ref == y.auth_ref and x.tls_ref == y.tls_ref and
+        x.remote_executable == y.remote_executable and a.profile_path == b.profile_path and a.controller_id == b.controller_id and
+        a.scope_digest == b.scope_digest and a.operation_id == b.operation_id and a.invoke_digest == b.invoke_digest and
+        a.binding_uid == b.binding_uid and a.attach_digest == b.attach_digest
+
+pub fn caret_remote_pane_begin_v1(view: CaretRemotePaneViewV1) -> Result<CaretRemotePaneViewV1, text>:
+    val claiming = view.phase == CaretRemotePanePhaseV1.Unclaimed
+    if (not claiming and view.phase != CaretRemotePanePhaseV1.Ready) or view.outstanding.is_some():
+        return Err("caret-remote-pane-cursor-not-ready")
+    if view.last_read_id == 9223372036854775807: return Err("caret-remote-pane-cursor-exhausted")
+    val pane = HostAgentPaneStreamRequestV6(binding_uid: view.scope.binding_uid, attach_digest: view.scope.attach_digest,
+        epoch: if claiming: 0 else: view.stream_epoch, read_id: if claiming: 0 else: view.last_read_id + 1)
+    val action = if claiming: "agent-pane-claim" else: "agent-pane-read"
+    val sub = host_control_sub_encode_v6(HostControlSubRequestV6(sub: action,
+        frame: host_agent_pane_stream_request_encode_v6(pane)))?
+    val source = controller_gateway_request_encode_v1(ControllerGatewayRequestV1(action: action,
+        controller_id: view.scope.controller_id, request_uid: view.scope.operation_id,
+        source: sub, ns: "", name: "", source_digest: ""))?
+    var next = view
+    next.phase = CaretRemotePanePhaseV1.Pending
+    next.outstanding = Some(CaretRemotePaneRequestV1(pane: pane, source: source))
+    next.problem = ""
+    Ok(next)
+
+pub fn caret_remote_pane_retry_v1(view: CaretRemotePaneViewV1) -> Result<CaretRemotePaneViewV1, text>:
+    if view.phase != CaretRemotePanePhaseV1.Unconfirmed or view.outstanding.is_none():
+        return Err("caret-remote-pane-retry-unavailable")
+    var next = view
+    next.phase = CaretRemotePanePhaseV1.Pending
+    next.problem = ""
+    Ok(next)
+
+fn caret_remote_pane_uncertain_v1(view: CaretRemotePaneViewV1) -> CaretRemotePaneViewV1:
+    var next = view
+    next.phase = CaretRemotePanePhaseV1.Unconfirmed
+    next.problem = "caret-remote-pane-reply-unconfirmed"
+    next
+
+fn caret_remote_pane_fields_v1(source: text, maximum: i64, nodes: i64, depth: i64) -> Result<Dict<text, SdnValue>, text>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: maximum,
+        max_depth: depth, max_nodes: nodes, max_rows: 0, max_cells: 0, max_columns: 12))
+    if parsed.is_err(): return Err("caret-remote-pane-sdn")
+    match parsed.unwrap().value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("caret-remote-pane-object")
+
+fn caret_remote_pane_refusal_v1(view: CaretRemotePaneViewV1, source: text, exit_code: i64, output: text) -> CaretRemotePaneViewV1:
+    val safe = controller_gateway_nonzero_reply_v1(source, exit_code, output)
+    if safe.exit_code != 1: return caret_remote_pane_uncertain_v1(view)
+    val fields = caret_remote_pane_fields_v1(safe.output, 4096, 24, 2)
+    if fields.is_err(): return caret_remote_pane_uncertain_v1(view)
+    match fields.unwrap()["detail"]:
+        case SdnValue.String(code):
+            var next = view
+            next.phase = CaretRemotePanePhaseV1.Refused
+            next.outstanding = None
+            next.problem = code
+            next
+        case _: caret_remote_pane_uncertain_v1(view)
+
+# The V6 receipt validator already checked canonical bytes, one stdout chunk,
+# digest, byte bounds and EOF shape. Escape raw bytes so independent receipt
+# boundaries cannot create a partial control or UTF-8 sequence in the UI.
+fn caret_remote_pane_display_v1(payload: text) -> Result<(bool, text), text>:
+    val fields = caret_remote_pane_fields_v1(payload, 131072, 24609, 5)?
+    val eof = match fields["eof"]:
+        case SdnValue.Bool(value): value
+        case _: return Err("caret-remote-pane-read-eof")
+    val chunks = match fields["chunks"]:
+        case SdnValue.Array(items): items
+        case _: return Err("caret-remote-pane-read-chunks")
+    if chunks.len() == 0: return Ok((eof, ""))
+    val chunk = match chunks[0]:
+        case SdnValue.Dict(values): values
+        case _: return Err("caret-remote-pane-read-chunk")
+    val bytes = match chunk["bytes"]:
+        case SdnValue.Array(items): items
+        case _: return Err("caret-remote-pane-read-bytes")
+    val hex = "0123456789abcdef"
+    var display: [u8] = []
+    for item in bytes:
+        val byte = match item:
+            case SdnValue.Int(value): value
+            case _: return Err("caret-remote-pane-read-byte")
+        val prior = display.len()
+        if byte == 10 or (byte >= 32 and byte <= 126 and byte != 92):
+            display.push(byte as u8)
+            if display.len() != prior + 1: return Err("caret-remote-pane-display-retention")
+        else:
+            display.push(92 as u8)
+            display.push(120 as u8)
+            display.push(hex.byte_at(byte / 16) as u8)
+            display.push(hex.byte_at(byte % 16) as u8)
+            if display.len() != prior + 4: return Err("caret-remote-pane-display-retention")
+    Ok((eof, bytes_to_text_checked(display)?))
+
+fn caret_remote_pane_append_v1(view: CaretRemotePaneViewV1, display: text) -> CaretRemotePaneViewV1:
+    if display == "": return view
+    var next = view
+    var first = 0
+    var size = next.transcript_bytes + display.byte_len()
+    while first < next.transcript.len() and (size > 131072 or next.transcript.len() - first >= 32):
+        size = size - next.transcript[first].byte_len()
+        first = first + 1
+    next.transcript = next.transcript.slice(first, next.transcript.len()) + [display]
+    next.transcript_bytes = size
+    next
+
+# Only call with a completion from the retained configured SSH exchange.
+# The exact source couples the caller's one retained transport to this cursor.
+pub fn caret_remote_pane_complete_v1(view: CaretRemotePaneViewV1, observed: CaretRemotePaneScopeV1,
+        request_source: text, reply: OrchestratorValidationReplyV1) -> Result<CaretRemotePaneViewV1, text>:
+    if not caret_remote_pane_same_scope_v1(view.scope, observed): return Err("caret-remote-pane-carrier-mismatch")
+    if reply.transport_cleanup.is_some() or reply.transport_store_cleanup.is_some() or reply.transport_exit_unconfirmed:
+        return Err("caret-remote-pane-carrier-cleanup-pending")
+    val exit_code = reply.exit_code
+    val output = reply.output
+    if exit_code == 0 and request_source == view.latest_source and view.latest_receipt_digest != "" and
+            sha256_text(output) == view.latest_receipt_digest:
+        return Ok(view)
+    if view.phase != CaretRemotePanePhaseV1.Pending or view.outstanding.is_none():
+        return Err("caret-remote-pane-no-outstanding")
+    val pending = view.outstanding.unwrap()
+    if request_source != pending.source: return Err("caret-remote-pane-request-mismatch")
+    if exit_code != 0: return Ok(caret_remote_pane_refusal_v1(view, request_source, exit_code, output))
+    val decoded = host_agent_pane_stream_receipt_decode_v6(output)
+    if decoded.is_err(): return Ok(caret_remote_pane_uncertain_v1(view))
+    val receipt = decoded.unwrap()
+    if not host_agent_pane_stream_receipt_matches_v6(view.scope.operation_id, pending.pane, receipt):
+        return Ok(caret_remote_pane_uncertain_v1(view))
+    var next = view
+    next.phase = CaretRemotePanePhaseV1.Ready
+    if receipt.read_id == 0:
+        next.stream_epoch = receipt.epoch
+    else:
+        val display = caret_remote_pane_display_v1(receipt.payload)
+        if display.is_err(): return Ok(caret_remote_pane_uncertain_v1(view))
+        next = caret_remote_pane_append_v1(next, display.unwrap().1)
+        next.last_read_id = receipt.read_id
+        if display.unwrap().0: next.phase = CaretRemotePanePhaseV1.Eof
+    next.outstanding = None
+    next.latest_source = request_source
+    next.latest_receipt_digest = sha256_text(output)
+    Ok(next)
+
+export CaretRemotePaneScopeV1, CaretRemotePanePhaseV1, CaretRemotePaneRequestV1, CaretRemotePaneViewV1
+export caret_remote_pane_open_v1, caret_remote_pane_begin_v1, caret_remote_pane_retry_v1, caret_remote_pane_complete_v1
