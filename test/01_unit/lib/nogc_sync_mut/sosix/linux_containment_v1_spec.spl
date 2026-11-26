@@ -1,0 +1,55 @@
+# Linux SOSIX containment (lane N1): review-only. Asserts the typed refusals and that
+# no evidence is ever produced; nothing here is a Linux capability claim.
+use std.spec.{describe, it, expect}
+use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainLimitsV1, SosixContainBytesV1, SosixContainCountV1, SosixContainCpuRateV1, SosixContainMillisV1, SosixContainFlagV1, SosixContainAdmissionV1, SosixContainLeaseV1, SosixContainSlotV1, SosixContainQualifyRequestV1}
+use std.nogc_sync_mut.sosix.containment_types_v1.{SosixContainMemoryProbeV1}
+use std.nogc_sync_mut.sosix.linux.containment_v1.{sosix_contain_support_v1, sosix_contain_start_v1, sosix_contain_poll_v1, sosix_contain_cancel_v1, sosix_contain_collect_v1, sosix_contain_qualify_v1, sosix_contain_memory_cap_evidence_v1}
+
+val DIGEST = "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn request(memory: i64, network: text) -> SosixContainRequestV1:
+    SosixContainRequestV1(program: "/bin/true", program_digest: DIGEST, args: [], environment: [], directory: "/", stdout_path: "/o", stderr_path: "/e",
+        limits: SosixContainLimitsV1(memory: SosixContainBytesV1(memory), processes: SosixContainCountV1(0), cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(0)),
+        identity: "inherit", scope: "", network: network, readonly_dirs: [], writable_dirs: [], private_pids: SosixContainFlagV1(false), root_dir: "")
+
+fn reason_of(admission: SosixContainAdmissionV1) -> text:
+    match admission:
+        case RejectedBeforeStart(reason): reason
+        case _: "not-rejected"
+
+describe "linux sosix containment (review-only)":
+    it "reports every axis unverified":
+        val s = sosix_contain_support_v1()
+        expect(s.mechanism).to_equal("linux-userns+cgroup2")
+        expect(s.memory_hard_limit.value).to_equal(false)
+        expect(s.process_limit.value).to_equal(false)
+        expect(s.write_confinement.value).to_equal(false)
+        expect(s.network_isolation.value).to_equal(false)
+        expect(s.pid_isolation.value).to_equal(false)
+        expect(s.root_remap.value).to_equal(false)
+        expect(s.kill_all_descendants.value).to_equal(false)
+        expect(s.unprivileged.value).to_equal(false)
+
+    it "refuses constrained requests by axis and plain ones by the named gap":
+        expect(reason_of(sosix_contain_start_v1(request(1048576, "host")))).to_equal("containment-memory-limit-unsupported")
+        expect(reason_of(sosix_contain_start_v1(request(0, "none")))).to_equal("containment-network-isolation-unsupported")
+        expect(reason_of(sosix_contain_start_v1(request(0, "host")))).to_equal("containment-launch-owner-missing-linux")
+
+    it "errors on lease operations":
+        val lease = SosixContainLeaseV1(slot: SosixContainSlotV1(0))
+        expect(sosix_contain_poll_v1(lease).is_err()).to_equal(true)
+        expect(sosix_contain_cancel_v1(lease).is_err()).to_equal(true)
+        expect(sosix_contain_collect_v1(lease).is_err()).to_equal(true)
+
+    it "returns no canaries and no evidence digest from qualify":
+        val q = SosixContainQualifyRequestV1(probe_program: "/bin/true", probe_digest: DIGEST, probe_script: "s", work_dir: "/tmp/q", scope: "n1", wall: SosixContainMillisV1(1000))
+        val result = sosix_contain_qualify_v1(q)
+        expect(result.canaries.len()).to_equal(0)
+        expect(result.evidence_digest).to_equal("")
+        expect(result.reason != "").to_equal(true)
+
+    it "never reports memory-cap enforcement":
+        val probe = SosixContainMemoryProbeV1(program: "p", program_digest: "d", under_args: [], over_args: [], cap: SosixContainBytesV1(1), work_dir: "w", wall: SosixContainMillisV1(1))
+        val evidence = sosix_contain_memory_cap_evidence_v1(probe)
+        expect(evidence.enforced.value).to_equal(false)
+        expect(evidence.evidence_digest).to_equal("")

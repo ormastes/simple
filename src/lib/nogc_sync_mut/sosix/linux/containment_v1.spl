@@ -1,25 +1,48 @@
-# SOSIX containment: linux variant. Typed refusal until this host's lane defines its
-# mechanism; nothing here ever reports success (architecture 4.2).
-use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainSupportV1, SosixContainAdmissionV1, SosixContainLeaseV1, SosixContainPollV1, SosixContainFlagV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1, sosix_contain_support_none_v1}
+# SOSIX containment: linux variant (architecture pure_simple_container 4.2, lane N1).
+# REVIEW-ONLY: no Linux host has run this, so nothing here claims a capability.
+# Intended mapping (userns + mount/net/pid namespaces, cgroup v2 memory.max /
+# pids.max / cpu.max / cgroup.kill, pivot_root) rests on io/linux_process_owner and
+# io/linux_container_containment_v1. Both keep their request, lease and snapshot types
+# non-pub and expose no launch entry (only linux_process_observation_decode_v2 and
+# the observe/close turns of an already-captured pid), so this variant cannot start a
+# child through them. The gaps are named in every refusal below:
+#   containment-launch-owner-missing-linux  no pub launch/cancel/collect entry on the owner
+#   containment-qualify-host-not-linux      qualify ran on a non-Linux host
+use std.platform.{is_linux}
+use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainSupportV1, SosixContainAdmissionV1, SosixContainLeaseV1, SosixContainPollV1, SosixContainFlagV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1, sosix_contain_support_none_v1, sosix_contain_request_reason_v1, sosix_contain_qualify_request_reason_v1}
 use std.nogc_sync_mut.sosix.containment_types_v1.{SosixContainMemoryProbeV1, SosixContainMemoryEvidenceV1}
 
+const _LINUX_GAP_LAUNCH = "containment-launch-owner-missing-linux"
+
+# Static and unverified: every axis is false until the owner exposes a launch entry
+# and a Linux run log exists, so the runtime refuses any constrained request.
 pub fn sosix_contain_support_v1() -> SosixContainSupportV1:
-    sosix_contain_support_none_v1("linux-unimplemented")
+    sosix_contain_support_none_v1("linux-userns+cgroup2")
 
 pub fn sosix_contain_start_v1(request: SosixContainRequestV1) -> SosixContainAdmissionV1:
-    SosixContainAdmissionV1.RejectedBeforeStart("containment-unimplemented-linux")
+    val reason = sosix_contain_request_reason_v1(request, sosix_contain_support_v1())
+    if reason != "":
+        return SosixContainAdmissionV1.RejectedBeforeStart(reason)
+    SosixContainAdmissionV1.RejectedBeforeStart(_LINUX_GAP_LAUNCH)
 
 pub fn sosix_contain_poll_v1(lease: SosixContainLeaseV1) -> Result<SosixContainPollV1, text>:
-    Err("containment-unimplemented-linux")
+    Err(_LINUX_GAP_LAUNCH)
 
 pub fn sosix_contain_cancel_v1(lease: SosixContainLeaseV1) -> Result<SosixContainFlagV1, text>:
-    Err("containment-unimplemented-linux")
+    Err(_LINUX_GAP_LAUNCH)
 
 pub fn sosix_contain_collect_v1(lease: SosixContainLeaseV1) -> Result<SosixContainPollV1, text>:
-    Err("containment-unimplemented-linux")
+    Err(_LINUX_GAP_LAUNCH)
 
+# Never returns a canary: off Linux nothing can run, and on Linux the launch the
+# nine canaries need is the gap above. evidence_digest stays empty either way.
 pub fn sosix_contain_qualify_v1(request: SosixContainQualifyRequestV1) -> SosixContainQualifyResultV1:
-    SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "containment-qualify-unimplemented-linux")
+    val invalid = sosix_contain_qualify_request_reason_v1(request)
+    if invalid != "":
+        return SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: invalid)
+    if not is_linux():
+        return SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "containment-qualify-host-not-linux")
+    SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "containment-qualify-launch-owner-missing-linux")
 
 pub fn sosix_contain_memory_cap_evidence_v1(probe: SosixContainMemoryProbeV1) -> SosixContainMemoryEvidenceV1:
-    SosixContainMemoryEvidenceV1(enforced: SosixContainFlagV1(false), evidence_digest: "", reason: "memory-cap-probe-unimplemented-linux")
+    SosixContainMemoryEvidenceV1(enforced: SosixContainFlagV1(false), evidence_digest: "", reason: "memory-cap-probe-launch-owner-missing-linux")

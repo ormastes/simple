@@ -10,7 +10,7 @@ TODO(platform-variant-migration): move here — nothing yet; new linux-specific 
 - **FILE.md** — this manifest.
 - **contained_write_v1.spl** — typed refusal for contained write/read grants (`contained-write-unimplemented-linux`).
 - **app_container_v1.spl** — typed refusal for the app sandbox (`app-sandbox-unimplemented-linux`).
-- **containment_v1.spl** — typed refusal for SOSIX containment (`containment-unimplemented-linux`).
+- **containment_v1.spl** — review-only SOSIX containment, typed refusals naming the launch-owner gap (`containment-launch-owner-missing-linux`).
 
 ## Child Manifests
 
