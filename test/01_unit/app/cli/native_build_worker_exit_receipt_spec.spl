@@ -14,7 +14,8 @@ use app.cli.native_build_worker_entry.{
     run_native_build_worker_entry, native_build_worker_publish_failure_receipt_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{
     native_file_worker_error_reason_publish_v1, native_file_worker_error_reason_read_v1}
-use app.io.env_ops.{env_snapshot, env_clear, env_set, env_restore}
+use app.io.env_ops.{env_set}
+use std.nogc_sync_mut.env.{env_snapshot, env_clear, env_restore}
 use std.io_runtime.{dir_create_all, dir_remove_all, file_read, getpid}
 
 fn _fresh_shard_queue(name: text) -> text:
@@ -103,14 +104,35 @@ describe "native-build worker early failure receipts":
         assert_false(ok)
         expect(reason).to_equal("")
 
-    it "wires shared failure receipt publisher across all worker entrypoints":
+    it "publishes MIR shard exit receipt for native-build role children on exit 3":
+        val mir_q = _fresh_shard_queue("mir_role_child")
+        val saved = env_snapshot()
+        env_clear()
+        val _s1 = env_set("SIMPLE_MIR_SHARD_QUEUE", mir_q)
+        val _s2 = env_set("SIMPLE_MIR_SHARD_OWNER", "1/4@mir")
+        val ok = native_build_worker_publish_failure_receipt_v1(["native-build", "--mir-shard=1/4"], 3, "")
+        val mir_reason = native_file_worker_error_reason_read_v1(mir_q, "1/4@mir")
+        env_restore(saved)
+        val _rm = dir_remove_all(mir_q)
+        assert_true(ok)
+        expect(mir_reason).to_contain("mir-shard child exited 3 without publishing a cause")
+
+    it "wires shared failure receipt publisher across all worker and role-child entrypoints":
         val entry_src = file_read("src/app/cli/native_build_worker_entry.spl")
         val worker_src = file_read("src/app/cli/native_build_worker.spl")
         val boot_src = file_read("src/app/cli/bootstrap_main.spl")
         val main_src = file_read("src/app/cli/_CliMain/main_and_help.spl")
         val nb_src = file_read("src/app/cli/native_build_main.spl")
+        val compile_src = file_read("src/app/io/_CliCompile/compile_targets.spl")
         expect(entry_src).to_contain("native_build_worker_publish_failure_receipt_v1")
         expect(worker_src).to_contain("native_build_worker_publish_failure_receipt_v1")
-        expect(boot_src).to_contain("native_build_worker_publish_failure_receipt_v1")
-        expect(main_src).to_contain("native_build_worker_publish_failure_receipt_v1")
+        expect(boot_src).to_contain("val _r = native_build_worker_publish_failure_receipt_v1(args, code, \"\")")
+        expect(boot_src).to_contain("val _r = native_build_worker_publish_failure_receipt_v1(all_args, 1, unsupported_reason)")
+        expect(boot_src).to_contain("val _r = native_build_worker_publish_failure_receipt_v1(all_args, 1, missing_reason)")
+        expect(boot_src).to_contain("val _r = native_build_worker_publish_failure_receipt_v1(all_args, native_code, \"\")")
+        expect(main_src).to_contain("val _r = native_build_worker_publish_failure_receipt_v1(get_args(), 1, policy_reason)")
+        expect(main_src).to_contain("val _r = native_build_worker_publish_failure_receipt_v1(get_args(), 1, table_reason)")
+        expect(main_src).to_contain("val _r = native_build_worker_publish_failure_receipt_v1(args, 1, admission_reason)")
+        expect(main_src).to_contain("val _r = native_build_worker_publish_failure_receipt_v1(args, 1, reason)")
         expect(nb_src).to_contain("native_file_worker_env_failure_receipt_publish_v1")
+        expect(compile_src).to_contain("native_file_worker_env_failure_receipt_publish_v1(args, rc, \"\")")

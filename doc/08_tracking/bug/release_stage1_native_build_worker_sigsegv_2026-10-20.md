@@ -127,7 +127,7 @@ runners: run 42457312983.
 
 ## WA-P9 Audit (2026-11-26)
 
-- **Current CI evidence (`55ed337beea`, PR `#11877`):** Per `doc/08_tracking/bug/phase_ladder_linux_phase2_stage1_sigsegv_hir_2026-11-26.md`, Linux Phase 2 driven by `stage1` still SIGSEGVs during `phase=hir` (Run `45659415417` at HIR module 480/1629; Run `45739034803` rung 2 at HIR module 291/1630). Phase 2 by `stage1` has not passed.
+- **Current CI evidence (`55ed337beea`, PR `#11877`):** Per `doc/08_tracking/bug/phase_ladder_linux_phase2_stage1_sigsegv_hir_2026-11-26.md`, Run `45659415417` hit SIGSEGV during Linux Phase 2 driven by `stage1` at HIR module `480/1629`, and Run `45739034803` rung 2 later lost hosted runner communication at HIR module `291/1630` (likely VM memory/swap starvation rather than a captured SIGSEGV, with rung 1 succeeding after PR `#11850`). Phase 2 by `stage1` has not passed.
 - **Workflow disposition:** Kept `.github/workflows/release.yml:1006` (`# @workaround bug=release_stage1_native_build_worker_sigsegv_2026_10_20 reason=stage1-native-build-worker-sigsegv`) and the Rust-seed fallback for `simple_test_runner`; removing this guard without fixing the underlying `stage1` HIR SIGSEGV would break release packaging on Linux. Verified `release_checker_contract_spec.spl` (2/2 pass) and `release_archive_layout_spec.spl` (2/2 pass).
 
 ## Linux x86_64 Verification Note (2026-11-26, Lane 1)

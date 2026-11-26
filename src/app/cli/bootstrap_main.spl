@@ -514,15 +514,19 @@ fn native_build_no_borrow_check_from_args(args: [text], i: i64) -> bool:
 # Native commands use the pure driver or its compiled CLI coordinator.
 pub fn run_native_build_bootstrap(args: [text]) -> i64:
     if not native_build_child_bind_parent_v1():
+        val _r = native_build_worker_publish_failure_receipt_v1(args, 1, "native-build child failed parent death binding")
         return 1
     val lease = match native_build_coordinator_cache_lease(args):
         case Ok(value): value
         case Err(reason):
             eprint(reason)
+            val _r = native_build_worker_publish_failure_receipt_v1(args, 1, reason)
             return 1
     val may_sweep = native_build_coordinator_may_sweep(args)
     val code = run_native_build_bootstrap_profile_leased(args, lease, may_sweep)
     native_build_coordinator_cache_finish(lease, args, code == 0 and may_sweep)
+    if code != 0:
+        val _r = native_build_worker_publish_failure_receipt_v1(args, code, "")
     code
 
 fn run_native_build_bootstrap_profile_leased(args: [text], base_lease: NativeCacheLease, may_sweep: bool) -> i64:
@@ -1163,7 +1167,9 @@ fn main() -> i64:
         # A marked coordinator child may never escape the internal allowlist
         # into ordinary command handling. Unmarked `run` is not internal and
         # deliberately falls through to the canonical unknown-command path.
-        print "error: unsupported bootstrap internal entry '{all_args[2]}'"
+        val unsupported_reason = "unsupported bootstrap internal entry '{all_args[2]}'"
+        print "error: {unsupported_reason}"
+        val _r = native_build_worker_publish_failure_receipt_v1(all_args, 1, unsupported_reason)
         return 1
     if first == "inspect-native-surfaces":
         return run_bootstrap_surface_inspection_v1(all_args)
@@ -1179,8 +1185,12 @@ fn main() -> i64:
         # so either spelling counts as the produced artifact.
         val native_present: i64 = if native_output != "" and (file_exists(native_output) or file_exists(native_output + ".exe")): 1 else: 0
         if bootstrap_native_build_missing_artifact_v1(native_code, native_output, native_present, artifact_owner) == 1:
-            eprint "error: native-build finished with exit 0 but produced no artifact at {native_output}; failing closed (see the pool/aggregate lines above)"
+            val missing_reason = "native-build finished with exit 0 but produced no artifact at {native_output}"
+            eprint "error: {missing_reason}; failing closed (see the pool/aggregate lines above)"
+            val _r = native_build_worker_publish_failure_receipt_v1(all_args, 1, missing_reason)
             return 1
+        if native_code != 0:
+            val _r = native_build_worker_publish_failure_receipt_v1(all_args, native_code, "")
         return native_code
     if first.len() == 9 and first.starts_with("--version"):
         print "simple-bootstrap {bootstrap_version()}{bootstrap_backend_capability_label_v1()}"
