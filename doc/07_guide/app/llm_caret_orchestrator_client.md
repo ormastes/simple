@@ -42,7 +42,10 @@ The interactive `/orchestrator remote <config|-> <context|-> <server|->
 <ssh-profile.sdn> <request.sdn>` command uses the shared Caret server context
 and authenticated SSH gateway. The request is a canonical controller gateway
 document. The profile's authentication and trust references must match the
-selected server. For configuration discovery and request documents see the
+selected server. Caret polls the request while the live dashboard runs.
+In line mode use `/orchestrator remote-progress`. `/orchestrator remote-cancel`
+requests local SSH transport cancellation. Preserve the original request UID
+for reconciliation. For configuration discovery and request documents see the
 [shared server guide](../tooling/orchestration_server_contexts.md).
 
 Local session commands use the local Caret listener. Remote controller intent

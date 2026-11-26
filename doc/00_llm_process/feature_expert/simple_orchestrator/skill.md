@@ -135,6 +135,11 @@ Use `simple orchestrator server-resolve - simple - - host` and
 `simple-orchestrator server-resolve - orchestrator - - host` to inspect the
 same discovery chain through both entrypoints. Use
 `llm_caret orchestrator server-resolve - caret - - host` for the Caret route.
+In Caret Suite, use `/orchestrator remote <config|-> <context|-> <server|->
+<profile> <request.sdn>` for the typed SSH controller route. The live
+dashboard progresses the one active exchange. The line client exposes
+`remote-progress` and `remote-cancel`; cancellation addresses the local SSH
+owner. Retained requests and signed execution continue to use gateway policy.
 Choose `agent` and `container` for a container-scoped resolution. When Simple
 and Orchestrator share a server, reuse the same `authRef` and trust reference
 through the protected identity store.

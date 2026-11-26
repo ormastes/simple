@@ -410,6 +410,13 @@ reporting a qualified deployment.
 [Orchestrator feature skill](feature_expert/simple_orchestrator/skill.md) ·
 [Release status](../03_plan/agent_tasks/simple_orchestrator_status_20261126.md)
 
+Caret Suite's `/orchestrator remote` selects its named context and explicit
+SSH server through the shared resolver. It uses the protected profile and
+typed controller gateway. The live dashboard progresses one native exchange
+per tick. Line mode can query `remote-progress`, and `remote-cancel` cancels
+the local transport. Local session commands validate the recorded loopback
+endpoint before sending their bearer. Live SSH qualification is pending.
+
 ## Modern SSpec typed evidence
 
 - **Observation:** a canonical record produced from the exercised surface.

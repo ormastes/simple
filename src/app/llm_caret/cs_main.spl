@@ -19,6 +19,7 @@ use std.nogc_async_mut.sosix.host_facade.{sosix_platform, sosix_print_raw as pri
 use app.llm_caret.cs_dashboard.{CsAgent, CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_frame_rows,
     cs_poll_screens, cs_resize_agents, cs_agent_area, cs_reap_containers}
+use app.llm_caret.cs_orchestrator_v1.{cs_orchestrator_remote_poll_v1, cs_orchestrator_remote_close_v1}
 use app.llm_caret.workbench.capability_checklist.{capability_rows, capability_lines,
     capability_probes_live}
 use app.llm_caret.workbench.key_resolver.{KeyEvent, KeyFocus, KeyRoute, KeyRouteKind,
@@ -142,9 +143,11 @@ fn cs_run(io: CaretIo, session: text) -> CaretLoopResult:
                 io.emit(outcome)
         else:
             running = false
+    val remote_cleanup = cs_orchestrator_remote_close_v1(session)
+    if remote_cleanup != "": io.emit(remote_cleanup)
     val _reap_note = cs_reap_containers(d)
     pane_cleanup_session(session)
-    CaretLoopResult(mode: "cs", ok: true, exit_reason: reason, error: "")
+    CaretLoopResult(mode: "cs", ok: remote_cleanup == "", exit_reason: reason, error: remote_cleanup)
 
 # ---------------------------------------------------------------------------
 # Live terminal dashboard: raw-mode keys, in-place repaint, agents polled on a
@@ -380,6 +383,11 @@ fn cs_run_live(session: text) -> CaretLoopResult:
             if pane_cols > 0:
                 cs_resize_agents(d, pane_cols, pane_rows)
         val now = time_now_monotonic_ms()
+        if now - last_poll >= _CS_POLL_MS:
+            val remote = cs_orchestrator_remote_poll_v1(session)
+            if remote != "":
+                d = _logged_outcome(d, remote)
+                dirty = true
         if now - last_refresh >= _CS_REFRESH_MS:
             d = cs_refresh(d)
             last_refresh = now
@@ -482,9 +490,11 @@ fn cs_run_live(session: text) -> CaretLoopResult:
             elif ch >= " ":
                 d = _with_input(d, d.input + ch, d.log)
     _live_end()
+    val remote_cleanup = cs_orchestrator_remote_close_v1(session)
+    if remote_cleanup != "": print_raw(remote_cleanup + "\n")
     val _reap_note = cs_reap_containers(d)
     pane_cleanup_session(session)
-    CaretLoopResult(mode: "cs", ok: true, exit_reason: reason, error: "")
+    CaretLoopResult(mode: "cs", ok: remote_cleanup == "", exit_reason: reason, error: remote_cleanup)
 
 # The line loop (`cs_plain_io`) prints a frame and reads a whole line. Neither
 # loop uses `production_caret_io()`, whose adapter wires raw mode, the

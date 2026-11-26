@@ -10,7 +10,8 @@ request via the five `SIMPLE_CARET_SSH_ACCEPTANCE_*` variables in the spec.
 The profile must match the selected server's authentication and trust
 references. Keep the fixture files under the dedicated operator's control.
 
-The scenario invokes the Caret Suite dispatcher's `remote` action. It checks
+The scenario invokes the Caret Suite dispatcher's `remote` action and polls
+its cooperative exchange to completion. It checks
 that the authenticated gateway responds for the exact controller and request
 UID and that the receipt carries no runtime execution authority. A missing
 fixture or a refused remote reply fails the case.

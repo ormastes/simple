@@ -88,9 +88,11 @@ gateway requests from its interactive command.
 
 A `-` config uses the session's config selection, then normal discovery.
 The remote action requires an SSH server and uses its selected address,
-port and protected identity and trust references. Start, launch, attach and
-pane controls continue to use the separate local session listener. Use an
-original request UID to inspect an uncertain controller operation.
+port and protected identity and trust references. The live dashboard polls
+the exchange as it refreshes. In line mode use `/orchestrator remote-progress`.
+`/orchestrator remote-cancel` cancels the local SSH exchange. Use the original
+request UID to inspect an uncertain controller operation. Start, launch,
+attach and pane controls use the separate local session listener.
 
 An agent selects the `agent` consumer with `container` address selection when
 it runs inside the workload.
