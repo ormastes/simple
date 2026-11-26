@@ -1,0 +1,55 @@
+# PureDatabase delete visibility and PK index parity spec.
+# @req REQ-LIB-DATABASE-002
+
+use std.spec.*
+use std.database.pure_sql.{PureDatabase, DbValue}
+use std.io_runtime.{file_delete}
+
+describe "PureDatabase delete visibility and PK index parity":
+    it "removes rows deleted via delete_by_key from MVCC tuples and SQL queries":
+        var db = PureDatabase.memory().unwrap()
+        expect(db.exec_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)").is_ok()).to_equal(true)
+        expect(db.put("items", [DbValue.Integer(value: 1), DbValue.Text(value: "a")]).is_ok()).to_equal(true)
+        expect(db.put("items", [DbValue.Integer(value: 2), DbValue.Text(value: "b")]).is_ok()).to_equal(true)
+
+        val deleted = db.delete_by_key("items", "id", DbValue.Integer(value: 1)).unwrap()
+        expect(deleted).to_equal(1)
+
+        val g1 = db.get("items", "id", DbValue.Integer(value: 1)).unwrap()
+        expect(g1 == nil).to_equal(true)
+        expect(db.query("SELECT * FROM items WHERE id = 1", []).unwrap().len()).to_equal(0)
+        expect(db.query("SELECT * FROM items WHERE id = ?", [DbValue.Integer(value: 1)]).unwrap().len()).to_equal(0)
+        expect(db.query("SELECT * FROM items", []).unwrap().len()).to_equal(1)
+        val g2 = db.get("items", "id", DbValue.Integer(value: 2)).unwrap()
+        expect(g2 != nil).to_equal(true)
+
+        match db.count_by_key("items", "id", DbValue.Integer(value: 1)).unwrap():
+            case Integer(n): expect(n).to_equal(0)
+            case _: expect(false).to_equal(true)
+
+    it "does not resurrect SQL-deleted rows in PK lookups across checkpoint and reopen":
+        val path = "/tmp/pure_database_delete_visibility_spec.db"
+        file_delete(path)
+        var db = PureDatabase.open_deferred(path).unwrap()
+        expect(db.exec_sql("CREATE TABLE t2 (id INTEGER PRIMARY KEY, name TEXT)").is_ok()).to_equal(true)
+        expect(db.exec_sql("INSERT INTO t2 (id, name) VALUES (1, 'x')").is_ok()).to_equal(true)
+        expect(db.exec_sql("INSERT INTO t2 (id, name) VALUES (2, 'y')").is_ok()).to_equal(true)
+        expect(db.exec_sql("DELETE FROM t2 WHERE id = 1").is_ok()).to_equal(true)
+        expect(db.checkpoint().is_ok()).to_equal(true)
+
+        val d1 = db.get("t2", "id", DbValue.Integer(value: 1)).unwrap()
+        expect(d1 == nil).to_equal(true)
+        expect(db.query("SELECT * FROM t2 WHERE id = 1", []).unwrap().len()).to_equal(0)
+        expect(db.query("SELECT * FROM t2 WHERE id = ?", [DbValue.Integer(value: 1)]).unwrap().len()).to_equal(0)
+        val d2 = db.get("t2", "id", DbValue.Integer(value: 2)).unwrap()
+        expect(d2 != nil).to_equal(true)
+
+        match db.count_by_key("t2", "id", DbValue.Integer(value: 1)).unwrap():
+            case Integer(n): expect(n).to_equal(0)
+            case _: expect(false).to_equal(true)
+
+        var reopened = PureDatabase.open_deferred(path).unwrap()
+        val r1 = reopened.get("t2", "id", DbValue.Integer(value: 1)).unwrap()
+        expect(r1 == nil).to_equal(true)
+        expect(reopened.query("SELECT * FROM t2", []).unwrap().len()).to_equal(1)
+        file_delete(path)

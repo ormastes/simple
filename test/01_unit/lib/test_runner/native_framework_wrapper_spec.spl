@@ -160,18 +160,40 @@ describe "native invocation completion wrappers":
         expect(output.contains("use std.spec")).to_equal(false)
         expect(output.contains("describe ")).to_equal(false)
 
-    it "refuses authored main until an entry-preserving wrapper exists":
-        val source = "fn main() -> i64:\n    0\n"
+    it "wraps authored main with an entry-preserving completion wrapper":
+        val source = "fn main() -> i64:\n    print \"hello\"\n    0\n"
         val result = native_plain_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source))
-        expect(result.is_err()).to_equal(true)
-        expect(result.unwrap_err()).to_contain("source defines main")
+        expect(result.is_ok()).to_equal(true)
+        val wrapped = result.unwrap()
+        expect(wrapped).to_contain("fn __simple_native_spec_0_user_main() -> i64:")
+        expect(wrapped).to_contain("fn main() -> i64:")
+        expect(wrapped).to_contain("__simple_native_spec_0_user_main()")
+        expect(wrapped).to_contain("native_execution_finish_v1")
 
-    it "allows nested main methods while refusing only a top-level entry":
+    it "wraps unit-returning and async top-level main while keeping nested main methods intact":
+        val unit_source = "fn main():\n    print \"hello\"\n"
+        val unit_wrapped = native_plain_wrapper_source(unit_source, simple_code_lines(unit_source), simple_string_continuation_lines(unit_source), simple_string_byte_ranges(unit_source)).unwrap()
+        expect(unit_wrapped).to_contain("fn __simple_native_spec_0_user_main():")
+        expect(unit_wrapped).to_contain("fn main() -> i64:")
         val nested = "struct Worker:\n    fn main() -> i64:\n        7\nval worker = Worker()\nif worker.main() != 7: panic(\"nested main failed\")\n"
-        val allowed = native_plain_wrapper_source(nested, simple_code_lines(nested), simple_string_continuation_lines(nested), simple_string_byte_ranges(nested))
-        expect(allowed.is_ok()).to_equal(true)
+        val allowed = native_plain_wrapper_source(nested, simple_code_lines(nested), simple_string_continuation_lines(nested), simple_string_byte_ranges(nested)).unwrap()
+        expect(allowed).to_contain("    fn main() -> i64:")
+        expect(allowed).to_contain("native_execution_finish_v1")
         val entry = "pub async fn main () -> i64:\n    0\n"
-        expect(native_plain_wrapper_source(entry, simple_code_lines(entry), simple_string_continuation_lines(entry), simple_string_byte_ranges(entry)).is_err()).to_equal(true)
+        val entry_wrapped = native_plain_wrapper_source(entry, simple_code_lines(entry), simple_string_continuation_lines(entry), simple_string_byte_ranges(entry)).unwrap()
+        expect(entry_wrapped).to_contain("pub async fn __simple_native_spec_0_user_main () -> i64:")
+        expect(entry_wrapped).to_contain("fn main() -> i64:")
+
+    it "wraps declaration-only snippets so declarations compile with completion evidence":
+        val decl_only = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+        val decl_wrapped = native_plain_wrapper_source(decl_only, simple_code_lines(decl_only), simple_string_continuation_lines(decl_only), simple_string_byte_ranges(decl_only))
+        expect(decl_wrapped.is_ok()).to_equal(true)
+        expect(decl_wrapped.unwrap()).to_contain("fn add(a: i64, b: i64) -> i64:")
+        expect(decl_wrapped.unwrap()).to_contain("native_execution_finish_v1")
+        val plain_body = "val x = 1 + 2\nprint \"x={{x}}\"\n"
+        expect(native_plain_wrapper_source(plain_body, simple_code_lines(plain_body), simple_string_continuation_lines(plain_body), simple_string_byte_ranges(plain_body)).is_ok()).to_equal(true)
+        val comments_only = "# just a comment\n"
+        expect(native_plain_wrapper_source(comments_only, simple_code_lines(comments_only), simple_string_continuation_lines(comments_only), simple_string_byte_ranges(comments_only)).is_err()).to_equal(true)
 
     it "keeps module-global bindings visible to helpers":
         val source = "val expected: i64 = 41\nfn check() -> bool:\n    expected == 41\nif not check(): panic(\"lost global\")\n"

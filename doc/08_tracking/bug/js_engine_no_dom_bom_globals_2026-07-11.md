@@ -1,6 +1,6 @@
 ---
 id: js_engine_no_dom_bom_globals_2026-07-11
-status: OPEN
+status: fix-implemented-verification-pending
 severity: high
 discovered: 2026-07-11
 discovered_by: famous-page JS conformance probe (tools/pixel_compare/probe_js_char.spl)
@@ -102,3 +102,13 @@ RED 4/5 -> GREEN 5/5: `test/01_unit/browser_engine/script/page_scripts_bom_globa
 `BrowserSession` already binds the full surface. STILL OPEN for this lane:
 `document` (getElementById/querySelector/createElement), `localStorage`, and
 DOM-tree bridging; those need the ScriptHost/BeDomNode bridge.
+
+## Update 2026-11-27 (Windows host, W2-3)
+
+- `src/lib/gc_async_mut/gpu/browser_engine/script/script_runner.spl` (`_bind_bom_and_dom`, `run_page_scripts`, `run_page_scripts_with_dom`) now projects `BeDomNode` subtrees and binds `window`/`self`/`globalThis`/`document`/`location`/`navigator`/`localStorage`/`sessionStorage`, including `getElementById`, `querySelector`, and `createElement`.
+- Fixed the remaining engine item in `.sdn` row 1 (`typeof` on eagerly-installed builtin globals like `console`, `Math.max`, `JSON.stringify`): `JsRuntime.new_browser` and `JsRuntime.create` in `src/lib/nogc_sync_mut/js/engine/runtime.spl` now call `interpreter.setup_globals()`.
+- Verified on Windows seed (`--mode=interpreter`):
+  - `test/01_unit/lib/js/function_scope_chain_and_global_constructors_spec.spl`: 4/4 PASS (includes `typeof console`/`console.log`/`Math`/`Math.max`/`JSON`/`JSON.stringify` + `Math.max(1, 5, 3) == 5.0` on both `new_browser` and `create`).
+  - `test/01_unit/lib/js/js_native_confinement_spec.spl`: 6/6 PASS; `es2015_parser_prevention_spec.spl`: 3/3 PASS; `interpreter_object_single_owner_spec.spl`: 1/1 PASS; `promise_constructor_spec.spl`: 6/6 PASS.
+  - `run_page_scripts` probe verified all 15 `typeof` DOM/BOM/builtin checks (`console`..`document.createElement`) and `localStorage.setItem`/`getItem`.
+- Pending fast self-hosted `bin/simple` verification of the full multi-tag `page_scripts_bom_globals_spec.spl` suite (exceeds timeout under Windows seed interpreter).
