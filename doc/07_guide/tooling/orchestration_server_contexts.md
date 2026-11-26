@@ -237,7 +237,21 @@ The Host verifies the current signed attach, exact run, and registered smux pane
 on every request, including a retry. Use this permission only for a controller
 account authorized to read agent terminal output.
 
-### Read an attached agent pane
+### Provision a target and read an attached agent pane
+
+Add the separate `agent-pane-target` grant to a controller account allowed
+to provision an agent pane. Once the signed Linux agent is running, submit
+`agent-pane-target` through the same controller with a canonical
+`host-control-sub` and the original invocation frame. Set `requestUid` to
+the exact held run. The authenticated Host allocates one vacant pane in its
+own smux process and returns the logical session, window and pane IDs
+together with the Host continuity ID and native service epoch.
+
+Repeat the identical target request to resolve a lost receipt. Do not choose
+another name or run ID to recover an unconfirmed allocation. Use the
+returned Host identity, epoch and registry IDs to construct and sign the
+separate V4 attach packet. The V6 wire request still uses the independent
+ready-reader listener incarnation.
 
 Send `agent-pane-claim` with `epoch: 0` and `readId: 0` after
 `agent-inspect` reports verified terminal authority. The binding UID comes
@@ -280,6 +294,7 @@ must appear in `allowedActions`.
 | `resume-execution` | Signed execution packet text in `source`; other operation data empty. |
 | `agent-attachment` | Canonical `host-control-sub` in `source` for `agent-inspect`, `agent-attach`, or `agent-detach`. The inspect frame is the exact Host operation ID. Attach and detach carry their respective signed V4 frames. `requestUid` equals that same Host operation ID and other operation data is empty. |
 | `agent-invoke` | Canonical `host-control-sub` in `source` for `agent-invoke`, carrying the original canonical V4 invocation frame for the exact `requestUid`. Other operation data is empty. |
+| `agent-pane-target` | Canonical `host-control-sub` in `source` with the original V4 invocation frame and exact held run as `requestUid`. Requires its own installed grant. Other operation data is empty. |
 | `agent-pane-claim` and `agent-pane-read` | Canonical `host-control-sub` in `source`, with the same action as the sub and a canonical `host-agent-pane-stream-request` as its frame. `requestUid` is the exact Host run. The frame contains `bindingUid`, `attachDigest`, `epoch` and `readId`. Other operation data is empty. |
 | `inspect-execution` | Empty operation data. |
 

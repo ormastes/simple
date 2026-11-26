@@ -14,9 +14,10 @@ The security-relevant pin is the status gate: host-action drops ONLY `ready` (a 
 unproven), every installed-identity comparison stays. A failed pin names that contract or the no-different-bytes archive.
 """
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
-use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.controller_dispatch_host_action_key_v3
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.{controller_dispatch_host_action_key_v3,
+    controller_dispatch_host_effect_key_v3}
 use std.common.crypto.sha256.sha256_text
-use std.common.contracts.orchestration.host_control_operation_v6.HOST_CONTROL_SUBS_V6
+use std.common.contracts.orchestration.host_control_operation_v6.{HOST_CONTROL_SUBS_V6, HOST_AGENT_PANE_TARGET_SUB_V6}
 
 val HA_DISPATCH_SOURCE_V3 = "src/lib/nogc_sync_mut/orchestration/controller_dispatch_owner_v3.spl"
 
@@ -113,6 +114,20 @@ describe "controller dispatch host-action mode (milestone_0046)":
         val progress = accept.index_of("dispatch_send_v3(owner, \"progress\", \"\")")
         expect(reply_gate >= 0 and pending_refusal > reply_gate and envelope_archive > pending_refusal and
             payload_archive > envelope_archive and progress > payload_archive).to_equal(true)
+
+    it "retains target allocation under its own immutable key and requires a synchronous reply":
+        val id = "agent_run_1"
+        val key = controller_dispatch_host_effect_key_v3(id, HOST_AGENT_PANE_TARGET_SUB_V6)
+        expect(key).to_equal("controller-agent-pane-target-v1/" + sha256_text(id) + ".sdn")
+        for sub in ["agent-invoke", "agent-attach", "agent-detach", "retention-release"]:
+            expect(key == controller_dispatch_host_effect_key_v3(id, sub)).to_equal(false)
+        val source = ha_dispatch_source_v3()
+        val control = ha_fn_body_v3(source, "fn dispatch_state_host_action_send_v3(")
+        expect(control).to_contain("owner.pane_target_exchange = sub.unwrap().sub == HOST_AGENT_PANE_TARGET_SUB_V6")
+        val accept = ha_fn_body_v3(source, "fn dispatch_accept_v3(")
+        val terminal_gate = accept.index_of("if owner.pane_target_exchange and reply.pending:")
+        val automatic_progress = accept.index_of("dispatch_send_v3(owner, \"progress\", \"\")")
+        expect(terminal_gate >= 0 and automatic_progress > terminal_gate).to_equal(true)
 
     it "hands a Host refusal of a control frame to the caller and settles nothing from Host text":
         val accept = ha_fn_body_v3(ha_dispatch_source_v3(), "fn dispatch_accept_v3(")

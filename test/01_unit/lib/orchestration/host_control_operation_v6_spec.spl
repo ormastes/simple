@@ -15,7 +15,7 @@ A failed scenario names the moved contract: the sub table, canonical bytes, the 
 use std.spec.{describe, it, expect, fail}
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, HOST_AGENT_CONTROL_SUBS_V6,
-    HOST_AGENT_PANE_SUBS_V6, host_control_sub_domain_action_v6, host_control_sub_encode_v6, host_control_sub_decode_v6}
+    HOST_AGENT_PANE_SUBS_V6, HOST_AGENT_PANE_TARGET_SUB_V6, host_control_sub_domain_action_v6, host_control_sub_encode_v6, host_control_sub_decode_v6}
 use std.common.contracts.orchestration.host_agent_pane_stream_v6.*
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
@@ -55,6 +55,7 @@ describe "host-control sub request (milestone_0046)":
         expect(HOST_AGENT_PANE_SUBS_V6).to_equal(["agent-pane-claim", "agent-pane-read"])
         for sub in HOST_AGENT_PANE_SUBS_V6:
             expect(host_control_sub_domain_action_v6(sub).unwrap()).to_equal("host-" + sub)
+        expect(host_control_sub_domain_action_v6(HOST_AGENT_PANE_TARGET_SUB_V6).unwrap()).to_equal("host-agent-pane-target")
         for sub in ["open", "remote-build-open", "service-handoff", "agent-pane-write", "agent-pane-resize", "", "helper-abandon "]:
             expect(host_control_sub_domain_action_v6(sub).is_err()).to_equal(true)
 
@@ -164,3 +165,34 @@ describe "Authenticated V6 agent pane frames":
         val malformed = HostAgentPaneStreamReceiptV6("run_1", "pane_1", digest, 0, 1, corrupted, sha256_text(corrupted))
         expect(host_agent_pane_stream_receipt_decode_v6(host_agent_pane_stream_receipt_encode_v6(malformed)).unwrap_err()).to_equal(
             "host-agent-pane-stream-read-byte")
+
+describe "Authenticated V6 agent pane target":
+    it "round-trips actual registry IDs with the native Host epoch":
+        val continuity = "a".repeat(32)
+        val invocation = "b".repeat(64)
+        val receipt = HostAgentPaneTargetReceiptV6("run_1", invocation, continuity, 7, "id1", "id2", "id3")
+        val source = host_agent_pane_target_receipt_encode_v6(receipt)
+        val target = host_agent_pane_target_receipt_decode_v6(source).unwrap()
+        expect(target.operation_id).to_equal("run_1")
+        expect(target.invoke_digest).to_equal(invocation)
+        expect(target.service_incarnation).to_equal(continuity)
+        expect(target.service_epoch).to_equal(7)
+        expect(target.session_id).to_equal("id1")
+        expect(target.window_id).to_equal("id2")
+        expect(target.pane_id).to_equal("id3")
+        expect(host_agent_pane_target_receipt_decode_v6(source + " ").is_err()).to_equal(true)
+        val bad = HostAgentPaneTargetReceiptV6("run_1", invocation, continuity, 0, "id1", "id2", "id3")
+        val bad_source = host_agent_pane_target_receipt_encode_v6(bad)
+        expect(host_agent_pane_target_receipt_decode_v6(bad_source).unwrap_err()).to_equal("host-agent-pane-target-fence")
+
+    it "gates creation and replay on live signed authority and retains exact IDs":
+        val source = control_source_v6("src/os/apps/smux/runtime_host_continuation_v6.spl")
+        val body = control_fn_body_v6(source, "fn remote_pane_target_v6(")
+        val authority = body.index_of("host_linux_service_agent_pane_target_authority_v4(")
+        val replay = body.index_of("if state.agent_pane_target_intent")
+        val intent = body.index_of("state.agent_pane_target_intent = name")
+        val create = body.index_of("smux_runtime_target_create_v3(")
+        expect(authority >= 0 and replay > authority and intent > replay and create > intent).to_equal(true)
+        expect(body).to_contain("runtime-agent-pane-target-name-collision")
+        expect(body).to_contain("state.agent_pane_target = Some(receipt)")
+        expect(body).to_contain("receipt.service_epoch != authority.service_epoch")

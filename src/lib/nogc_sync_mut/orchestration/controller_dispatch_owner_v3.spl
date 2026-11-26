@@ -18,7 +18,8 @@ use std.common.contracts.orchestration.controller_dispatch_request_v2.*
 use std.common.contracts.orchestration.host_controller_status_v3.*
 use std.common.contracts.orchestration.host_service_operation_v6.*
 use std.common.contracts.orchestration.host_service_operation_reply_v6.*
-use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_PANE_SUBS_V6, host_control_sub_decode_v6}
+use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_PANE_SUBS_V6, HOST_AGENT_PANE_TARGET_SUB_V6,
+    host_control_sub_decode_v6}
 use std.common.contracts.orchestration.host_prepare_request_v1.*
 use std.common.contracts.orchestration.host_prepare_response_v1.host_prepare_response_decode_v1
 use std.common.contracts.orchestration.host_execute_request_v2.*
@@ -79,6 +80,7 @@ class ControllerDispatchStateV3:
     var remote_started: bool = false
     # The live pane carrier retains only its in-memory request and reply.
     var live_pane_exchange: bool = false
+    var pane_target_exchange: bool = false
     # milestone_0030 C3: the Host operation id of a REMOTE-mode run (no packet is bound in that mode).
     var remote_op: text = ""
 
@@ -380,6 +382,8 @@ pub fn controller_dispatch_host_effect_key_v3(operation_id: text, sub: text) -> 
         return "controller-agent-attachment-v1/" + sha256_text(sub + "\n" + operation_id) + ".sdn"
     if sub == "agent-invoke":
         return "controller-agent-invoke-v1/" + sha256_text(operation_id) + ".sdn"
+    if sub == HOST_AGENT_PANE_TARGET_SUB_V6:
+        return "controller-agent-pane-target-v1/" + sha256_text(operation_id) + ".sdn"
     controller_dispatch_host_action_key_v3(operation_id)
 
 fn dispatch_state_host_action_send_v3(original: ControllerDispatchStateV3, payload: text) -> ControllerDispatchStateTurnV3:
@@ -390,6 +394,7 @@ fn dispatch_state_host_action_send_v3(original: ControllerDispatchStateV3, paylo
     if sub.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, sub.unwrap_err()))
     owner.response = ""
     owner.live_pane_exchange = HOST_AGENT_PANE_SUBS_V6.contains(sub.unwrap().sub)
+    owner.pane_target_exchange = sub.unwrap().sub == HOST_AGENT_PANE_TARGET_SUB_V6
     if owner.live_pane_exchange:
         # A claim can be consumed, and a read can drain bytes before its reply.
         # Keep this exchange transient and send it once.
@@ -620,6 +625,8 @@ fn dispatch_execute_v3(original: ControllerDispatchStateV3, payload: text) -> Co
 
 fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOperationReplyV6) -> ControllerDispatchStateV3:
     var owner = original
+    if owner.pane_target_exchange and reply.pending:
+        return dispatch_fail_v3(owner, "dispatch-pane-target-reply-pending")
     val encoded = host_service_operation_reply_encode_v6(reply)
     if encoded.is_err(): return dispatch_fail_v3(owner, encoded.unwrap_err())
     if owner.live_pane_exchange:

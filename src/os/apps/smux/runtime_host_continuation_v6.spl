@@ -6,11 +6,12 @@ use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOpe
 use std.common.contracts.orchestration.host_service_operation_reply_v6.HostServiceOperationReplyV6
 use std.common.contracts.orchestration.host_remote_build_operation_v6.{host_remote_build_sub_decode_v6, host_remote_build_sub_domain_action_v6}
 use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_CONTROL_SUBS_V6,
-    HOST_AGENT_PANE_SUBS_V6, host_control_sub_decode_v6, host_control_sub_domain_action_v6}
+    HOST_AGENT_PANE_SUBS_V6, HOST_AGENT_PANE_TARGET_SUB_V6, host_control_sub_decode_v6, host_control_sub_domain_action_v6}
 use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneStreamRequestV6,
     HostAgentPaneStreamReceiptV6, host_agent_pane_stream_request_decode_v6, host_agent_pane_stream_request_matches_v6,
-    host_agent_pane_stream_receipt_encode_v6}
-use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.host_linux_service_agent_terminal_authority_v4
+    host_agent_pane_stream_receipt_encode_v6, HostAgentPaneTargetReceiptV6, host_agent_pane_target_receipt_encode_v6}
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{host_linux_service_agent_terminal_authority_v4,
+    host_linux_service_agent_pane_target_authority_v4}
 use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.HostAgentTerminalAuthorityV4
 use std.common.contracts.orchestration.host_controller_status_v3.host_controller_status_encode_v3
 use std.nogc_sync_mut.orchestration.host_controller_observation_v3.{host_controller_retained_origin_v3, host_controller_status_v3}
@@ -35,7 +36,10 @@ use os.apps.smux.runtime_agent_pane_v1.{smux_agent_pane_claim_gate_v1, smux_agen
     smux_agent_pane_write_done_v1,
     smux_agent_pane_registry_match_v1, smux_agent_pane_attach_supersedes_v1}
 use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
-use os.apps.smux.api.smux_list_panes
+use os.apps.smux.api.{smux_list_panes, smux_list_sessions, smux_owner_snapshot, smux_configuration_revision,
+    smux_window_closing}
+use os.apps.smux.runtime_binding_target_create_v3.smux_runtime_target_create_v3
+use os.apps.smux.runtime_binding_target_v3.{smux_runtime_target_v3, smux_runtime_target_decode_v3}
 
 # Restriction/correlation data from the canonical caller, never authority.
 # query/bound derive the authoritative scope from the supplied actual Domain.
@@ -81,6 +85,8 @@ pub class SmuxHostContinuationV6:
     agent_pane_revoked: bool = false
     agent_pane_operation_id: text = ""
     remote_agent_pane: Option<SmuxRemotePaneV6> = None
+    agent_pane_target_intent: text = ""
+    agent_pane_target: Option<HostAgentPaneTargetReceiptV6> = None
 
     pub fn execution_pending_v6() -> bool: self.execution.is_some()
     pub fn inspection_pending_v6() -> bool:
@@ -236,6 +242,50 @@ fn agent_pane_turn_v6(domain: HostServiceDomainV3, original: SmuxHostContinuatio
     state.agent_pane_lease = read.lease
     state.agent_pane_revoked = read.revoked
     SmuxHostTurnV6(io.owner, state, read.response, read.error)
+
+# Allocate only vacant smux metadata for the exact executing run. The
+# existing signed attach remains the sole path to native terminal authority.
+fn remote_pane_target_v6(domain: HostServiceDomainV3, original: SmuxHostContinuationV6,
+        request: HostServiceRequestV2, context: SmuxHostContextV6) -> SmuxHostTurnV6:
+    var state = original
+    val local = match domain.local:
+        case HostLocalRootV3.LinuxService(value): value
+        case _: return refused_v6(domain, state, "runtime-agent-pane-requires-linux-service")
+    val checked = host_linux_service_agent_pane_target_authority_v4(local, request.operation_id, request.payload)
+    if checked.is_err(): return refused_v6(domain, state, checked.unwrap_err())
+    val authority = checked.unwrap()
+    val invoke_digest = sha256_text(request.payload)
+    val name = "agent-pane-" + sha256_text(context.service_incarnation + "\n" + authority.service_incarnation +
+        "\n" + request.operation_id + "\n" + invoke_digest)
+    if state.agent_pane_target_intent != "":
+        if state.agent_pane_target_intent != name:
+            return refused_v6(domain, state, "runtime-agent-pane-target-conflict")
+        if state.agent_pane_target.is_none():
+            return refused_v6(domain, state, "runtime-agent-pane-target-unconfirmed")
+        val receipt = state.agent_pane_target.unwrap()
+        if receipt.service_epoch != authority.service_epoch:
+            return refused_v6(domain, state, "runtime-agent-pane-target-fence")
+        val current = smux_runtime_target_v3(smux_owner_snapshot(), smux_configuration_revision(),
+            smux_window_closing(receipt.session_id, receipt.window_id), authority.service_incarnation,
+            receipt.session_id, receipt.window_id, receipt.pane_id)
+        if current.is_err() or not current.unwrap().vacant:
+            return refused_v6(domain, state, "runtime-agent-pane-target-unavailable")
+        return SmuxHostTurnV6(domain, state, host_agent_pane_target_receipt_encode_v6(receipt), "")
+    # The legacy helper can reuse a session by name. A new intent must
+    # refuse any existing session, since this owner has no allocation record.
+    for session in smux_list_sessions():
+        if session.name == name:
+            return refused_v6(domain, state, "runtime-agent-pane-target-name-collision")
+    state.agent_pane_target_intent = name
+    val created = smux_runtime_target_create_v3(name, authority.service_incarnation)
+    if created.is_err(): return refused_v6(domain, state, "runtime-agent-pane-target-unconfirmed")
+    val target = smux_runtime_target_decode_v3(created.unwrap())
+    if target.is_err(): return refused_v6(domain, state, "runtime-agent-pane-target-unconfirmed")
+    val pane = target.unwrap()
+    val receipt = HostAgentPaneTargetReceiptV6(request.operation_id, invoke_digest, authority.service_incarnation,
+        authority.service_epoch, pane.session_id, pane.window_id, pane.pane_id)
+    state.agent_pane_target = Some(receipt)
+    SmuxHostTurnV6(domain, state, host_agent_pane_target_receipt_encode_v6(receipt), "")
 
 fn remote_pane_authority_v6(domain: HostServiceDomainV3, operation_id: text,
         pane: HostAgentPaneStreamRequestV6) -> Result<HostAgentTerminalAuthorityV4, text>:
@@ -433,9 +483,12 @@ fn host_control_query_v6(domain: HostServiceDomainV3, state: SmuxHostContinuatio
         return operation_reply_v6(domain, state, request, false, 2, "", "runtime-host-execution-pending")
     if context.connection_pending: return operation_reply_v6(domain, state, request, false, 2, "", "runtime-connection-opening")
     if context.geometry_pending: return operation_reply_v6(domain, state, request, false, 2, "", "runtime-geometry-pending")
-    if HOST_AGENT_PANE_SUBS_V6.contains(sub.unwrap().sub):
+    if HOST_AGENT_PANE_SUBS_V6.contains(sub.unwrap().sub) or sub.unwrap().sub == HOST_AGENT_PANE_TARGET_SUB_V6:
         val routed = HostServiceRequestV2(action.unwrap(), request.operation_id, sub.unwrap().frame)
-        val turn = remote_pane_turn_v6(domain, state, routed, context)
+        val turn = if sub.unwrap().sub == HOST_AGENT_PANE_TARGET_SUB_V6:
+            remote_pane_target_v6(domain, state, routed, context)
+        else:
+            remote_pane_turn_v6(domain, state, routed, context)
         return operation_reply_v6(turn.domain, turn.state, request, false, if turn.error == "": 0 else: 2,
             turn.response, turn.error)
     if HOST_AGENT_CONTROL_SUBS_V6.contains(sub.unwrap().sub):

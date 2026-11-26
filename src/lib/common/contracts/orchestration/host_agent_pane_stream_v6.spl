@@ -139,3 +139,36 @@ pub fn host_agent_pane_stream_receipt_matches_v6(operation_id: text, request: Ho
     receipt.operation_id == operation_id and receipt.binding_uid == request.binding_uid and
         receipt.attach_digest == request.attach_digest and receipt.read_id == request.read_id and
         (request.read_id == 0 or receipt.epoch == request.epoch)
+
+# Names the vacant logical target that the signed attach must bind. This uses
+# the native Host identity/epoch, independently of the V6 listener identity.
+pub struct HostAgentPaneTargetReceiptV6:
+    operation_id: text
+    invoke_digest: text
+    service_incarnation: text
+    service_epoch: i64
+    session_id: text
+    window_id: text
+    pane_id: text
+
+pub fn host_agent_pane_target_receipt_encode_v6(receipt: HostAgentPaneTargetReceiptV6) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("host-agent-pane-target-receipt"),
+        "version": SdnValue.Int(6), "operationId": SdnValue.String(receipt.operation_id),
+        "invokeDigest": SdnValue.String(receipt.invoke_digest), "serviceIncarnation": SdnValue.String(receipt.service_incarnation),
+        "serviceEpoch": SdnValue.Int(receipt.service_epoch), "sessionId": SdnValue.String(receipt.session_id),
+        "windowId": SdnValue.String(receipt.window_id), "paneId": SdnValue.String(receipt.pane_id)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+pub fn host_agent_pane_target_receipt_decode_v6(source: text) -> Result<HostAgentPaneTargetReceiptV6, text>:
+    val fields = pane_fields_v6(source, 4096, 2, 24)?
+    val receipt = HostAgentPaneTargetReceiptV6(pane_text_v6(fields, "operationId")?,
+        pane_text_v6(fields, "invokeDigest")?, pane_text_v6(fields, "serviceIncarnation")?,
+        pane_int_v6(fields, "serviceEpoch")?, pane_text_v6(fields, "sessionId")?,
+        pane_text_v6(fields, "windowId")?, pane_text_v6(fields, "paneId")?)
+    if not host_service_hex_shape_v6(receipt.invoke_digest, 64) or
+            not host_service_hex_shape_v6(receipt.service_incarnation, 32) or receipt.service_epoch < 1:
+        return Err("host-agent-pane-target-fence")
+    for identity in [receipt.operation_id, receipt.session_id, receipt.window_id, receipt.pane_id]:
+        if not builder_identifier_valid_v1(identity): return Err("host-agent-pane-target-identity")
+    if host_agent_pane_target_receipt_encode_v6(receipt) != source: return Err("host-agent-pane-target-noncanonical")
+    Ok(receipt)

@@ -6,9 +6,11 @@ use app.orchestrator.server_config_load_v1.{server_host_reference_validate_v1, s
 use app.orchestrator.server_command_v1.{orchestrator_server_ssh_begin_v1,
     orchestrator_server_ssh_begin_file_v1, orchestrator_server_ssh_step_v1}
 use std.common.config_core.server_context_types_v1.{ResolvedServerV1, ServerRecordV1}
-use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_encode_v6}
+use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_PANE_TARGET_SUB_V6, HostControlSubRequestV6,
+    host_control_sub_decode_v6, host_control_sub_encode_v6}
 use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneStreamRequestV6,
-    HostAgentPaneStreamReceiptV6, host_agent_pane_stream_request_encode_v6, host_agent_pane_stream_receipt_encode_v6}
+    HostAgentPaneStreamReceiptV6, host_agent_pane_stream_request_encode_v6, host_agent_pane_stream_receipt_encode_v6,
+    HostAgentPaneTargetReceiptV6, host_agent_pane_target_receipt_encode_v6}
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
@@ -28,11 +30,11 @@ fn gateway_request_v1(action: text = "inspect") -> ControllerGatewayRequestV1:
 fn gateway_config_v1(actions: [text]) -> ControllerGatewayConfigV1:
     ControllerGatewayConfigV1(state_root: "/private/controller-a", controller_id: "controller-a", allowed_actions: actions)
 
-fn gateway_invoke_fixture_v1(run_id: text) -> ControllerGatewayRequestV1:
-    var request = gateway_request_v1("agent-invoke")
+fn gateway_invoke_fixture_v1(run_id: text, action: text = "agent-invoke") -> ControllerGatewayRequestV1:
+    var request = gateway_request_v1(action)
     val invoke = host_agent_invoke_request_encode_v4(HostAgentInvokeRequestV4(operation_id: run_id,
         manifest: "manifest bytes for codec coverage")).unwrap()
-    request.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "agent-invoke", frame: invoke)).unwrap()
+    request.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: action, frame: invoke)).unwrap()
     request
 
 fn gateway_pane_fixture_v1(action: text, read_id: i64) -> ControllerGatewayRequestV1:
@@ -49,6 +51,47 @@ fn gateway_ssh_selection_v1(transport: text) -> ResolvedServerV1:
             remote_executable: "/opt/simple/bin/simple"))
 
 describe "Typed selected-server controller boundary":
+    it "requires an independent target grant and the canonical invocation for this run":
+        val action = HOST_AGENT_PANE_TARGET_SUB_V6
+        val profile = "version: 1\nstateRoot: /private/controller\ncontrollerId: controller-a\nallowedActions: [agent-pane-target]\n"
+        expect(controller_gateway_config_decode_v1(profile).unwrap_err()).to_equal("controller-gateway-agent-pane-target-profile")
+        val pinned = profile + "dispatchRoot: /private/dispatch\ndispatchConfigDigest: \"" + "a".repeat(64) + "\"\n"
+        val installed = controller_gateway_config_decode_v1(pinned).unwrap()
+        val request = gateway_invoke_fixture_v1("request-a", action)
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val header = controller_gateway_header_v1(source).unwrap()
+        expect(controller_gateway_authorize_v1(installed, header, source).unwrap().source).to_equal(request.source)
+        val generic = gateway_config_v1(["agent-attachment", "agent-invoke", "agent-pane"])
+        expect(controller_gateway_authorize_v1(generic, header, source).unwrap_err()).to_equal("controller-gateway-action-denied")
+        expect(controller_gateway_request_encode_v1(gateway_invoke_fixture_v1("another-run", action)).unwrap_err()).to_equal("controller-gateway-agent-pane-target-operation")
+        var swapped = gateway_invoke_fixture_v1("request-a")
+        swapped.action = action
+        expect(controller_gateway_request_encode_v1(swapped).unwrap_err()).to_equal("controller-gateway-agent-pane-target-sub")
+        val exact = host_control_sub_decode_v6(request.source).unwrap()
+        swapped.source = host_control_sub_encode_v6(HostControlSubRequestV6(sub: action, frame: exact.frame + " ")).unwrap()
+        expect(controller_gateway_request_encode_v1(swapped).is_err()).to_equal(true)
+
+    it "returns target metadata for the exact run and invocation digest":
+        val request = gateway_invoke_fixture_v1("request-a", HOST_AGENT_PANE_TARGET_SUB_V6)
+        val source = controller_gateway_request_encode_v1(request).unwrap()
+        val frame = host_control_sub_decode_v6(request.source).unwrap().frame
+        var target = HostAgentPaneTargetReceiptV6(operation_id: "request-a", invoke_digest: sha256_text(frame),
+            service_incarnation: "b".repeat(32), service_epoch: 9, session_id: "session-a",
+            window_id: "window-a", pane_id: "pane-a")
+        val receipt = host_agent_pane_target_receipt_encode_v6(target)
+        expect(controller_gateway_response_v1(source, receipt).unwrap()).to_equal(receipt)
+        target.operation_id = "request-b"
+        expect(controller_gateway_response_v1(source, host_agent_pane_target_receipt_encode_v6(target)).unwrap_err()).to_equal("controller-gateway-agent-pane-target-receipt-mismatch")
+        target.operation_id = "request-a"
+        target.invoke_digest = sha256_text(request.source)
+        expect(controller_gateway_response_v1(source, host_agent_pane_target_receipt_encode_v6(target)).unwrap_err()).to_equal("controller-gateway-agent-pane-target-receipt-mismatch")
+        target.invoke_digest = sha256_text(frame)
+        target.service_epoch = 0
+        expect(controller_gateway_response_v1(source, host_agent_pane_target_receipt_encode_v6(target)).is_err()).to_equal(true)
+        val unknown = controller_gateway_nonzero_reply_v1(source, 2, "remote invocation bytes")
+        expect(unknown.exit_code).to_equal(2)
+        expect(unknown.output.contains("remote invocation bytes")).to_equal(false)
+
     it "requires a separate installed pane grant and rejects swapping claim and read":
         val profile = "version: 1\nstateRoot: /private/controller\ncontrollerId: controller-a\nallowedActions: [agent-pane]\n"
         expect(controller_gateway_config_decode_v1(profile).unwrap_err()).to_equal("controller-gateway-agent-pane-profile")
