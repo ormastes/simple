@@ -816,10 +816,41 @@ fn _isv1_pin_args_error(root: text, pin_id: text, owner: text) -> text:
 # Claim pin `pin_id` for `owner` (no-replace owner file; an existing owner file
 # must match) and add one no-replace ref file per key. Existing refs are
 # already pinned, which is success. Nothing is ever overwritten.
+# A NEW pin is built in a private staging dir and renamed into `pins/<id>`, so a
+# half-created (ownerless) pin is never visible. An existing pin takes the
+# in-place merge path. POSIX rename(2) replaces an EMPTY destination dir, so the
+# destination is checked first; a staged pin is never empty (it holds `owner`),
+# so two racing creators cannot replace each other. Residual: an empty
+# `pins/<id>` made by legacy code between the check and the rename.
 fn _isv1_pin_add(root: text, pin_id: text, owner: text, keys: [text]) -> text:
     if keys.len() > _ISV1_MAX_REFS:
         return "pin-refs-too-many"
-    val pin_dir = _isv1_pin_path(root, pin_id)
+    val target = _isv1_pin_path(root, pin_id)
+    if is_dir(target):
+        return _isv1_pin_add_in_place(root, target, owner, keys)
+    val staging_root = _isv1_join(root, "staging")
+    if not dir_create_all(staging_root) and not is_dir(staging_root):
+        return "staging-dir-failed"
+    val stage = secure_temp_dir_raw(staging_root, "pincreate-")
+    if stage.len() <= 0:
+        return "staging-create-failed"
+    val reason = _isv1_pin_add_in_place(root, stage + "/pin", owner, keys)
+    if reason != "":
+        dir_remove_all(stage)
+        return reason
+    val pins_root = _isv1_join(root, "pins")
+    if not dir_create_all(pins_root) and not is_dir(pins_root):
+        dir_remove_all(stage)
+        return "pins-dir-failed"
+    if is_dir(target) or not rename_path(stage + "/pin", target):
+        dir_remove_all(stage)
+        if is_dir(target):
+            return _isv1_pin_add_in_place(root, target, owner, keys)
+        return "pin-write-failed"
+    dir_remove_all(stage)
+    ""
+
+fn _isv1_pin_add_in_place(root: text, pin_dir: text, owner: text, keys: [text]) -> text:
     val refs_dir = pin_dir + "/refs"
     if not dir_create_all(refs_dir) and not is_dir(refs_dir):
         return "pins-dir-failed"
@@ -1059,7 +1090,7 @@ fn _isv1_restore_moved(root: text, keys: [text], destinations: [text],
         i = i + 1
     settled
 
-# Removes crash residue under staging/ (`pinrel-*`, `ingest-*`, `publish-*`)
+# Removes crash residue under staging/ (`pinrel-*`, `pincreate-*`, `ingest-*`, `publish-*`)
 # whose directory mtime is at least `min_age_secs` old; younger entries may be
 # a live ingest/publish and are kept. An entry whose mtime is unavailable (0)
 # is kept (fail-safe). Collect passes _ISV1_STAGING_MIN_AGE_SECS: an ingest
@@ -1075,7 +1106,7 @@ pub fn immutable_store_v1_sweep_staging(root: text, min_age_secs: StoreCountV1) 
     var removed: i64 = 0
     for entry in dir_list(staging_root):
         val name = entry.trim()
-        if not (name.starts_with("pinrel-") or name.starts_with("ingest-") or name.starts_with("publish-")):
+        if not (name.starts_with("pinrel-") or name.starts_with("pincreate-") or name.starts_with("ingest-") or name.starts_with("publish-")):
             continue
         val path = staging_root + "/" + name
         if not is_dir(path):

@@ -180,6 +180,27 @@ describe "immutable_store_v1 roots and pins":
         expect(immutable_store_v1_pin(root, "p2", "owner-a", ["bad key"])).to_start_with("pin-ref-invalid")
         _store_cleanup(root)
 
+    it "creates a pin atomically with owner and refs and no staging residue":
+        val root = _store_root("pin-atomic")
+        val key = immutable_store_v1_ingest(root, "atomic pin payload".bytes(), HASH_POLICY_V1_XXH3_128).object_key
+        expect(immutable_store_v1_pin(root, "pa", "owner-a", [key])).to_equal("")
+        expect(file_exists(root + "/pins/pa/owner")).to_equal(true)
+        expect(file_exists(root + "/pins/pa/refs/" + key)).to_equal(true)
+        expect(dir_list(root + "/staging").len()).to_equal(0)
+        _store_cleanup(root)
+
+    it "keeps existing-pin semantics when the pin dir already exists":
+        val root = _store_root("pin-existing")
+        val k1 = immutable_store_v1_ingest(root, "existing one".bytes(), HASH_POLICY_V1_XXH3_128).object_key
+        val k2 = immutable_store_v1_ingest(root, "existing two".bytes(), HASH_POLICY_V1_XXH3_128).object_key
+        expect(immutable_store_v1_pin(root, "pe", "owner-a", [k1])).to_equal("")
+        expect(immutable_store_v1_pin(root, "pe", "owner-a", [k2])).to_equal("")
+        expect(file_exists(root + "/pins/pe/refs/" + k1)).to_equal(true)
+        expect(file_exists(root + "/pins/pe/refs/" + k2)).to_equal(true)
+        expect(immutable_store_v1_pin(root, "pe", "owner-b", [k1])).to_equal("pin-owner-mismatch")
+        expect(dir_list(root + "/staging").len()).to_equal(0)
+        _store_cleanup(root)
+
     it "rejects a pin update or release by a different owner":
         val root = _store_root("pin-owner")
         val a = immutable_store_v1_ingest(root, "owner a payload".bytes(), HASH_POLICY_V1_XXH3_128)
@@ -590,6 +611,7 @@ describe "immutable_store_v1 crash and failure safety":
         val root = _store_root("staging-sweep")
         dir_create_all(root + "/staging/ingest-dead")
         dir_create_all(root + "/staging/pinrel-dead/pin")
+        dir_create_all(root + "/staging/pincreate-dead/pin")
         dir_create_all(root + "/staging/other-keep")
         # Fresh dirs survive the real GC threshold (one hour) and a dry run.
         expect(immutable_store_v1_sweep_staging(root, StoreCountV1(3600)).value).to_equal(0)
@@ -597,8 +619,9 @@ describe "immutable_store_v1 crash and failure safety":
         immutable_store_v1_collect(root, StoreFlagV1(false))
         expect(is_dir(root + "/staging/ingest-dead")).to_equal(true)
         # With a zero age bound every recognised entry counts as stale.
-        expect(immutable_store_v1_sweep_staging(root, StoreCountV1(0)).value).to_equal(2)
+        expect(immutable_store_v1_sweep_staging(root, StoreCountV1(0)).value).to_equal(3)
         expect(is_dir(root + "/staging/ingest-dead")).to_equal(false)
         expect(is_dir(root + "/staging/pinrel-dead")).to_equal(false)
+        expect(is_dir(root + "/staging/pincreate-dead")).to_equal(false)
         expect(is_dir(root + "/staging/other-keep")).to_equal(true)
         _store_cleanup(root)
