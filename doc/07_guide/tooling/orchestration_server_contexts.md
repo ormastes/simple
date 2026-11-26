@@ -91,8 +91,35 @@ The remote action requires an SSH server and uses its selected address,
 port and protected identity and trust references. The live dashboard polls
 the exchange as it refreshes. In line mode use `/orchestrator remote-progress`.
 `/orchestrator remote-cancel` cancels the local SSH exchange. Use the original
-request UID to inspect an uncertain controller operation. Start, launch,
-attach and pane controls use the separate local session listener.
+request UID to inspect an uncertain controller operation. Existing local
+session controls use the local session listener.
+
+### View an attached remote pane in Caret
+
+From the same Caret process, submit an exact `agent-pane-target` request:
+
+```text
+/orchestrator pane-target <config|-> <context|-> <server|-> <ssh-profile.sdn> <request.sdn>
+```
+
+Submit the corresponding signed attach and invoke frames through the
+configured controller. When inspection reports verified terminal authority,
+open the read-only view with the same canonical signed attach frame:
+
+```text
+/orchestrator pane-view <signed-attach-frame.sdn>
+/orchestrator pane-read
+/orchestrator pane-retry
+/orchestrator pane-close
+```
+
+`pane-read` requests one bounded native read. If its result is uncertain,
+`pane-retry` explicitly resends the outstanding request with the same ID.
+Caret polls only the active exchange and appends a validated receipt once.
+Line mode uses `/orchestrator remote-progress` for each active exchange.
+Closing the view hides its transcript and keeps its cursor in the running
+Caret process. The remote surface is read-only. Interactive input and
+geometry require a separately authorized CoreMux attachment.
 
 An agent selects the `agent` consumer with `container` address selection when
 it runs inside the workload.
