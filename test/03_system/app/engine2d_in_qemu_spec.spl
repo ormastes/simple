@@ -29,9 +29,8 @@ use os.qemu_runner.{OsTarget, build_os}
 use os.kernel.arch.arch_context.{Architecture}
 use os.compositor.qemu_capture.{capture_qemu_vm}
 use os.compositor.electron_capture.{CaptureResult}
-use os.compositor.screenshot_compare.{ComparisonResult, compare_with_profile}
-use os.compositor.tolerance_profile.{ToleranceProfile, profile_text_tolerant}
 use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
 use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, dir_create_all}
 
 use test.fixtures.system_support.qemu.os.common.qemu_os_harness.{
@@ -115,9 +114,16 @@ fn _update_baseline_requested() -> bool:
     v == "1" or v == "true"
 
 fn _capture_engine2d_ppm(qmp_socket: text, output_path: text) -> CaptureResult:
-    val cap = capture_qemu_vm(qmp_socket, output_path)
+    # The guest may still be flushing the first frame: retry the QMP
+    # screendump for up to 15 s (30 x 500 ms), like the old helper's poll.
+    var cap = capture_qemu_vm(qmp_socket, output_path)
+    var tries = 1
+    while not cap.success and tries < 30:
+        thread_sleep_ms(500)
+        cap = capture_qemu_vm(qmp_socket, output_path)
+        tries = tries + 1
     if not cap.success:
-        print "[engine2d_in_qemu_spec] qmp capture failed: {cap.error}"
+        print "[engine2d_in_qemu_spec] qmp capture failed after {tries} tries: {cap.error}"
     cap
 
 # Exact-pixel match against the baseline: same dimensions and >= 95% of

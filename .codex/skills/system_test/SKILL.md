@@ -164,10 +164,9 @@ describe "<Feature Name>":
 
 ### SimpleOS toolchain and desktop evidence profiles
 
-- Keep one canonical executable spec under `test/03_system/os/`; remove
-  byte-identical compatibility copies under `test/system/` when modernizing
-  that surface. The generated/manual mirror belongs only under
-  `doc/06_spec/03_system/os/`.
+- Keep one canonical executable spec under `test/03_system/os/`; the legacy
+  `test/system/` tree was retired on 2026-11-27, so never add a copy there.
+  The generated/manual mirror belongs only under `doc/06_spec/03_system/os/`.
 - Label each scenario as `source-contract`, `host-fixture`, `image-admission`,
   or `live-guest`. A source/file inventory never satisfies image or live-guest
   behavior. A host fixture may exercise the production wrapper but proves only
