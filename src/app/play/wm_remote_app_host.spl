@@ -11,7 +11,15 @@
 # Plan: doc/03_plan/ui/wm_remote_app/remote_app_presentation_plan.md
 
 use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_response_new}
-use std.nogc_sync_mut.io.process_ops.{process_is_running}
+# process_exists, not process_is_running: the client is not a child of the
+# window manager, and process_exists is the documented arbitrary-pid probe.
+# process_is_running is not safe here: the Rust runtime twin that the seed
+# JIT links (env_process.rs rt_process_is_running) answers false for a pid
+# this process did not spawn, while the interpreter and the C runtime
+# deliberately fall back to an OS probe. That twin is the outlier; see
+# rt_process_is_running_lane_drift_non_child_pid_2026-11-26.
+# A zombie client still counts as existing until its parent reaps it.
+use std.nogc_sync_mut.io.process_ops.{process_exists}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io_runtime.{mkdir_p}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
@@ -125,7 +133,7 @@ fn _open(comp_in: HostCompositor, state_in: WmRemoteAppState, req: DaemonRequest
     val width = _field_i64(req, "w", 0).to_i32()
     val height = _field_i64(req, "h", 0).to_i32()
     val pid = _field_i64(req, "pid", 0)
-    if pid <= 1 or not process_is_running(pid):
+    if pid <= 1 or not process_exists(pid):
         return WmRemoteRouteOutcome(resp: _refuse(req, "bad-pid"), comp: comp, state: state)
     var held: i64 = 0
     for existing in state.rows:
@@ -495,7 +503,7 @@ pub fn wm_remote_app_reap(comp_in: HostCompositor, state_in: WmRemoteAppState) -
     for row in state_in.rows:
         val window_index = _window_index(comp, row.window_id)
         val has_window = window_index >= 0
-        if has_window and process_is_running(row.client_pid):
+        if has_window and process_exists(row.client_pid):
             val content_w = comp.windows[window_index].w - WM_REMOTE_APP_CHROME_W
             val content_h = comp.windows[window_index].h - WM_REMOTE_APP_CHROME_H
             if content_w != row.announced_width or content_h != row.announced_height:
