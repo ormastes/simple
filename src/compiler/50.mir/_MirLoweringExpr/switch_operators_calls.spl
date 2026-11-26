@@ -91,6 +91,33 @@ fn _sffi_enum_discriminant<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
+# Scoped receiver type-parameter bindings (`T -> Result<[u8], IoError>`) active
+# while lowering arguments of a method call on an instantiated generic receiver
+# (e.g. `Future<Result<[u8], IoError>>.then(\result: ...)`). Kept in module
+# state rather than on `MirLowering` to avoid changing struct ABI layout across
+# separately cached MIR object files.
+var _erased_callback_hir_bindings_v1: Dict<text, HirType> = {}
+
+pub fn erased_callback_hir_bindings_swap_v1(next: Dict<text, HirType>) -> Dict<text, HirType>:
+    val prev = _erased_callback_hir_bindings_v1
+    _erased_callback_hir_bindings_v1 = next
+    prev
+
+pub fn erased_callback_hir_binding_lookup_v1(name: text) -> HirType?:
+    if _erased_callback_hir_bindings_v1.contains(name):
+        Some(_erased_callback_hir_bindings_v1[name])
+    else:
+        None
+
+fn erased_hir_binding_actual_ready_v1(actual: HirType) -> bool:
+    if actual == None:
+        return false
+    match actual.kind:
+        case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.TypeParam(_, _):
+            false
+        case _:
+            true
+
 # Deterministic per-module counter and hash tag for lambda-lift synthesized
 # top-level function names. Each module's lifted functions carry both its owner
 # module identity and a deterministic module-key hash/fold tag so parallel MIR
@@ -8413,6 +8440,109 @@ impl MirLowering:
         self.error_fatal("dynamic callback requires a callable with proven arity and tagged ABI", Some(value.span))
         None
 
+    me erased_type_param_name_v1(hir_type: HirType) -> text:
+        """Return type-parameter name for either `TypeParam` or `Named`
+        wrapping a `SymbolKind.TypeParam` declaration."""
+        if hir_type == None:
+            return ""
+        match hir_type.kind:
+            case HirTypeKind.TypeParam(binder_name, _):
+                return binder_name
+            case HirTypeKind.Named(sym, _):
+                val optional_sym: HirSymbol? = self.symbols.get_symbol_raw(sym.id)
+                if val present_sym = optional_sym:
+                    val sym_info: HirSymbol = present_sym
+                    if sym_info.kind == SymbolKind.TypeParam:
+                        return sym_info.name
+            case _: ()
+        ""
+
+    me erased_hir_binding_promotable_v1(hir_type: HirType) -> bool:
+        """True when a lambda parameter bound from a generic receiver should
+        receive its concrete HIR type (`Result`, `Optional`, aggregate/enum)
+        rather than staying `TypeParam` for scalar erased RuntimeValue decode."""
+        if hir_type == None or self.erased_type_param_name_v1(hir_type) != "":
+            return false
+        match hir_type.kind:
+            case HirTypeKind.Result(_, _) | HirTypeKind.Optional(_) | HirTypeKind.Tuple(_) |
+                    HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Dict(_, _) |
+                    HirTypeKind.Union(_) | HirTypeKind.Function(_, _, _):
+                true
+            case HirTypeKind.Named(sym, _):
+                not self.bitfield_map.has(sym.id) and custom_primitive_underlying_type_tag_by_symbol(sym.id) < 0
+            case _:
+                false
+
+    me struct_type_param_names_for_receiver_v1(receiver_local: LocalId, receiver_hir: HirType) -> [text]:
+        """Resolve declared type-parameter names for an instantiated generic
+        method receiver (`Future` -> `["T"]`)."""
+        var candidates: [text] = []
+        if self.struct_value_syms.contains(receiver_local.id):
+            val owner_key = self.struct_value_syms[receiver_local.id]
+            if owner_key != "":
+                candidates.push(owner_key)
+        val layout_key = self.optional_payload_struct_name(receiver_hir)
+        if layout_key != "":
+            candidates.push(layout_key)
+        match receiver_hir.kind:
+            case HirTypeKind.Named(recv_sym, _):
+                val canonical_key = mir_class_identity_raw(self.symbols, recv_sym.id)
+                if canonical_key != "":
+                    candidates.push(canonical_key)
+                val optional_sym: HirSymbol? = self.symbols.get_symbol_raw(recv_sym.id)
+                if val recv_symbol_info = optional_sym:
+                    val sym_info: HirSymbol = recv_symbol_info
+                    if sym_info.name != "":
+                        candidates.push(sym_info.name)
+            case _: ()
+        for candidate in candidates:
+            if self.struct_type_param_names.has(candidate):
+                val names = self.struct_type_param_names[candidate]
+                if names.len() > 0:
+                    return names
+            val colon_bare = layout_key_bare_name(candidate)
+            val dot_parts = colon_bare.split(".")
+            if dot_parts.len() > 0:
+                val bare = dot_parts[dot_parts.len() - 1]
+                if self.struct_type_param_names.has(bare):
+                    val names = self.struct_type_param_names[bare]
+                    if names.len() > 0:
+                        return names
+        []
+
+    me method_receiver_erased_hir_bindings_v1(receiver_local: LocalId, receiver_expr: HirExpr?, param_types: [HirType]) -> Dict<text, HirType>:
+        """Bind erased generic class/struct type parameters from the concrete
+        method receiver alone so lambda arguments get their receiver's types
+        without leaking outer enclosing-call bindings."""
+        var candidate_hirs: [HirType] = []
+        if val local_hir = self.find_local_hir_type(receiver_local.id):
+            candidate_hirs.push(local_hir)
+        if val rx = receiver_expr:
+            if rx.has_type_ and rx.type_ != None:
+                candidate_hirs.push(rx.type_)
+        for rh in candidate_hirs:
+            match rh.kind:
+                case HirTypeKind.Named(_, actual_args):
+                    if actual_args.len() > 0:
+                        val type_param_names = self.struct_type_param_names_for_receiver_v1(receiver_local, rh)
+                        if type_param_names.len() > 0:
+                            var recv_bindings: Dict<text, HirType> = {}
+                            if param_types.len() > 0:
+                                recv_bindings = self.bind_struct_type_params(param_types[0], rh, type_param_names, recv_bindings)
+                            var idx = 0
+                            while idx < type_param_names.len() and idx < actual_args.len():
+                                val pname = type_param_names[idx]
+                                val actual_arg: HirType = actual_args[idx]
+                                if (not recv_bindings.contains(pname) and
+                                        erased_hir_binding_actual_ready_v1(actual_arg) and
+                                        self.erased_type_param_name_v1(actual_arg) == ""):
+                                    recv_bindings[pname] = actual_arg
+                                idx = idx + 1
+                            if recv_bindings.len() > 0:
+                                return recv_bindings
+                case _: ()
+        {}
+
     me lower_lambda_value(lam: HirExpr, runtime_any_abi: bool = false, param_records: [text] = []) -> MirOperand?:
         # Builtin word callbacks and contextual tagged callbacks have distinct
         # boundaries. Declaration-owned slots use the typed entry below.
@@ -9292,6 +9422,7 @@ impl MirLowering:
                 lw.global_statics_by_id = self.global_statics_by_id
                 lw.global_constants_by_id = self.global_constants_by_id
                 lw.global_const_exprs = self.global_const_exprs
+                lw.struct_type_param_names = self.struct_type_param_names
                 if self.declaration_repository != None:
                     # Share only admitted declaration metadata and expression
                     # descriptors. Lifted bodies have their own lambda scratch.
@@ -9345,25 +9476,36 @@ impl MirLowering:
                                     argument_local = lw.decode_runtime_value(argument_local, lw.lower_type(argument_hir))
                             lw.remember_local_hir_type(argument_local.id, argument_hir, 0, 0)
                         elif declared_return != None:
-                            lw.remember_local_hir_type(argument_local.id, declared_params[qi], 0, 0)
-                            match declared_params[qi].kind:
-                                case HirTypeKind.TypeParam(binder_name, _):
-                                    # An erased binder arrives as the tagged
-                                    # word; a record passes through as its
-                                    # handle. Give it the call site's layout.
-                                    lw.mark_runtime_value_local(argument_local.id)
-                                    if (_sffi_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
-                                        print "[erased-callback-lift] param={qi} binder={binder_name} bound={self.erased_callback_record_bindings.contains(binder_name)}"
-                                    if self.erased_callback_record_bindings.contains(binder_name):
-                                        lw.struct_value_syms[argument_local.id] = self.erased_callback_record_bindings[binder_name]
-                                case HirTypeKind.Named(_, _):
-                                    # A declared record slot (`fn(S) -> i64`):
-                                    # the parameter is that record. Without
-                                    # this, `\f: f.c` read field 0.
-                                    val declared_record = self.optional_payload_struct_name(declared_params[qi])
-                                    if declared_record != "":
-                                        lw.struct_value_syms[argument_local.id] = declared_record
-                                case _: ()
+                            var param_hir: HirType = declared_params[qi]
+                            val binder_name = self.erased_type_param_name_v1(declared_params[qi])
+                            if binder_name != "":
+                                # An erased binder arrives as the tagged
+                                # word; a record passes through as its
+                                # handle. Give it the call site's layout
+                                # and concrete non-scalar HIR type from the generic receiver.
+                                lw.mark_runtime_value_local(argument_local.id)
+                                if (_sffi_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+                                    print "[erased-callback-lift] param={qi} binder={binder_name} bound={self.erased_callback_record_bindings.contains(binder_name)}"
+                                if self.erased_callback_record_bindings.contains(binder_name):
+                                    lw.struct_value_syms[argument_local.id] = self.erased_callback_record_bindings[binder_name]
+                                if val bound_hir = erased_callback_hir_binding_lookup_v1(binder_name):
+                                    if not lw.struct_value_syms.contains(argument_local.id):
+                                        val bound_record = self.optional_payload_struct_name(bound_hir)
+                                        if bound_record != "":
+                                            lw.struct_value_syms[argument_local.id] = bound_record
+                                    if self.erased_hir_binding_promotable_v1(bound_hir):
+                                        param_hir = bound_hir
+                            else:
+                                match declared_params[qi].kind:
+                                    case HirTypeKind.Named(_, _):
+                                        # A declared record slot (`fn(S) -> i64`):
+                                        # the parameter is that record. Without
+                                        # this, `\f: f.c` read field 0.
+                                        val declared_record = self.optional_payload_struct_name(declared_params[qi])
+                                        if declared_record != "":
+                                            lw.struct_value_syms[argument_local.id] = declared_record
+                                    case _: ()
+                            lw.remember_local_hir_type(argument_local.id, param_hir, 0, 0)
                         # The caller proved the record this parameter receives
                         # (an array-HOF element, `array_hof_element_record_owner`).
                         if qi < param_records.len() and param_records[qi] != "" and not lw.struct_value_syms.contains(argument_local.id):
@@ -9424,10 +9566,14 @@ impl MirLowering:
                         if val capture_elem_type = self.runtime_elem_value_type.get(source_local.id):
                             lw.runtime_elem_value_type[loaded_local.id] = capture_elem_type
                         cap_i = cap_i + 1
+                # Clear outer call receiver bindings before lowering the lifted
+                # lambda body so unrelated or nested generic calls start fresh.
+                val body_saved_hir_bindings = erased_callback_hir_bindings_swap_v1({})
                 var result = if val typed_return = declared_return:
                     lw.lower_expr_for_slot(body, typed_return)
                 else:
                     lw.lower_expr(body)
+                val _restored_body_hir_bindings = erased_callback_hir_bindings_swap_v1(body_saved_hir_bindings)
                 # A child error is fatal in both full-HIR and declaration
                 # repository lanes. Never admit a runtime-panic placeholder
                 # merely because this parent has no compact repository.
