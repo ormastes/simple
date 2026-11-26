@@ -14,8 +14,10 @@ use compiler.backend.llvm_diagnostic_admission.{llvm_llc_error_diagnostic}
 use compiler.mir_opt.mod.{OptLevel}
 use compiler.interp.interpreter.llvm.tools.*
 use compiler.backend.io_compat.{backend_shell_tuple}
-use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists,
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists,
     file_is_regular_no_follow, file_size_raw, file_read_text}
+use std.nogc_sync_mut.io_runtime.{file_write_bytes}
+use std.common.text_bytes.{text_to_bytes}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.nogc_sync_mut.path.{dirname}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
@@ -421,7 +423,7 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
         print "[llvm-tools] write-at:done"
         wrote_ir = file_exists(ir_path)
     else:
-        wrote_ir = file_write(ir_path, llvm_ir)
+        wrote_ir = file_write_bytes(ir_path, text_to_bytes(llvm_ir))
     if not wrote_ir:
         if bootstrap_io:
             print "[llvm-tools] write-failed"
@@ -575,7 +577,7 @@ fn llvm_object_stage_fail(
             val ir_text = file_read_text(staged_ir)
             if ir_text != "":
                 val kept_ir = "{diagnostic_path}.module.ll"
-                if file_write(kept_ir, ir_text):
+                if file_write_bytes(kept_ir, text_to_bytes(ir_text)):
                     kept_ir_note = "; IR kept at {kept_ir}"
     # SIMPLE_LLVM_KEEP_STAGE=1 preserves module.ll/module.o for diagnosis. The
     # staging directory is otherwise removed on failure, which makes an llc
@@ -632,11 +634,16 @@ pub fn compile_ir_to_object_path(
             llvm_llc_not_found_message_v1("llc not found", probe_diag),
             1)
     val bootstrap_io = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    # file_write admits only FILE_TEXT_DEFAULT_LIMIT (16 MiB) of UTF-8; a large
+    # module's LLVM IR (e.g. compiler.mir._MirLoweringExpr.expr_dispatch under
+    # the stage2 compiler-test matrix, which does not export SIMPLE_BOOTSTRAP=1)
+    # exceeds it and the session encode refuses, surfacing as "Failed to write
+    # LLVM IR to private staging". The bytes writer has no text-session cap.
     val wrote_ir = if bootstrap_io:
         rt_file_write_text_at(ir_path, 0, llvm_ir)
         file_exists(ir_path)
     else:
-        file_write(ir_path, llvm_ir)
+        file_write_bytes(ir_path, text_to_bytes(llvm_ir))
     if not wrote_ir:
         return llvm_object_stage_fail(stage_dir, diagnostic_path,
             "Failed to write LLVM IR to private staging", 1)
@@ -884,7 +891,7 @@ fn compile_ir_to_wasm(llvm_ir: text, config: LlvmTargetConfig, opt_level: Optimi
     val obj_path = "{tmp_dir}/simple_wasm_{pid}_{ts}.o"
 
     # Step 1: Write IR to temp file
-    if not file_write(ir_path, llvm_ir):
+    if not file_write_bytes(ir_path, text_to_bytes(llvm_ir)):
         return Err("Failed to write LLVM IR to {ir_path}")
 
     # Step 2: Compile IR to wasm object via llc
