@@ -183,6 +183,20 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+#[link(name = "userenv")]
+unsafe extern "system" {
+    fn CreateAppContainerProfile(
+        name: *const u16,
+        display_name: *const u16,
+        description: *const u16,
+        capabilities: *mut c_void,
+        capability_count: u32,
+        sid_out: *mut c_void,
+    ) -> i32;
+    fn DeriveAppContainerSidFromAppContainerName(name: *const u16, sid_out: *mut c_void) -> i32;
+    fn DeleteAppContainerProfile(name: *const u16) -> i32;
+}
+
 #[link(name = "bcrypt")]
 unsafe extern "system" {
     fn BCryptOpenAlgorithmProvider(
@@ -274,6 +288,10 @@ const NAMES: &[&str] = &[
     "GetNamedSecurityInfoW",
     "CreateProcessAsUserW",
     "CreateProcessWithTokenW",
+    // userenv AppContainer profile surface (container lane W2).
+    "CreateAppContainerProfile",
+    "DeriveAppContainerSidFromAppContainerName",
+    "DeleteAppContainerProfile",
 ];
 
 /// True when `name` is one of the direct Win64 ABI externs this module implements.
@@ -702,6 +720,26 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     process_info,
                 )
             } as i64))
+        }
+        "CreateAppContainerProfile" => {
+            let profile = opt_ptr(arg_i64(args, 0, name)?);
+            let display = opt_ptr(arg_i64(args, 1, name)?);
+            let description = opt_ptr(arg_i64(args, 2, name)?);
+            let capabilities = opt_ptr(arg_i64(args, 3, name)?);
+            let count = arg_i64(args, 4, name)? as u32;
+            let sid_out = opt_ptr(arg_i64(args, 5, name)?);
+            Ok(Value::Int(unsafe {
+                CreateAppContainerProfile(profile.cast(), display.cast(), description.cast(), capabilities, count, sid_out)
+            } as i64))
+        }
+        "DeriveAppContainerSidFromAppContainerName" => {
+            let profile = opt_ptr(arg_i64(args, 0, name)?);
+            let sid_out = opt_ptr(arg_i64(args, 1, name)?);
+            Ok(Value::Int(unsafe { DeriveAppContainerSidFromAppContainerName(profile.cast(), sid_out) } as i64))
+        }
+        "DeleteAppContainerProfile" => {
+            let profile = opt_ptr(arg_i64(args, 0, name)?);
+            Ok(Value::Int(unsafe { DeleteAppContainerProfile(profile.cast()) } as i64))
         }
         "CreateProcessWithTokenW" => {
             let token = opt_ptr(arg_i64(args, 0, name)?);

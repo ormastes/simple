@@ -4657,6 +4657,7 @@ fn is_windows_system_prefix(name: &str) -> bool {
         || name.starts_with("Close")
         || name.starts_with("Delete")
         || name.starts_with("Duplicate")
+        || name.starts_with("Derive")
         || name.starts_with("Flush")
         || name.starts_with("Map")
         || name.starts_with("Unmap")

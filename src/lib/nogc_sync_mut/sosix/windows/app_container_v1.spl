@@ -1,0 +1,342 @@
+# SOSIX app sandbox: Windows variant (architecture pure_simple_container 4.2, lane W2).
+# One synchronous run of one child inside a per-scope AppContainer. The profile is created
+# (or a stale one of the same scope replaced) through userenv, the child is launched with
+# SECURITY_CAPABILITIES carrying that SID and ZERO capabilities (so no network, and no file
+# access beyond what the container SID is granted), the container SID is granted only on the
+# dirs the request lists, and every grant and the profile are removed at teardown. Fails
+# closed: any step that cannot be proven refuses or reports a reason; helpers stay non-pub.
+use std.common.contracts.sosix.containment_v1.{SosixContainExitCodeV1, SosixContainFlagV1}
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_is_real_no_follow}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_quote_arg_v1, windows_process_path_valid_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CreateFileW, InitializeProcThreadAttributeList, DeleteProcThreadAttributeList, GetLastError, GetExitCodeProcess, windows_abi_update_proc_thread_attribute, windows_abi_handle_is_invalid, windows_abi_pointer_bytes, windows_abi_security_attributes_size, windows_abi_security_attributes_inherit_offset, windows_abi_startupinfoex_size, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset}
+use std.nogc_sync_mut.io_runtime.file_exists
+use std.nogc_sync_mut.sosix.app_container_types_v1.{SosixAppSandboxRequestV1, SosixAppSandboxResultV1, SOSIX_APP_SANDBOX_IDENTITY_V1}
+use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.sosix_windows_scope_sid_v1
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_is_win64_v1, sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_close_handle_v1, sec_read_ptr_v1, sec_write_ptr_v1, sec_u32_v1, sec_put_u32_v1, sec_wide_v1, sec_get_dacl_v1, sec_set_entries_v1, sec_set_dacl_v1, sec_access_entry_v1}
+
+@abi("system")
+@unsafe(reason: "userenv create of a per-scope AppContainer profile, SID returned in an owned slot", capabilities: [ffi, raw_ptr])
+extern fn CreateAppContainerProfile(name: i64, display_name: i64, description: i64, capabilities: i64, capability_count: u32, sid_out: i64) -> i32
+@abi("system")
+@unsafe(reason: "userenv delete of the per-scope AppContainer profile", capabilities: [ffi, raw_ptr])
+extern fn DeleteAppContainerProfile(name: i64) -> i32
+@abi("system")
+@unsafe(reason: "release of a SID that userenv allocated", capabilities: [ffi, raw_ptr])
+extern fn FreeSid(sid: i64) -> i64
+
+# FILE_GENERIC_READ|FILE_GENERIC_EXECUTE and modify (read, write, execute, delete).
+const _READ_EXEC_MASK = 0x1200A9
+const _MODIFY_MASK = 0x1301BF
+# OBJECT_INHERIT | CONTAINER_INHERIT.
+const _INHERIT_TREE = 3
+# EXPLICIT_ACCESS_W grfAccessMode: GRANT_ACCESS and REVOKE_ACCESS.
+const _MODE_GRANT = 1
+const _MODE_REVOKE = 4
+# HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) as a signed 32-bit value.
+const _HR_ALREADY_EXISTS = -2147024713
+# PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES and PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
+const _ATTR_SECURITY_CAPABILITIES = 131081
+const _ATTR_HANDLE_LIST = 131074
+# CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW.
+const _CREATE_FLAGS = 134743044
+const _WALL_MAX_MS = 600000
+const _SCOPE_MAX_BYTES = 48
+const _KILL_WAIT_MS = 5000
+const _FAILED_EXIT = -1
+
+struct ProfileV1:
+    sid: i64
+    created: bool
+    reason: text
+
+struct LaunchV1:
+    reason: text
+    exit_code: i64
+    timed_out: bool
+
+struct GrantsV1:
+    attempted: [text]
+    reason: text
+
+fn _native(path: text) -> text:
+    path.replace("/", "\\")
+
+fn _normal(path: text) -> text:
+    path.replace("\\", "/")
+
+fn _refusal(reason: text) -> SosixAppSandboxResultV1:
+    SosixAppSandboxResultV1(reason: reason, exit_code: SosixContainExitCodeV1(_FAILED_EXIT), timed_out: SosixContainFlagV1(false))
+
+fn _contains_nul(values: [text]) -> bool:
+    for value in values:
+        if value.contains("\0"): return true
+    false
+
+# "" when every directory is a real, non-reparse directory and the lists are disjoint.
+fn _dirs_reason(readonly_dirs: [text], writable_dirs: [text], directory: text) -> text:
+    if readonly_dirs.len() + writable_dirs.len() == 0: return "app-sandbox-request-invalid"
+    var granted: [text] = []
+    for dir in readonly_dirs + writable_dirs:
+        if not windows_process_path_valid_v1(dir): return "app-sandbox-request-invalid"
+        if not is_dir(dir) or not dir_is_real_no_follow(dir): return "app-sandbox-request-invalid"
+        val key = _normal(dir).to_lower()
+        if granted.contains(key): return "app-sandbox-request-invalid"
+        granted = granted.push(key)
+    if not granted.contains(_normal(directory).to_lower()): return "app-sandbox-directory-not-granted"
+    ""
+
+fn _request_reason(request: SosixAppSandboxRequestV1) -> text:
+    if not sec_is_win64_v1(): return "app-sandbox-unsupported-width"
+    if request.scope.byte_len() > _SCOPE_MAX_BYTES: return "app-sandbox-scope-invalid"
+    if sosix_windows_scope_sid_v1(request.scope).is_err(): return "app-sandbox-scope-invalid"
+    if not windows_process_path_valid_v1(request.program) or not file_exists(request.program): return "app-sandbox-request-invalid"
+    if _contains_nul(request.args): return "app-sandbox-request-invalid"
+    if not windows_process_path_valid_v1(request.stdout_path) or not windows_process_path_valid_v1(request.stderr_path): return "app-sandbox-request-invalid"
+    if _normal(request.stdout_path).to_lower() == _normal(request.stderr_path).to_lower(): return "app-sandbox-request-invalid"
+    val wall = request.wall.value
+    if wall < 1 or wall > _WALL_MAX_MS: return "app-sandbox-request-invalid"
+    if not windows_process_path_valid_v1(request.directory): return "app-sandbox-request-invalid"
+    _dirs_reason(request.readonly_dirs, request.writable_dirs, request.directory)
+
+# A fresh profile for this scope: a stale one left by a crashed run is deleted first, so the
+# profile this run uses and later deletes is always its own.
+fn _open_profile(name_wide: i64) -> ProfileV1:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return ProfileV1(sid: 0, created: false, reason: "app-sandbox-alloc-failed")
+    var hr = CreateAppContainerProfile(name_wide, name_wide, name_wide, 0, 0u32, slot)
+    if hr == _HR_ALREADY_EXISTS:
+        val _stale = DeleteAppContainerProfile(name_wide)
+        hr = CreateAppContainerProfile(name_wide, name_wide, name_wide, 0, 0u32, slot)
+    var sid = 0
+    var reason = ""
+    if hr == 0:
+        sid = sec_read_ptr_v1(slot)
+        if sid == 0: reason = "app-sandbox-profile-sid-missing"
+    else:
+        reason = "app-sandbox-profile-create-failed-" + hr.to_string()
+    sec_free_v1(slot)
+    ProfileV1(sid: sid, created: hr == 0, reason: reason)
+
+# Merge one ACE for the container SID into the DACL of path (grant or revoke); "" on success.
+fn _set_ace(path: text, sid: i64, mode: i64, mask: i64) -> text:
+    val slot = sec_alloc_v1(8)
+    val entries = sec_alloc_v1(48)
+    if slot == 0 or entries == 0:
+        sec_free_v1(slot)
+        sec_free_v1(entries)
+        return "app-sandbox-alloc-failed"
+    var reason = ""
+    val descriptor = sec_get_dacl_v1(_native(path), slot)
+    if descriptor == 0:
+        reason = "app-sandbox-dacl-read-failed"
+    else:
+        sec_access_entry_v1(entries, 0, mask, _INHERIT_TREE, sid)
+        sec_put_u32_v1(entries + 4, mode)
+        val merged = sec_set_entries_v1(1, entries, sec_read_ptr_v1(slot))
+        if merged == 0:
+            reason = "app-sandbox-dacl-build-failed"
+        elif not sec_set_dacl_v1(_native(path), merged):
+            reason = "app-sandbox-dacl-write-failed"
+        sec_local_free_v1(merged)
+    sec_local_free_v1(descriptor)
+    sec_free_v1(entries)
+    sec_free_v1(slot)
+    reason
+
+fn _release_all(pointers: [i64]):
+    for pointer in pointers:
+        sec_free_v1(pointer)
+
+# Inheritable handle for a child standard stream; 0 on failure.
+fn _open_stream(path_wide: i64, security: i64, access: i64, disposition: i64) -> i64:
+    val handle = CreateFileW(path_wide, access as u32, 1u32, security, disposition as u32, 128u32, 0)
+    if windows_abi_handle_is_invalid(handle) or handle == 0: return 0
+    handle
+
+fn _read_exit(process: i64, slot: i64) -> i64:
+    if GetExitCodeProcess(process, slot) == 0: return _FAILED_EXIT
+    sec_u32_v1(slot)
+
+# True once the process handle is signalled within wait_ms.
+fn _process_ended(process: i64, wait_ms: i64) -> bool:
+    WaitForSingleObject(process, wait_ms as u32) == 0u32
+
+# The job holds the child and its descendants; closing it kills any survivor.
+fn _job_with_kill_on_close(limits: i64) -> i64:
+    val job = CreateJobObjectW(0, 0)
+    if job == 0: return 0
+    # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+    sec_put_u32_v1(limits + windows_abi_job_limit_flags_offset(), 8192)
+    if SetInformationJobObject(job, 9, limits, windows_abi_job_extended_limit_size() as u32) == 0:
+        val _closed = sec_close_handle_v1(job)
+        return 0
+    job
+
+fn _launch(request: SosixAppSandboxRequestV1, sid: i64) -> LaunchV1:
+    var command = windows_process_quote_arg_v1(request.program)
+    for arg in request.args: command = command + " " + windows_process_quote_arg_v1(arg)
+    val app = sec_wide_v1(_native(request.program))
+    val argv = sec_wide_v1(command)
+    val cwd = sec_wide_v1(_native(request.directory))
+    val nul = sec_wide_v1("NUL")
+    val out_wide = sec_wide_v1(_native(request.stdout_path))
+    val err_wide = sec_wide_v1(_native(request.stderr_path))
+    val startup = sec_alloc_v1(windows_abi_startupinfoex_size())
+    val process_info = sec_alloc_v1(windows_abi_process_info_size())
+    val security = sec_alloc_v1(windows_abi_security_attributes_size())
+    val size_slot = sec_alloc_v1(windows_abi_pointer_bytes())
+    val handle_list = sec_alloc_v1(windows_abi_pointer_bytes() * 3)
+    val capabilities = sec_alloc_v1(24)
+    val limits = sec_alloc_v1(windows_abi_job_extended_limit_size())
+    val exit_slot = sec_alloc_v1(8)
+    val live = [app, argv, cwd, nul, out_wide, err_wide, startup, process_info, security, size_slot, handle_list, capabilities, limits, exit_slot]
+    var reason = ""
+    for pointer in live:
+        if pointer == 0: reason = "app-sandbox-alloc-failed"
+    var stdin_handle = 0
+    var stdout_handle = 0
+    var stderr_handle = 0
+    var attributes = 0
+    var attributes_initialized = false
+    var job = 0
+    var process = 0
+    var thread = 0
+    var created = false
+    var exit_code = _FAILED_EXIT
+    var timed_out = false
+    if reason == "":
+        sec_put_u32_v1(security, windows_abi_security_attributes_size())
+        sec_put_u32_v1(security + windows_abi_security_attributes_inherit_offset(), 1)
+        # GENERIC_READ / OPEN_EXISTING for NUL; GENERIC_WRITE / CREATE_NEW for the output files.
+        stdin_handle = _open_stream(nul, security, 2147483648, 3)
+        stdout_handle = _open_stream(out_wide, security, 1073741824, 1)
+        stderr_handle = _open_stream(err_wide, security, 1073741824, 1)
+        if stdin_handle == 0 or stdout_handle == 0 or stderr_handle == 0:
+            reason = "app-sandbox-stream-open-failed"
+    if reason == "":
+        job = _job_with_kill_on_close(limits)
+        if job == 0: reason = "app-sandbox-job-failed"
+    if reason == "":
+        # SECURITY_CAPABILITIES: AppContainerSid, Capabilities = NULL, CapabilityCount = 0.
+        sec_write_ptr_v1(capabilities, sid)
+        sec_write_ptr_v1(capabilities + 8, 0)
+        sec_put_u32_v1(capabilities + 16, 0)
+        sec_put_u32_v1(startup, windows_abi_startupinfoex_size())
+        # STARTF_USESTDHANDLES.
+        sec_put_u32_v1(startup + windows_abi_startupinfo_flags_offset(), 256)
+        sec_write_ptr_v1(startup + windows_abi_startupinfo_std_input_offset(), stdin_handle)
+        sec_write_ptr_v1(startup + windows_abi_startupinfo_std_output_offset(), stdout_handle)
+        sec_write_ptr_v1(startup + windows_abi_startupinfo_std_error_offset(), stderr_handle)
+        sec_write_ptr_v1(handle_list, stdin_handle)
+        sec_write_ptr_v1(handle_list + windows_abi_pointer_bytes(), stdout_handle)
+        sec_write_ptr_v1(handle_list + windows_abi_pointer_bytes() * 2, stderr_handle)
+        val _sized = InitializeProcThreadAttributeList(0, 2u32, 0u32, size_slot)
+        val required = sec_read_ptr_v1(size_slot)
+        if required <= 0 or required > 1048576:
+            reason = "app-sandbox-attribute-size-invalid"
+        else:
+            attributes = sec_alloc_v1(required)
+            if attributes == 0:
+                reason = "app-sandbox-alloc-failed"
+            elif InitializeProcThreadAttributeList(attributes, 2u32, 0u32, size_slot) == 0:
+                reason = "app-sandbox-attribute-init-failed"
+            else:
+                attributes_initialized = true
+                if windows_abi_update_proc_thread_attribute(attributes, _ATTR_SECURITY_CAPABILITIES, capabilities, 24) == 0:
+                    reason = "app-sandbox-capabilities-attribute-failed"
+                elif windows_abi_update_proc_thread_attribute(attributes, _ATTR_HANDLE_LIST, handle_list, windows_abi_pointer_bytes() * 3) == 0:
+                    reason = "app-sandbox-handle-list-attribute-failed"
+                sec_write_ptr_v1(startup + windows_abi_startupinfoex_attr_list_offset(), attributes)
+    if reason == "":
+        if CreateProcessW(app, argv, 0, 0, 1, _CREATE_FLAGS as u32, 0, cwd, startup, process_info) == 0:
+            reason = "app-sandbox-create-process-failed-" + GetLastError().to_string()
+        else:
+            created = true
+            process = sec_read_ptr_v1(process_info + windows_abi_process_info_process_offset())
+            thread = sec_read_ptr_v1(process_info + windows_abi_process_info_thread_offset())
+            if AssignProcessToJobObject(job, process) == 0:
+                reason = "app-sandbox-job-assign-failed"
+            elif ResumeThread(thread) == 4294967295u32:
+                reason = "app-sandbox-resume-failed"
+    if created and reason == "":
+        val waited = WaitForSingleObject(process, request.wall.value as u32)
+        if waited == 0u32:
+            exit_code = _read_exit(process, exit_slot)
+        elif waited == 258u32:
+            timed_out = true
+            reason = "app-sandbox-timeout"
+        else:
+            reason = "app-sandbox-wait-failed"
+    # A child that did not end on its own is killed with its tree and proven ended.
+    if created and exit_code == _FAILED_EXIT and not _process_ended(process, 0):
+        val _killed = TerminateJobObject(job, 125u32)
+        if not _process_ended(process, _KILL_WAIT_MS):
+            val _forced = TerminateProcess(process, 125u32)
+            if not _process_ended(process, _KILL_WAIT_MS): reason = reason + "; app-sandbox-cleanup-unproven"
+    if attributes_initialized: DeleteProcThreadAttributeList(attributes)
+    sec_free_v1(attributes)
+    var released = true
+    for handle in [thread, process, job, stdin_handle, stdout_handle, stderr_handle]:
+        if handle != 0 and not sec_close_handle_v1(handle): released = false
+    _release_all(live)
+    if not released: reason = reason + "; app-sandbox-handle-release-failed"
+    LaunchV1(reason: reason, exit_code: exit_code, timed_out: timed_out)
+
+# Grants the container SID on every listed dir; every dir attempted is returned so a failed
+# grant is still revoked. reason is the first failure.
+fn _grant_all(request: SosixAppSandboxRequestV1, sid: i64) -> GrantsV1:
+    var attempted: [text] = []
+    for dir in request.readonly_dirs:
+        attempted = attempted.push(dir)
+        val why = _set_ace(dir, sid, _MODE_GRANT, _READ_EXEC_MASK)
+        if why != "": return GrantsV1(attempted: attempted, reason: why)
+    for dir in request.writable_dirs:
+        attempted = attempted.push(dir)
+        val why = _set_ace(dir, sid, _MODE_GRANT, _MODIFY_MASK)
+        if why != "": return GrantsV1(attempted: attempted, reason: why)
+    GrantsV1(attempted: attempted, reason: "")
+
+# "app-sandbox-revoke-failed" when any revoke cannot be proven; never hidden.
+fn _revoke_all(attempted: [text], sid: i64) -> text:
+    var reason = ""
+    for dir in attempted:
+        val why = _set_ace(dir, sid, _MODE_REVOKE, 0)
+        if why != "": reason = "app-sandbox-revoke-failed"
+    reason
+
+fn _run(request: SosixAppSandboxRequestV1) -> SosixAppSandboxResultV1:
+    val refused = _request_reason(request)
+    if refused != "": return _refusal(refused)
+    val name_wide = sec_wide_v1("sosix-" + request.scope)
+    if name_wide == 0: return _refusal("app-sandbox-alloc-failed")
+    val profile = _open_profile(name_wide)
+    var reason = profile.reason
+    var launched = LaunchV1(reason: "", exit_code: _FAILED_EXIT, timed_out: false)
+    var attempted: [text] = []
+    if reason == "":
+        val grants = _grant_all(request, profile.sid)
+        attempted = grants.attempted
+        reason = grants.reason
+    if reason == "":
+        launched = _launch(request, profile.sid)
+        reason = launched.reason
+    var teardown = ""
+    if profile.sid != 0: teardown = _revoke_all(attempted, profile.sid)
+    if profile.created:
+        if DeleteAppContainerProfile(name_wide) != 0 and teardown == "": teardown = "app-sandbox-profile-delete-failed"
+    if profile.sid != 0:
+        val _freed = FreeSid(profile.sid)
+    sec_free_v1(name_wide)
+    if teardown != "":
+        if reason == "":
+            reason = teardown
+        else:
+            reason = reason + "; " + teardown
+    SosixAppSandboxResultV1(reason: reason, exit_code: SosixContainExitCodeV1(launched.exit_code),
+        timed_out: SosixContainFlagV1(launched.timed_out))
+
+pub fn sosix_app_sandbox_identity_v1() -> text:
+    SOSIX_APP_SANDBOX_IDENTITY_V1
+
+pub fn sosix_app_sandbox_run_v1(request: SosixAppSandboxRequestV1) -> SosixAppSandboxResultV1:
+    _run(request)
