@@ -7,6 +7,18 @@ alwaysApply: false
 ---
 # Bootstrap & Binary Architecture
 
+## Sanctioned bootstrap shell scripts
+
+The only `.sh` files exempt from the "ALL code in `.spl`/`.shs`" rule are the
+bootstrap scripts (CLAUDE.md counts 7; the gate exempts 8 paths, because `build-phase3-phase4.sh` was already exempt but uncounted), listed in `scan_forbidden_extension_files` of
+`scripts/check/check-repo-hygiene.shs`: `bootstrap-from-scratch.sh`,
+`bootstrap-seed.sh`, `bootstrap-verify.sh`, `build-phase3-phase4.sh`, and the
+exec'd resume stages `resume-stage2-from-cache.sh`,
+`resume-stage3-from-admitted.sh`, `resume-stage4-from-admitted.sh` plus the
+worker `lib/stage3-native-build-worker.sh` (all under `scripts/bootstrap/`). They are POSIX
+`sh` and are referenced by name from about 150 files, so they are not renamed.
+Owner sign-off on this exemption is pending (coordinator default, 2026-11-26).
+
 ## Bootstrap failure collection
 
 During diagnosis, finish every independently runnable module/build/test row,
