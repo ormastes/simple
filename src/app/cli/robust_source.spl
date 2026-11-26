@@ -1,0 +1,229 @@
+# Origin-fact source selection for `simple robust` (`--source text|hir`), the
+# text/hir parity harness, and the frozen v1 schema of the inventory `--sdn`
+# document. `text` is the reference source (line-level scan in
+# compiler.semantics.lint.bound_origin_facts and the SPL-BOUND-00x checkers).
+# `hir` reads the HIR origin side table (RB-ORIGIN lane 1); until that lands it
+# is reported unavailable, never silently substituted with text.
+
+use std.io_runtime.{is_dir, dir_walk}
+use compiler.semantics.lint.bound_origin_facts.{bound_origin_inventory_text, bound_origin_inventory_sdn, bound_origin_boundaries_text}
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts}
+use compiler.semantics.lint.bound_unit_reassert.{check_bound_unit_reasserts}
+
+val ROBUST_SOURCES = ["text", "hir"]
+val ROBUST_DEFAULT_SOURCE = "text"
+val ROBUST_SURFACES = ["inventory_text", "inventory_sdn", "boundaries", "lints"]
+val ROBUST_FIXTURE_DIRS = ["test/01_unit/compiler/lint/fixtures/bound_graph", "test/01_unit/compiler/lint/fixtures/bound_unit_graph"]
+
+val ROBUST_SDN_V1_ROW_KEYS = ["file", "line", "function", "subject", "origin", "boundary"]
+val ROBUST_SDN_V1_ORIGINS = ["extern_decl", "param", "literal", "extern_return", "cast", "copy", "call", "expr"]
+
+# A diff line on `surface` containing `needle` is accepted because the HIR
+# source is more precise there; `reason` is mandatory.
+pub struct RobustParityAllow:
+    surface: text
+    needle: text
+    reason: text
+
+val ROBUST_PARITY_ALLOW: [RobustParityAllow] = []
+
+@allow(primitive_api)  # CLI boundary: source is the --source flag value, result is a yes/no availability probe
+pub fn robust_source_available(source: text) -> bool:
+    source == "text"
+
+pub fn robust_fixture_paths() -> [text]:
+    var out: [text] = []
+    for d in ROBUST_FIXTURE_DIRS:
+        if is_dir(d):
+            var found: [text] = []
+            for p in dir_walk(d):
+                if p.ends_with(".spl"):
+                    found.push(p.replace("\\", "/"))
+            for p in found.sort():
+                out.push(p)
+    out
+
+fn _robust_lints_text(paths: [text], sources: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < paths.len():
+        for f in check_bound_late_casts(sources[i], paths[i]):
+            out = out + "{paths[i]}:{f.line_num} {f.code}\n"
+        for f in check_bound_unit_reasserts(sources[i], paths[i]):
+            out = out + "{paths[i]}:{f.line_num} {f.code}\n"
+        i = i + 1
+    out
+
+# Render one surface from one source; None when the source is unavailable.
+pub fn robust_render(surface: text, source: text, paths: [text], sources: [text]) -> text?:
+    if not robust_source_available(source):
+        return None
+    if surface == "inventory_sdn":
+        return Some(bound_origin_inventory_sdn(paths, sources))
+    if surface == "boundaries":
+        return Some(bound_origin_boundaries_text(paths, sources))
+    if surface == "lints":
+        return Some(_robust_lints_text(paths, sources))
+    var out = ""
+    var j = 0
+    while j < paths.len():
+        out = out + bound_origin_inventory_text(sources[j], paths[j]) + "\n"
+        j = j + 1
+    Some(out)
+
+fn _robust_count(xs: [text], x: text) -> i64:
+    var n = 0
+    for y in xs:
+        if y == x:
+            n = n + 1
+    n
+
+fn _robust_allowed(surface: text, line: text, allow: [RobustParityAllow]) -> bool:
+    for e in allow:
+        if e.reason != "" and e.surface == surface and line.contains(e.needle):
+            return true
+    false
+
+# Multiset line diff of two renders: "-" lines only in `a`, "+" only in `b`.
+pub fn robust_parity_diff(surface: text, a: text, b: text, allow: [RobustParityAllow]) -> [text]:
+    val la = a.split("\n")
+    val lb = b.split("\n")
+    var out: [text] = []
+    for l in la:
+        if _robust_count(la, l) > _robust_count(lb, l) and not _robust_allowed(surface, l, allow):
+            out.push("{surface}: - {l}")
+    for l in lb:
+        if _robust_count(lb, l) > _robust_count(la, l) and not _robust_allowed(surface, l, allow):
+            out.push("{surface}: + {l}")
+    out
+
+# Every surface, both sources; problems are unallowed diffs, reasonless
+# allowlist entries, and an unavailable source.
+pub fn robust_parity_check(ref_source: text, cand_source: text, paths: [text], sources: [text], allow: [RobustParityAllow]) -> [text]:
+    var out: [text] = []
+    for e in allow:
+        if e.reason == "":
+            out.push("allowlist entry without reason: {e.surface} {e.needle}")
+    for s in ROBUST_SURFACES:
+        val a = robust_render(s, ref_source, paths, sources)
+        val b = robust_render(s, cand_source, paths, sources)
+        if not a.? or not b.?:
+            out.push("{s}: source unavailable ({ref_source} vs {cand_source})")
+            continue
+        for d in robust_parity_diff(s, a.unwrap(), b.unwrap(), allow):
+            out.push(d)
+    out
+
+# --- SDN schema v1 -----------------------------------------------------------
+
+fn _sdn_quoted_end(s: text, start: i64) -> i64:
+    # `start` is at the opening quote; returns index after the closing quote, -1 if none.
+    if start >= s.byte_len() or s.substring(start, start + 1) != "\"":
+        return -1
+    var i = start + 1
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if c == "\\":
+            i = i + 2
+            continue
+        if c == "\"":
+            return i + 1
+        i = i + 1
+    -1
+
+fn _sdn_digits_end(s: text, start: i64) -> i64:
+    var i = start
+    while i < s.byte_len() and s.substring(i, i + 1) >= "0" and s.substring(i, i + 1) <= "9":
+        i = i + 1
+    if i == start:
+        return -1
+    i
+
+fn _sdn_v1_row(row: text, n: i64) -> [text]:
+    # Row: `    {file: "..", line: N, function: "..", subject: "..", origin: "..", boundary: true|false}`
+    var errs: [text] = []
+    val head = "    {"
+    if not row.starts_with(head) or not row.ends_with("}"):
+        return ["row {n}: not a v1 row"]
+    var i = head.byte_len()
+    var k = 0
+    while k < ROBUST_SDN_V1_ROW_KEYS.len():
+        val key = ROBUST_SDN_V1_ROW_KEYS[k]
+        var pre = key + ": "
+        if k > 0:
+            pre = ", " + pre
+        if row.substring(i, i + pre.byte_len()) != pre:
+            return ["row {n}: expected key `{key}`"]
+        i = i + pre.byte_len()
+        var e = -1
+        if key == "line":
+            e = _sdn_digits_end(row, i)
+        elif key == "boundary":
+            if row.substring(i, i + 4) == "true":
+                e = i + 4
+            elif row.substring(i, i + 5) == "false":
+                e = i + 5
+        else:
+            e = _sdn_quoted_end(row, i)
+            if e > 0 and key == "origin":
+                val o = row.substring(i + 1, e - 1)
+                if not ROBUST_SDN_V1_ORIGINS.contains(o):
+                    errs.push("row {n}: unknown origin `{o}`")
+        if e < 0:
+            return ["row {n}: bad value for `{key}`"]
+        i = e
+        k = k + 1
+    if i != row.byte_len() - 1:
+        errs.push("row {n}: trailing fields")
+    errs
+
+fn _sdn_total(line: text, key: text) -> i64:
+    val pre = "  " + key + ": "
+    if not line.starts_with(pre):
+        return -1
+    val rest = line.substring(pre.byte_len(), line.byte_len())
+    if _sdn_digits_end(rest, 0) != rest.byte_len():
+        return -1
+    rest.to_int()
+
+# Violations of the frozen v1 inventory SDN shape; [] means valid.
+pub fn robust_sdn_v1_violations(doc: text) -> [text]:
+    var lines = doc.split("\n")
+    if lines.len() > 0 and lines[lines.len() - 1] == "":
+        lines.pop()
+    if lines.len() < 6:
+        return ["document too short"]
+    var errs: [text] = []
+    if lines[0] != "inventory:":
+        errs.push("line 1: expected `inventory:`")
+    val files = _sdn_total(lines[1], "files")
+    val facts = _sdn_total(lines[2], "facts")
+    val boundary = _sdn_total(lines[3], "boundary")
+    if files < 0:
+        errs.push("line 2: expected `  files: N`")
+    if facts < 0:
+        errs.push("line 3: expected `  facts: N`")
+    if boundary < 0:
+        errs.push("line 4: expected `  boundary: N`")
+    if lines[4] != "  rows: [":
+        errs.push("line 5: expected `  rows: [`")
+    if lines[lines.len() - 1] != "  ]":
+        errs.push("last line: expected `  ]`")
+    var n_rows = 0
+    var n_boundary = 0
+    var r = 5
+    while r < lines.len() - 1:
+        n_rows = n_rows + 1
+        for e in _sdn_v1_row(lines[r], n_rows):
+            errs.push(e)
+        if lines[r].ends_with("boundary: true}"):
+            n_boundary = n_boundary + 1
+        r = r + 1
+    if facts >= 0 and facts != n_rows:
+        errs.push("facts={facts} but {n_rows} rows")
+    if boundary >= 0 and boundary != n_boundary:
+        errs.push("boundary={boundary} but {n_boundary} boundary rows")
+    errs
+
+export RobustParityAllow, ROBUST_SOURCES, ROBUST_DEFAULT_SOURCE, ROBUST_SURFACES, ROBUST_PARITY_ALLOW, ROBUST_SDN_V1_ROW_KEYS, ROBUST_SDN_V1_ORIGINS
+export robust_source_available, robust_fixture_paths, robust_render, robust_parity_diff, robust_parity_check, robust_sdn_v1_violations

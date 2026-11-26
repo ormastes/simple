@@ -1,0 +1,59 @@
+"""
+## Purpose and audience
+Purpose: Freeze the `simple robust inventory --sdn` document as schema v1:
+top-level `inventory:` with `files`, `facts`, `boundary` totals and a `rows`
+list whose rows carry exactly `file, line, function, subject, origin,
+boundary` in that order, with `origin` drawn from the eight v1 kinds.
+Audience: consumers of the robust inventory SDN and the HIR-source migration.
+## Operator workflow
+Run this spec with the test runner; a FAIL names each schema violation.
+## Compatibility and limitations
+Any change to the shape is a v2 and must add a new validator, not edit v1.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read}
+use app.cli.robust_source.{robust_render, robust_source_available, robust_fixture_paths, robust_sdn_v1_violations, ROBUST_SDN_V1_ROW_KEYS, ROBUST_SDN_V1_ORIGINS}
+
+fn fixture_sources(paths: [text]) -> [text]:
+    var out: [text] = []
+    for p in paths:
+        out.push(file_read(p))
+    out
+
+# @manual_section: robust_sdn_schema_v1
+describe "robust inventory SDN schema v1":
+    """The --sdn document shape is frozen."""
+
+    it "pins the v1 row keys and origin kinds":
+        expect(ROBUST_SDN_V1_ROW_KEYS).to_equal(["file", "line", "function", "subject", "origin", "boundary"])
+        expect(ROBUST_SDN_V1_ORIGINS).to_equal(["extern_decl", "param", "literal", "extern_return", "cast", "copy", "call", "expr"])
+
+    it "text source output over every robust fixture is valid v1":
+        step("Render the cross-file SDN and validate it")
+        val paths = robust_fixture_paths()
+        val doc = robust_render("inventory_sdn", "text", paths, fixture_sources(paths)).unwrap()
+        expect(robust_sdn_v1_violations(doc)).to_equal([])
+
+    it "hir source output is valid v1 when available":
+        val paths = robust_fixture_paths()
+        val r = robust_render("inventory_sdn", "hir", paths, fixture_sources(paths))
+        if robust_source_available("hir"):
+            expect(robust_sdn_v1_violations(r.unwrap())).to_equal([])
+        else:
+            expect(r.?).to_equal(false)
+
+    it "rejects drift: reordered keys, unknown origin, bad totals":
+        step("Validate hand-written broken documents")
+        val good = "inventory:\n  files: 1\n  facts: 1\n  boundary: 0\n  rows: [\n    {file: \"a.spl\", line: 3, function: \"f\", subject: \"x\", origin: \"param\", boundary: false}\n  ]\n"
+        expect(robust_sdn_v1_violations(good)).to_equal([])
+        val reorder = good.replace("function: \"f\", subject: \"x\"", "subject: \"x\", function: \"f\"")
+        expect(robust_sdn_v1_violations(reorder).len() > 0).to_equal(true)
+        val origin = good.replace("\"param\"", "\"mystery\"")
+        expect(robust_sdn_v1_violations(origin).len() > 0).to_equal(true)
+        val totals = good.replace("facts: 1", "facts: 2")
+        expect(robust_sdn_v1_violations(totals).len() > 0).to_equal(true)
+        val header = good.replace("inventory:", "inv:")
+        expect(robust_sdn_v1_violations(header).len() > 0).to_equal(true)
