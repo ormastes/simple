@@ -118,16 +118,33 @@ bootstrap_stage3_memory_darwin_default_cap_kib() {
     if [ -z "$bootstrap_stage3_darwin_bytes" ]; then
         bootstrap_stage3_darwin_bytes=$(sysctl -n hw.memsize 2>/dev/null || printf '0\n')
     fi
-    if bootstrap_stage3_memory_is_uint "$bootstrap_stage3_darwin_bytes" &&
-            [ "$bootstrap_stage3_darwin_bytes" -gt 0 ]; then
-        bootstrap_stage3_darwin_scaled_kib=$((bootstrap_stage3_darwin_bytes / 1024 / 3))
-        if [ "$bootstrap_stage3_darwin_scaled_kib" -lt "$bootstrap_stage3_darwin_floor_kib" ]; then
-            bootstrap_stage3_darwin_scaled_kib=$bootstrap_stage3_darwin_floor_kib
-        elif [ "$bootstrap_stage3_darwin_scaled_kib" -gt "$bootstrap_stage3_darwin_ceil_kib" ]; then
-            bootstrap_stage3_darwin_scaled_kib=$bootstrap_stage3_darwin_ceil_kib
+    if bootstrap_stage3_memory_is_uint "$bootstrap_stage3_darwin_bytes"; then
+        while :; do
+            case "$bootstrap_stage3_darwin_bytes" in
+                0?*) bootstrap_stage3_darwin_bytes=${bootstrap_stage3_darwin_bytes#0} ;;
+                *) break ;;
+            esac
+        done
+        case "$bootstrap_stage3_darwin_bytes" in
+            0)
+                printf '%s\n' "$bootstrap_stage3_darwin_floor_kib"
+                return 0
+                ;;
+            ???????????????????*)
+                printf '%s\n' "$bootstrap_stage3_darwin_ceil_kib"
+                return 0
+                ;;
+        esac
+        if [ "$bootstrap_stage3_darwin_bytes" -gt 0 ]; then
+            bootstrap_stage3_darwin_scaled_kib=$((bootstrap_stage3_darwin_bytes / 1024 / 3))
+            if [ "$bootstrap_stage3_darwin_scaled_kib" -lt "$bootstrap_stage3_darwin_floor_kib" ]; then
+                bootstrap_stage3_darwin_scaled_kib=$bootstrap_stage3_darwin_floor_kib
+            elif [ "$bootstrap_stage3_darwin_scaled_kib" -gt "$bootstrap_stage3_darwin_ceil_kib" ]; then
+                bootstrap_stage3_darwin_scaled_kib=$bootstrap_stage3_darwin_ceil_kib
+            fi
+            printf '%s\n' "$bootstrap_stage3_darwin_scaled_kib"
+            return 0
         fi
-        printf '%s\n' "$bootstrap_stage3_darwin_scaled_kib"
-        return 0
     fi
     printf '%s\n' "$bootstrap_stage3_darwin_floor_kib"
 }
@@ -179,9 +196,13 @@ bootstrap_stage3_memory_posix_args_kind() {
             while ($i < @args) {
                 if ($args[$i] eq "--") {
                     $i++; last;
-                } elsif ($args[$i] eq "-u" || $args[$i] eq "-C") {
+                } elsif ($args[$i] eq "-u" || $args[$i] eq "-C" ||
+                         $args[$i] eq "--unset" || $args[$i] eq "--chdir" ||
+                         $args[$i] =~ /\A-[i0S]+[uC]\z/) {
                     $i += 2;
-                } elsif ($args[$i] =~ /\A-[i0uS]+\z/ ||
+                } elsif ($args[$i] =~ /\A-[i0S]+\z/ ||
+                         $args[$i] =~ /\A-[i0S]*[uC].+/ ||
+                         $args[$i] =~ /\A--(?:unset|chdir)=/ ||
                          $args[$i] =~ /\A[A-Za-z_][A-Za-z0-9_]*=/) {
                     $i++;
                 } else {
@@ -197,9 +218,11 @@ bootstrap_stage3_memory_posix_args_kind() {
         }
         if ($exe =~ /\Aqemu-system-[A-Za-z0-9_+-]+\z/) {
             print "qemu\n";
-        } elsif ($exe eq "simple" && @args > 1 && $args[1] eq "native-build") {
+        } elsif ($exe =~ /\Asimple(?:[_-][A-Za-z0-9.+-]+)?(?:\.exe)?\z/ &&
+                 @args > 1 && $args[1] eq "native-build") {
             print "native-build\n";
-        } elsif ($exe eq "simple" && @args > 2 && $args[1] eq "replay" &&
+        } elsif ($exe =~ /\Asimple(?:[_-][A-Za-z0-9.+-]+)?(?:\.exe)?\z/ &&
+                 @args > 2 && $args[1] eq "replay" &&
                  $args[2] eq "missing-build-log.json") {
             print "replay-chain\n";
         } elsif ($arg0 =~ m{(?:^|/)scripts/bootstrap/bootstrap-from-scratch\.sh\z}) {

@@ -35,15 +35,42 @@ gib_bytes=$((1024 * 1024 * 1024))
   fail '48 GiB Darwin host did not scale to host_kib/3 (16 GiB)'
 [ "$(bootstrap_stage3_memory_darwin_default_cap_kib $((96 * gib_bytes)))" = 20971520 ] ||
   fail '96 GiB Darwin host exceeded 20 GiB ceiling'
+over64_err=$(mktemp "${TMPDIR:-/tmp}/darwin-cap-over64.XXXXXX")
+over64_cap=$(bootstrap_stage3_memory_darwin_default_cap_kib 9999999999999999999 2>"$over64_err")
+[ "$over64_cap" = 20971520 ] && [ ! -s "$over64_err" ] || {
+  rm -f "$over64_err"
+  fail "over-64-bit byte count returned cap=$over64_cap err=$(cat "$over64_err" 2>/dev/null || true)"
+}
+rm -f "$over64_err"
 
 # Non-Linux process classification must ignore -c wrapper strings naming
-# bootstrap-from-scratch.sh while catching real sibling bootstrap processes.
+# bootstrap-from-scratch.sh/native-build while catching flat bootstrap binaries.
 [ "$(bootstrap_stage3_memory_posix_args_kind 'bash -c "sh scripts/bootstrap/bootstrap-from-scratch.sh --resume"')" = none ] ||
   fail 'bash -c wrapper was misclassified as a bootstrap process'
 [ "$(bootstrap_stage3_memory_posix_args_kind 'sh -ec "scripts/bootstrap/bootstrap-from-scratch.sh"')" = none ] ||
   fail 'sh -ec wrapper was misclassified as a bootstrap process'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'bash -c "/tmp/simple_stage3 native-build"')" = none ] ||
+  fail 'bash -c wrapper invoking native-build was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'sh -ec "/tmp/simple_stage2 native-build"')" = none ] ||
+  fail 'sh -ec wrapper invoking simple_stage2 was misclassified'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'sh /tmp/helper.sh native-build')" = none ] ||
+  fail 'non-bootstrap shell script with native-build arg was misclassified'
 [ "$(bootstrap_stage3_memory_posix_args_kind '/bin/sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap')" = bootstrap ] ||
   fail 'direct bootstrap-from-scratch invocation was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage3 native-build --threads 1')" = native-build ] ||
+  fail 'simple_stage3 native-build was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage2 native-build')" = native-build ] ||
+  fail 'simple_stage2 native-build was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage3.exe native-build')" = native-build ] ||
+  fail 'simple_stage3.exe native-build was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage3 replay missing-build-log.json')" = replay-chain ] ||
+  fail 'simple_stage3 replay-chain was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind '/tmp/simple_stage2 replay missing-build-log.json')" = replay-chain ] ||
+  fail 'simple_stage2 replay-chain was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'env -u FOO /tmp/simple_stage3 native-build --threads 1')" = native-build ] ||
+  fail 'env -u VAR simple_stage3 native-build was missed'
+[ "$(bootstrap_stage3_memory_posix_args_kind 'grep native-build /tmp/log')" = none ] ||
+  fail 'grep native-build was misclassified as native-build'
 
 # Hardened exact argv[0]/argv[1], login-shell, env, option-arg, and quoted-path cases.
 [ "$(bootstrap_stage3_memory_posix_args_kind 'grep qemu-system-aarch64 /tmp/log')" = none ] ||

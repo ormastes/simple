@@ -221,22 +221,43 @@ describe "native cache scope retention floor and active shard protection":
         assert_equal(native_cache_scopes_keep_for_v1("", "8"), 10)
         assert_equal(native_cache_scopes_keep_for_v1("12", "8"), 12)
         assert_equal(native_cache_scopes_keep_for_v1("4", "8"), 4)
+        assert_equal(native_cache_scopes_keep_for_v1("0", "8"), 10)
+        assert_equal(native_cache_scopes_keep_for_v1("-3", "8"), 10)
         assert_equal(native_cache_scopes_keep_for_v1("bad", "8"), 10)
 
-    it "discovers active mir-queue and mir-run-latest ledgers":
+    it "dereferences mir-run-latest to protect an external queue ledger scope from eviction":
         # @req REQ-SSPEC-COMPILER
-        step("discovers active queue ledgers alongside cache and HIR roots")
+        step("dereferences mir-run-latest outside cache/hir roots and protects its scope")
         val root = fresh_root("ledgers")
         val cache = root + "/cache"
         val hir = root + "/hir"
-        val q_active = hir + "/mir-queue-123"
+        val q_external = root + "/external/mir-queue-123"
         val latest = hir + "/mir-run-latest"
+        val scope_ext = cache + "/s00000000000000000000000000000099"
+        val obj_ext = scope_ext + "/aot-ext.o"
         val _c = dir_create_all(cache)
-        val _q = dir_create_all(q_active)
-        val _l = file_write(latest, q_active + "\n")
-        val found = native_mir_shard_active_ledger_paths_v1(cache, hir, q_active, "")
-        assert_true(found.contains(q_active))
-        assert_true(found.contains(latest))
+        val _h = dir_create_all(hir)
+        val _q = dir_create_all(q_external)
+        val _s = dir_create_all(scope_ext)
+        val _o = file_write(obj_ext, "obj-ext")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/2@0+fork0/2")
+        assert_true(hir_shard_recovery_inventory(q_external, "ident", ["mod.ext"]))
+        assert_equal(native_mir_shard_claim_v1(q_external, "mod.ext", "ident"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(q_external, "mod.ext", obj_ext, 1, 0, "cap"))
+        assert_true(file_delete(scope_ext + "/.last-use"))
+        assert_false(file_exists(scope_ext + "/.last-use"))
+        val _l = file_write(latest, q_external + "\n")
+        val found = native_mir_shard_active_ledger_paths_v1(cache, hir, "", "")
+        assert_true(found.contains(q_external))
+        assert_false(found.contains(latest))
+        val _unset_keep = env_unset("SIMPLE_NATIVE_CACHE_SCOPES_KEEP")
+        val lease = native_cache_lease_begin(cache).unwrap()
+        val evicted = native_cache_scope_midbuild_sweep_v1(
+            lease, "s00000000000000000000000000000000", hir, "", "", "2")
+        native_cache_lease_end(lease)
+        assert_equal(evicted, 0)
+        assert_true(file_exists(scope_ext + "/.last-use"))
+        assert_true(file_exists(obj_ext))
         val _removed = dir_remove_all(root)
 
     it "protects Shard 0/8 and 1/8 ledger scopes from mid-build sweep and applies shard-count floor":
