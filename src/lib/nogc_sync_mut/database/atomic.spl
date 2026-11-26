@@ -17,22 +17,13 @@
 # INCORRECT USAGE (from application code):
 #   use std.database.atomic (atomic_write)      // ❌ Internal API
 
-# Direct extern declarations for bootstrap runtime compatibility
-# (use app.io wildcard import brings in timestamp_now/sleep_ms which
-#  are not available in the bootstrap runtime)
-extern fn rt_file_read_text(path: text) -> text?
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+# Host access goes through the SOSIX fs facade (no direct rt_* here).
 use std.io_runtime.{file_rename}
+use std.nogc_sync_mut.sosix.fs_v1.{file_create_excl, file_sync, file_write_text, file_publish_noreplace_raw, secure_temp_dir_raw}
+export use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_delete}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir, file_lock, file_unlock, file_modified_time}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.path.{dirname}
-extern fn rt_file_create_excl(path: text, content: text) -> bool
-extern fn rt_file_sync(path: text) -> bool
-extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
-extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
-extern fn rt_dir_remove(path: text, recursive: bool) -> bool
 use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{thread_sleep}
@@ -43,11 +34,7 @@ use std.io_runtime.{dir_exists}
 # (doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md).
 use std.io_runtime.{file_read}
 fn file_write(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
-fn file_exists(path: text) -> bool:
-    rt_file_exists(path)
-fn file_delete(path: text) -> bool:
-    rt_file_delete(path)
+    file_write_text(path, content)
 
 fn get_timestamp() -> i64:
     time_now_unix_micros()
@@ -141,7 +128,7 @@ class FileLock:
     fn create_lock_file() -> bool:
         val pid = getpid()
         val lock_content = "{pid}\n{get_timestamp()}"
-        rt_file_create_excl(self.lock_path, lock_content)
+        file_create_excl(self.lock_path, lock_content)
 
     # Break a lock previously judged stale (`judged` is the content that was
     # seen). Breakers are serialized by a kernel lock; under it the lock is
@@ -234,7 +221,7 @@ fn atomic_write(path: text, content: text) -> bool:
         return false
 
     # Flush to durable storage before rename (crash safety)
-    if not rt_file_sync(temp_path):
+    if not file_sync(temp_path):
         lock.release()
         return false
 
@@ -254,26 +241,26 @@ fn atomic_write_exclusive(path: text, content: text) -> bool:
         return false
     val separator = path.rfind("/")
     val parent = if separator < 0: "." else if separator == 0: "/" else: path[0:separator]
-    val stage_dir = rt_secure_temp_dir(parent, ".sdn-create")
+    val stage_dir = secure_temp_dir_raw(parent, ".sdn-create")
     if stage_dir.len() <= 0:
         return false
     val staged_path = stage_dir + "/database.sdn"
-    if not rt_file_create_excl(staged_path, content):
+    if not file_create_excl(staged_path, content):
         # A provider may have created the private stage file before a partial
         # write failed. Remove only this attempt's stage entry.
-        rt_file_delete(staged_path)
-        rt_dir_remove(stage_dir, false)
+        file_delete(staged_path)
+        dir_remove(stage_dir, false)
         return false
-    if not rt_file_sync(staged_path):
-        rt_file_delete(staged_path)
-        rt_dir_remove(stage_dir, false)
+    if not file_sync(staged_path):
+        file_delete(staged_path)
+        dir_remove(stage_dir, false)
         return false
-    val status = rt_file_publish_noreplace(staged_path, path)
+    val status = file_publish_noreplace_raw(staged_path, path)
     # Native and interpreter no-replace providers consume the stage on success;
     # also remove it here in case a provider reports success with a hard-link
     # fallback whose source unlink failed.
-    rt_file_delete(staged_path)
-    rt_dir_remove(stage_dir, false)
+    file_delete(staged_path)
+    dir_remove(stage_dir, false)
     status == 1
 
 # Byte-exact replacement for arbitrary user destinations. The secure-temp
@@ -288,14 +275,14 @@ fn atomic_write_bytes(path: text, content: [u8]) -> bool:
         Ok(directory): directory
         Err(error): return false
     val temp_path = "{staging}/payload"
-    if not rt_file_create_excl(temp_path, ""):
+    if not file_create_excl(temp_path, ""):
         dir_remove(staging, false)
         return false
     if not file_write_bytes(temp_path, content):
         file_delete(temp_path)
         dir_remove(staging, false)
         return false
-    if not rt_file_sync(temp_path):
+    if not file_sync(temp_path):
         file_delete(temp_path)
         dir_remove(staging, false)
         return false
@@ -362,7 +349,7 @@ fn atomic_write_batch(paths: [text], contents: [text]) -> bool:
     # Flush all temp files to durable storage before rename (crash safety)
     for idx in sorted_indices:
         val temp_path = atomic_temp_path(paths[idx])
-        if not rt_file_sync(temp_path):
+        if not file_sync(temp_path):
             var ri: i64 = 0
             while ri < locks.len():
                 locks[ri].release()
@@ -408,7 +395,7 @@ fn atomic_append(path: text, content: text) -> bool:
         return false
 
     # Flush to durable storage before rename (crash safety)
-    if not rt_file_sync(temp_path):
+    if not file_sync(temp_path):
         lock.release()
         return false
 
@@ -437,7 +424,7 @@ fn atomic_append_framed(path: text, content: text, header: text) -> bool:
     if not file_write(temp_path, existing + content):
         lock.release()
         return false
-    if not rt_file_sync(temp_path):
+    if not file_sync(temp_path):
         lock.release()
         return false
     val success = file_rename(temp_path, path)
