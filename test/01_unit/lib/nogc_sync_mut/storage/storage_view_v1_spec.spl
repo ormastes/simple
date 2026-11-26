@@ -13,6 +13,8 @@ use std.common.contracts.container.lifecycle_journal_v1.{lifecycle_journal_v1_de
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.storage.storage_view_v1.{_sv_merged_count_error}
 use app.io.file_ops.{path_absolute}
 
 fn _hex(b: [u8]) -> text:
@@ -257,3 +259,61 @@ describe "storage_view_v1 save, load and clone":
         expect(dirty.status).to_equal("rejected")
         expect(dirty.reason).to_equal("clone-dirty-upper")
         _cleanup(base)
+
+describe "storage_view_v1 hardening":
+    it "refuses reads and writes through a pre-existing junction in a volume":
+        val base = _temp("junction")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vol_dir = base + "/vol"
+        val outside = base + "/outside"
+        expect(dir_create_all(vol_dir)).to_equal(true)
+        expect(dir_create_all(outside)).to_equal(true)
+        expect(file_write_bytes(outside + "/secret.txt", "secret".bytes())).to_equal(true)
+        val made = process_run("cmd", ["/c", "mklink", "/J", (vol_dir + "/link").replace("/", "\\"), outside.replace("/", "\\")])
+        expect(made.2).to_equal(0)
+        val added = storage_view_v1_add_volume(view, "data", vol_dir, ViewFlagV1(true))
+        expect(added.status).to_equal("ok")
+        val read = storage_view_v1_read(added.view, "data/link/secret.txt")
+        expect(read.status).to_equal("rejected")
+        expect(read.reason).to_equal("path-escape")
+        val wrote = storage_view_v1_write(added.view, "data/link/new.txt", "evil".bytes())
+        expect(wrote.status).to_equal("rejected")
+        expect(wrote.reason).to_equal("path-escape")
+        expect(file_exists(outside + "/new.txt")).to_equal(false)
+        # Remove only the junction itself; the target dir must survive.
+        process_run("cmd", ["/c", "rmdir", (vol_dir + "/link").replace("/", "\\")])
+        expect(file_exists(outside + "/secret.txt")).to_equal(true)
+        _cleanup(base)
+
+    it "rejects reserved device names as view ids and root names":
+        val base = _temp("reserved")
+        val store = _store(base)
+        val made = storage_view_v1_create(store, base + "/views", "CON", "", StoreGenerationV1(0), ViewBytesV1(10))
+        expect(made.status).to_equal("rejected")
+        expect(made.reason).to_equal("view-id-invalid")
+        val view = _new_view(base, store, "v1", 100)
+        val saved = storage_view_v1_save(view, "nul.txt", StoreGenerationV1(0))
+        expect(saved.status).to_equal("rejected")
+        expect(saved.reason).to_equal("root-name-invalid")
+        _cleanup(base)
+
+    it "rejects a write that case-collides with a base path":
+        val base = _temp("casecol")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 100)
+        expect(storage_view_v1_write(view, "Readme.txt", "a".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(view, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        expect(loaded.status).to_equal("ok")
+        val clash = storage_view_v1_write(loaded.view, "README.txt", "b".bytes())
+        expect(clash.status).to_equal("rejected")
+        expect(clash.reason).to_equal("path-case-collision")
+        expect(storage_view_v1_write(loaded.view, "Readme.txt", "c".bytes()).status).to_equal("ok")
+        _cleanup(base)
+
+    it "rejects a merged entry count above the manifest decode cap":
+        # A real 4096-entry base is too slow on the interpreter; the save path
+        # calls this same check before any ingest.
+        expect(_sv_merged_count_error(4096)).to_equal("")
+        expect(_sv_merged_count_error(4097)).to_equal("manifest-too-many-entries")

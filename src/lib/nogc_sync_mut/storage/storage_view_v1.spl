@@ -13,7 +13,7 @@
 # base file), volumes are not part of save/quota, and clone does not carry
 # volumes. Design: doc/05_design/platform/container/simple_container_improvement.md
 
-use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_XXH3_128}
+use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_XXH3_128, hash_policy_v1_digest}
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
@@ -25,7 +25,7 @@ use std.common.contracts.container.lifecycle_journal_v1.{ContainerLifecycleJourn
     LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1,
     lifecycle_journal_v1_encode, lifecycle_journal_v1_decode, lifecycle_recovery_actions_v1}
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1,
-    immutable_store_v1_ingest_pinned, immutable_store_v1_open, immutable_store_v1_root_head, StoreRootHeadV1, immutable_store_v1_publish_root,
+    immutable_store_v1_ingest_pinned, immutable_store_v1_open, immutable_store_v1_root_head, StoreRootHeadV1, immutable_store_v1_publish_root, immutable_store_v1_pin,
     immutable_store_v1_release_pin}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_size_raw,
     file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes}
@@ -134,7 +134,7 @@ fn _sv_id_valid(value: text) -> bool:
     for b in value.bytes():
         if not _sv_is_id_byte(b):
             return false
-    true
+    not _sv_reserved_stem(value)
 
 # Root names follow the store's own name alphabet (plus '.') but never "."/"..".
 fn _sv_root_name_valid(value: text) -> bool:
@@ -145,7 +145,12 @@ fn _sv_root_name_valid(value: text) -> bool:
     for b in value.bytes():
         if not (_sv_is_id_byte(b) or b == 46):
             return false
-    true
+    if value.ends_with("."):
+        return false
+    val dot = value.index_of(".")
+    if dot >= 0:
+        return not _sv_reserved_stem(value.substring(0, dot))
+    not _sv_reserved_stem(value)
 
 fn _sv_normalize_root(root: text) -> text:
     var out = root.replace("\\", "/")
@@ -434,9 +439,13 @@ fn _sv_scan_upper(upper: text) -> Result<SvScanV1, text>:
         sizes.push(size)
     Ok(SvScanV1(paths: paths, sizes: sizes))
 
-# Create each missing directory below `base`, refusing symlinks and files in
-# the way. Returns "" or a reject reason.
-fn _sv_prepare_parents(base: text, segs: [text]) -> text:
+# Walk every parent component below `base` with no-follow checks, shared by
+# reads and writes so a pre-existing junction/symlink cannot redirect either.
+# With `create` true, missing directories are created; otherwise a missing
+# component returns "path-missing". Returns "" or a reason.
+fn _sv_check_parents(base: text, segs: [text], create: ViewFlagV1) -> text:
+    if not dir_is_real_no_follow(base):
+        return "volume-dir-missing"
     var current = base
     for i in 0..(segs.len() - 1):
         current = current + "/" + segs[i]
@@ -445,13 +454,15 @@ fn _sv_prepare_parents(base: text, segs: [text]) -> text:
                 return "path-escape"
         elif file_exists(current):
             return "path-conflict"
+        elif not create.value:
+            return "path-missing"
         elif not dir_create_all(current):
             return "write-failed"
     ""
 
 fn _sv_write_file(base: text, rel: text, bytes: [u8]) -> text:
     val segs = rel.split("/")
-    val prep = _sv_prepare_parents(base, segs)
+    val prep = _sv_check_parents(base, segs, ViewFlagV1(true))
     if prep != "":
         return prep
     val target = base + "/" + rel
@@ -612,6 +623,14 @@ pub fn storage_view_v1_write(view: StorageViewV1, rel_path: text, bytes: [u8]) -
             return _sv_write_rejected(volume_reason)
         return ViewWriteV1(status: "ok", reason: "", used: ViewBytesV1(0))
     val upper = _sv_upper_dir(view.view_root, view.view_id)
+    if view.base_manifest_key != "":
+        val base = match _sv_manifest_load(view.store, view.base_manifest_key):
+            case Ok(value): value
+            case Err(reason): return _sv_write_rejected("base-manifest-invalid: " + reason)
+        val wanted = rel_path.to_lower()
+        for p in base.paths:
+            if p != rel_path and p.to_lower() == wanted:
+                return _sv_write_rejected("path-case-collision")
     val scan = match _sv_scan_upper(upper):
         case Ok(value): value
         case Err(reason): return _sv_write_rejected(reason)
@@ -654,9 +673,17 @@ fn _sv_read_base(view: StorageViewV1, rel_path: text) -> ViewReadV1:
             return ViewReadV1(status: "ok", reason: "", bytes: opened.bytes)
     _sv_read_result("missing", "path-missing")
 
-fn _sv_read_host_file(path: text) -> ViewReadV1:
+fn _sv_read_host_file(base: text, rel: text) -> ViewReadV1:
+    val checked = _sv_check_parents(base, rel.split("/"), ViewFlagV1(false))
+    if checked == "path-missing":
+        return _sv_read_result("missing", "path-missing")
+    if checked != "":
+        return _sv_read_result("rejected", checked)
+    val path = base + "/" + rel
     if not file_exists(path):
         return _sv_read_result("missing", "path-missing")
+    if is_dir(path):
+        return _sv_read_result("rejected", "path-conflict")
     match file_read_regular_no_follow_bounded_bytes(path, _SV_MAX_FILE_BYTES):
         case Ok(value): ViewReadV1(status: "ok", reason: "", bytes: value)
         case Err(_): _sv_read_result("corrupt", "read-failed")
@@ -673,16 +700,22 @@ pub fn storage_view_v1_read(view: StorageViewV1, rel_path: text) -> ViewReadV1:
         if rest_at < 0:
             return _sv_read_result("rejected", "path-unauthorized")
         val rest = rel_path.substring(rest_at + 1, rel_path.byte_len())
-        return _sv_read_host_file(view.volumes[vol].host_dir + "/" + rest)
+        return _sv_read_host_file(view.volumes[vol].host_dir, rest)
     val upper = _sv_upper_dir(view.view_root, view.view_id)
     if not dir_is_real_no_follow(upper):
         return _sv_read_result("rejected", "upper-missing")
-    val path = upper + "/" + rel_path
-    if file_exists(path) and not is_dir(path):
-        return _sv_read_host_file(path)
+    val from_upper = _sv_read_host_file(upper, rel_path)
+    if from_upper.status != "missing":
+        return from_upper
     _sv_read_base(view, rel_path)
 
 # ------------------------------------------------------------------ save
+
+# Merged base+upper entry count must stay decodable by load (manifest cap).
+fn _sv_merged_count_error(count: i64) -> text:
+    if count > _SV_MAX_FILES:
+        return "manifest-too-many-entries"
+    ""
 
 fn _sv_save_inner(view: StorageViewV1, root_name: text, expected: StoreGenerationV1,
         pin_id: text, owner: text) -> ViewSaveV1:
@@ -701,6 +734,23 @@ fn _sv_save_inner(view: StorageViewV1, root_name: text, expected: StoreGeneratio
             paths.push(base.paths[i])
             keymap[base.paths[i]] = base.keys[i]
             lenmap[base.paths[i]] = base.lens[i]
+        # Keep every base object reachable for the whole save (GC cannot
+        # dangle them between ingest and publish).
+        var base_refs: [text] = [view.base_manifest_key]
+        for k in base.keys:
+            base_refs.push(k)
+        val pinned = immutable_store_v1_pin(view.store, pin_id, owner, base_refs)
+        if pinned != "":
+            return _sv_save_rejected("base-pin-failed: " + pinned)
+    # The merged manifest must stay loadable: enforce the decode cap before
+    # any ingest so a root that load would reject is never published.
+    var merged_count: i64 = paths.len()
+    for rel in scan.paths:
+        if not keymap.contains_key(rel):
+            merged_count = merged_count + 1
+    val cap_reason = _sv_merged_count_error(merged_count)
+    if cap_reason != "":
+        return _sv_save_rejected(cap_reason)
     # Upper files override base entries of the same path; the manifest encode
     # below rejects any remaining case-insensitive collision before publishing.
     for i in 0..scan.paths.len():
@@ -755,7 +805,18 @@ pub fn storage_view_v1_save(view: StorageViewV1, root_name: text, expected: Stor
         return _sv_save_rejected("root-name-invalid")
     if expected.value < 0:
         return _sv_save_rejected("root-generation-invalid")
-    _sv_save_inner(view, root_name, expected, "save-" + view.view_id, "view-" + view.view_id)
+    # The pin id carries a short digest of view_root so two view roots that
+    # reuse one view_id cannot share (or release) each other's pin.
+    val scope = hash_policy_v1_digest(HASH_POLICY_V1_XXH3_128, view.view_root.bytes())
+    if scope.status != "ok" or scope.hex.byte_len() < 8:
+        return _sv_save_rejected("pin-scope-failed")
+    val pin_id = "save-" + scope.hex.substring(0, 8) + "-" + view.view_id
+    val owner = "view-" + scope.hex.substring(0, 8) + "-" + view.view_id
+    val result = _sv_save_inner(view, root_name, expected, pin_id, owner)
+    if result.status != "ok":
+        # Every failure path drops the pin; "pin-missing" just means none was made.
+        immutable_store_v1_release_pin(view.store, pin_id, owner)
+    result
 
 # ------------------------------------------------------------------ load
 

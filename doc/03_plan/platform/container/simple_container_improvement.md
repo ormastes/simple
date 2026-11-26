@@ -54,6 +54,8 @@ Lane A (SCV adapter, `work/container-inc2-scv-adapter-20261126`): `scv_adapter_v
 
 Lane B (`work/container-inc2-storage-view-20261126`) implemented `src/lib/nogc_sync_mut/storage/storage_view_v1.spl` (host copy-on-write view: create/open/add_volume/write/read/save/load/clone/destroy) with `storage_view_v1_spec.spl` (9 examples). Path-policy confinement only, not kernel confinement; no whiteouts; `load` uses a fixed 64 MiB default quota; clone does not carry volumes.
 
+Lane B open items (Fable review 2026-11-26, not fixed here): create has a crash window between view-dir creation and the journal/meta writes; a stale view handle can still reach volume dirs after destroy; `rt_dir_walk` swallows read_dir errors so the upper scan can fail open; `rt_dir_remove_all` may follow ancestor junctions during destroy.
+
 ## Review follow-ups (Fable review 2026-11-26)
 
 Fixed in increment 1: root CAS made atomic via no-replace `roots/<name>.g<N>.claim`
