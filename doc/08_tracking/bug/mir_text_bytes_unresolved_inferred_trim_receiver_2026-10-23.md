@@ -1,6 +1,25 @@
 # MIR: text `.bytes()` unresolved when receiver type is inferred from `trim()`
 
-Status: open (compiler fix applied, unverified by a rebuilt compiler; workaround active)
+Status: open (compiler fix INSUFFICIENT — stage1-built stage2 still miscompiles the inferred form; workaround reinstated 2026-11-27)
+
+## 2026-11-27 verification result (lane v7c, pin 06ba866385d5)
+
+The workaround was retired by 41cbec8c26d (2026-11-25) while verification was
+still pending. The stage2 compiler built by stage1 from pinned 06ba866385d5
+miscompiles `val trimmed = _sdn_strip_leading_comment_lines(source).trim()`:
+the stage2 compiler-test matrix `test_runner_build` row failed at dyn-lib
+packaging with `src/compiler/00.common/simple.sdn: project.name is missing` —
+the SDN parse of that manifest (37 leading comment lines, so the strip returns
+a non-trivial slice) loses `project.name` inside the stage2 binary. Reproduced
+outside the harness with the same stage2 binary:
+`native-build --mode dynload --entry-closure --source src --entry src/app/test_runner_new/main.spl`
+from the pinned root fails identically after link (321/321 objects). Probes
+compiled BY that stage2 binary parse the same manifest bytes correctly both
+from an embedded string and via `std.io_runtime.file_read` (len=2528,
+NAME=simple-compiler-common), so the parser/file_read sources are correct and
+the defect is in the stage1→stage2 compiled copy. The `method_calls_literals.spl`
+`bytes_receiver_has_declaration` fix does not cover this path. Workaround
+annotation restored at src/lib/common/sdn/parser.spl `parse`.
 
 ## Symptom
 Stage 2 pure-Simple `native-build` of the standalone test runner fails in MIR on 1/287 modules:
