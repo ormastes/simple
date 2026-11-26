@@ -1,0 +1,170 @@
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/lean_native_constructor_default_argument_2026_10_21.md
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{HirCallArg, HirExpr, HirExprKind, HirParam}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.resident_default_global_owner.*
+
+fn rdc_span() -> Span:
+    Span(start: 0, end: 0, line: 0, col: 1, file: "synthetic", length: 0)
+
+fn rdc_named_type(sym: SymbolId) -> HirType:
+    HirType(kind: HirTypeKind.Named(sym, []), span: rdc_span())
+
+fn rdc_int_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: rdc_span())
+
+describe "Resident parameter default constructor relocation":
+    it "relocates imported struct constructor call away from colliding consumer symbol ids":
+        var provider_syms = SymbolTable.new()
+        val provider_limits = provider_syms.define(
+            "LeanRecursiveArrayLimitsV1",
+            SymbolKind.Struct,
+            None,
+            rdc_span(),
+            Visibility.Public,
+            false,
+            Some("plugins.backend_lean.lean_type_declarations")
+        )
+        val callee = "plugins.backend_lean.lean_type_declarations.lean_plan_type_declarations"
+        val owner = "plugins.backend_lean.lean_type_declarations"
+        bootstrap_default_provider_register(owner, provider_syms, [])
+
+        val default_callee = HirExpr(
+            kind: HirExprKind.Var(provider_limits),
+            has_type_: true,
+            type_: rdc_named_type(provider_limits),
+            span: rdc_span()
+        )
+        val default_expr = HirExpr(
+            kind: HirExprKind.Call(default_callee, [], []),
+            has_type_: true,
+            type_: rdc_named_type(provider_limits),
+            span: rdc_span()
+        )
+        val param = HirParam(
+            symbol: SymbolId(id: 99),
+            name: "limits",
+            type_: rdc_named_type(provider_limits),
+            has_default: true,
+            default: default_expr,
+            span: rdc_span(),
+            is_mutable: false
+        )
+        bootstrap_fn_param_defaults_register(callee, [param], owner)
+
+        var consumer_syms = SymbolTable.new()
+        val colliding_fn = consumer_syms.define(
+            "lean_plan_type_declarations",
+            SymbolKind.Function,
+            None,
+            rdc_span(),
+            Visibility.Public,
+            false,
+            Some("plugins.backend_lean.lean_backend")
+        )
+        expect(colliding_fn.id).to_equal(provider_limits.id)
+
+        var lowering = MirLowering.new(consumer_syms)
+        lowering.current_module_id = "plugins.backend_lean.lean_backend"
+        val relocated = lowering.bind_resident_default_global_v1(callee, default_expr)
+
+        expect(lowering.errors.len()).to_equal(0)
+        match relocated.kind:
+            case HirExprKind.Call(relocated_callee, args, _):
+                expect(args.len()).to_equal(0)
+                match relocated_callee.kind:
+                    case HirExprKind.NamedVar(target_id, target_name):
+                        expect(target_id.id).to_be_greater_than(colliding_fn.id)
+                        expect(target_name).to_equal("LeanRecursiveArrayLimitsV1")
+                        val sym = lowering.symbols.get_symbol_raw(target_id.id)
+                        expect(sym != None).to_equal(true)
+                        if val present_sym = sym:
+                            expect(present_sym.kind == SymbolKind.Struct).to_equal(true)
+                    case _:
+                        expect(false).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+
+    it "relocates imported StructLit default expressions":
+        var provider_syms = SymbolTable.new()
+        val provider_limits = provider_syms.define(
+            "Limits",
+            SymbolKind.Struct,
+            None,
+            rdc_span(),
+            Visibility.Public,
+            false,
+            Some("test.policy")
+        )
+        val owner = "test.policy"
+        val callee = "test.policy.policy_signature"
+        bootstrap_default_provider_register(owner, provider_syms, [])
+
+        val field_val = HirExpr(kind: HirExprKind.IntLit(128, None), has_type_: true, type_: rdc_int_type(), span: rdc_span())
+        val default_expr = HirExpr(
+            kind: HirExprKind.StructLit(rdc_named_type(provider_limits), [("max_depth", field_val)]),
+            has_type_: true,
+            type_: rdc_named_type(provider_limits),
+            span: rdc_span()
+        )
+        val param = HirParam(
+            symbol: SymbolId(id: 50),
+            name: "limits",
+            type_: rdc_named_type(provider_limits),
+            has_default: true,
+            default: default_expr,
+            span: rdc_span(),
+            is_mutable: false
+        )
+        bootstrap_fn_param_defaults_register(callee, [param], owner)
+
+        var consumer_syms = SymbolTable.new()
+        val colliding_consumer_fn = consumer_syms.define(
+            "main",
+            SymbolKind.Function,
+            None,
+            rdc_span(),
+            Visibility.Private,
+            false,
+            Some("test.consumer")
+        )
+        var lowering = MirLowering.new(consumer_syms)
+        lowering.current_module_id = "test.consumer"
+        val relocated = lowering.bind_resident_default_global_v1(callee, default_expr)
+
+        expect(lowering.errors.len()).to_equal(0)
+        match relocated.kind:
+            case HirExprKind.StructLit(relocated_ty, fields):
+                expect(fields.len()).to_equal(1)
+                match relocated_ty.kind:
+                    case HirTypeKind.Named(target_id, _):
+                        expect(target_id.id).to_be_greater_than(colliding_consumer_fn.id)
+                    case _:
+                        expect(false).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+
+    it "fails closed when provider symbol table is missing for constructor call":
+        var consumer_syms = SymbolTable.new()
+        val provider_sid = SymbolId(id: 42)
+        val default_callee = HirExpr(kind: HirExprKind.Var(provider_sid), has_type_: false, type_: rdc_int_type(), span: rdc_span())
+        val default_expr = HirExpr(kind: HirExprKind.Call(default_callee, [], []), has_type_: false, type_: rdc_int_type(), span: rdc_span())
+        bootstrap_fn_param_defaults_register(
+            "missing.provider.fn",
+            [HirParam(symbol: SymbolId(id: 1), name: "x", type_: rdc_int_type(), has_default: true, default: default_expr, span: rdc_span(), is_mutable: false)],
+            "missing.provider"
+        )
+        var lowering = MirLowering.new(consumer_syms)
+        lowering.current_module_id = "test.consumer"
+        val relocated = lowering.bind_resident_default_global_v1("missing.provider.fn", default_expr)
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        match relocated.kind:
+            case HirExprKind.Error:
+                expect(true).to_equal(true)
+            case _:
+                expect(false).to_equal(true)

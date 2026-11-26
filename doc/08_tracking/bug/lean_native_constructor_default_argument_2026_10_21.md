@@ -1,8 +1,8 @@
 # Imported constructor-expression default blocks Lean bootstrap owner
 
 - Canonical ID: `lean_native_constructor_default_argument_2026_10_21`
-- Status: OPEN; source workaround active. Bug DB reconciliation pending because
-  the available exact compiler is bootstrap-only, not a qualified full CLI.
+- Status: FIXED in pure-Simple `50.mir` (`resident_default_global_owner.spl`);
+  workaround retired in `src/plugins/backend_lean/lean_backend.spl`.
 - Original source/recovery commit: `0bfa8039acd`.
 - Owner: imported default-expression lowering in the bootstrap producer;
   `src/plugins/backend_lean/lean_backend.spl:769` is the affected consumer.
@@ -133,7 +133,19 @@ workaround must stay. Separately, the committed `omitted.spl`/`policy.spl` fixtu
    the provider's `Limits` `SymbolId`, colliding and emitting broken LLVM IR
    (`%l2 = call i64 @lean.decls.plan_decls()`, `%l3 = call i64 @lean.decls.plan_decls(ptr %l1, i64 %l2)`).
 
-Workaround `@workaround bug=lean_native_constructor_default_argument_2026_10_21`
-in `src/plugins/backend_lean/lean_backend.spl:770` MUST STAY (`50.mir` fix
-tracked separately). Pinned by
-`test/01_unit/compiler/backend/wa_src_lane6_lean_default_spec.spl`.
+## Pure-Simple `50.mir` fix & workaround retirement (2026-11-26)
+
+1. `src/compiler/50.mir/_MirLowering/resident_default_global_owner.spl`
+   (`bind_resident_default_global_v1` / `bind_resident_default_expr_v1`) now
+   recursively relocates cross-module parameter default expressions (`Call`,
+   `StructLit`, `Var`/`NamedVar`, and nested provider expressions/types) against
+   `bootstrap_default_provider_symbols(owner)` via `relocate_provider_default` /
+   `relocate_provider_type`, while continuing to bind resident globals for
+   `Const`/`Variable` references and failing closed on missing provider symbols.
+2. Retired `# @workaround bug=lean_native_constructor_default_argument_2026_10_21`
+   from `src/plugins/backend_lean/lean_backend.spl` so
+   `lean_plan_type_declarations(module, "{self.module_prefix}.{module.name}")?`
+   uses the default `LeanRecursiveArrayLimitsV1()` directly.
+3. Unit specs updated/added:
+   - `test/01_unit/compiler/mir/resident_default_ctor_relocate_spec.spl`
+   - `test/01_unit/compiler/backend/wa_src_lane6_lean_default_spec.spl`
