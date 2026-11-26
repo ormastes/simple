@@ -1,10 +1,14 @@
 # Remaining no-import carve-outs: `error`/`panic`, block-DSL bodies, `nilnilnilnilnilnil`
 
 - **Date:** 2026-08-01
-- **Status:** OPEN — carve-out 1 (`panic`/`error`) fixed in source (verified
-  2026-11-11); block-DSL and `nilnilnilnilnilnil` carve-outs remain open;
-  the pinning spec's panic example is currently harness-blocked by an
-  unrelated PR #7597 visibility regression (see 2026-11-11 addendum).
+- **Status:** VERIFIED 2026-11-26 on aarch64 Linux (admitted Stage 2 at
+  76892f19a3a, native llvm and cranelift). Carve-out 1: `panic` builds, a bare
+  `error(...)` is a hard unresolved name. Carve-out 4: no identifier leak from
+  block-DSL strings (brace-escape spec 6/6). Carve-out 5: all of
+  `parser_preprocessor.spl` lowers through the compiled frontend with 0
+  unresolved names and no `nilnil` identifier. The pinning spec passes 2/2. The
+  native backslash-brace value divergence is tracked as
+  `native_text_literal_brace_escape_unprocessed_2026-11-26`.
 - **Parent:** `selfhost_names_with_no_import_path_masked_by_seed_flat_resolution_2026-08-01.md`
 - **Sibling docs (FIXED this lane):**
   - `match_arm_underscore_subpattern_becomes_lambda_2026-08-01.md` (parent
