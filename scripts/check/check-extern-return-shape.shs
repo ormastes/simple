@@ -11,7 +11,8 @@
 #
 # Census (committed content only, never the working tree — a sparse checkout
 # would undercount): `git grep <rev>` over src/**/*.spl excluding **/vendor/**,
-# lines containing `extern fn rt_` whose first non-blank char is not `#`.
+# lines containing `extern fn rt_` whose first non-blank char is not `#` and
+# whose `extern` is not inside a string literal (no `"` before it).
 # Return shape = text after `->` that follows the parameter list, whitespace
 # removed; no `->` = `()`. Generic params are renamed positionally ($G1, $G2…)
 # so `<T> -> T?` and `<TElement> -> TElement?` are one shape. `void` and `()`
@@ -57,6 +58,7 @@ normalize() {
       if (s ~ /^[ \t]*#/) next
       sub(/#.*$/,"",s)
       if (!match(s,/extern[ \t]+fn[ \t]+rt_[A-Za-z0-9_]*/)) next
+      if (substr(s,1,RSTART-1) ~ /"/) next   # declaration text inside a string literal
       hd=substr(s,RSTART,RLENGTH); sub(/extern[ \t]+fn[ \t]+/,"",hd); name=hd
       rest=substr(s,RSTART+RLENGTH)
       np=0
@@ -126,7 +128,7 @@ selftest() {
     r="$st/repo"; mkdir -p "$r/src/a" "$r/src/b" "$r/src/vendor/x"
     git -C "$r" init -q && git -C "$r" config core.autocrlf false && git -C "$r" config user.email t@t && git -C "$r" config user.name t
     printf 'extern fn rt_one(x: i64) -> i64\nextern fn rt_gen<T>(t: i64) -> T?\nextern fn rt_dup(x: i64) -> i64\n' > "$r/src/a/m.spl"
-    printf '# extern fn rt_one(x: i64) -> text\nextern fn rt_gen<TElem>(t: i64) -> TElem?\nextern fn rt_dup(x: i64) -> text?\n' > "$r/src/b/m.spl"
+    printf 'val s = "extern fn rt_one(x: i64) -> bool"\n# extern fn rt_one(x: i64) -> text\nextern fn rt_gen<TElem>(t: i64) -> TElem?\nextern fn rt_dup(x: i64) -> text?\n' > "$r/src/b/m.spl"
     printf 'extern fn rt_one(x: i64) -> bool\n' > "$r/src/vendor/x/m.spl"
     git -C "$r" add -A && git -C "$r" commit -qm base
     fails=0
