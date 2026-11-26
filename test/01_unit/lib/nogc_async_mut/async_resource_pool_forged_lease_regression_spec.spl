@@ -1,0 +1,26 @@
+# Regression spec: AsyncResourcePool refuses forged/unclaimed slot releases
+# instead of inflating permit counts above capacity.
+
+use std.spec.*
+use std.nogc_async_mut.async.resource_pool.{AsyncResourcePool, AsyncResourceLease}
+
+describe "AsyncResourcePool unclaimed lease guard":
+    it "rejects a forged lease on an unclaimed slot without inflating available permits":
+        var pool = AsyncResourcePool.with_resources([10, 20]).unwrap()
+        val held = pool.try_acquire().unwrap()
+        expect(pool.available()).to_equal(1)
+
+        val other_slot = if held.slot == 0: 1 else: 0
+        val forged = AsyncResourceLease(pool_id: held.pool_id, slot: other_slot, generation: 0)
+
+        expect(pool.lease_error(forged)).to_equal("stale resource lease")
+        expect(pool.resource(forged).is_none()).to_equal(true)
+        expect(pool.release(forged)).to_equal(false)
+        expect(pool.available()).to_equal(1)
+
+        expect(pool.release(held)).to_equal(true)
+        expect(pool.available()).to_equal(2)
+        expect(pool.release(held)).to_equal(false)
+        expect(pool.available()).to_equal(2)
+        expect(pool.close()).to_equal(true)
+        expect(pool.free()).to_equal(true)

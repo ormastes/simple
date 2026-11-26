@@ -69,13 +69,22 @@ struct MarkSweepResult:
     trashed_manifests: i64
     trashed_artifacts: i64
 
+var _mark_trash_seq: i64 = 0
+
 fn trash_dir(root: text) -> text:
     "{root}/trash"
 
+fn _sanitize_trash_name(path: text) -> text:
+    var clean = path.replace("\\", "_")
+    clean = clean.replace("/", "_")
+    clean = clean.replace(":", "_")
+    clean
+
 fn move_to_trash(root: text, path: text) -> bool:
     mark_dir_create_all_raw(trash_dir(root))
-    val stamp = "{mark_process_id_raw()}-{mark_time_now_unix_micros_raw()}"
-    val name = path.replace("/", "_")
+    _mark_trash_seq = _mark_trash_seq + 1
+    val stamp = "{mark_process_id_raw()}-{mark_time_now_unix_micros_raw()}-{_mark_trash_seq}"
+    val name = _sanitize_trash_name(path)
     mark_file_move_raw(path, "{trash_dir(root)}/{name}-{stamp}")
 
 # Collect every action-manifest file path under root/actions.
@@ -111,6 +120,8 @@ fn read_pins(root: text) -> [text]:
         return []
     val maybe_content = file_read_nullable(path)
     if maybe_content.is_none():
+        if not mark_file_exists_raw(path):
+            return []
         panic("E-SFFI-CACHE-PINS-READ: unreadable existing pins file: {path}")
     val content = maybe_content.unwrap()
     var out: [text] = []
@@ -157,6 +168,8 @@ fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
     for path in action_paths:
         val maybe_content = file_read_nullable(path)
         if maybe_content.is_none():
+            if not mark_file_exists_raw(path):
+                continue
             panic("E-SFFI-CACHE-MANIFEST-READ: unreadable existing manifest: {path}")
         val content = maybe_content.unwrap()
         match action_manifest_parse(content):

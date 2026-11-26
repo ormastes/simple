@@ -7,6 +7,7 @@ use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_wait, process
 use std.nogc_sync_mut.io.process_ops.{shell_int}
 use std.nogc_sync_mut.io.file_shell.{shell_output}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_delete, file_exists}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 use std.test_runner.test_runner_execute.{find_simple_binary, build_child_args, make_result_from_output}
@@ -32,6 +33,7 @@ val _WAIT_POLL_INITIAL_MS = 10
 val _WAIT_POLL_MEDIUM_MS = 50
 val _WAIT_POLL_MAX_MS = 100
 val _WAIT_POLL_MAX_ITERATIONS = 6000
+var _async_temp_seq: i64 = 0
 
 # ============================================================================
 # Temp File Management
@@ -54,6 +56,8 @@ fn create_temp_files(file_path: text) -> (text, text):
     Returns: (stdout_file, stderr_file)
     """
     val timestamp = time_now_unix_micros()
+    _async_temp_seq = _async_temp_seq + 1
+    val pid = getpid()
 
     # Replace path separators (chained replace breaks in runtime)
     var base = file_path
@@ -77,8 +81,9 @@ fn create_temp_files(file_path: text) -> (text, text):
     var sep = "/"
     if os == "windows":
         sep = "\\"
-    val stdout_file = "{tmp_dir}{sep}simple_test_{base}_{timestamp}_out.txt"
-    val stderr_file = "{tmp_dir}{sep}simple_test_{base}_{timestamp}_err.txt"
+    val stamp = "{pid}_{timestamp}_{_async_temp_seq}"
+    val stdout_file = "{tmp_dir}{sep}simple_test_{base}_{stamp}_out.txt"
+    val stderr_file = "{tmp_dir}{sep}simple_test_{base}_{stamp}_err.txt"
 
     # Initialize empty files
     file_write(stdout_file, "")
@@ -106,7 +111,7 @@ fn _find_completed_run(runs: [AsyncTestRun]) -> i64:
     var idx = 0
     while idx < runs.len():
         val run = runs[idx]
-        if not process_is_running(run.pid):
+        if run.pid <= 0 or not process_is_running(run.pid):
             return idx
         idx = idx + 1
     -1
@@ -170,9 +175,10 @@ fn collect_async_result(run: AsyncTestRun) -> TestFileResult:
     Returns: TestFileResult
     """
     # Wait for process to complete (with timeout)
-    val exit_code = process_wait(run.pid, run.timeout_ms)
+    val exit_code = if run.pid > 0: process_wait(run.pid, run.timeout_ms) else: -1
     # Unregister from tracker now that the process has been reaped
-    untrack_process(run.pid)
+    if run.pid > 0:
+        untrack_process(run.pid)
 
     val end_time = time_now_unix_micros()
     val duration_ms = (end_time - run.start_time) / 1000
@@ -288,6 +294,34 @@ fn run_tests_parallel(
                         new_runs.push(active_runs[idx])
                     idx = idx + 1
                 active_runs = new_runs
+            else:
+                # Poll timeout: terminate expired or stalled runs so active_runs
+                # cannot spin forever with completed_idx == -1.
+                val now_us = time_now_unix_micros()
+                var remaining_runs: [AsyncTestRun] = []
+                for run in active_runs:
+                    val elapsed_ms = (now_us - run.start_time) / 1000
+                    if run.pid <= 0 or not process_is_running(run.pid) or elapsed_ms >= run.timeout_ms:
+                        if run.pid > 0 and process_is_running(run.pid):
+                            process_kill(run.pid)
+                        val result = collect_async_result(run)
+                        results.push(result)
+                    else:
+                        remaining_runs.push(run)
+                if remaining_runs.len() == active_runs.len():
+                    val victim = active_runs[0]
+                    if victim.pid > 0:
+                        process_kill(victim.pid)
+                    val victim_result = collect_async_result(victim)
+                    results.push(victim_result)
+                    var trimmed: [AsyncTestRun] = []
+                    var idx = 1
+                    while idx < active_runs.len():
+                        trimmed.push(active_runs[idx])
+                        idx = idx + 1
+                    active_runs = trimmed
+                else:
+                    active_runs = remaining_runs
 
     results
 
@@ -347,11 +381,12 @@ fn run_tests_parallel_with_monitoring(
             val elapsed_ms = (current_time - run.start_time) / 1000
 
             if elapsed_ms > run.timeout_ms:
-                process_kill(run.pid)
+                if run.pid > 0:
+                    process_kill(run.pid)
                 val result = collect_async_result(run)
                 results.push(result)
                 had_completion = true
-            elif not process_is_running(run.pid):
+            elif run.pid <= 0 or not process_is_running(run.pid):
                 val result = collect_async_result(run)
                 results.push(result)
                 had_completion = true

@@ -15,6 +15,11 @@ pub struct NativeCacheLease:
     directory: text
     handle: i64
 
+var _active_native_lease_dirs: Dict<text, i64> = {}
+
+fn _lease_dir_key(path: text) -> text:
+    path.replace("\\", "/")
+
 pub fn native_cache_build_root(override_root: text) -> text:
     if override_root != "":
         return override_root
@@ -64,13 +69,27 @@ fn native_cache_lease_register(cache_root: text, base: text) -> Result<NativeCac
             if handle < 0:
                 val _removed = dir_remove(directory, true)
                 return Err("cannot lock native cache build lease: " + directory)
+            val key = _lease_dir_key(directory)
+            val prev = if _active_native_lease_dirs.contains_key(key): _active_native_lease_dirs[key] else: 0
+            _active_native_lease_dirs[key] = prev + 1
             Ok(NativeCacheLease(cache_root: cache_root, registry: base, directory: directory, handle: handle))
 
 pub fn native_cache_lease_end(lease: NativeCacheLease):
-    if not file_unlock(lease.handle):
+    if lease.handle < 0:
         return
-    # Registry scans tolerate a lease disappearing after its owner exits.
-    val _removed = dir_remove(lease.directory, true)
+    val gate = file_lock(lease_gate(lease.registry), 30)
+    val key = _lease_dir_key(lease.directory)
+    if _active_native_lease_dirs.contains_key(key):
+        val left = _active_native_lease_dirs[key] - 1
+        if left <= 0:
+            _active_native_lease_dirs.remove(key)
+        else:
+            _active_native_lease_dirs[key] = left
+    if file_unlock(lease.handle):
+        # Registry scans tolerate a lease disappearing after its owner exits.
+        val _removed = dir_remove(lease.directory, true)
+    if gate >= 0:
+        val _gate_released = file_unlock(gate)
 
 fn native_cache_other_build_active(base: text, own_directory: text) -> bool:
     val rows = match dir_list_optional(base):
@@ -81,6 +100,10 @@ fn native_cache_other_build_active(base: text, own_directory: text) -> bool:
         val name = basename(row.replace("\\", "/"))
         if name != own_name and name.starts_with("build-"):
             val directory = base + "/" + name
+            # In-process leases share the host PID (interpreter file_lock is re-entrant),
+            # so consult the live in-process registry before probing owner.lock.
+            if _active_native_lease_dirs.contains_key(_lease_dir_key(directory)):
+                return true
             val handle = file_lock(directory + "/owner.lock", 0)
             if handle < 0:
                 return true

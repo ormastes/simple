@@ -4,6 +4,8 @@
 
 use std.nogc_sync_mut.database.csm_seal.{csm_write_sealed}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_copy}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.common.path_pure.{path_dirname}
 use std.test_runner.test_db_lock.FileLock
 
 # =========================================================================
@@ -31,12 +33,18 @@ fn read_db_file(path: text) -> Result<text, text>:
 # Atomic Write with Locking
 # =========================================================================
 
+fn ensure_db_parent_dir(path: text):
+    val parent = path_dirname(path)
+    if parent != "" and parent != ".":
+        dir_create_all(parent)
+
 fn write_db_file_locked(path: text, content: text) -> Result<(), text>:
-    # Acquire lock
-    val lock_result = FileLock.acquire(path, LOCK_TIMEOUT)
-    val lock = match lock_result:
-        Ok(value): value
-        Err(message): return Err(message)
+    ensure_db_parent_dir(path)
+    # Acquire lock (`FileLock.acquire` returns `FileLock?`).
+    val acquired = FileLock.acquire(path, LOCK_TIMEOUT)
+    if acquired.is_none():
+        return Err("Failed to acquire lock for {path} within {LOCK_TIMEOUT}s")
+    var lock: FileLock = acquired.unwrap()
 
     # Guard against overwriting non-empty with empty
     if content.trim() == "" and file_exists(path):
@@ -64,10 +72,11 @@ fn write_db_file_locked(path: text, content: text) -> Result<(), text>:
 # =========================================================================
 
 fn update_db_file(path: text, updater: fn(text) -> text) -> Result<(), text>:
-    val lock_result = FileLock.acquire(path, LOCK_TIMEOUT)
-    val lock = match lock_result:
-        Ok(value): value
-        Err(message): return Err(message)
+    ensure_db_parent_dir(path)
+    val acquired = FileLock.acquire(path, LOCK_TIMEOUT)
+    if acquired.is_none():
+        return Err("Failed to acquire lock for {path} within {LOCK_TIMEOUT}s")
+    var lock: FileLock = acquired.unwrap()
 
     var content = ""
     if file_exists(path):
