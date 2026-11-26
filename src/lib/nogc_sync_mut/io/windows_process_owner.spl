@@ -120,6 +120,37 @@ fn _windows_cmd_is_safe_pre_switch_v1(arg: text) -> bool:
         lower == "/v:on" or lower == "/v:off" or
         _windows_cmd_is_exec_switch_v1(arg)
 
+fn _windows_cmd_token_needs_quote_v1(token: text) -> bool:
+    if token == "": return true
+    if token.contains(" ") or token.contains("\t"): return true
+    token.contains("&") or token.contains("|") or token.contains("<") or
+        token.contains(">") or token.contains("^") or token.contains("(") or
+        token.contains(")") or token.contains(";") or token.contains(",")
+
+fn _windows_cmd_quote_tail_arg_v1(tail: text) -> Result<text, text>:
+    if tail.contains("\r") or tail.contains("\n"):
+        return Err("Windows cmd.exe shell payload contains newline")
+    if tail.contains("\""):
+        if tail.byte_len() >= 2 and tail.starts_with("\"") and tail.ends_with("\""):
+            val inner = tail.substring(1, tail.byte_len() - 1)
+            if not inner.contains("\""):
+                return Ok(tail)
+        return Err("Windows cmd.exe multi-arg token contains unsafe embedded quote")
+    if _windows_cmd_token_needs_quote_v1(tail):
+        return Ok("\"" + tail + "\"")
+    Ok(tail)
+
+fn _windows_cmd_join_tail_v1(args: [text], start: i64) -> Result<text, text>:
+    var joined = ""
+    var idx = start
+    while idx < args.len():
+        val part = _windows_cmd_quote_tail_arg_v1(args[idx])?
+        if idx > start:
+            joined = joined + " "
+        joined = joined + part
+        idx = idx + 1
+    Ok(joined)
+
 fn windows_process_build_command_line_v1(program: text, args: [text]) -> Result<text, text>:
     if program.contains("\0"):
         return Err("NUL in program")
@@ -137,25 +168,19 @@ fn windows_process_build_command_line_v1(program: text, args: [text]) -> Result<
         val arg = args[i]
         if _windows_cmd_is_exec_switch_v1(arg):
             val remaining = args.len() - i - 1
+            if remaining == 0:
+                command = command + " " + arg
+                return Ok(command)
+            var payload = ""
             if remaining == 1:
-                val payload = args[i + 1]
+                payload = args[i + 1]
                 if payload.contains("\r") or payload.contains("\n"):
                     return Err("Windows cmd.exe shell payload contains newline")
-                if payload.contains("\""):
-                    if not seen_s:
-                        command = command + " /S"
-                    command = command + " " + arg + " \"" + payload + "\""
-                else:
-                    command = command + " " + arg + " \"" + payload + "\""
-                return Ok(command)
-            command = command + " " + arg
-            i = i + 1
-            while i < args.len():
-                val tail = args[i]
-                if tail.contains("\r") or tail.contains("\n"):
-                    return Err("Windows cmd.exe shell payload contains newline")
-                command = command + " " + windows_process_quote_arg_v1(tail)
-                i = i + 1
+            else:
+                payload = _windows_cmd_join_tail_v1(args, i + 1)?
+            if payload.contains("\"") and not seen_s:
+                command = command + " /S"
+            command = command + " " + arg + " \"" + payload + "\""
             return Ok(command)
         if not _windows_cmd_is_safe_pre_switch_v1(arg):
             return Err("Windows cmd.exe rejects unsupported switch before /c or /k: " + arg)

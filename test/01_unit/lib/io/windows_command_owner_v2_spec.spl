@@ -3,6 +3,7 @@
 # @req REQ-WINDOWS-COMMAND-002
 use std.spec.{describe, it, expect, step}
 use std.nogc_sync_mut.io.windows_command_contract_v2.*
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_build_command_line_v1}
 
 fn command_request() -> WindowsCommandRequestV2:
     WindowsCommandRequestV2(program: "C:\\Tools\\docker.exe", args: ["inspect", "exact-id"],
@@ -83,3 +84,16 @@ describe "Windows retained command contracts v2":
         step("Lone continuation and 0xFF bytes are never decoded lossily")
         expect(windows_command_output_decode_v2([255u8]).unwrap_err()).to_equal("windows-command-output-invalid-utf8")
         expect(windows_command_output_decode_v2([65u8, 128u8, 66u8]).unwrap_err()).to_equal("windows-command-output-invalid-utf8")
+
+    it "builds multi-arg cmd.exe /c command lines with safe sub-arg quoting":
+        step("Preserve multi-arg cmd.exe invocations without CRT-quoting tokens individually")
+        val cmd_path = "C:\\Windows\\System32\\cmd.exe"
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "exit", "7"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /c \"exit 7\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "hi"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /c \"echo hi\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "hello world"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"echo \"hello world\"\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", cmd_path, "/c", "echo ok"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"C:\\Windows\\System32\\cmd.exe /c \"echo ok\"\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "\"hello\"", "world"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"\"hello\" world\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "a&echo", "PWNED"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"echo \"a&echo\" PWNED\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "a|b"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"echo \"a|b\"\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "a\"&calc"]).is_err()).to_equal(true)
+        expect(windows_process_build_command_line_v1(cmd_path, ["/d&echo", "/c", "exit", "7"]).is_err()).to_equal(true)
