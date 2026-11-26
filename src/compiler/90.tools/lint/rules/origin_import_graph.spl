@@ -1,0 +1,219 @@
+# Cross-file ORIGIN summaries for exported functions, carried through the
+# SIF origin section (compiler.driver.sif.sif_origin).
+#
+# Extends the one-hop bound_unit_import_summaries (PR #11808) to N hops:
+# a module's summary is computed with the summaries of the modules IT imports,
+# so `A: extern fn` -> `B: fn wrap() = a_extern()` -> `C: use b.wrap` sees
+# wrap's return as extern_return. Depth-bounded, cycle-guarded (visiting set),
+# memoized per root. Every hop goes through the serialized SIF section, and a
+# cached section whose version/digest does not verify is a MISS (recomputed
+# from source), never a crash.
+#
+# The producer here is textual and temporary; lane 1's HIR origin table
+# (35.semantics) replaces origin_summary_of_source once it lands.
+
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.driver.sif.sif_origin.{FnOriginSummary, sif_origin_serialize, sif_origin_parse, sif_origin_status}
+use compiler.tools.lint.rules.bound_import_graph.{bound_resolve_module}
+
+val ORIGIN_IMPORT_MAX_DEPTH: i64 = 16
+
+pub class OriginModuleSummary:
+    module: text
+    fns: [FnOriginSummary]
+
+class OriginGraphMemo:
+    paths: [text]
+    sections: [text]
+
+fn _og_use_modules(source: text) -> [text]:
+    var mods: [text] = []
+    for raw in source.split("\n"):
+        val t = raw.trim()
+        if not t.starts_with("use "):
+            continue
+        val open = t.find(".{{")
+        if open <= 4:
+            continue
+        val m = t.substring(4, open).trim()
+        if m != "" and not mods.contains(m):
+            mods.push(m)
+    mods
+
+fn _og_ident_before_paren(s: text) -> text:
+    val at = s.find("(")
+    if at <= 0:
+        return ""
+    s.substring(0, at).trim()
+
+# "fn name(a: T, b: U) -> R:" -> param names.
+fn _og_params(header: text) -> [text]:
+    var out: [text] = []
+    val open = header.find("(")
+    val close = header.find(")")
+    if open < 0 or close <= open + 1:
+        return out
+    for p in header.substring(open + 1, close).split(","):
+        val colon = p.find(":")
+        val name = if colon > 0: p.substring(0, colon).trim() else: p.trim()
+        if name != "":
+            out.push(name)
+    out
+
+fn _og_index(xs: [text], x: text) -> i64:
+    var i = 0
+    while i < xs.len():
+        if xs[i] == x:
+            return i
+        i = i + 1
+    -1
+
+fn _og_find(known: [FnOriginSummary], name: text) -> i64:
+    var i = 0
+    while i < known.len():
+        if known[i].fn_name == name:
+            return i
+        i = i + 1
+    -1
+
+# Args of the first `name(...)` call in `line` (no nesting); [] when absent.
+fn _og_call_args(line: text, name: text) -> [text]:
+    var out: [text] = []
+    val at = line.find(name + "(")
+    if at < 0:
+        return out
+    if at > 0:
+        val prev = line.substring(at - 1, at)
+        if prev != " " and prev != "(" and prev != "," and prev != "=":
+            return out
+    val start = at + name.byte_len() + 1
+    val rest = line.substring(start, line.byte_len())
+    val close = rest.find(")")
+    if close < 0:
+        return out
+    for a in rest.substring(0, close).split(","):
+        out.push(a.trim())
+    out
+
+fn _og_summarise_fn(name: text, params: [text], body: [text], known: [FnOriginSummary]) -> FnOriginSummary:
+    var ret_expr = ""
+    for l in body:
+        val t = l.trim()
+        if t != "" and not t.starts_with("#"):
+            ret_expr = if t.starts_with("return "): t.substring(7, t.byte_len()).trim() else: t
+    var origin = ""
+    val callee = _og_ident_before_paren(ret_expr)
+    val ci = if callee != "": _og_find(known, callee) else: -1
+    if ci >= 0:
+        val co = known[ci].return_origin
+        if co == "extern_return":
+            origin = co
+        elif co.starts_with("param:"):
+            val k = co.substring(6, co.byte_len()).to_int()
+            val args = _og_call_args(ret_expr, callee)
+            if k < args.len() and params.contains(args[k]):
+                origin = "param:{_og_index(params, args[k])}"
+    elif params.contains(ret_expr):
+        origin = "param:{_og_index(params, ret_expr)}"
+    var flows: [i64] = []
+    var pi = 0
+    while pi < params.len():
+        var hit = false
+        for l in body:
+            for kf in known:
+                val args = _og_call_args(l, kf.fn_name)
+                var ai = 0
+                while ai < args.len():
+                    if args[ai] == params[pi] and kf.boundary_params.contains(ai):
+                        hit = true
+                    ai = ai + 1
+        if hit:
+            flows.push(pi)
+        pi = pi + 1
+    FnOriginSummary(fn_name: name, return_origin: origin, boundary_params: flows)
+
+# Origin summaries of every top-level fn / extern fn in `source`, given the
+# summaries of the modules it imports. Externs are boundaries themselves.
+pub fn origin_summary_of_source(source: text, imported: [OriginModuleSummary]) -> [FnOriginSummary]:
+    var known: [FnOriginSummary] = []
+    for m in imported:
+        for f in m.fns:
+            known.push(f)
+    var out: [FnOriginSummary] = []
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val raw = lines[i]
+        val t = if raw.starts_with("pub "): raw.substring(4, raw.byte_len()) else: raw
+        if t.starts_with("extern fn "):
+            val params = _og_params(t)
+            var all: [i64] = []
+            var k = 0
+            while k < params.len():
+                all.push(k)
+                k = k + 1
+            val e = FnOriginSummary(fn_name: _og_ident_before_paren(t.substring(10, t.byte_len())), return_origin: "extern_return", boundary_params: all)
+            known.push(e)
+            out.push(e)
+        elif t.starts_with("fn "):
+            val name = _og_ident_before_paren(t.substring(3, t.byte_len()))
+            var body: [text] = []
+            var j = i + 1
+            while j < lines.len() and (lines[j].starts_with(" ") or lines[j].trim() == ""):
+                body.push(lines[j])
+                j = j + 1
+            val s = _og_summarise_fn(name, _og_params(t), body, known)
+            known.push(s)
+            out.push(s)
+            i = j - 1
+        i = i + 1
+    out
+
+fn _og_memo_get(memo: OriginGraphMemo, path: text) -> text:
+    var i = 0
+    while i < memo.paths.len():
+        if memo.paths[i] == path:
+            return memo.sections[i]
+        i = i + 1
+    ""
+
+fn _og_summaries(source: text, path: text, depth: i64, visiting: [text], memo: OriginGraphMemo) -> [OriginModuleSummary]:
+    var out: [OriginModuleSummary] = []
+    if depth >= ORIGIN_IMPORT_MAX_DEPTH:
+        return out
+    for m in _og_use_modules(source):
+        val dep_path = bound_resolve_module(m, path)
+        if dep_path == "" or visiting.contains(dep_path):
+            continue
+        var section = _og_memo_get(memo, dep_path)
+        if sif_origin_status(section) != "":
+            # Miss (absent, stale version, corrupt): recompute from source.
+            val dep_src = file_read(dep_path)
+            var next_visiting = [v for v in visiting]
+            next_visiting.push(dep_path)
+            val sub = _og_summaries(dep_src, dep_path, depth + 1, next_visiting, memo)
+            section = sif_origin_serialize(m, origin_summary_of_source(dep_src, sub))
+            memo.paths.push(dep_path)
+            memo.sections.push(section)
+        val fns = sif_origin_parse(section)
+        if fns.len() > 0:
+            out.push(OriginModuleSummary(module: m, fns: fns))
+    out
+
+# Origin summaries of the modules `source` (at `path`) imports, N hops deep.
+pub fn origin_import_summaries(source: text, path: text) -> [OriginModuleSummary]:
+    origin_import_summaries_cached(source, path, [], [])
+
+# Same, seeded with previously stored SIF origin sections (cache_paths[i] ->
+# cache_sections[i]). A section that does not verify is ignored (cache miss).
+pub fn origin_import_summaries_cached(source: text, path: text, cache_paths: [text], cache_sections: [text]) -> [OriginModuleSummary]:
+    if not source.contains("use "):
+        return []
+    var memo = OriginGraphMemo(paths: [], sections: [])
+    var i = 0
+    while i < cache_paths.len() and i < cache_sections.len():
+        if sif_origin_status(cache_sections[i]) == "":
+            memo.paths.push(cache_paths[i])
+            memo.sections.push(cache_sections[i])
+        i = i + 1
+    _og_summaries(source, path, 0, [path], memo)
