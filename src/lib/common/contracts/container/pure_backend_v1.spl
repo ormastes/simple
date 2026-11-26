@@ -1,0 +1,60 @@
+# Pure-Simple container backend identity and capability mapping (architecture
+# pure_simple_container 6). Maps what a SOSIX variant reports it enforces
+# (SosixContainSupportV1) plus measured evidence onto the existing
+# ContainerCapabilityReportV1. Fields not mapped stay false: nothing is
+# affirmed that was not measured.
+
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1,
+    ContainerCapabilityFlagV1, container_capability_report_v1_empty,
+    CONTAINER_CLIENT_AUTHORITY_USER_V1, CONTAINER_CLIENT_AUTHORITY_DELEGATED_V1,
+    CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1,
+    CONTAINER_ISOLATION_KIND_NATIVE_V1, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1}
+use std.common.contracts.sosix.containment_v1.{SosixContainSupportV1}
+
+pub const PURE_CONTAINER_BACKEND_V1 = "simple-pure-process"
+pub const PURE_CONTAINER_ENGINE_V1 = "simple-pure-container-v1"
+pub const PURE_CONTAINER_ROOT_VIEW_SPLIT_V1 = "hardlink-lower-split-upper"
+
+pub struct PureContainerEvidenceV1:
+    host_os: text
+    host_arch: text
+    guest_abi: text
+    root_view_kind: text
+    memory_cap_enforced: ContainerCapabilityFlagV1   # measured verdict only
+    base_fully_linked: ContainerCapabilityFlagV1
+    launch_observed: ContainerCapabilityFlagV1
+    cleanup_observed: ContainerCapabilityFlagV1
+    evidence_revision: text
+
+fn _pure_client_authority_v1(support: SosixContainSupportV1) -> text:
+    if support.mechanism == "": return CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1
+    if support.unprivileged.value: return CONTAINER_CLIENT_AUTHORITY_USER_V1
+    CONTAINER_CLIENT_AUTHORITY_DELEGATED_V1
+
+pub fn pure_container_capability_report_v1(support: SosixContainSupportV1,
+        evidence: PureContainerEvidenceV1) -> ContainerCapabilityReportV1:
+    var report = container_capability_report_v1_empty()
+    val confined_write = support.write_confinement.value
+    val confined_read = support.read_confinement.value
+    val full = confined_write and confined_read and support.network_isolation.value and
+        support.pid_isolation.value and support.root_remap.value
+    report.host_os = evidence.host_os
+    report.host_arch = evidence.host_arch
+    report.guest_abi = evidence.guest_abi
+    report.isolation_kind = if full: CONTAINER_ISOLATION_KIND_NATIVE_V1 else: CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1
+    report.client_authority = _pure_client_authority_v1(support)
+    report.launch_qualified = ContainerCapabilityFlagV1(evidence.launch_observed.value)
+    report.filesystem_confinement = ContainerCapabilityFlagV1(confined_write and confined_read)
+    report.root_view_kind = evidence.root_view_kind
+    report.ephemeral_cleanup = ContainerCapabilityFlagV1(evidence.cleanup_observed.value)
+    report.memory_accounting = support.memory_accounting
+    report.memory_hard_limit = ContainerCapabilityFlagV1(
+        support.memory_hard_limit.value and evidence.memory_cap_enforced.value)
+    report.readonly_file_backing_reuse = ContainerCapabilityFlagV1(evidence.base_fully_linked.value)
+    report.filesystem_save_load = ContainerCapabilityFlagV1(true)
+    report.provider_version = PURE_CONTAINER_ENGINE_V1
+    report.evidence_revision = evidence.evidence_revision
+    report
+
+export PURE_CONTAINER_BACKEND_V1, PURE_CONTAINER_ENGINE_V1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1
+export PureContainerEvidenceV1, pure_container_capability_report_v1

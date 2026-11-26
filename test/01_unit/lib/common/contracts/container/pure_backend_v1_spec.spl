@@ -1,0 +1,135 @@
+# Pure-Simple container backend: SosixContainSupportV1 + measured evidence ->
+# ContainerCapabilityReportV1, and its fail-closed admission on Windows.
+# Design: doc/04_architecture/platform/container/pure_simple_container.md 6
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1,
+    pure_container_capability_report_v1, PURE_CONTAINER_BACKEND_V1,
+    PURE_CONTAINER_ENGINE_V1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1}
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1,
+    container_capability_requirement_v1_empty, container_capability_v1_admission_reason,
+    CONTAINER_ISOLATION_KIND_NATIVE_V1, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1,
+    CONTAINER_CLIENT_AUTHORITY_USER_V1, CONTAINER_CLIENT_AUTHORITY_DELEGATED_V1,
+    CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1, CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1}
+use std.common.contracts.sosix.containment_v1.{SosixContainFlagV1, SosixContainSupportV1,
+    sosix_contain_support_none_v1}
+
+fn _windows_support() -> SosixContainSupportV1:
+    var s = sosix_contain_support_none_v1("windows-job+restricted-token")
+    s.memory_accounting = "job-commit"
+    s.memory_hard_limit = SosixContainFlagV1(true)
+    s.process_limit = SosixContainFlagV1(true)
+    s.cpu_rate_limit = SosixContainFlagV1(true)
+    s.kill_all_descendants = SosixContainFlagV1(true)
+    s.write_confinement = SosixContainFlagV1(true)
+    s.unprivileged = SosixContainFlagV1(true)
+    s
+
+fn _evidence(revision: text, memory: bool) -> PureContainerEvidenceV1:
+    PureContainerEvidenceV1(host_os: "windows", host_arch: "x86_64", guest_abi: "windows-amd64",
+        root_view_kind: PURE_CONTAINER_ROOT_VIEW_SPLIT_V1,
+        memory_cap_enforced: ContainerCapabilityFlagV1(memory),
+        base_fully_linked: ContainerCapabilityFlagV1(true),
+        launch_observed: ContainerCapabilityFlagV1(true),
+        cleanup_observed: ContainerCapabilityFlagV1(true), evidence_revision: revision)
+
+fn _full_support() -> SosixContainSupportV1:
+    var s = _windows_support()
+    s.read_confinement = SosixContainFlagV1(true)
+    s.network_isolation = SosixContainFlagV1(true)
+    s.pid_isolation = SosixContainFlagV1(true)
+    s.root_remap = SosixContainFlagV1(true)
+    s
+
+describe "pure_container_capability_report_v1 mapping":
+    it "names the backend, engine and root view":
+        expect(PURE_CONTAINER_BACKEND_V1).to_equal("simple-pure-process")
+        expect(PURE_CONTAINER_ENGINE_V1).to_equal("simple-pure-container-v1")
+        expect(PURE_CONTAINER_ROOT_VIEW_SPLIT_V1).to_equal("hardlink-lower-split-upper")
+
+    it "reports a Windows-shaped support as an unconfined native-sandbox":
+        val r = pure_container_capability_report_v1(_windows_support(), _evidence("ev-1", true))
+        expect(r.isolation_kind).to_equal(CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1)
+        expect(r.client_authority).to_equal(CONTAINER_CLIENT_AUTHORITY_USER_V1)
+        expect(r.filesystem_confinement.value).to_equal(false)
+        expect(r.memory_accounting).to_equal(CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1)
+        expect(r.memory_hard_limit.value).to_equal(true)
+        expect(r.launch_qualified.value).to_equal(true)
+        expect(r.ephemeral_cleanup.value).to_equal(true)
+        expect(r.readonly_file_backing_reuse.value).to_equal(true)
+        expect(r.filesystem_save_load.value).to_equal(true)
+        expect(r.durable_recovery.value).to_equal(false)
+        expect(r.process_checkpoint.value).to_equal(false)
+        expect(r.provider_version).to_equal(PURE_CONTAINER_ENGINE_V1)
+        expect(r.evidence_revision).to_equal("ev-1")
+
+    it "takes memory_hard_limit from measured evidence, never support alone":
+        val r = pure_container_capability_report_v1(_windows_support(), _evidence("ev-1", false))
+        expect(r.memory_hard_limit.value).to_equal(false)
+        var s = _windows_support()
+        s.memory_hard_limit = SosixContainFlagV1(false)
+        val r2 = pure_container_capability_report_v1(s, _evidence("ev-1", true))
+        expect(r2.memory_hard_limit.value).to_equal(false)
+
+    it "reports native-container only when write, read, network, pid and root remap all hold":
+        val r = pure_container_capability_report_v1(_full_support(), _evidence("ev-1", true))
+        expect(r.isolation_kind).to_equal(CONTAINER_ISOLATION_KIND_NATIVE_V1)
+        expect(r.filesystem_confinement.value).to_equal(true)
+        var s = _full_support()
+        s.root_remap = SosixContainFlagV1(false)
+        expect(pure_container_capability_report_v1(s, _evidence("ev-1", true)).isolation_kind)
+            .to_equal(CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1)
+        var t = _full_support()
+        t.pid_isolation = SosixContainFlagV1(false)
+        expect(pure_container_capability_report_v1(t, _evidence("ev-1", true)).isolation_kind)
+            .to_equal(CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1)
+
+    it "maps authority: privileged is delegated, no mechanism is unavailable":
+        var s = _windows_support()
+        s.unprivileged = SosixContainFlagV1(false)
+        expect(pure_container_capability_report_v1(s, _evidence("ev-1", true)).client_authority)
+            .to_equal(CONTAINER_CLIENT_AUTHORITY_DELEGATED_V1)
+        expect(pure_container_capability_report_v1(sosix_contain_support_none_v1(""), _evidence("ev-1", true)).client_authority)
+            .to_equal(CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1)
+
+    it "does not affirm unmeasured evidence":
+        var e = _evidence("ev-1", true)
+        e.launch_observed = ContainerCapabilityFlagV1(false)
+        e.cleanup_observed = ContainerCapabilityFlagV1(false)
+        e.base_fully_linked = ContainerCapabilityFlagV1(false)
+        val r = pure_container_capability_report_v1(_windows_support(), e)
+        expect(r.launch_qualified.value).to_equal(false)
+        expect(r.ephemeral_cleanup.value).to_equal(false)
+        expect(r.readonly_file_backing_reuse.value).to_equal(false)
+
+describe "pure_container_capability_report_v1 admission":
+    it "admits a measured Windows report against a launch requirement":
+        val r = pure_container_capability_report_v1(_windows_support(), _evidence("ev-1", true))
+        var req = container_capability_requirement_v1_empty()
+        req.required_launch_qualified = ContainerCapabilityFlagV1(true)
+        req.required_memory_hard_limit = ContainerCapabilityFlagV1(true)
+        req.required_isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1
+        expect(container_capability_v1_admission_reason(r, req)).to_equal("")
+
+    it "fails capability-evidence-missing with an empty evidence_revision":
+        val r = pure_container_capability_report_v1(_windows_support(), _evidence("", true))
+        var req = container_capability_requirement_v1_empty()
+        req.required_launch_qualified = ContainerCapabilityFlagV1(true)
+        expect(container_capability_v1_admission_reason(r, req)).to_equal("capability-evidence-missing")
+
+    it "fails isolation-kind-mismatch for a native-container requirement":
+        val r = pure_container_capability_report_v1(_windows_support(), _evidence("ev-1", true))
+        var req = container_capability_requirement_v1_empty()
+        req.required_isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_V1
+        expect(container_capability_v1_admission_reason(r, req)).to_equal("isolation-kind-mismatch")
+
+    it "fails filesystem-confinement-missing for a filesystem_confinement requirement":
+        val r = pure_container_capability_report_v1(_windows_support(), _evidence("ev-1", true))
+        var req = container_capability_requirement_v1_empty()
+        req.required_filesystem_confinement = ContainerCapabilityFlagV1(true)
+        expect(container_capability_v1_admission_reason(r, req)).to_equal("filesystem-confinement-missing")
+
+    it "fails memory-hard-limit-missing when the cap was not measured as enforced":
+        val r = pure_container_capability_report_v1(_windows_support(), _evidence("ev-1", false))
+        var req = container_capability_requirement_v1_empty()
+        req.required_memory_hard_limit = ContainerCapabilityFlagV1(true)
+        expect(container_capability_v1_admission_reason(r, req)).to_equal("memory-hard-limit-missing")
