@@ -3,6 +3,9 @@ use app.orchestrator.controller_gateway_v1.*
 use app.orchestrator.local_controller.orchestrator_local_input_command_v1
 use app.orchestrator.execution.orchestrator_execution_input_command_v2
 use app.orchestrator.server_config_load_v1.{server_host_reference_validate_v1, server_host_reference_v1}
+use app.orchestrator.server_command_v1.{orchestrator_server_ssh_begin_v1,
+    orchestrator_server_ssh_begin_file_v1, orchestrator_server_ssh_step_v1}
+use std.common.config_core.server_context_types_v1.{ResolvedServerV1, ServerRecordV1}
 
 fn gateway_request_v1(action: text = "inspect") -> ControllerGatewayRequestV1:
     ControllerGatewayRequestV1(action: action, controller_id: "controller-a", request_uid: "request-a",
@@ -11,7 +14,37 @@ fn gateway_request_v1(action: text = "inspect") -> ControllerGatewayRequestV1:
 fn gateway_config_v1(actions: [text]) -> ControllerGatewayConfigV1:
     ControllerGatewayConfigV1(state_root: "/private/controller-a", controller_id: "controller-a", allowed_actions: actions)
 
+fn gateway_ssh_selection_v1(transport: text) -> ResolvedServerV1:
+    ResolvedServerV1(consumer: "caret", context: "work", source: "shared",
+        record: ServerRecordV1(name: "build", transport: transport, host: "build.example.test", port: 22,
+            container_host: "", auth_ref: "secret://ssh/build", tls_ref: "trust://ssh/build",
+            remote_executable: "/opt/simple/bin/simple"))
+
 describe "Typed selected-server controller boundary":
+    it "validates the request before opening an SSH profile and keeps a finished turn settled":
+        val invalid = "kind: wrong-request\n"
+        val selection = gateway_ssh_selection_v1("ssh")
+        val rejected = orchestrator_server_ssh_begin_v1(selection, "", invalid)
+        expect(rejected.owner.is_none()).to_equal(true)
+        val reply = rejected.reply.unwrap()
+        expect(reply.exit_code).to_equal(1)
+        expect(reply.output).to_contain(controller_gateway_header_v1(invalid).unwrap_err())
+        expect(reply.transport_cleanup.is_none()).to_equal(true)
+        expect(reply.transport_store_cleanup.is_none()).to_equal(true)
+        val stepped = orchestrator_server_ssh_step_v1(rejected, true)
+        expect(stepped.owner.is_none()).to_equal(true)
+        expect(stepped.reply.unwrap().output).to_equal(reply.output)
+
+    it "rejects unreadable request input or a non-SSH selection without acquiring transport":
+        val selection = gateway_ssh_selection_v1("ssh")
+        val missing = orchestrator_server_ssh_begin_file_v1(selection, "", "")
+        expect(missing.owner.is_none()).to_equal(true)
+        expect(missing.reply.unwrap().output).to_contain("server-request-unavailable")
+        val source = controller_gateway_request_encode_v1(gateway_request_v1()).unwrap()
+        val unsupported = orchestrator_server_ssh_begin_v1(gateway_ssh_selection_v1("local"), "", source)
+        expect(unsupported.owner.is_none()).to_equal(true)
+        expect(unsupported.reply.unwrap().output).to_contain("server-consumer-transport-unsupported")
+
     it "REQ-002 decodes quoted host schema and endpoint path exactly once":
         val source = "host_config:\n  schema: \"simple-host-config-v1\"\n  server_config: \"/private/servers.sdn\"\nother:\n  server_config: /wrong/servers.sdn\n"
         expect(server_host_reference_v1(source).unwrap()).to_equal("/private/servers.sdn")
