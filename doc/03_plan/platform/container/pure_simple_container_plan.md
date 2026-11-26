@@ -393,8 +393,16 @@ Each default is what the lanes assume. Default, owner may override.
 ## Status (2026-11-26)
 
 - Design reviewed by Fable over four rounds; final verdict LAND.
-- Landed: S0 shared extraction (#11924), seed advapi32/token/SID/ACL externs
-  for P1 (#11925; specs needing them run on a seed built from that commit),
-  inc-3 lane E memory cap (#11914).
-- In flight: P0 contract, P1 identity + grants, P3 rootfs, Windows Docker
-  live lane. P2 and P4 start after P0/P1/P3 land.
+- Increment 1 is complete: S0 shared extraction (#11924), seed
+  advapi32/token/SID/ACL externs (#11925), P0 contract (#11932), P1 identity +
+  grants (#11955), P2 SOSIX containment (#11975), P3 rootfs (#11934), P4 runtime
+  (#11980). Inc-3 lane E memory cap landed earlier (#11914).
+- Facade lane: `sosix/fs_v1.spl` gives `pure_runtime_v1.spl` its directory,
+  file, hard-link and host-identity access, so the runtime no longer imports
+  `io.*`, `io_runtime` or `std.platform` directly. Directory names keep their
+  owner names (a seed alias-binding quirk, recorded in the facade header).
+- Follow-ups recorded as bug docs:
+  `doc/08_tracking/bug/pure_runtime_same_id_race_and_unknown_outcome_2026-11-26.md`,
+  `doc/08_tracking/bug/seed_get_volume_information_w_extern_missing_2026-11-26.md`,
+  `doc/08_tracking/bug/platform_variant_gate_export_list_not_counted_2026-11-26.md`.
+- Next: increment 2 lanes.
