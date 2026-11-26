@@ -94,3 +94,44 @@ phase-ladder: phase 2 build failed
      artifact steps still run.
   2. Rerun phase 2 at a lower `selfhost` thread count to tell starvation
      apart from the SIGSEGV.
+
+## Update 2026-11-26 (lane hirmem): local phase-2 memory profile, HIR is NOT memory-bound
+
+- **Setup.** Same program and source as rung 2 of run 45739034803: the rung-1
+  artifact `ladder-linux-x86_64-r1` (`linux-x86_64-p1/simple`, pure-Simple
+  stage1) building source `d4ea18fa337` with the exact
+  `build-next-phase-ci.shs` command (`--low-memory --threads 2`, same env).
+  Run on a WSL2 Ubuntu VM (63 GB, 80 vCPU) with the source on tmpfs. Every 5 s
+  the run sampled `/proc/<pid>/VmRSS` for each process in the build's process
+  group, with a kill switch at 24 GB.
+- **Result (678 samples, about 56 min, killed by hand while MIR/objects were in progress):**
+
+  | point | tree RSS | coordinator | per-file workers |
+  |---|---|---|---|
+  | load_sources/parse | 2.06-2.36 GB | 1.46-1.49 GB | 2 x ~300 MB |
+  | HIR 278/1630 (peak in HIR) | 2.25 GB | 1.50 GB | 301 + 403 MB |
+  | HIR 314/1630 (past CI's 291) | 2.15 GB | 1.50 GB | 2 x 300 MB |
+  | whole-run peak (native_compile) | **2.41 GB** | 1.51 GB | 301 + 544 MB |
+  | +56 min, 134 objects | 2.18 GB | 1.51 GB | 2 x 300 MB |
+
+- **What grows:** almost nothing. Workers are short-lived processes, one per
+  16-module unit. They exit, which frees their memory, so there are no N
+  retained worker copies. The coordinator creeps about 1 MB/min
+  (1460 -> 1512 MB). That is not a session-cache blowup. There is no
+  per-module retained HIR in the coordinator. On-disk state is small (cache
+  372 MB, TMPDIR spool 3 MB, `build/scv` 235 MB).
+- **Conclusion:** at `--threads 2`, phase 2 needs about 2.4 GB, roughly 15% of
+  the 16 GB runner. Memory starvation by the build tree does not explain the
+  runner loss at module 291, so no retention fix was made. A job-count
+  reduction is **not** warranted: 16 GB would fit about `(16 - 1.5 OS - 1.6
+  coordinator) / 0.55 = 23` workers by RSS. A lower thread count is not the
+  lever. Caveat: the admission estimate printed by the compiler (`worker
+  estimate=6291456 kB`) is about 15x the measured worker RSS, so it is very
+  conservative.
+- **Proposal to the CI-sampler lane:** look at non-RSS causes of the VM loss.
+  Candidates are disk exhaustion from the 53 GiB swapfile on the runner disk
+  plus caches, the runner agent being starved of CPU or I/O, and the SIGSEGV
+  path. The sampler should also log `df` and the swap fill level, not only RSS.
+- **Local-run gotchas (in case this needs reproducing):** SCV refuses a checkout whose `.git` points at
+  a Windows path (`git-event-source-unavailable`), and a 9p git walk fails
+  (`git-event-refresh-failed`). The workers also need a writable `TMPDIR`.
