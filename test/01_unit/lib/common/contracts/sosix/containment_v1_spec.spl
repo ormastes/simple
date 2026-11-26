@@ -15,7 +15,7 @@ fn _no_limits() -> SosixContainLimitsV1:
         cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(0))
 
 fn _request() -> SosixContainRequestV1:
-    SosixContainRequestV1(program: "child.exe", program_digest: "", args: [],
+    SosixContainRequestV1(program: "child.exe", program_digest: "a".repeat(64), args: [],
         environment: [], directory: "work", stdout_path: "out.txt", stderr_path: "err.txt",
         limits: _no_limits(), identity: SOSIX_CONTAIN_IDENTITY_INHERIT_V1,
         network: SOSIX_CONTAIN_NETWORK_HOST_V1, readonly_dirs: [], writable_dirs: [],
@@ -81,6 +81,75 @@ describe "sosix_contain_request_reason_v1 refusals in order":
         c.writable_dirs = [""]
         expect(sosix_contain_request_reason_v1(c, _windows_support())).to_equal("containment-request-invalid")
 
+    it "refuses an empty digest as invalid":
+        var r = _request()
+        r.program_digest = ""
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+
+    it "refuses uppercase hex and a non-hex 64-char digest":
+        var a = _request()
+        a.program_digest = "A".repeat(64)
+        expect(sosix_contain_request_reason_v1(a, _windows_support())).to_equal("containment-request-invalid")
+        var b = _request()
+        b.program_digest = "z".repeat(64)
+        expect(sosix_contain_request_reason_v1(b, _windows_support())).to_equal("containment-request-invalid")
+        var c = _request()
+        c.program_digest = "a".repeat(65)
+        expect(sosix_contain_request_reason_v1(c, _windows_support())).to_equal("containment-request-invalid")
+
+    it "refuses negative processes, wall and cpu rate":
+        expect(sosix_contain_request_reason_v1(_with_limits(0, -1, 0, 0), _windows_support()))
+            .to_equal("containment-request-invalid")
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, 0, -1), _windows_support()))
+            .to_equal("containment-request-invalid")
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, -1, 0), _windows_support()))
+            .to_equal("containment-request-invalid")
+
+    it "bounds cpu rate at 10000 inclusive":
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, 10000, 0), _windows_support())).to_equal("")
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, 10001, 0), _windows_support()))
+            .to_equal("containment-request-invalid")
+
+    it "refuses an empty readonly entry":
+        var r = _request()
+        r.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        r.readonly_dirs = [""]
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+
+    it "refuses environment entries without a name or an equals sign":
+        var a = _request()
+        a.environment = ["NOEQUALS"]
+        expect(sosix_contain_request_reason_v1(a, _windows_support())).to_equal("containment-request-invalid")
+        var b = _request()
+        b.environment = ["=value"]
+        expect(sosix_contain_request_reason_v1(b, _windows_support())).to_equal("containment-request-invalid")
+        var c = _request()
+        c.environment = ["K=", "PATH=a=b"]
+        expect(sosix_contain_request_reason_v1(c, _windows_support())).to_equal("")
+
+    it "refuses a directory both writable and readonly":
+        var r = _request()
+        r.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        r.readonly_dirs = ["shared"]
+        r.writable_dirs = ["shared"]
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+
+    it "requires restricted identity for readonly dirs, checked right after invalid":
+        var a = _request()
+        a.readonly_dirs = ["lower"]
+        expect(sosix_contain_request_reason_v1(a, _windows_support()))
+            .to_equal("containment-readonly-requires-restricted")
+        expect(sosix_contain_request_reason_v1(a, sosix_contain_support_none_v1("x")))
+            .to_equal("containment-readonly-requires-restricted")
+        var b = _with_limits(1, 0, 0, 0)
+        b.readonly_dirs = ["lower"]
+        expect(sosix_contain_request_reason_v1(b, sosix_contain_support_none_v1("x")))
+            .to_equal("containment-readonly-requires-restricted")
+        var c = _request()
+        c.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        c.readonly_dirs = ["lower"]
+        expect(sosix_contain_request_reason_v1(c, _windows_support())).to_equal("")
+
     it "refuses a memory limit the variant cannot enforce":
         expect(sosix_contain_request_reason_v1(_with_limits(1, 0, 0, 0), sosix_contain_support_none_v1("x")))
             .to_equal("containment-memory-limit-unsupported")
@@ -99,6 +168,7 @@ describe "sosix_contain_request_reason_v1 refusals in order":
         expect(sosix_contain_request_reason_v1(a, sosix_contain_support_none_v1("x")))
             .to_equal("containment-write-confinement-unsupported")
         var b = _request()
+        b.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
         b.readonly_dirs = ["lower"]
         expect(sosix_contain_request_reason_v1(b, sosix_contain_support_none_v1("x")))
             .to_equal("containment-write-confinement-unsupported")

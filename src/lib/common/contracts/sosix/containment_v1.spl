@@ -27,7 +27,7 @@ pub struct SosixContainLimitsV1:
 
 pub struct SosixContainRequestV1:
     program: text
-    program_digest: text               # "" or sha256 lowercase hex; the host owner pins before launch
+    program_digest: text               # sha256 hex; pinned by the host owner before launch
     args: [text]
     environment: [text]                # complete "K=V" block; nothing is inherited
     directory: text
@@ -82,7 +82,6 @@ pub fn sosix_contain_support_none_v1(mechanism: text) -> SosixContainSupportV1:
         network_isolation: no, pid_isolation: no, root_remap: no, unprivileged: no)
 
 fn _contain_digest_ok_v1(digest: text) -> bool:
-    if digest == "": return true
     if digest.byte_len() != 64: return false
     for byte in digest.bytes():
         if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return false
@@ -92,6 +91,24 @@ fn _contain_texts_nonempty_v1(values: [text]) -> bool:
     for value in values:
         if value == "": return false
     true
+
+fn _contain_env_entry_ok_v1(entry: text) -> bool:
+    var index = 0
+    for byte in entry.bytes():
+        if byte == 61: return index > 0
+        index = index + 1
+    false
+
+fn _contain_env_ok_v1(entries: [text]) -> bool:
+    for entry in entries:
+        if not _contain_env_entry_ok_v1(entry): return false
+    true
+
+fn _contain_dirs_overlap_v1(left: [text], right: [text]) -> bool:
+    for a in left:
+        for b in right:
+            if a == b: return true
+    false
 
 fn _contain_request_invalid_v1(request: SosixContainRequestV1) -> bool:
     val limits = request.limits
@@ -105,6 +122,8 @@ fn _contain_request_invalid_v1(request: SosixContainRequestV1) -> bool:
     if limits.cpu_rate.value < 0 or limits.cpu_rate.value > _SOSIX_CONTAIN_CPU_RATE_MAX_V1: return true
     if not _contain_texts_nonempty_v1(request.readonly_dirs): return true
     if not _contain_texts_nonempty_v1(request.writable_dirs): return true
+    if not _contain_env_ok_v1(request.environment): return true
+    if _contain_dirs_overlap_v1(request.readonly_dirs, request.writable_dirs): return true
     false
 
 # "" = admissible. Refuses every requested axis the variant does not enforce,
@@ -113,6 +132,8 @@ pub fn sosix_contain_request_reason_v1(request: SosixContainRequestV1,
         support: SosixContainSupportV1) -> text:
     if _contain_request_invalid_v1(request):
         return "containment-request-invalid"
+    if request.readonly_dirs.len() > 0 and request.identity != SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1:
+        return "containment-readonly-requires-restricted"
     val limits = request.limits
     if limits.memory.value > 0 and not support.memory_hard_limit.value:
         return "containment-memory-limit-unsupported"
