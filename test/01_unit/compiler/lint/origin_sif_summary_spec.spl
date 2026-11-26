@@ -7,7 +7,7 @@ Audience: compiler and tooling engineers maintaining robust-boundary origins.
 ## Operator workflow
 Run this spec with the test runner and read the per-scenario verdict lines.
 ## Compatibility and limitations
-The producer is textual until the HIR origin table (lane 1) lands.
+The producer lowers each file to HIR and reads the lane-1 HIR origin table.
 """
 # @req: REQ-DIAG-POLICY-001
 
@@ -69,3 +69,14 @@ describe "SIF origin summary across files":
         val path = FIX_DIR + "/orig_c.spl"
         val sums = origin_import_summaries_cached(file_read(path), path, [b_path], [stale])
         expect(_origin_of(sums, "wrap_read")).to_equal("extern_return")
+
+describe "SIF origin summary from the HIR origin table":
+    it "sees an extern return through a let-copy chain":
+        # @req: REQ-DIAG-POLICY-001
+        step("val r = extern(); val s = r; s -> extern_return; param copies -> param:k")
+        val a = OriginModuleSummary(module: "orig_a", fns: origin_summary_of_source(file_read(FIX_DIR + "/orig_a.spl"), []))
+        val src = "use orig_a.{rt_read_raw, rt_write_raw}\n\npub fn chained() -> i64:\n    val r = rt_read_raw()\n    val s = r\n    s\n\npub fn pass_on(v: i64, w: i64):\n    val u = w\n    rt_write_raw(u)\n"
+        val fns = origin_summary_of_source(src, [a])
+        expect(fns[0].fn_name).to_equal("chained")
+        expect(fns[0].return_origin).to_equal("extern_return")
+        expect(fns[1].boundary_params).to_equal([1])
