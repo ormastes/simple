@@ -63,7 +63,7 @@ class _CsrFile:
         elif addr == CSR_MSCRATCH:
             self.mscratch = value
         elif addr == CSR_MEPC:
-            self.mepc = value & 0xFFFFFFFC
+            self.mepc = value & 0xFFFFFFFE
         elif addr == CSR_MCAUSE:
             self.mcause = value
 
@@ -86,7 +86,7 @@ class _CsrFile:
         old
 
     me trap_enter(cause: i64, pc: i64, tval: i64):
-        self.mepc = pc & 0xFFFFFFFC
+        self.mepc = pc & 0xFFFFFFFE
         self.mcause = cause
         self.mtval = tval
         val mie_bit = (self.mstatus >> 3) & 1
@@ -107,7 +107,7 @@ class _CsrFile:
         self.minstret = self.minstret + 1
 
 fn _new_csr() -> _CsrFile:
-    _CsrFile(mstatus: 0, misa: 0x40101104, mie: 0, mtvec: 0,
+    _CsrFile(mstatus: 0, misa: 0x40101105, mie: 0, mtvec: 0,
              mscratch: 0, mepc: 0, mcause: 0, mtval: 0,
              mip: 0, mcycle: 0, minstret: 0)
 
@@ -126,14 +126,14 @@ describe "CSR Read/Write":
         csr.write(CSR_MSCRATCH, 0xCAFEBABE)
         expect(csr.read(CSR_MSCRATCH)).to_equal(0xCAFEBABE)
 
-    it "mepc is word-aligned":
+    it "mepc is halfword-aligned (MISA has C)":
         var csr = _new_csr()
         csr.write(CSR_MEPC, 0x80001003)
-        expect(csr.read(CSR_MEPC)).to_equal(0x80001000)
+        expect(csr.read(CSR_MEPC)).to_equal(0x80001002)
 
     it "misa reports RV32IMAC":
         val csr = _new_csr()
-        expect(csr.read(CSR_MISA)).to_equal(0x40101104)
+        expect(csr.read(CSR_MISA)).to_equal(0x40101105)
 
 describe "CSR Atomic Operations":
     """
@@ -178,6 +178,14 @@ describe "CSR Trap Handling":
         csr.trap_enter(11, 0x80001234, 0)
         expect(csr.read(CSR_MEPC)).to_equal(0x80001234)
         expect(csr.read(CSR_MCAUSE)).to_equal(11)
+        # MIE (bit 3) cleared, its old value saved in MPIE (bit 7)
+        expect(csr.read(CSR_MSTATUS) & 0x08).to_equal(0)
+        expect(csr.read(CSR_MSTATUS) & 0x80).to_equal(0x80)
+
+    it "trap entry keeps a halfword-aligned pc":
+        var csr = _new_csr()
+        csr.trap_enter(2, 0x80001236, 0)
+        expect(csr.read(CSR_MEPC)).to_equal(0x80001236)
 
     it "trap_vector returns aligned mtvec":
         var csr = _new_csr()
