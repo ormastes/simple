@@ -28,9 +28,10 @@ dedicated store and the required cgroup and native service topology to support
 provision, retry, and serving opens.
 
 1. Decode the fixture binding and derive the expected anchor and digest.
-   Check the five pinned fixture inputs before creating the credential.
-   A missing or mismatched file fails with its filename and leaves the
-   output store available for a corrected run.
+   Check the local machine ID and five pinned fixture inputs before creating
+   the credential.
+   A machine mismatch or a missing or mismatched file leaves the output
+   store available for a corrected run.
 2. Run `host-linux-enrollment-issue` through the production dispatcher. Check
    the receipt against the actual protected credential file and confirm no
    outstanding cleanup. Repeat the command and require refusal with the same
@@ -208,6 +209,11 @@ describe "Signed Linux provisioning through installed Host startup":
             return
         val anchor = host_linux_service_root_path_v4(binding.unwrap()).unwrap()
         val digest = host_linux_service_enrollment_digest_v3(binding.unwrap()).unwrap()
+        step("Check the fixture binding names this Linux machine before issuing a credential")
+        val machine = file_read_regular_no_follow_bounded("/etc/machine-id", 128)
+        if machine.is_err() or machine.unwrap().trim() != binding.unwrap().native_machine_id:
+            fail("dedicated fixture binding does not match the local machine ID")
+            return
         step("Check every fixture input pin before issuing a one-use credential")
         val pins = provision_startup_verify_input_pins_v3(input, binding.unwrap())
         if pins.is_err():

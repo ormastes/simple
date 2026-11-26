@@ -74,6 +74,8 @@ or capability probe alone cannot satisfy these checks.
 Prepare the protected enrollment parent and its `authority-policy.sdn` on that
 fixture. Supply fresh controller output storage, authorized issuer and approver
 keys, and an enrollment binding for the fixture's actual native identity and
-provider. Run the scenario in the installed Host profile using a qualified
+provider. For this Linux provider, `nativeMachineId` is the exact 32 lowercase
+hexadecimal characters from the fixture's `/etc/machine-id`, without a prefix
+or newline. Run the scenario in the installed Host profile using a qualified
 self-hosted Simple runner. The fixture inputs and expected receipts are in the
 [signed provisioning SSpec manual](../06_spec/03_system/app/orchestrator/feature/host_linux_provision_startup_v3_spec.md).
