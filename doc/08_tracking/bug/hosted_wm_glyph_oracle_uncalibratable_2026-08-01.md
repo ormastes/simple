@@ -268,3 +268,32 @@ admitted X11 phase environment (toolchain + quiet host + pure-Simple binary
   host: `xdotool`, `Xvfb`, ImageMagick `import`/`convert`, and a GUI-enabled
   `simple` binary (`rt_winit_event_loop_new`) are absent, and `cargo build` is
   not runnable here. No hash fabricated; status stays `open`.
+
+## Linux aarch64 Re-check (2026-11-26, lane wm-lane-20261126)
+
+Host: DGX Spark (GB10), release/1.0.0 79445b063c4, seed
+`/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple`.
+
+- `GLYPH_RGB_SHA256=pending` still at
+  `scripts/check/check-linux-hosted-wm-live-window-evidence.shs:26`.
+- `--self-test`: exit 0 (`runtime_staged=pass`, `runtime_fd=pass`,
+  `runtime_changed=rejected`).
+- Live run (`SIMPLE_BIN=<seed>`): exit 1,
+  `status=unavailable reason=missing-command-xdotool`; framebuffer, window
+  PNG, glyph crop and deliberate-red rows all `fail`/`missing`; runtime
+  provider `fail`.
+- Environment: `xdotool`, `Xvfb`, ImageMagick (`import`/`convert`/`magick`)
+  absent; no passwordless sudo; the only X server (`/tmp/.X11-unix/X0`) is
+  owned by `gdm` with no client auth for this user; Xorg has only the
+  `modesetting` driver (no `dummy`); no
+  `src/runtime/spl_winit/target/release/libspl_winit.so`.
+
+No crop was captured, so no pin was written. Calibration still needs the
+admitted X11 phase environment; status stays `open`.
+
+Blockers that no package install removes, even with the capture tools
+unpacked without root: the gate rejects the only available compiler
+(`--version` matches `rust-built ... bootstrap seed` -> `rust-seed-forbidden`,
+script line 889; no pure-Simple `bin/release/<triple>/simple` exists here),
+and `admit_runtime_provider` has no admitted `libsimple_runtime.so`
+(`src/compiler_rust/target/bootstrap/deps/` is empty in this worktree).
