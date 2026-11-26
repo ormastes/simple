@@ -919,6 +919,36 @@ pub fn storage_view_v1_clone(src: StorageViewV1, new_view_id: text) -> ViewHandl
 
 # --------------------------------------------------------------- destroy
 
+# Recovery for a create that crashed after claiming the view dir but before the
+# journal/meta landed. A live view always has a valid journal (writes require
+# `_sv_live`), so a dir with a missing or unparseable journal is removed only
+# when it holds nothing but the create artifacts: journal.sdn and view.sdn as
+# plain files and an EMPTY real upper/. Anything else is refused untouched.
+fn _sv_destroy_half_created(view_root: text, view_id: text, reason: text) -> ViewDestroyV1:
+    val view_dir = _sv_view_dir(view_root, view_id)
+    val listed = dir_list_optional(view_dir)
+    if listed == nil:
+        return _sv_destroy_result("rejected", reason)
+    for raw in listed ?? []:
+        val name = raw.trim()
+        if name == "" or name == "." or name == "..":
+            continue
+        val full = view_dir + "/" + name
+        if name == "journal.sdn" or name == "view.sdn":
+            if is_dir(full):
+                return _sv_destroy_result("rejected", reason)
+        elif name == "upper":
+            if not dir_is_real_no_follow(full):
+                return _sv_destroy_result("rejected", reason)
+            val inner = dir_list_optional(full)
+            if inner == nil or (inner ?? []).len() > 0:
+                return _sv_destroy_result("rejected", reason)
+        else:
+            return _sv_destroy_result("rejected", reason)
+    if not dir_remove_all(view_dir) or is_dir(view_dir):
+        return _sv_destroy_result("rejected", "view-dir-remove-failed")
+    _sv_destroy_result("ok", "")
+
 # Refuses while a materialized `lower/` exists: its links and the store pin are
 # owned by rootfs_materialize_v1, so the caller must run rootfs_dematerialize_v1
 # first (reason "lower-materialized").
@@ -933,7 +963,10 @@ pub fn storage_view_v1_destroy(view: StorageViewV1) -> ViewDestroyV1:
         return _sv_destroy_result("rejected", "lower-materialized")
     val journal = match _sv_journal_load(view.view_root, view.view_id):
         case Ok(value): value
-        case Err(reason): return _sv_destroy_result("rejected", reason)
+        case Err(reason):
+            if reason == "journal-missing" or reason == "journal-unreadable" or reason == "journal-invalid":
+                return _sv_destroy_half_created(view.view_root, view.view_id, reason)
+            return _sv_destroy_result("rejected", reason)
     val upper = _sv_upper_dir(view.view_root, view.view_id)
     val actions = lifecycle_recovery_actions_v1(journal, ContainerNativeAliveV1(false))
     for action in actions:
