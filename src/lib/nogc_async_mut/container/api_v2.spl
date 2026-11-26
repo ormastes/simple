@@ -30,10 +30,13 @@ use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxW
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
 use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
 use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.WindowsSimpleContainerAdapterV2
+use std.nogc_async_mut.container.pure_adapter_v1.{PureSimpleContainerAdapterV1, PureContainerOwnerPolicyV1}
+use std.common.contracts.sosix.containment_v1.{SosixContainMillisV1}
 
 pub enum SimpleContainerOwnerV2:
     Linux(ContainerHostScopeV2, LinuxSimpleContainerAdapterV2)
     Windows(ContainerHostScopeV2, WindowsSimpleContainerAdapterV2)
+    Pure(ContainerHostScopeV2, PureSimpleContainerAdapterV1)
 
 pub struct SimpleContainerFreshOpenV2:
     owner: Option<SimpleContainerOwnerV2> = None
@@ -115,7 +118,7 @@ fn simple_container_agent_step_v3(owner: SimpleContainerOwnerV2, kind: text,
             val turn = adapter.agent_step_v3(kind, root, native, value)
             SimpleContainerAgentTurnV3(owner: SimpleContainerOwnerV2.Linux(scope, turn.owner), root: turn.root,
                 native: turn.native, error: turn.error)
-        case SimpleContainerOwnerV2.Windows(_, _):
+        case _:
             SimpleContainerAgentTurnV3(owner: owner, root: root, native: native, error: "container-workspace-linux-required")
 
 pub fn simple_container_take_workspace_root_v3(owner: SimpleContainerOwnerV2) -> SimpleContainerAgentTurnV3:
@@ -139,33 +142,33 @@ pub fn simple_container_set_lifecycle_root_v3(owner: SimpleContainerOwnerV2, roo
 pub fn simple_container_epoch_current_v3(owner: SimpleContainerOwnerV2) -> Result<MachineFreshEpochRecordV1, text>:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.epoch_current_v3()
-        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+        case _: Err("container-workspace-linux-required")
 
 pub fn simple_container_helper_dirs_v3(owner: SimpleContainerOwnerV2) -> Result<[text], text>:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.helper_dirs_v3()
-        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+        case _: Err("container-workspace-linux-required")
 
 pub fn simple_container_validate_helper_template_v3(owner: SimpleContainerOwnerV2, template: GroupProcessStreamLaunchV2) -> Result<(), text>:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.validate_helper_template_v3(template)
-        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+        case _: Err("container-workspace-linux-required")
 
 pub fn simple_container_settle_workspace_v3(owner: SimpleContainerOwnerV2) -> Result<(), text>:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.settle_workspace_v3()
-        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+        case _: Err("container-workspace-linux-required")
 
 # milestone_0021 PR3 (D19): the released machine-charge row digest of the current settled lifecycle.
 pub fn simple_container_released_charge_digest_v3(owner: SimpleContainerOwnerV2) -> Result<text, text>:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.released_charge_digest_v3()
-        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+        case _: Err("container-workspace-linux-required")
 
 pub fn simple_container_return_settled_workspace_source_v3(owner: SimpleContainerOwnerV2) -> Result<bool, text>:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.return_settled_workspace_source_v3()
-        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+        case _: Err("container-workspace-linux-required")
 
 # milestone_0030 op (ii): bounded stdout/stderr/declared-output read of the SETTLED, reserved,
 # not-yet-returned remote-build source. Must run before simple_container_return_settled_workspace_source_v3.
@@ -173,12 +176,12 @@ pub fn simple_container_read_settled_workspace_v3(owner: SimpleContainerOwnerV2,
         bounds: ContainerSettledWorkspaceBoundsV3) -> Result<ContainerSettledWorkspaceReadV3, text>:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.read_settled_workspace_v3(bounds)
-        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+        case _: Err("container-workspace-linux-required")
 
 pub fn simple_container_close_workload_v3(owner: SimpleContainerOwnerV2) -> Result<(), text>:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.close_workload_v3()
-        case SimpleContainerOwnerV2.Windows(_, _): Err("container-workspace-linux-required")
+        case _: Err("container-workspace-linux-required")
 
 # 3.7 step 4: the amended transfer close_v2 (authority, R2, never-adopted R3, custody, phase closed). The root
 # must already be taken and its loan ended (step 2), and the service loan ended (step 3); close_v2 refuses otherwise.
@@ -192,6 +195,9 @@ pub fn simple_container_close_v2(owner: SimpleContainerOwnerV2) -> SimpleContain
             val pending = if closed.owner.is_some(): Some(SimpleContainerOwnerV2.Linux(scope, closed.owner.unwrap())) else: nil
             SimpleContainerCloseV2(pending, closed.closed, closed.error)
         case SimpleContainerOwnerV2.Windows(_, _): SimpleContainerCloseV2(Some(owner), false, "container-api-lifecycle-retained")
+        case SimpleContainerOwnerV2.Pure(_, adapter):
+            val unproven = adapter.unproven_cleanup_reason()
+            if unproven != "": SimpleContainerCloseV2(Some(owner), false, "container-api-" + unproven) else: SimpleContainerCloseV2(nil, true, "")
 
 pub fn simple_container_fresh_cleanup_v2(original: SimpleContainerFreshOpenV2) -> SimpleContainerFreshCleanupV2:
     var retained = original
@@ -228,6 +234,9 @@ pub fn simple_container_stats_observe_v1(owner: SimpleContainerOwnerV2,
         case SimpleContainerOwnerV2.Windows(_, _):
             return ContainerExecutionStatsTurnV1(owner: owner, observation: None,
                 error: "optional-capability-unavailable:stats:windows-docker")
+        case SimpleContainerOwnerV2.Pure(_, _):
+            return ContainerExecutionStatsTurnV1(owner: owner, observation: None,
+                error: "optional-capability-unavailable:stats:simple-pure")
         case SimpleContainerOwnerV2.Linux(scope, adapter):
             val started = time_sample_monotonic_nanos_or_failure()
             if started <= 0: return ContainerExecutionStatsTurnV1(owner, None, "container-stats-monotonic-clock")
@@ -336,6 +345,9 @@ pub fn simple_container_logs_capture_v1(owner: SimpleContainerOwnerV2,
             val started = active.logs_capture_begin_v1(original_request)
             container_logs_capture_finish_v1(SimpleContainerOwnerV2.Windows(scope, active), original_request,
                 scope, started.runtime, started.capture, "", false)
+        case SimpleContainerOwnerV2.Pure(_, _):
+            ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: None, observation: None,
+                error: "optional-capability-unavailable:logs-capture:simple-pure")
 
 pub fn simple_container_logs_capture_step_v1(owner: SimpleContainerOwnerV2,
         capture: ContainerExecutionLogsCaptureOwnerV1, cancel: bool = false) -> ContainerExecutionLogsCaptureTurnV1:
@@ -417,17 +429,20 @@ pub fn simple_container_observation_v2(owner: SimpleContainerOwnerV2) -> Contain
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.observation()
         case SimpleContainerOwnerV2.Windows(_, adapter): adapter.observation()
+        case SimpleContainerOwnerV2.Pure(_, adapter): adapter.observation()
 
 # Trusted owner metadata only; accessors perform no engine call or admission.
 pub fn simple_container_scope_v2(owner: SimpleContainerOwnerV2) -> ContainerHostScopeV2:
     match owner:
         case SimpleContainerOwnerV2.Linux(scope, _): scope
         case SimpleContainerOwnerV2.Windows(scope, _): scope
+        case SimpleContainerOwnerV2.Pure(scope, _): scope
 
 pub fn simple_container_backend_v2(owner: SimpleContainerOwnerV2) -> text:
     match owner:
         case SimpleContainerOwnerV2.Linux(_, _): "linux-podman"
         case SimpleContainerOwnerV2.Windows(_, _): "windows-docker-process"
+        case SimpleContainerOwnerV2.Pure(_, _): CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1
 
 fn container_api_text_v2(value: text) -> bool:
     str_len(value) > 0 and str_len(value) <= 4096 and not value.contains("\0") and
@@ -455,7 +470,7 @@ fn container_api_open_observation_v2(backend: text, scope: ContainerHostScopeV2,
 # unsupported; a known backend without qualified effects is refused with its
 # own unqualified reason. Neither ever falls through to Docker or Podman.
 fn container_api_backend_v2(backend: text) -> Result<ContainerBackendIdentityV1, text>:
-    match container_backend_admit_effects_v1(backend):
+    match container_backend_admit_owner_v1(backend):
         case Ok(identity): Ok(identity)
         case Err(reason): Err("container-api-" + reason)
 
@@ -481,7 +496,22 @@ pub fn simple_container_open_v2(backend: text, policy_bytes: text, state_root: t
             # Pre-effect refusal: no owner, handle or directory exists yet.
             Err("container-api-" + CONTAINER_BACKEND_UNQUALIFIED_SEATBELT_V1)
         case ContainerBackendIdentityV1.SimplePureProcess:
-            Err("container-api-" + CONTAINER_BACKEND_UNQUALIFIED_SIMPLE_PURE_V1)
+            # Pure owners carry measured evidence the text policy cannot: use simple_container_open_pure_v2.
+            Err("container-api-pure-typed-open-required")
+
+# Typed open for the pure backend: the owner policy carries the measured
+# evidence (pure_container_qualify_v1), which a text policy cannot. The same
+# observation/continuity/pin checks as every other owner apply.
+pub fn simple_container_open_pure_v2(policy: PureContainerOwnerPolicyV1, state_root: text,
+        scope: ContainerHostScopeV2, expected_provider_identity_digest: text, timeout: SosixContainMillisV1) -> Result<SimpleContainerOwnerV2, text>:
+    if not container_api_text_v2(state_root) or not container_api_scope_v2(scope) or
+            not builder_digest_valid_v1(expected_provider_identity_digest) or timeout.value <= 0:
+        return Err("container-api-open-invalid")
+    if scope.continuity_mode != "native-boot-incarnation-v1": return Err("container-api-continuity-unproven")
+    val adapter = PureSimpleContainerAdapterV1.open(policy, state_root, scope, expected_provider_identity_digest, timeout)?
+    val observed = container_api_open_observation_v2(CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, scope,
+        expected_provider_identity_digest, adapter.observation())?
+    Ok(SimpleContainerOwnerV2.Pure(scope, adapter))
 
 fn container_api_request_scope_v2(backend: text, scope: ContainerHostScopeV2,
         request: ContainerExecutionRequestV2) -> Result<bool, text>:
@@ -519,6 +549,11 @@ pub fn simple_container_project_v2(owner: SimpleContainerOwnerV2,
             if not adapter.validate(request)?: return Err("container-api-leaf-validation-refused")
             val projection = adapter.project(request)?
             container_api_projection_v2(request, projection)
+        case SimpleContainerOwnerV2.Pure(scope, adapter):
+            val scoped = container_api_request_scope_v2(CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, scope, request)?
+            if not adapter.validate(request)?.value: return Err("container-api-leaf-validation-refused")
+            val projection = adapter.project(request)?
+            container_api_projection_v2(request, projection)
 
 pub fn simple_container_action_project_v2(owner: SimpleContainerOwnerV2,
         request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
@@ -526,6 +561,7 @@ pub fn simple_container_action_project_v2(owner: SimpleContainerOwnerV2,
     val projected = match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter): adapter.action_project(request)?
         case SimpleContainerOwnerV2.Windows(_, adapter): adapter.action_project(request)?
+        case SimpleContainerOwnerV2.Pure(_, adapter): adapter.action_project(request)?
     if projected.argv.len() == 0 or projected.argv.len() > 4096 or projected.mounts.len() > 256 or
             not container_api_text_v2(projected.working_directory):
         return Err("container-api-action-projection-invalid")
@@ -564,6 +600,10 @@ pub fn simple_container_read_v2(owner: SimpleContainerOwnerV2, action: text,
             var active = adapter
             val operation = active.read(action, request)
             ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Windows(scope, active), operation: operation)
+        case SimpleContainerOwnerV2.Pure(scope, adapter):
+            var active = adapter
+            val operation = active.read(action, request)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Pure(scope, active), operation: operation)
 
 pub fn simple_container_apply_v2(owner: SimpleContainerOwnerV2, action: text,
         request: ContainerExecutionRequestV2, deadline: ContainerEffectDeadlineV1) -> ContainerOperationTurnV2:
@@ -585,6 +625,10 @@ pub fn simple_container_apply_v2(owner: SimpleContainerOwnerV2, action: text,
             var active = adapter
             val operation = active.apply(action, request, deadline)
             ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Windows(scope, active), operation: operation)
+        case SimpleContainerOwnerV2.Pure(scope, adapter):
+            var active = adapter
+            val operation = active.apply(action, request, deadline)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Pure(scope, active), operation: operation)
 
 # Explicit separately authorized lifecycle control. The caller verifies its
 # cleanup grant; the leaf rechecks this control window against actual time
@@ -605,6 +649,10 @@ pub fn simple_container_control_v2(owner: SimpleContainerOwnerV2, action: text,
             var active = adapter
             val operation = active.control(action, request, deadline)
             ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Windows(scope, active), operation: operation)
+        case SimpleContainerOwnerV2.Pure(scope, adapter):
+            var active = adapter
+            val operation = active.control(action, request, deadline)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Pure(scope, active), operation: operation)
 
 fn container_api_intent_v2(request: ContainerExecutionRequestV2, intent: RuntimeIntentV1) -> Result<RuntimeIntentV1, text>:
     val plan = request.plan
@@ -628,6 +676,10 @@ pub fn simple_container_intent_v2(owner: SimpleContainerOwnerV2,
             val intent = adapter.intent(request)?
             container_api_intent_v2(request, intent)
 
+        case SimpleContainerOwnerV2.Pure(scope, adapter):
+            val intent = adapter.intent(request)?
+            container_api_intent_v2(request, intent)
+
 pub fn simple_container_recover_v2(owner: SimpleContainerOwnerV2,
         request: ContainerExecutionRequestV2, intent: RuntimeIntentV1) -> ContainerOperationTurnV2:
     val projected = simple_container_project_v2(owner, request)
@@ -643,6 +695,10 @@ pub fn simple_container_recover_v2(owner: SimpleContainerOwnerV2,
             var active = adapter
             val operation = active.recover(request, intent)
             ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Windows(scope, active), operation: operation)
+        case SimpleContainerOwnerV2.Pure(scope, adapter):
+            var active = adapter
+            val operation = active.recover(request, intent)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Pure(scope, active), operation: operation)
 
 fn container_api_runtime_identity_v2(owner: SimpleContainerOwnerV2,
         request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<bool, text>:
@@ -691,6 +747,10 @@ pub fn simple_container_absence_v2(owner: SimpleContainerOwnerV2, request: Conta
             var active = adapter
             val result = active.absence(request, expected)
             container_api_absence_turn_v2(SimpleContainerOwnerV2.Windows(scope, active), request, expected, result)
+        case SimpleContainerOwnerV2.Pure(scope, adapter):
+            var active = adapter
+            val result = active.absence(request, expected)
+            container_api_absence_turn_v2(SimpleContainerOwnerV2.Pure(scope, active), request, expected, result)
 
 fn container_api_execution_user_turn_v2(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
         expected: RuntimeIdentityV1, result: Result<ContainerExecutionUserReceiptV2, text>) -> ContainerExecutionUserTurnV2:
@@ -728,3 +788,7 @@ pub fn simple_container_execution_user_v2(owner: SimpleContainerOwnerV2, request
             var active = adapter
             val result = active.execution_user(request, expected)
             container_api_execution_user_turn_v2(SimpleContainerOwnerV2.Windows(scope, active), request, expected, result)
+        case SimpleContainerOwnerV2.Pure(scope, adapter):
+            var active = adapter
+            val result = active.execution_user(request, expected)
+            container_api_execution_user_turn_v2(SimpleContainerOwnerV2.Pure(scope, active), request, expected, result)

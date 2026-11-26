@@ -1,0 +1,80 @@
+# Container backend selection (architecture pure_simple_container 10). Pure
+# data over (backend, capability report) candidates: the host variation
+# supplies the candidate list in the caller's preference order, the caller's
+# requirement is checked against each with container_capability_v1_admission_reason,
+# and the first admitted backend wins. Nothing is ever downgraded: a requirement
+# without an isolation kind is refused, and when no backend is admitted the
+# result is a typed refusal naming every backend's reason.
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1,
+    ContainerCapabilityRequirementV1, ContainerCapabilityFlagV1, container_capability_v1_admission_reason}
+use std.common.contracts.container.backend_identity_v1.{container_backend_known_v1,
+    CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1}
+
+pub const CONTAINER_SELECT_ISOLATION_REQUIRED_V1 = "backend-select-isolation-required"
+pub const CONTAINER_SELECT_NO_CANDIDATES_V1 = "backend-select-no-candidates"
+pub const CONTAINER_SELECT_NONE_ADMITTED_V1 = "backend-select-none-admitted"
+
+# unavailable_reason is the leaf probe's own reason when the backend could not
+# be observed at all; non-empty means "not available", whatever the report says.
+pub struct ContainerBackendCandidateV1:
+    backend: text
+    report: ContainerCapabilityReportV1
+    unavailable_reason: text
+
+pub struct ContainerBackendRefusalV1:
+    backend: text
+    reason: text
+
+pub struct ContainerBackendSelectionV1:
+    backend: text
+    admitted: ContainerCapabilityFlagV1
+    reason: text
+    refusals: [ContainerBackendRefusalV1]
+
+fn _select_refused_v1(reason: text, refusals: [ContainerBackendRefusalV1]) -> ContainerBackendSelectionV1:
+    ContainerBackendSelectionV1(backend: "", admitted: ContainerCapabilityFlagV1(false), reason: reason, refusals: refusals)
+
+# Windows hosts: the pure job-contained sandbox first, Docker (HCS process
+# isolation) second. Isolation kind, not this order, decides what is admitted.
+pub fn container_backend_candidates_windows_v1(pure_report: ContainerCapabilityReportV1,
+        pure_unavailable_reason: text, docker_report: ContainerCapabilityReportV1,
+        docker_unavailable_reason: text) -> [ContainerBackendCandidateV1]:
+    [ContainerBackendCandidateV1(backend: CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, report: pure_report,
+        unavailable_reason: pure_unavailable_reason),
+     ContainerBackendCandidateV1(backend: CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1, report: docker_report,
+        unavailable_reason: docker_unavailable_reason)]
+
+pub fn container_backend_select_v1(candidates: [ContainerBackendCandidateV1],
+        requirement: ContainerCapabilityRequirementV1) -> ContainerBackendSelectionV1:
+    if requirement.required_isolation_kind == "":
+        return _select_refused_v1(CONTAINER_SELECT_ISOLATION_REQUIRED_V1, [])
+    if candidates.len() == 0:
+        return _select_refused_v1(CONTAINER_SELECT_NO_CANDIDATES_V1, [])
+    var refusals: [ContainerBackendRefusalV1] = []
+    for candidate in candidates:
+        var reason = ""
+        if not container_backend_known_v1(candidate.backend):
+            reason = "backend-unsupported"
+        elif candidate.unavailable_reason != "":
+            reason = candidate.unavailable_reason
+        else:
+            reason = container_capability_v1_admission_reason(candidate.report, requirement)
+        if reason == "":
+            return ContainerBackendSelectionV1(backend: candidate.backend, admitted: ContainerCapabilityFlagV1(true),
+                reason: "", refusals: refusals)
+        refusals.push(ContainerBackendRefusalV1(backend: candidate.backend, reason: reason))
+    _select_refused_v1(CONTAINER_SELECT_NONE_ADMITTED_V1, refusals)
+
+# "<overall>: <backend>=<reason>; <backend>=<reason>" for logs and error returns.
+pub fn container_backend_selection_text_v1(selection: ContainerBackendSelectionV1) -> text:
+    var out = selection.reason
+    if selection.admitted.value: return "selected:" + selection.backend
+    var first = true
+    for refusal in selection.refusals:
+        out = out + (if first: ": " else: "; ") + refusal.backend + "=" + refusal.reason
+        first = false
+    out
+
+export ContainerBackendCandidateV1, ContainerBackendRefusalV1, ContainerBackendSelectionV1
+export container_backend_select_v1, container_backend_candidates_windows_v1, container_backend_selection_text_v1
+export CONTAINER_SELECT_ISOLATION_REQUIRED_V1, CONTAINER_SELECT_NO_CANDIDATES_V1, CONTAINER_SELECT_NONE_ADMITTED_V1

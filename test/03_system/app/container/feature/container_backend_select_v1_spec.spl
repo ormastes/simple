@@ -1,0 +1,367 @@
+# @cover src/lib/nogc_async_mut/container/backend_select_v1.spl 80%
+# @cover src/lib/nogc_async_mut/container/pure_adapter_v1.spl 70%
+# @cover src/lib/nogc_async_mut/container/providers/windows/docker_capability_report_v1.spl 80%
+# codex-system-test
+# @manual: primary
+# Increment-2 lane A1 on the Windows evidence host: capability-admission backend
+# selection between the pure sandbox and Docker, and an api_v2 run through the
+# pure owner. Examples return early unless Windows + the seed exist; a skipped
+# example is not evidence, so the measured values accompany the lane report.
+# Run (Docker live needs the opt-in and an unset DOCKER_*/proxy environment):
+#   SIMPLE_DOCKER_HOSTED_LIVE=1 C:/dev/keep/seeds/simple-local-20261126.exe test <this spec>
+# Architecture: doc/04_architecture/platform/container/pure_simple_container.md (10)
+use std.spec.*
+use std.platform.{is_windows, get_current_dir, get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{file_exists, getpid, time_now_monotonic_ms}
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1, ContainerCapabilityRequirementV1, ContainerCapabilityReportV1, container_capability_requirement_v1_empty, container_capability_report_v1_empty, CONTAINER_ISOLATION_KIND_NATIVE_V1, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1}
+use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, pure_container_capability_report_v1}
+use std.common.contracts.container.backend_identity_v1.{CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionPlanV2, ContainerExecutionRequestV2}
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.container.control_deadline_v1.container_control_deadline_v1
+use std.common.contracts.container.runtime_v1.{RuntimeExitStatusV1, RUNTIME_STATUS_OK}
+use std.common.contracts.sosix.containment_v1.{SosixContainLimitsV1, SosixContainBytesV1, SosixContainCountV1, SosixContainCpuRateV1, SosixContainMillisV1}
+use std.common.container_policy.attempt_dir_plan_v1.{ContainerAttemptNumberV1}
+use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1, SosixContainMemoryProbeV1}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
+use std.nogc_sync_mut.storage.storage_view_v1.{ViewBytesV1, storage_view_v1_create, storage_view_v1_write, storage_view_v1_save}
+use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, StoreGenerationV1}
+use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerQualifyV1, pure_container_qualify_v1}
+use std.nogc_sync_mut.sosix.host.{env_get, sosix_env_set, secure_temp_dir, dir_remove_all, file_is_regular_no_follow}
+use std.nogc_sync_mut.sosix.process.sosix_process_run_bounded
+use std.nogc_sync_mut.sosix.time.sosix_time_now_unix_micros
+use std.nogc_sync_mut.sosix.fs_v1.{sosix_fs_host_arch, dir_create_all}
+use std.nogc_async_mut.container.backend_select_v1.*
+use std.nogc_async_mut.container.pure_adapter_v1.*
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_encode_v1
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+use std.nogc_async_mut.container.providers.windows.docker_capability_report_v1.{windows_docker_capability_report_v1, windows_docker_unavailable_reason_v1}
+
+val SEED = "C:/dev/keep/seeds/simple-local-20261126.exe"
+val CAP_BYTES = 276824064
+val RUN_TAG = getpid().to_string() + "_" + time_now_monotonic_ms().to_string()
+val DOCKER = "C:\Program Files\Docker\docker.exe"
+val PIPE = "npipe:////./pipe/docker_engine"
+val WALL_MS = 120000
+
+fn ready() -> bool:
+    is_windows() and file_exists(SEED)
+
+fn digest_of(path: text) -> text:
+    if is_windows(): windows_process_file_digest_v1(path) else: ""
+
+fn repo() -> text:
+    get_current_dir().replace("\\", "/")
+
+fn base_dir() -> text:
+    get_temp_dir().replace("\\", "/") + "/pure_a1_" + RUN_TAG
+
+fn store_root() -> text:
+    base_dir() + "/store"
+
+fn view_root() -> text:
+    base_dir() + "/views"
+
+fn state_root() -> text:
+    base_dir() + "/state"
+
+fn make_base() -> bool:
+    if not dir_create_all(base_dir() + "/mem"): return false
+    if immutable_store_v1_init(store_root()) != "": return false
+    val seeded = storage_view_v1_create(store_root(), base_dir() + "/seedviews", "seed", "", StoreGenerationV1(0), ViewBytesV1(100000))
+    if seeded.status != "ok": return false
+    if storage_view_v1_write(seeded.view, "bin/tool.txt", "tool-bytes".bytes()).status != "ok": return false
+    if storage_view_v1_write(seeded.view, "etc.txt", "etc-bytes".bytes()).status != "ok": return false
+    storage_view_v1_save(seeded.view, "main", StoreGenerationV1(0)).status == "ok"
+
+val base_ready = if ready(): make_base() else: false
+
+fn empty_evidence() -> PureContainerEvidenceV1:
+    val no = ContainerCapabilityFlagV1(false)
+    PureContainerEvidenceV1(host_os: "windows", host_arch: "x86_64", guest_abi: "windows",
+        root_view_kind: PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, memory_cap_enforced: no, write_confinement_observed: no,
+        base_fully_linked: no, launch_observed: no, cleanup_observed: no, roots_digest: "", evidence_revision: "")
+
+fn qualify_request() -> PureContainerQualifyV1:
+    PureContainerQualifyV1(state_root: state_root(), view_root: view_root(), probe_program: SEED,
+        probe_digest: digest_of(SEED),
+        probe_script: repo() + "/src/lib/nogc_sync_mut/sosix/contain_canary_probe.spl",
+        memory_probe: SosixContainMemoryProbeV1(program: SEED, program_digest: digest_of(SEED),
+            under_args: ["run", repo() + "/test/fixtures/container/alloc_mb.spl", "48"],
+            over_args: ["run", repo() + "/test/fixtures/container/alloc_mb.spl", "256"],
+            cap: SosixContainBytesV1(CAP_BYTES), work_dir: base_dir() + "/mem", wall: SosixContainMillisV1(180000)))
+
+val evidence = if base_ready: pure_container_qualify_v1(qualify_request()) else: empty_evidence()
+
+fn requirement_of(kind: text) -> ContainerCapabilityRequirementV1:
+    var requirement = container_capability_requirement_v1_empty()
+    requirement.required_host_os = "windows"
+    requirement.required_isolation_kind = kind
+    requirement.required_launch_qualified = ContainerCapabilityFlagV1(true)
+    requirement
+
+fn requirement_sandbox() -> ContainerCapabilityRequirementV1:
+    var requirement = requirement_of(CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1)
+    requirement.required_ephemeral_cleanup = ContainerCapabilityFlagV1(true)
+    requirement.required_root_view_kind = PURE_CONTAINER_ROOT_VIEW_SPLIT_V1
+    requirement
+
+fn requirement_native() -> ContainerCapabilityRequirementV1:
+    requirement_of(CONTAINER_ISOLATION_KIND_NATIVE_V1)
+
+# ------------------------------------------------------------------ Docker
+
+fn docker_engine_id() -> text:
+    val temp = env_get("TEMP")
+    val config = secure_temp_dir(if temp != "": temp else: "C:\Windows\Temp", "simple-docker-probe-")
+    if not config.is_ok() or not file_is_regular_no_follow(DOCKER): return ""
+    val info = sosix_process_run_bounded(DOCKER, ["--host", PIPE, "info", "--format", "{{{{.ID}}}}"], 60000, 65536)
+    val removed = dir_remove_all(config.unwrap())
+    if info.2 != 0: "" else: info.0.trim()
+
+fn docker_policy(engine_id: text) -> WindowsDockerPolicyV1:
+    val temp = env_get("TEMP")
+    val root = env_get("SystemRoot")
+    WindowsDockerPolicyV1(docker_executable: DOCKER, endpoint: PIPE, engine_id: engine_id,
+        node_boot_id: "live-boot-a", provider_generation: 1,
+        expected_kernel_version: "10.0 26300 (26100.1.amd64fre.ge_release.240331-1435)",
+        image_os_version: WINDOWS_DOCKER_PINNED_IMAGE_OS_VERSION_V1, expected_image_id: WINDOWS_DOCKER_PINNED_IMAGE_ID_V1,
+        timeout_ms: WALL_MS, max_output_bytes: 65536,
+        system_root: if root != "": root else: "C:\Windows",
+        temp_directory: if temp != "": temp else: "C:\Windows\Temp")
+
+fn docker_engine_cached() -> text:
+    if ready(): docker_engine_id() else: ""
+
+# live: whether the hosted-live opt-in is set for this probe. The probe reason
+# without it is the provider's own docker-hosted-launch-not-enabled.
+fn docker_candidate_parts(live: bool) -> ContainerBackendCandidateV1:
+    val previous = env_get("SIMPLE_DOCKER_HOSTED_LIVE")
+    sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", if live: "1" else: "0")
+    val policy = docker_policy(docker_engine_cached())
+    var provider = WindowsDockerRuntimeProviderV1.new(policy)
+    val probe = provider.probe()
+    sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
+    ContainerBackendCandidateV1(backend: CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1,
+        report: windows_docker_capability_report_v1(probe, policy, sosix_fs_host_arch()),
+        unavailable_reason: windows_docker_unavailable_reason_v1(probe))
+
+fn pure_candidate(ev: PureContainerEvidenceV1) -> ContainerBackendCandidateV1:
+    ContainerBackendCandidateV1(backend: CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1,
+        report: pure_container_capability_report_v1(sosix_contain_support_v1(), ev), unavailable_reason: "")
+
+fn candidates_of(pure: ContainerBackendCandidateV1, docker: ContainerBackendCandidateV1) -> [ContainerBackendCandidateV1]:
+    container_backend_candidates_windows_v1(pure.report, pure.unavailable_reason, docker.report, docker.unavailable_reason)
+
+fn refusal_for(selection: ContainerBackendSelectionV1, backend: text) -> text:
+    for refusal in selection.refusals:
+        if refusal.backend == backend: return refusal.reason
+    "<none>"
+
+describe "backend selection by capability admission":
+    it "picks pure for native-sandbox with qualified evidence, never silently Docker":
+        if not ready(): return
+        expect(base_ready).to_equal(true)
+        expect(evidence.evidence_revision.starts_with("pure:")).to_equal(true)
+        val selection = container_backend_select_v1(candidates_of(pure_candidate(evidence), docker_candidate_parts(true)), requirement_sandbox())
+        expect(selection.reason).to_equal("")
+        expect(selection.backend).to_equal(CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1)
+        expect(selection.admitted.value).to_equal(true)
+
+    it "refuses pure for native-sandbox when its evidence is missing and does not fall to Docker":
+        if not ready(): return
+        val selection = container_backend_select_v1(candidates_of(pure_candidate(empty_evidence()), docker_candidate_parts(true)), requirement_sandbox())
+        expect(selection.admitted.value).to_equal(false)
+        expect(selection.reason).to_equal(CONTAINER_SELECT_NONE_ADMITTED_V1)
+        expect(refusal_for(selection, CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1)).to_equal("capability-evidence-missing")
+        expect(refusal_for(selection, CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1)).to_equal("isolation-kind-mismatch")
+
+    it "picks Docker for native-container when the engine is observed live":
+        if not ready(): return
+        expect(docker_engine_cached() != "").to_equal(true)
+        val docker = docker_candidate_parts(true)
+        expect(docker.unavailable_reason).to_equal("")
+        expect(docker.report.evidence_revision.starts_with("docker:")).to_equal(true)
+        val selection = container_backend_select_v1(candidates_of(pure_candidate(evidence), docker), requirement_native())
+        expect(selection.reason).to_equal("")
+        expect(selection.backend).to_equal(CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1)
+        expect(selection.refusals.len()).to_equal(1)
+        expect(selection.refusals[0].reason).to_equal("isolation-kind-mismatch")
+
+    it "refuses when neither admits and names each backend's reason":
+        if not ready(): return
+        val docker_off = docker_candidate_parts(false)
+        val selection = container_backend_select_v1(candidates_of(pure_candidate(evidence), docker_off), requirement_native())
+        expect(selection.admitted.value).to_equal(false)
+        expect(selection.backend).to_equal("")
+        expect(selection.reason).to_equal(CONTAINER_SELECT_NONE_ADMITTED_V1)
+        expect(refusal_for(selection, CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1)).to_equal("isolation-kind-mismatch")
+        expect(refusal_for(selection, CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1)).to_equal("docker-hosted-launch-not-enabled")
+        val text_form = container_backend_selection_text_v1(selection)
+        expect(text_form.contains("simple-pure-process=isolation-kind-mismatch")).to_equal(true)
+        expect(text_form.contains("windows-docker-process=docker-hosted-launch-not-enabled")).to_equal(true)
+
+    it "refuses a requirement with no isolation kind and an empty candidate list":
+        if not ready(): return
+        val none = container_capability_requirement_v1_empty()
+        val unconstrained = container_backend_select_v1(candidates_of(pure_candidate(evidence), docker_candidate_parts(true)), none)
+        expect(unconstrained.reason).to_equal(CONTAINER_SELECT_ISOLATION_REQUIRED_V1)
+        expect(unconstrained.admitted.value).to_equal(false)
+        expect(container_backend_select_v1([], requirement_native()).reason).to_equal(CONTAINER_SELECT_NO_CANDIDATES_V1)
+
+    it "does not admit an unknown backend name":
+        if not ready(): return
+        val unknown = ContainerBackendCandidateV1(backend: "made-up", report: container_capability_report_v1_empty(), unavailable_reason: "")
+        val selection = container_backend_select_v1([unknown], requirement_native())
+        expect(refusal_for(selection, "made-up")).to_equal("backend-unsupported")
+
+# --------------------------------------------------------- api_v2 pure route
+
+fn scope_a() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "service-a", boot_id: "boot-a",
+        provider_generation: 1, native_machine_id: "machine-a", continuity_mode: "native-boot-incarnation-v1",
+        continuity_id: "boot-a")
+
+fn pure_policy() -> PureContainerOwnerPolicyV1:
+    PureContainerOwnerPolicyV1(store: store_root(), view_root: view_root(), base_root: "main", quota: ViewBytesV1(1048576),
+        limits: SosixContainLimitsV1(memory: SosixContainBytesV1(0), processes: SosixContainCountV1(0),
+            cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(WALL_MS)),
+        identity: "restricted", requirement: requirement_sandbox(), evidence: evidence)
+
+fn child_env() -> [text]:
+    ["SystemRoot=C:\\Windows", "PATH=C:\\Windows\\System32"]
+
+fn pure_request(code: text) -> ContainerExecutionRequestV2:
+    val wire = PureContainerRequestV1(pod_uid: "pure-api-pod", attempt: ContainerAttemptNumberV1(1), operation_id: "pure-api-op",
+        program: SEED, program_digest: digest_of(SEED),
+        args: ["run", repo() + "/test/fixtures/container/pure_probe.spl", "args:", "base", code],
+        environment: child_env(), network: "host")
+    val bytes = pure_container_request_encode_v1(wire).unwrap()
+    val scope = scope_a()
+    ContainerExecutionRequestV2(plan: ContainerExecutionPlanV2(backend: CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1,
+        workload_uid: "pure-api-pod", attempt: 1, operation_id: "pure-api-op",
+        request_digest: pure_container_request_digest_v1(bytes), physical_host_id: scope.physical_host_id,
+        service_scope_id: scope.service_scope_id, boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id),
+        request_bytes: bytes)
+
+fn open_pure() -> Result<SimpleContainerOwnerV2, text>:
+    simple_container_open_pure_v2(pure_policy(), state_root(), scope_a(), pure_container_provider_pin_v1(pure_policy()), SosixContainMillisV1(WALL_MS))
+
+describe "api_v2 through the pure backend":
+    it "refuses the text-policy open and the text observation for the pure backend (typed owner required)":
+        if not ready(): return
+        val pin = pure_container_provider_pin_v1(pure_policy())
+        expect(simple_container_open_v2(CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, "x", "C:\\x", scope_a(), pin, 1000).unwrap_err())
+            .to_equal("container-api-pure-typed-open-required")
+        expect(simple_container_observe_v2(CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, "x").unwrap_err())
+            .to_equal("container-api-pure-observation-requires-owner")
+
+    it "refuses to open with empty evidence, a wrong pin or a weak continuity scope":
+        if not ready(): return
+        var blank = pure_policy()
+        blank.evidence = empty_evidence()
+        expect(simple_container_open_pure_v2(blank, state_root(), scope_a(), pure_container_provider_pin_v1(blank), SosixContainMillisV1(WALL_MS)).unwrap_err())
+            .to_equal("pure-container-evidence-missing")
+        expect(simple_container_open_pure_v2(pure_policy(), state_root(), scope_a(), "a".repeat(64), SosixContainMillisV1(WALL_MS)).unwrap_err())
+            .to_equal("pure-container-provider-identity-mismatch")
+        var weak = scope_a()
+        weak.continuity_mode = "machine-boot-counter-v1"
+        expect(simple_container_open_pure_v2(pure_policy(), state_root(), weak, pure_container_provider_pin_v1(pure_policy()), SosixContainMillisV1(WALL_MS)).unwrap_err())
+            .to_equal("container-api-open-invalid")
+
+    it "runs prepare, create, start, wait and destroy and returns the workload exit code 7":
+        if not ready(): return
+        val opened = open_pure()
+        expect(opened.is_ok()).to_equal(true)
+        var owner = opened.unwrap()
+        expect(simple_container_backend_v2(owner)).to_equal(CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1)
+        expect(simple_container_observation_v2(owner).execution_os).to_equal("host")
+        val request = pure_request("7")
+        val projected = simple_container_project_v2(owner, request)
+        expect(projected.is_ok()).to_equal(true)
+        val now_ms = sosix_time_now_unix_micros() / 1000
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, "pure-api-op", ["create", "start"], now_ms + WALL_MS).unwrap()
+        val prepared = simple_container_apply_v2(owner, "prepare", request, deadline)
+        expect(prepared.operation.reason).to_equal("")
+        expect(prepared.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val created = simple_container_apply_v2(prepared.owner, "create", request, deadline)
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val started = simple_container_apply_v2(created.owner, "start", request, deadline)
+        expect(started.operation.reason).to_equal("")
+        expect(started.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(started.operation.exit_code).to_equal(7)
+        match started.operation.state.workload_exit:
+            RuntimeExitStatusV1.Exited(code): expect(code).to_equal(7)
+            _: expect("exited").to_equal("not-exited")
+        val waited = simple_container_read_v2(started.owner, "wait", request)
+        expect(waited.operation.exit_code).to_equal(7)
+        val control = container_control_deadline_v1(request.plan.request_digest, "pure-api-op", ["destroy"], now_ms + WALL_MS).unwrap()
+        val destroyed = simple_container_control_v2(waited.owner, "destroy", request, control)
+        expect(destroyed.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(destroyed.operation.state.phase).to_equal("destroyed")
+        val closed = simple_container_close_v2(destroyed.owner)
+        expect(closed.closed).to_equal(true)
+
+    it "fails closed on a misrouted backend, an expired launch window and unsupported reads":
+        if not ready(): return
+        var owner = open_pure().unwrap()
+        val request = pure_request("3")
+        val now_ms = sosix_time_now_unix_micros() / 1000
+        val expired = container_effect_deadline_v1(request.plan.request_digest, "pure-api-op", ["create", "start"], now_ms + 1).unwrap()
+        val prepared = simple_container_apply_v2(owner, "prepare", request, expired)
+        expect(prepared.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val late = simple_container_apply_v2(prepared.owner, "create", request, container_effect_deadline_v1(request.plan.request_digest, "pure-api-op", ["create"], now_ms + 1).unwrap())
+        expect(late.operation.reason).to_equal("container-effect-deadline-expired")
+        var wrong = request
+        wrong.plan.backend = CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1
+        expect(simple_container_apply_v2(late.owner, "create", wrong, expired).operation.reason).to_equal("container-api-backend-mismatch")
+        expect(simple_container_read_v2(late.owner, "logs", request).operation.reason).to_equal("pure-container-logs-unsupported")
+
+# ----------------------------------------------------- Docker route (live)
+
+describe "api_v2 and the Docker backend on this host":
+    it "stays refused at the owner gate: Windows observes only a boot counter, never a native boot incarnation":
+        if not ready(): return
+        if docker_engine_cached() == "": return
+        val previous = env_get("SIMPLE_DOCKER_HOSTED_LIVE")
+        sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", "1")
+        val policy_bytes = windows_docker_policy_encode_v1(docker_policy(docker_engine_cached())).unwrap()
+        val temp = env_get("TEMP")
+        val opened = simple_container_open_v2(CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1, policy_bytes,
+            (if temp != "": temp else: "C:\Windows\Temp"), scope_a(), "a".repeat(64), WALL_MS)
+        sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
+        expect(opened.is_err()).to_equal(true)
+        # Fail-closed at the owner gate. Which gate answers first depends on the runtime: the seed interpreter has no native
+        # host identity (below); a native build reaches windows-container-fresh-service-incarnation-required.
+        val reason = opened.unwrap_err()
+        expect(reason == "Windows host identity requires native AOT runtime" or reason == "windows-container-fresh-service-incarnation-required").to_equal(true)
+
+    it "runs cmd /c echo through the selected Docker provider lifecycle and returns exit 0":
+        if not ready(): return
+        if docker_engine_cached() == "": return
+        val previous = env_get("SIMPLE_DOCKER_HOSTED_LIVE")
+        sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", "1")
+        val docker = docker_candidate_parts(true)
+        val selection = container_backend_select_v1(candidates_of(pure_candidate(evidence), docker), requirement_native())
+        expect(selection.backend).to_equal(CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1)
+        val policy = docker_policy(docker_engine_cached())
+        var provider = WindowsDockerRuntimeProviderV1.new(policy)
+        val request = WindowsDockerRequestV1(pod_uid: "a1-docker-echo", attempt: 1, operation_id: "a1-docker-echo-op",
+            image: WINDOWS_DOCKER_PINNED_IMAGE_REF_V1, command: ["cmd", "/c", "echo", "a1-docker-ok"], args: [],
+            cpu_count: 1, memory_limit_bytes: 536870912, network: "none")
+        val digest = windows_docker_request_digest_v1(policy, request).unwrap()
+        val now_ms = sosix_time_now_unix_micros() / 1000
+        val deadline = container_effect_deadline_v1(digest, request.operation_id, ["create", "start"], now_ms + WALL_MS).unwrap()
+        expect(provider.set_launch_deadline_v1(deadline).unwrap()).to_equal(true)
+        val prepared = provider.prepare_pod(request)
+        val created = if prepared.status == "ok": provider.create(request) else: prepared
+        val started = if created.status == "ok": provider.start(request) else: created
+        val waited = if started.status == "ok": provider.wait(request) else: started
+        val destroyed = if created.status == "ok": provider.destroy(request, true) else: created
+        sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
+        expect(waited.status).to_equal("ok")
+        expect(waited.exit_code).to_equal(0)
+        expect(destroyed.status).to_equal("ok")
