@@ -825,6 +825,7 @@ fn process_use_stmt(
                 }
             }
         }
+        Err(e) if super::super::module_loader::is_unprovided_use_error(&e) => return Err(e),
         Err(_e) => {
             // Module loading failed - use empty dict
             env.insert(binding_name.clone(), Value::Dict(Arc::new(crate::value::DictMap::new())));

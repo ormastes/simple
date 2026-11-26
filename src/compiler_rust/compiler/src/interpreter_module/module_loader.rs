@@ -912,11 +912,6 @@ fn use_warning_seen(key: String) -> bool {
     }
 }
 
-fn use_list_warnings_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none())
-}
-
 /// A module whose surface cannot be enumerated statically: it re-exports via a
 /// glob (`export use x.*`) or a bare `export use {..}` that pulls from siblings.
 /// Checking such a module would produce false positives, so we skip it.
@@ -1144,6 +1139,20 @@ fn private_import_is_baselined(module_path: &Path, name: &str) -> bool {
 /// registers the module's whole surface, so an unprovided name would otherwise
 /// resolve to whatever OTHER co-compiled module defines it (wrong owner,
 /// seed_export_use_as_alias_binds_wrong_owner_2026-11-26).
+/// Message tail of every unprovided-use rejection; nested-load error arms key on it
+/// so the rejection propagates instead of degrading to an empty module dict.
+pub(crate) const UNPROVIDED_USE_MARKER: &str = "does not provide it (imported from";
+
+pub(crate) fn is_unprovided_use_error(e: &CompileError) -> bool {
+    e.to_string().contains(UNPROVIDED_USE_MARKER)
+}
+
+/// True when the module text carries a top-level host gate, so its parsed
+/// surface depends on the host and is not a complete provided set.
+fn source_is_host_gated(src: &str) -> bool {
+    src.lines().any(|l| l.starts_with("@when(") || l.starts_with("@cfg("))
+}
+
 fn check_unprovided_use_names(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
@@ -1832,15 +1841,16 @@ pub fn load_and_merge_module(
     // Use-list check: the braced names in `use mod.{a, b}` are otherwise never
     // compared against what `mod` actually provides. Record the surface so
     // later cache hits can run the same check, then report any name the module
-    // does not provide. Reporting only — registration below is unchanged.
+    // does not provide as a hard error.
     register_module_private_fns(&module_path, &filtered_items);
-    let provided_names = collect_provided_names(
-        &filtered_items,
-        &exports,
-        &module_functions,
-        &module_classes,
-        &module_enums,
-    );
+    // A host-gated module (`@when(os=...)` / `@cfg(...)`) has its other-host
+    // items stripped before this point, so its surface here is only THIS
+    // host's; checking against it would reject valid cross-host imports.
+    let provided_names = if source_is_host_gated(&raw) {
+        None
+    } else {
+        collect_provided_names(&filtered_items, &exports, &module_functions, &module_classes, &module_enums)
+    };
     record_provided_names(&module_path, provided_names.clone());
     if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names) {
         // Release the loading mark exactly like the evaluation-error arm above.
@@ -3541,8 +3551,20 @@ mod private_call_visibility_tests {
         }
     }
 
+    fn use_of(src: &str) -> simple_parser::ast::UseStmt {
+        let parsed = simple_parser::Parser::new(src).parse().expect("fixture");
+        parsed
+            .items
+            .into_iter()
+            .find_map(|n| match n {
+                simple_parser::ast::Node::UseStmt(u) => Some(u),
+                _ => None,
+            })
+            .expect("use stmt")
+    }
+
     fn facade_provided(src: &str) -> super::ProvidedNames {
-        let parsed = Parser::new(src).parse().expect("fixture");
+        let parsed = simple_parser::Parser::new(src).parse().expect("fixture");
         super::collect_provided_names(
             &parsed.items,
             &std::sync::Arc::new(crate::value::ModuleTable::leaf(Default::default())),
@@ -3557,9 +3579,30 @@ mod private_call_visibility_tests {
         let provided = facade_provided("export use owner_a.{is_dir as fa_is_dir}\n");
         let u = use_of("use facade.{is_dir}\n");
         let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("facade.spl"), "facade", &provided);
-        let msg = format!("{:?}", r.expect_err("unprovided name must be rejected"));
+        let e = r.expect_err("unprovided name must be rejected");
+        let msg = format!("{:?}", e);
         assert!(msg.contains("is_dir") && msg.contains("facade"), "{msg}");
         let ok = use_of("use facade.{fa_is_dir}\n");
         assert!(super::check_unprovided_use_names(&ok, None, std::path::Path::new("facade.spl"), "facade", &provided).is_ok());
+        assert!(super::is_unprovided_use_error(&e));
+    }
+
+    #[test]
+    fn every_named_declaration_kind_is_provided() {
+        let provided = facade_provided(
+            "pub unit TokV1: i64\ntrait Tr:\n    fn t() -> i64\ntype Al = i64\nconst K = 1\nstatic S = 2\n",
+        );
+        for name in ["TokV1", "Tr", "Al", "K", "S"] {
+            let u = use_of(&format!("use m.{{{name}}}\n"));
+            let r = super::check_unprovided_use_names(&u, None, std::path::Path::new("m.spl"), "m", &provided);
+            assert!(r.is_ok(), "{name}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn host_gated_source_is_detected() {
+        assert!(super::source_is_host_gated("# c\n@when(os=\"linux\"):\npub fn f():\n    pass\n"));
+        assert!(super::source_is_host_gated("@cfg(arch=\"x86_64\")\nfn g():\n    pass\n"));
+        assert!(!super::source_is_host_gated("fn h():\n    @when(x)\n"));
     }
 }
