@@ -5103,3 +5103,25 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
 - **Gate traps:** this aarch64 host needs `CHROME_NO_SANDBOX=1` (Chrome aborts
   and the gate reports "viewport probe returned no inner height"); the gate does
   not record RSS — wrap `SIMPLE_BIN` with `/usr/bin/time -a -o LOG -f "%e %M %C"`.
+
+## 2026-11-26 — parity specs never found Chrome off the default paths (`work/webrender-parity-wmaqua-20261126`)
+
+- **Symptom:** `wm_aqua_chrome_vs_pure_simple_parity` panicked with
+  `array index out of bounds: index is 16020 but length is 0`. 16020 is
+  `(20,20)` on 800 px, the first `_pixel_at` in `_assert_aqua_theme_pixels("chrome", ...)`,
+  so the empty buffer was the CHROME capture, not a Simple frame.
+- **Cause:** `compare_view_find_browser("")` (`src/lib/nogc_sync_mut/ui/compare_view_host.spl`)
+  only tried four fixed install paths. This host's Chrome is Playwright's
+  Chromium, so it returned `""` and `process_run("")` gave `code=-1` with no
+  stderr. `expect` does not stop an `it`, so the spec went on to index the empty frame.
+  The same lookup made `complex_layered_interactive` fail at
+  `expect(browser_bin != "")` and made `text_orientation_layout_parity` pass
+  vacuously through `[parity-skip]`. **No `chrome_vs_simple_*` spec had
+  compared against Chrome on this host before this fix.**
+- **Fix:** look up `SIMPLE_COMPARE_VIEW_BROWSER`, then `CHROME_BIN` (the
+  catalog gate's name), each only when the file exists, before the install
+  paths. An explicit argument still wins. `wm_aqua` now `fail()`s with the
+  reason and returns, instead of panicking.
+- **Result with Chrome found** (with and without the #11963 scrollbar wiring,
+  identical): wm_aqua 2/2, complex_layered 2/2, text_orientation 3/3,
+  examples 7/8 (the hero-centring geometry, fixed in its own lane).

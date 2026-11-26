@@ -11,7 +11,7 @@ available. Written for rendering-parity test owners.
 viewer; this spec never does.
 """
 use std.spec.*
-use std.io_runtime.{file_exists, file_read, file_size, dir_remove_all, host_os}
+use std.io_runtime.{file_exists, file_read, file_size, dir_remove_all, host_os, env_get, env_set}
 use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect_with, compare_view_inspect, compare_view_find_browser, compare_view_host_screen}
 
 fn _solid(n: i64, argb: u32) -> [u32]:
@@ -64,6 +64,30 @@ describe "compare_view host":
 
     it "treats a missing viewer path as no viewer":
         expect(compare_view_find_browser("definitely/not/a/browser.exe")).to_equal("")
+
+    # The parity specs call compare_view_find_browser("") and fail with an
+    # empty capture when Chrome lives off the default paths (Playwright's
+    # Chromium). CHROME_BIN is the name the catalog gate reads;
+    # SIMPLE_COMPARE_VIEW_BROWSER is this module's own knob and wins.
+    it "finds the browser from CHROME_BIN and SIMPLE_COMPARE_VIEW_BROWSER, explicit path first":
+        val saved_chrome = env_get("CHROME_BIN") ?? ""
+        val saved_view = env_get("SIMPLE_COMPARE_VIEW_BROWSER") ?? ""
+        env_set("CHROME_BIN", "")
+        env_set("SIMPLE_COMPARE_VIEW_BROWSER", "")
+        val default_pick = compare_view_find_browser("")
+        val chrome_like = "test/01_unit/lib/nogc_sync_mut/ui/compare_view_host_spec.spl"
+        val viewer_like = "src/lib/nogc_sync_mut/ui/compare_view_host.spl"
+        env_set("CHROME_BIN", chrome_like)
+        expect(compare_view_find_browser("")).to_equal(chrome_like)
+        env_set("SIMPLE_COMPARE_VIEW_BROWSER", viewer_like)
+        expect(compare_view_find_browser("")).to_equal(viewer_like)
+        expect(compare_view_find_browser(chrome_like)).to_equal(chrome_like)
+        expect(compare_view_find_browser("definitely/not/a/browser.exe")).to_equal("")
+        env_set("SIMPLE_COMPARE_VIEW_BROWSER", "")
+        env_set("CHROME_BIN", "definitely/not/a/browser.exe")
+        expect(compare_view_find_browser("")).to_equal(default_pick)
+        env_set("CHROME_BIN", saved_chrome)
+        env_set("SIMPLE_COMPARE_VIEW_BROWSER", saved_view)
 
     it "writes a.png, b.png, diff.png, heatmap.png, and index.html in html mode":
         dir_remove_all("build/compare_view/host_spec_html")
