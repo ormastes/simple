@@ -1,0 +1,137 @@
+# AUTHORED_NOT_RUN. Dedicated enrolled Linux V6 Host, held agent and real smux required.
+use std.spec.{describe, it, expect, step, fail}
+use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_encode_v6}
+use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOperationRequestV6, host_service_operation_request_digest_v6}
+use std.common.contracts.orchestration.host_service_operation_reply_v6.HostServiceOperationReplyV6
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attach_request_decode_v4,
+    host_agent_detach_request_decode_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use test.fixtures.orchestration.host_authenticated_route_fixture_v6.{route_fixture_parse_v6, route_open_v6,
+    route_status_v6, route_exchange_v6, route_cleanup_v6, route_client_released_v6}
+
+struct LinuxAgentControlFixtureV6:
+    route: Dict<text, text>
+    operation_id: text
+    attach: text
+    invoke: text
+    detach: text
+
+fn attachment_fixture_read_v6(name: text, maximum: i64) -> Result<text, text>:
+    val path = env_get(name)
+    if path == "": return Err("BLOCKED: enrolled Linux V6 attachment fixture requires " + name)
+    file_read_regular_no_follow_bounded(path, maximum)
+
+fn attachment_fixture_load_v6() -> Result<LinuxAgentControlFixtureV6, text>:
+    val route = route_fixture_parse_v6(attachment_fixture_read_v6("SIMPLE_LINUX_ATTACH_V6_READY", 32768)?)?
+    val attach = attachment_fixture_read_v6("SIMPLE_LINUX_ATTACH_V6_ATTACH", 2097152)?
+    val invoke = attachment_fixture_read_v6("SIMPLE_LINUX_ATTACH_V6_INVOKE", 2097152)?
+    val detach = attachment_fixture_read_v6("SIMPLE_LINUX_ATTACH_V6_DETACH", 1048576)?
+    val attached = host_agent_attach_request_decode_v4(attach)?
+    val invoked = host_agent_invoke_request_decode_v4(invoke)?
+    val detached = host_agent_detach_request_decode_v4(detach)?
+    val operation = attached.operation_id
+    if (invoked.operation_id != operation or detached.operation_id != operation or
+            detached.association_digest != attached.association_digest or detached.attach_digest != sha256_text(attach)):
+        return Err("Linux V6 attachment fixture packet binding")
+    Ok(LinuxAgentControlFixtureV6(route, operation, attach, invoke, detach))
+
+fn attachment_control_v6(incarnation: text, scope: text, operation: text, sub: text,
+        frame: text) -> Result<HostServiceOperationReplyV6, text>:
+    val body = host_control_sub_encode_v6(HostControlSubRequestV6(sub, frame))?
+    val digest = host_service_operation_request_digest_v6(operation, body)?
+    route_exchange_v6(HostServiceOperationRequestV6("host-control", incarnation, operation, scope, digest, body))
+
+fn attachment_report_v6(reply: HostServiceOperationReplyV6, operation: text) -> Result<Dict<text, SdnValue>, text>:
+    if reply.pending or reply.exit_code != 0 or reply.error != "":
+        return Err("Linux V6 attachment report refused")
+    val parsed = sdn_parse_strict_v1(reply.payload, SdnStrictLimitsV1(max_source_bytes: 65536,
+        max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16))
+    if parsed.is_err(): return Err("Linux V6 attachment report SDN")
+    match parsed.unwrap().value:
+        case SdnValue.Dict(fields):
+            if (not fields.contains_key("kind") or fields["kind"] != SdnValue.String("linux-host-agent-attachment") or
+                    not fields.contains_key("version") or fields["version"] != SdnValue.Int(4) or
+                    not fields.contains_key("operationId") or fields["operationId"] != SdnValue.String(operation) or
+                    not fields.contains_key("attachStage")):
+                return Err("Linux V6 attachment report binding mismatch")
+            return Ok(fields)
+        case _: return Err("Linux V6 attachment report must be an object")
+
+fn attachment_observe_until_v6(incarnation: text, scope: text, fixture: LinuxAgentControlFixtureV6,
+        release: bool) -> Result<Dict<text, SdnValue>, text>:
+    val started = sosix_time_now_monotonic_ms()
+    var polls = 0
+    while started >= 0 and polls < 4000:
+        val now = sosix_time_now_monotonic_ms()
+        if now < started or now - started >= 80000: break
+        val operation = fixture.operation_id
+        val inspected = attachment_control_v6(incarnation, scope, operation, "agent-inspect", operation)?
+        val report = attachment_report_v6(inspected, operation)?
+        if not report.contains_key("attachDigest") or report["attachDigest"] != SdnValue.String(sha256_text(fixture.attach)):
+            return Err("Linux V6 attachment archive identity changed")
+        if release:
+            if report["attachStage"] == SdnValue.String("returned"): return Ok(report)
+        elif report.contains_key("terminalAuthority") and report["terminalAuthority"] == SdnValue.String("verified"):
+            return Ok(report)
+        if report["attachStage"] == SdnValue.String("release-blocked") or report["attachStage"] == SdnValue.String("failed"):
+            return Err("Linux V6 attachment entered a failure stage")
+        val advanced = attachment_control_v6(incarnation, scope, operation, "agent-invoke", fixture.invoke)?
+        if advanced.pending or advanced.exit_code != 0 or advanced.error != "":
+            return Err("Linux V6 agent progression refused")
+        sosix_sleep_ms(10)
+        polls = polls + 1
+    Err("Linux V6 attachment terminal observation deadline")
+
+fn attachment_trial_v6(fixture: LinuxAgentControlFixtureV6) -> Result<bool, text>:
+    val incarnation = route_open_v6(fixture.route)?
+    val status = route_status_v6(fixture.route, incarnation)?
+    val scope = container_scope_fence_id_v2(status.scope)?
+    val operation = fixture.operation_id
+    step("Inspect the held Linux agent before the first attachment")
+    val before = attachment_report_v6(attachment_control_v6(incarnation, scope, operation, "agent-inspect", operation)?, operation)?
+    if before["attachStage"] != SdnValue.String("none"): return Err("Linux V6 fixture already has an attachment")
+    step("Refuse a correctly authenticated envelope with the wrong operation ID")
+    val wrong = attachment_control_v6(incarnation, scope, "sspec-different-run", "agent-attach", fixture.attach)?
+    if wrong.exit_code == 0 or not wrong.payload.contains("host-service-agent-attachment-operation-mismatch"):
+        return Err("Linux V6 mismatched attachment envelope was not refused")
+    val unchanged = attachment_report_v6(attachment_control_v6(incarnation, scope, operation, "agent-inspect", operation)?, operation)?
+    if unchanged != before: return Err("Linux V6 refused envelope changed attachment state")
+    step("Admit the genuine signed attachment and drive the same immutable agent invocation")
+    val opened = attachment_report_v6(attachment_control_v6(incarnation, scope, operation, "agent-attach", fixture.attach)?, operation)?
+    if (opened["attachStage"] != SdnValue.String("opening") or not opened.contains_key("attachDigest") or
+            opened["attachDigest"] != SdnValue.String(sha256_text(fixture.attach))):
+        return Err("Linux V6 did not retain the exact signed attachment")
+    val ready = attachment_observe_until_v6(incarnation, scope, fixture, false)?
+    if not [SdnValue.String("ready"), SdnValue.String("adopted")].contains(ready["attachStage"]):
+        return Err("Linux V6 terminal authority lacks a held ready attachment")
+    step("Detach through the separately signed request and require exact attachment return")
+    val _detached = attachment_report_v6(attachment_control_v6(incarnation, scope, operation, "agent-detach", fixture.detach)?, operation)?
+    val returned = attachment_observe_until_v6(incarnation, scope, fixture, true)?
+    if (not returned.contains_key("detachDigest") or returned["detachDigest"] != SdnValue.String(sha256_text(fixture.detach)) or
+            returned.contains_key("terminalAuthority")):
+        return Err("Linux V6 detached attachment returned stale terminal authority")
+    Ok(true)
+
+describe "Authenticated V6 signed Linux agent attachment":
+    it "attaches and detaches the held exact agent using the installed smux owner":
+        val fixture = attachment_fixture_load_v6()
+        if fixture.is_err():
+            fail(fixture.unwrap_err())
+            return
+        val result = attachment_trial_v6(fixture.unwrap())
+        step("Release the actual client exchange and ready reader before evaluating evidence")
+        val closed = route_cleanup_v6()
+        expect(closed).to_equal("")
+        expect(route_client_released_v6()).to_equal(true)
+        if result.is_err():
+            fail(result.unwrap_err())
+            return
+        expect(result.unwrap()).to_equal(true)
