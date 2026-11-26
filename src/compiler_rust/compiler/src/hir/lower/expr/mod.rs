@@ -752,9 +752,44 @@ impl Lowerer {
     /// local bound from the call loses its owner, and native layout then
     /// places fields without the vtable header word
     /// (stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06).
+    fn lookup_generic_identity_param_spec(
+        &self,
+        callee: &Expr,
+        resolved_symbol: Option<&str>,
+    ) -> Option<crate::hir::lower::lowerer::GenericIdentityParamSpec> {
+        if let Some(sym) = resolved_symbol {
+            if let Some(spec) = self.generic_identity_param.get(sym) {
+                return Some(spec.clone());
+            }
+        }
+        match callee {
+            Expr::Identifier(name) => {
+                if let Some(spec) = self.generic_identity_param.get(name) {
+                    return Some(spec.clone());
+                }
+                if let Some(orig) = self.resolve_function_alias(name) {
+                    return self.generic_identity_param.get(orig).cloned();
+                }
+                None
+            }
+            Expr::Path(segments) => self.generic_identity_param.get(&segments.join(".")).cloned(),
+            Expr::FieldAccess { receiver, field, .. } => {
+                if let Expr::Identifier(mod_name) = receiver.as_ref() {
+                    return self
+                        .generic_identity_param
+                        .get(&format!("{mod_name}.{field}"))
+                        .cloned();
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn refine_generic_identity_return(
         &mut self,
         callee: &Expr,
+        resolved_symbol: Option<&str>,
         args: &[ast::Argument],
         ret: TypeId,
         ctx: &FunctionContext,
@@ -762,15 +797,34 @@ impl Lowerer {
         if ret != TypeId::ANY {
             return ret;
         }
-        let Expr::Identifier(name) = callee else { return ret };
-        let Some(&idx) = self.generic_identity_param.get(name) else { return ret };
-        let Some(arg) = args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(idx) else {
+        let (base_callee, explicit_type_args) = match callee {
+            Expr::GenericInst { expr, type_args } => (expr.as_ref(), Some(type_args.as_slice())),
+            other => (other, None),
+        };
+        let Some(spec) = self.lookup_generic_identity_param_spec(base_callee, resolved_symbol) else {
             return ret;
         };
-        match self.infer_type(&arg.value, ctx) {
-            Ok(ty) if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) => ty,
-            _ => ret,
+        let arg = args
+            .iter()
+            .find(|a| a.name.as_deref() == Some(spec.name.as_str()))
+            .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(spec.index));
+        if let Some(arg) = arg {
+            if let Ok(ty) = self.infer_type(&arg.value, ctx) {
+                if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                    return ty;
+                }
+            }
         }
+        if let (Some(type_args), Some(pos)) = (explicit_type_args, spec.generic_param_pos) {
+            if let Some(ast_ty) = type_args.get(pos) {
+                if let Ok(ty) = self.resolve_type(ast_ty) {
+                    if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                        return ty;
+                    }
+                }
+            }
+        }
+        ret
     }
 
     fn call_return_type(&self, callee: &Expr, fallback: TypeId) -> TypeId {
@@ -2011,7 +2065,27 @@ impl Lowerer {
             Some(HirType::Array { element, .. }) => Some(*element),
             _ => None,
         };
-        let hir_args = match (method, element_ty, args) {
+        let callback_param_ty = element_ty.or_else(|| {
+            if method != "map" {
+                return None;
+            }
+            // Also propagate Ok / Some payload type into placeholder lambdas such
+            // as `inspect_ambient_storage_roots(...).map(_.roots)` so field access
+            // resolves against the payload struct rather than `TypeId::ANY`.
+            match self.module.types.get(receiver.ty) {
+                Some(HirType::Pointer { inner, .. }) if self.module.types.optional_inner(receiver.ty).is_some() => {
+                    Some(*inner)
+                }
+                Some(HirType::Enum { name, .. }) if name == "Option" => self
+                    .enum_variant_payload_type_for_builtin_method(receiver.ty, "Some")
+                    .or_else(|| self.enum_payload_type_for_builtin_method(receiver.ty)),
+                Some(HirType::Enum { name, .. }) if name == "Result" => {
+                    self.enum_variant_payload_type_for_builtin_method(receiver.ty, "Ok")
+                }
+                _ => None,
+            }
+        });
+        let hir_args = match (method, element_ty.or(callback_param_ty), args) {
             ("map" | "filter", Some(element_ty), [arg]) => {
                 if let Expr::Lambda {
                     params,
@@ -2317,6 +2391,67 @@ impl Lowerer {
                     }));
                 }
                 _ => {}
+            }
+        }
+
+        if method == "map" && hir_args.len() == 1 {
+            let mapped_payload_ty = hir_args.first().map_or(TypeId::ANY, |callback| {
+                if matches!(callback.kind, HirExprKind::Lambda { .. }) {
+                    callback.ty
+                } else {
+                    match self.module.types.get(callback.ty) {
+                        Some(HirType::Function { ret, .. }) => *ret,
+                        _ => TypeId::ANY,
+                    }
+                }
+            });
+            let mapped_result_ty = match self.module.types.get(receiver.ty) {
+                Some(HirType::Pointer { .. }) if self.module.types.optional_inner(receiver.ty).is_some() => {
+                    Some(self.module.types.register_optional(mapped_payload_ty))
+                }
+                Some(HirType::Enum { name, .. }) if name == "Option" => {
+                    Some(self.module.types.register(HirType::Enum {
+                        name: "Option".to_string(),
+                        variants: vec![
+                            ("Some".to_string(), Some(vec![mapped_payload_ty])),
+                            ("None".to_string(), None),
+                        ],
+                        generic_params: vec!["T".to_string()],
+                        is_generic_template: false,
+                        type_bindings: std::collections::HashMap::from([("T".to_string(), mapped_payload_ty)]),
+                    }))
+                }
+                Some(HirType::Enum { name, .. }) if name == "Result" => {
+                    let err_ty = self
+                        .enum_variant_payload_type_for_builtin_method(receiver.ty, "Err")
+                        .unwrap_or(TypeId::ANY);
+                    Some(self.module.types.register(HirType::Enum {
+                        name: "Result".to_string(),
+                        variants: vec![
+                            ("Ok".to_string(), Some(vec![mapped_payload_ty])),
+                            ("Err".to_string(), Some(vec![err_ty])),
+                        ],
+                        generic_params: vec!["T".to_string(), "E".to_string()],
+                        is_generic_template: false,
+                        type_bindings: std::collections::HashMap::from([
+                            ("T".to_string(), mapped_payload_ty),
+                            ("E".to_string(), err_ty),
+                        ]),
+                    }))
+                }
+                _ => None,
+            };
+            if let Some(ty) = mapped_result_ty {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(receiver.clone()),
+                        method: method.to_string(),
+                        args: hir_args,
+                        dispatch: DispatchMode::Static,
+                        generic_args: Vec::new(),
+                    },
+                    ty,
+                }));
             }
         }
 

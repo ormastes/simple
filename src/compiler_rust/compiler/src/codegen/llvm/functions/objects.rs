@@ -475,101 +475,56 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let i8_type = self.context_ref().i8_type();
-        let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
-        // Closures can escape the creating stack frame through runtime pool and
-        // thread APIs. Allocate them on the runtime heap so captured values stay
-        // stable after the loop iteration or function call that created them.
-        let i64_type = self.runtime_int_type();
-        let alloc_fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
-        let alloc_fn = module
-            .get_function("rt_alloc")
-            .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
-        // LLVM native callable header: entry pointer, reserved kind word.
-        // MIR capture offsets start at 8; shift them past the kind word so
-        // arbitrary captured data can never masquerade as a direct function.
-        let allocation_size = closure_size.checked_add(8)
-            .ok_or_else(|| CompileError::semantic("LLVM closure allocation size overflow"))?
-            .max(16);
-        let size_val = i64_type.const_int(allocation_size as u64, false);
-        let alloc_call = builder
-            .build_call(alloc_fn, &[size_val.into()], "closure_alloc")
-            .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
-        let alloc_value = alloc_call
+        let _ = (closure_size, capture_offsets);
+        let rv_type = self.runtime_int_type();
+        // Register a real `HeapObjectType::Closure` via `rt_closure_new` +
+        // `rt_closure_set_capture`, pointing to the outlined lambda's `$boxed`
+        // entry (all-RuntimeValue ABI). Runtime collection/option/result
+        // helpers (`rt_array_map`, `rt_option_map`, `rt_map`) reject raw
+        // `rt_alloc` blocks in `rt_closure_func_ptr` -> `[]` / `nil`.
+        let arg_count = captures.len();
+        let boxed_name = crate::codegen::boxed_entry_name(func_name);
+        let entry_fn = if let Some(f) = module.get_function(&boxed_name) {
+            Some(f)
+        } else {
+            self.ensure_boxed_entry_for_existing_fn(func_name, arg_count, module, builder)?
+        };
+        let fn_addr_rv = match entry_fn {
+            Some(f) => builder
+                .build_ptr_to_int(f.as_global_value().as_pointer_value(), rv_type, "closure_fn_addr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?,
+            None => rv_type.const_zero(),
+        };
+
+        let closure_new = self.declare_rt_closure_new(module);
+        let count_rv = rv_type.const_int(captures.len() as u64, false);
+        let new_call = builder
+            .build_call(closure_new, &[fn_addr_rv.into(), count_rv.into()], "closure_new")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_closure_new call", &e))?;
+        let closure_rv = new_call
             .try_as_basic_value()
             .basic()
-            .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
-        let closure_ptr =
-            match alloc_value {
-                inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
-                    .build_pointer_cast(ptr, i8_ptr_type, "closure_ptr")
-                    .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?,
-                inkwell::values::BasicValueEnum::IntValue(iv) => builder
-                    .build_int_to_ptr(iv, i8_ptr_type, "closure_ptr")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
-                _ => {
-                    return Err(crate::error::factory::llvm_build_failed(
-                        "rt_alloc result",
-                        &"unsupported return value kind",
-                    ))
-                }
-            };
+            .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_closure_new result", &"missing return value"))?;
 
-        let func_ptr = module
-            .get_function(func_name)
-            .map(|f| f.as_global_value().as_pointer_value())
-            .unwrap_or_else(|| i8_ptr_type.const_null());
-        let func_ptr_cast = builder
-            .build_pointer_cast(func_ptr, i8_ptr_type, "fn_ptr_cast")
-            .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn ptr", &e))?;
-        let ptr_slot_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
-        let fn_slot = builder
-            .build_pointer_cast(closure_ptr, ptr_slot_type, "fn_slot")
-            .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot", &e))?;
-        builder
-            .build_store(fn_slot, func_ptr_cast)
-            .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
-
-        {
-            let offset_val = self.context_ref().i32_type().const_int(8, false);
-            let marker_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "closure_marker_ptr") }
-                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
-            let marker_slot = builder
-                .build_pointer_cast(
-                    marker_ptr,
-                    self.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                    "closure_marker_slot",
-                )
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast marker ptr", &e))?;
-            builder
-                .build_store(marker_slot, i64_type.const_zero())
-                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+        if !captures.is_empty() {
+            let set_capture = self.declare_rt_closure_set_capture(module);
+            for (idx, (field_type, value)) in capture_types.iter().zip(captures.iter()).enumerate() {
+                let capture_val = self.get_vreg(value, vreg_map)?;
+                let llvm_field_ty = self.llvm_type(field_type)?;
+                let field_val = self.coerce_value_to_type(capture_val, Some(llvm_field_ty), builder)?;
+                let cap_rv = self.coerce_value_to_type(field_val, Some(rv_type.into()), builder)?;
+                let idx_rv = rv_type.const_int(idx as u64, false);
+                builder
+                    .build_call(
+                        set_capture,
+                        &[closure_rv.into(), idx_rv.into(), cap_rv.into()],
+                        "closure_set_cap",
+                    )
+                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_closure_set_capture call", &e))?;
+            }
         }
 
-        for ((offset, field_type), value) in capture_offsets.iter().zip(capture_types.iter()).zip(captures.iter()) {
-            let capture_val = self.get_vreg(value, vreg_map)?;
-            let offset_val = self.context_ref().i32_type().const_int(*offset as u64 + 8, false);
-            let field_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr") }
-                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
-            let llvm_field_ty = self.llvm_type(field_type)?;
-            let coerced_capture_val = self.coerce_value_to_type(capture_val, Some(llvm_field_ty), builder)?;
-            let typed_ptr = builder
-                .build_pointer_cast(
-                    field_ptr,
-                    self.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                    "cap_typed_ptr",
-                )
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast cap ptr", &e))?;
-            builder
-                .build_store(typed_ptr, coerced_capture_val)
-                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
-        }
-
-        // Convert closure pointer to i64 (tagged-value ABI)
-        let closure_i64 = builder
-            .build_ptr_to_int(closure_ptr, self.runtime_int_type(), "closure_i64")
-            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
-        vreg_map.insert(dest, closure_i64.into());
+        vreg_map.insert(dest, closure_rv);
         Ok(())
     }
 }

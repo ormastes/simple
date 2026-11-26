@@ -1070,68 +1070,84 @@ impl LlvmBackend {
         let mut sorted_functions: Vec<_> = module_ir.global_init_functions.iter().collect();
         sorted_functions.sort_by_key(|(name, _)| (*name).clone());
         if !sorted_functions.is_empty() {
-            let alloc = get_rt("rt_alloc", 1);
             for (global_name, func_name) in sorted_functions {
-                let callee = m
-                    .get_function(func_name)
-                    .or_else(|| {
-                        let sanitized = func_name.replace('.', "_dot_");
-                        m.get_function(&sanitized)
-                    })
-                    .or_else(|| {
-                        // Imported and named only by this initializer: declare
-                        // the import with the uniform all-`i64` user-function
-                        // signature, its arity from the global's function type.
-                        let arity = module_ir
-                            .globals
-                            .iter()
-                            .find(|(name, _, _)| name == global_name)
-                            .and_then(|(_, ty, _)| match module_ir.type_registry.get(*ty) {
-                                Some(crate::hir::HirType::Function { params, .. }) => Some(params.len()),
-                                _ => None,
-                            })?;
-                        let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                            (0..arity).map(|_| i64_type.into()).collect();
-                        let sanitized = func_name.replace('.', "_dot_");
-                        Some(m.add_function(
-                            &sanitized,
-                            i64_type.fn_type(&params, false),
-                            Some(inkwell::module::Linkage::External),
-                        ))
-                    })
-                    .ok_or_else(|| {
-                        CompileError::Codegen(format!(
-                            "function global initializer '{}' references unknown function '{}'",
-                            global_name, func_name
-                        ))
-                    })?;
-                let closure_size = i64_type.const_int(16, false);
-                let closure_pi = call_i64(alloc, &[closure_size], "init_closure")?;
-                let closure_ptr = builder
-                    .build_int_to_ptr(closure_pi, ptr_type, "closure_ptr")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("closure inttoptr", &e))?;
-                let fn_addr = callee.as_global_value().as_pointer_value();
-                let fn_addr_i = builder
-                    .build_ptr_to_int(fn_addr, i64_type, "fn_addr")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("fn ptrtoint", &e))?;
-                let direct_marker = i64_type.const_int(0x5344_4952_4543_5446, false);
-                builder
-                    .build_store(closure_ptr, fn_addr_i)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("closure store fn", &e))?;
-                let marker_slot = unsafe {
-                    builder
-                        .build_gep(
-                            ctx.i8_type(),
-                            closure_ptr,
-                            &[ctx.i32_type().const_int(8, false)],
-                            "marker_slot",
-                        )
-                        .map_err(|e| crate::error::factory::llvm_build_failed("closure gep", &e))?
+                let is_extern = module_ir.extern_fn_names.contains(func_name.as_str());
+                let boxed_fn = if is_extern {
+                    None
+                } else {
+                    let boxed_name = crate::codegen::boxed_entry_name(func_name);
+                    let sanitized_boxed = crate::codegen::boxed_entry_name(&func_name.replace('.', "_dot_"));
+                    m.get_function(&boxed_name).or_else(|| m.get_function(&sanitized_boxed))
                 };
-                builder
-                    .build_store(marker_slot, direct_marker)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("closure store marker", &e))?;
-                store_to_global(global_name, closure_pi)?;
+                if let Some(boxed_fn) = boxed_fn {
+                    let closure_rv = self.build_zero_capture_boxed_closure(boxed_fn, &builder, m)?;
+                    let closure_int = self
+                        .coerce_value_to_type(closure_rv, Some(i64_type.into()), &builder)?
+                        .into_int_value();
+                    store_to_global(global_name, closure_int)?;
+                } else {
+                    let alloc = get_rt("rt_alloc", 1);
+                    let callee = m
+                        .get_function(func_name)
+                        .or_else(|| {
+                            let sanitized = func_name.replace('.', "_dot_");
+                            m.get_function(&sanitized)
+                        })
+                        .or_else(|| {
+                            // Imported and named only by this initializer: declare
+                            // the import with the uniform all-`i64` user-function
+                            // signature, its arity from the global's function type.
+                            let arity = module_ir
+                                .globals
+                                .iter()
+                                .find(|(name, _, _)| name == global_name)
+                                .and_then(|(_, ty, _)| match module_ir.type_registry.get(*ty) {
+                                    Some(crate::hir::HirType::Function { params, .. }) => Some(params.len()),
+                                    _ => None,
+                                })?;
+                            let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                                (0..arity).map(|_| i64_type.into()).collect();
+                            let sanitized = func_name.replace('.', "_dot_");
+                            Some(m.add_function(
+                                &sanitized,
+                                i64_type.fn_type(&params, false),
+                                Some(inkwell::module::Linkage::External),
+                            ))
+                        })
+                        .ok_or_else(|| {
+                            CompileError::Codegen(format!(
+                                "function global initializer '{}' references unknown function '{}'",
+                                global_name, func_name
+                            ))
+                        })?;
+                    let closure_size = i64_type.const_int(16, false);
+                    let closure_pi = call_i64(alloc, &[closure_size], "init_closure")?;
+                    let closure_ptr = builder
+                        .build_int_to_ptr(closure_pi, ptr_type, "closure_ptr")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("closure inttoptr", &e))?;
+                    let fn_addr = callee.as_global_value().as_pointer_value();
+                    let fn_addr_i = builder
+                        .build_ptr_to_int(fn_addr, i64_type, "fn_addr")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("fn ptrtoint", &e))?;
+                    let direct_marker = i64_type.const_int(0x5344_4952_4543_5446, false);
+                    builder
+                        .build_store(closure_ptr, fn_addr_i)
+                        .map_err(|e| crate::error::factory::llvm_build_failed("closure store fn", &e))?;
+                    let marker_slot = unsafe {
+                        builder
+                            .build_gep(
+                                ctx.i8_type(),
+                                closure_ptr,
+                                &[ctx.i32_type().const_int(8, false)],
+                                "marker_slot",
+                            )
+                            .map_err(|e| crate::error::factory::llvm_build_failed("closure gep", &e))?
+                    };
+                    builder
+                        .build_store(marker_slot, direct_marker)
+                        .map_err(|e| crate::error::factory::llvm_build_failed("closure store marker", &e))?;
+                    store_to_global(global_name, closure_pi)?;
+                }
             }
         }
 
@@ -2266,6 +2282,8 @@ impl NativeBackend for LlvmBackend {
         self.declare_dot_aliases_for_methods();
         #[cfg(feature = "llvm")]
         self.emit_vtables(module);
+        #[cfg(feature = "llvm")]
+        self.emit_boxed_closure_entries(module)?;
 
         // Second pass: compile all function bodies
         for func in &module.functions {
@@ -2441,10 +2459,17 @@ mod module_init_layout_tests {
         mir.functions.push(target_fn);
 
         mir.globals.push(("G_FN".to_string(), T::ANY, false));
+        mir.globals.push(("G_EXT".to_string(), T::ANY, false));
         mir.globals.push(("G_STRUCT".to_string(), T::ANY, false));
         mir.local_globals.insert("G_FN".to_string());
+        mir.local_globals.insert("G_EXT".to_string());
         mir.local_globals.insert("G_STRUCT".to_string());
+        mir.extern_fn_names.insert("ext_fn".to_string());
+        let mut ext_fn = MirFunction::new("ext_fn".to_string(), T::I64, Visibility::Public);
+        ext_fn.blocks.clear();
+        mir.functions.push(ext_fn);
         mir.global_init_functions.insert("G_FN".to_string(), "my_fn".to_string());
+        mir.global_init_functions.insert("G_EXT".to_string(), "ext_fn".to_string());
         mir.global_init_structs.insert(
             "G_STRUCT".to_string(),
             HirGlobalStructInit {
@@ -2459,8 +2484,12 @@ mod module_init_layout_tests {
         backend.compile(&mir).unwrap();
         let ir = backend.get_ir().unwrap();
         assert!(
+            ir.contains("@rt_closure_new(") && ir.contains("@\"my_fn$boxed\""),
+            "user function global initializer must register a RuntimeClosure over $boxed:\n{ir}"
+        );
+        assert!(
             ir.contains("%marker_slot = getelementptr i8, ptr %closure_ptr, i32 8"),
-            "closure marker slot must be at byte offset 8 on freestanding 32-bit:\n{ir}"
+            "extern direct closure marker slot must be at byte offset 8 on freestanding 32-bit:\n{ir}"
         );
         assert!(
             ir.contains("store i32 11, ptr %struct_ptr")

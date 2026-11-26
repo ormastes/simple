@@ -48,3 +48,19 @@ before calling `rfind` (introduced by `70f8df9766d`, 2026-11-14). Regression spe
 Add `"rfind" | "last_index_of"` to the chained `Value::Str` arm, matching
 `interpreter_method/string.rs`, with a unit test next to
 `nested_substring_dispatches_byte_indexed_on_temporary_text`.
+
+## 2026-11-26 — Rust Seed Root Fix (WA-P6, `ROOT-FIXED+SEED-GATED`)
+- Fixed chained `Value::Str` method dispatch in
+  `src/compiler_rust/compiler/src/interpreter_helpers/method_dispatch.rs`
+  (`call_method_on_value`) to handle `"last_index_of" | "rfind"`, delegating
+  to `eval_string_method` matching `interpreter_method/string.rs`.
+- Added unit test `nested_rfind_and_last_index_of_dispatch_on_temporary_text` in
+  `src/compiler_rust/compiler/src/interpreter_helpers/method_dispatch.rs`.
+- Kept caller guard in `src/compiler/90.tools/fix/rules/impl_/lint_star_import.spl:481`
+  with `@workaround bug=seed_nested_call_rfind_missing_2026-11-15 recover=8e96296d9e6 reason=ROOT-FIXED+SEED-GATED: ...`
+  so pre-fix bootstrap seeds continue passing until Stage 2 rebuilds.
+- Verified:
+  - `cargo test -p simple-compiler --lib -j 4 interpreter_helpers::method_dispatch`: `11 passed; 0 failed`
+  - `test/01_unit/compiler/wa_src_lane3_workarounds_spec.spl --mode=interpreter`: `7 passed, 0 failed`
+  - `test/01_unit/compiler/lint/star_import_fix_edit_spec.spl --mode=interpreter`: `8 passed, 0 failed`
+

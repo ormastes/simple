@@ -51,3 +51,32 @@ are unchanged; any of them may be affected when built by the seed.
   artifacts, so removing the explicit guards would regress seed-built binaries.
 - Guard regression spec added at
   `test/01_unit/lib/database/wa_src_lane7_seed_map_guard_spec.spl`.
+
+## 2026-11-26 — Rust Seed Root Fix (WA-P6)
+
+- Fixed HIR lowering in `src/compiler_rust/compiler/src/hir/lower/expr/mod.rs`
+  (`lower_builtin_method_call`): narrowed `Type::Pointer` unboxing to
+  `optional_inner(receiver.ty).is_some()`, propagated `Result` `Ok` / `Option`
+  `Some` / optional payload owners into `.map` placeholder lambdas, and lowered
+  `.map` on `Result`/`Option` to `HirExprKind::MethodCall` (`DispatchMode::Static`)
+  typed `Result<mapped, err>` / `Option<mapped>`.
+- Fixed LLVM seed codegen in `src/compiler_rust/compiler/src/codegen/closure_boxed_entry.rs`,
+  `src/compiler_rust/compiler/src/codegen/llvm/closure_boxed.rs`, `backend_core.rs`,
+  `emitter.rs`, `functions.rs`, `functions/calls.rs`, and `functions/objects.rs`
+  (`$boxed` entry thunks, `rt_closure_new`/`rt_closure_set_capture`/
+  `rt_closure_get_capture`/`rt_closure_func_ptr`, and static `"map"` -> `"rt_map"`).
+- Added unit tests `result_map_placeholder_uses_ok_payload_owner`
+  (`hir::lower::tests::seed_regression_tests`) and 3 tests in
+  `codegen::llvm::closure_boxed::tests`
+  (`array_map_method_ref_emits_runtime_closure_boxed_and_rt_map`,
+  `captured_scalar_closure_uses_rt_closure_capture_apis_and_boxed_indirect_call`,
+  `result_map_field_placeholder_emits_runtime_closure_and_rt_map`).
+- Did not touch `src/lib/nogc_sync_mut/database/core.spl` or
+  `src/lib/nogc_sync_mut/storage_roots/environment_owner.spl` (caller guards
+  retired upstream in `#11846` / `307fc728ef9`).
+- Verified:
+  - `cargo test -p simple-compiler --lib -j 4 hir::lower::tests`: `405 passed; 0 failed` (default & `--features llvm`)
+  - `cargo test -p simple-compiler --lib -j 4 mir::lower::tests`: `660 passed; 0 failed`
+  - `cargo test -p simple-compiler --lib -j 4 --features llvm codegen::llvm`: `103 passed; 4 failed` (all 4 failures pre-existing outside WA-P6; all new `closure_boxed` and `backend_core` tests passed); default-feature `codegen::llvm::`: `16 passed; 0 failed`
+  - `test/01_unit/lib/database/wa_src_lane7_seed_map_guard_spec.spl --mode=interpreter`: `2 passed, 0 failed`
+

@@ -196,6 +196,16 @@ pub(crate) fn call_method_on_value(
                 }
                 return Ok(Value::text_from_bytes(bytes[start..end].to_vec()));
             }
+            "last_index_of" | "rfind" => {
+                // Match `interpreter_method/string.rs` (`seed_nested_call_rfind_missing_2026-11-15`):
+                // return the last UTF-8 byte offset or -1 so chained receivers like
+                // `entry.replace("\\", "/").rfind("/")` do not fall through to METHOD_NOT_FOUND.
+                let needle = _args.first().map(Value::to_key_string).unwrap_or_default();
+                return Ok(match s.rfind(&needle) {
+                    Some(idx) => Value::Int(idx as i64),
+                    None => Value::Int(-1),
+                });
+            }
             "to_i64" | "to_int" => {
                 return Ok(s.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Nil));
             }
@@ -1361,6 +1371,32 @@ mod tests {
         assert_eq!(call(trimmed.clone(), "substring", &[Value::Int(-3)]), trimmed);
         // Byte offsets, matching `len`/`index_of` and native `rt_slice`.
         assert_eq!(call(Value::text("caféZ".to_string()), "substring", &[Value::Int(5)]), Value::text("Z".to_string()));
+    }
+
+    #[test]
+    fn nested_rfind_and_last_index_of_dispatch_on_temporary_text() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let mut call = |recv: Value, method: &str, args: &[Value]| {
+            call_method_on_value(recv, method, args, &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+                .expect("nested rfind/last_index_of should dispatch")
+        };
+
+        let normalized = call(
+            Value::text(r"src\compiler\50.mir\mod.spl".to_string()),
+            "replace",
+            &[Value::text(r"\".to_string()), Value::text("/".to_string())],
+        );
+        assert_eq!(call(normalized.clone(), "rfind", &[Value::text("/".to_string())]), Value::Int(19));
+        assert_eq!(
+            call(normalized.clone(), "last_index_of", &[Value::text("/".to_string())]),
+            Value::Int(19)
+        );
+        assert_eq!(call(normalized, "rfind", &[Value::text(":".to_string())]), Value::Int(-1));
+        assert_eq!(call(Value::text("café/a/b".to_string()), "rfind", &[Value::text("/".to_string())]), Value::Int(7));
     }
 
     #[test]

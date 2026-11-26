@@ -48,14 +48,52 @@ pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync
 
 impl Lowerer {
     fn record_imported_type_owner(&mut self, name: &str) {
-        if let Some(path) = self.current_file.clone() {
-            self.imported_type_owners.entry(name.to_string()).or_default().insert(path);
+        if let Some(path) = self.current_file.as_deref() {
+            self.imported_type_owners
+                .entry(name.to_string())
+                .or_default()
+                .insert(crate::interpreter::normalize_path_key(path));
         }
     }
 
     fn record_imported_fn_owner(&mut self, name: &str) {
-        if let Some(path) = self.current_file.clone() {
-            self.imported_fn_owners.entry(name.to_string()).or_default().insert(path);
+        if let Some(path) = self.current_file.as_deref() {
+            self.imported_fn_owners
+                .entry(name.to_string())
+                .or_default()
+                .insert(crate::interpreter::normalize_path_key(path));
+        }
+    }
+
+    fn collect_default_ctor_names(expr: &Expr, out: &mut Vec<String>) {
+        match expr {
+            Expr::Call { callee, args } => {
+                if let Expr::Identifier(name) = callee.as_ref() {
+                    if !out.iter().any(|existing| existing == name) {
+                        out.push(name.clone());
+                    }
+                }
+                for arg in args {
+                    Self::collect_default_ctor_names(&arg.value, out);
+                }
+            }
+            Expr::Array(items) | Expr::Tuple(items) => {
+                for item in items {
+                    Self::collect_default_ctor_names(item, out);
+                }
+            }
+            Expr::Dict(entries) => {
+                for (k, v) in entries {
+                    Self::collect_default_ctor_names(k, out);
+                    Self::collect_default_ctor_names(v, out);
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, v) in fields {
+                    Self::collect_default_ctor_names(v, out);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -433,6 +471,7 @@ impl Lowerer {
                 if let Some(fn_ty) = self.imported_function_value_types.get(&original_name).copied() {
                     self.imported_function_value_types.insert(alias_name.clone(), fn_ty);
                 }
+                self.record_generic_identity_param_alias(&original_name, &alias_name);
                 if self.extern_fn_names.contains(&original_name) {
                     self.extern_fn_names.insert(alias_name.clone());
                 }
@@ -643,6 +682,84 @@ impl Lowerer {
                             default => default.clone(),
                         }).collect();
                         self.record_imported_fn_owner(&func_def.name);
+                        let mut aliases = Vec::new();
+                        Self::aliased_import_pairs(target, &mut aliases);
+                        for (orig, alias) in &aliases {
+                            if orig == &func_def.name && alias != orig {
+                                self.record_imported_fn_owner(alias);
+                            }
+                        }
+                        let mut default_ctor_names = Vec::new();
+                        for default_expr in defaults.iter().flatten() {
+                            Self::collect_default_ctor_names(default_expr, &mut default_ctor_names);
+                        }
+                        let decl_key = crate::interpreter::normalize_path_key(declaration_file);
+                        for ctor_name in default_ctor_names {
+                            if self.should_import_symbol(&ctor_name, target) {
+                                continue;
+                            }
+                            let mut matched = false;
+                            for ctor_item in items {
+                                match ctor_item {
+                                    Node::Struct(struct_def) if struct_def.name == ctor_name => {
+                                        matched = true;
+                                        self.record_imported_type_owner(&ctor_name);
+                                        let conflicting_owner = self
+                                            .imported_type_owners
+                                            .get(&ctor_name)
+                                            .is_some_and(|owners| owners.iter().any(|p| p != &decl_key));
+                                        let already_complete = matches!(
+                                            self.module.types.lookup(&ctor_name).and_then(|id| self.module.types.get(id)),
+                                            Some(HirType::Struct { fields, .. }) if !fields.is_empty()
+                                        );
+                                        if !self.own_declared_type_names.contains(&ctor_name)
+                                            && !conflicting_owner
+                                            && !already_complete
+                                        {
+                                            let struct_type_id = if declared_aliases.is_empty() {
+                                                self.register_struct(struct_def)?
+                                            } else {
+                                                let mut scoped = struct_def.clone();
+                                                Self::expand_field_aliases(&mut scoped.fields, &declared_aliases);
+                                                self.register_struct(&scoped)?
+                                            };
+                                            self.globals.insert(ctor_name.clone(), struct_type_id);
+                                            self.record_imported_method_defaults(&ctor_name, &struct_def.methods);
+                                        }
+                                        break;
+                                    }
+                                    Node::Class(class_def) if class_def.name == ctor_name => {
+                                        matched = true;
+                                        self.record_imported_type_owner(&ctor_name);
+                                        let conflicting_owner = self
+                                            .imported_type_owners
+                                            .get(&ctor_name)
+                                            .is_some_and(|owners| owners.iter().any(|p| p != &decl_key));
+                                        let already_complete = matches!(
+                                            self.module.types.lookup(&ctor_name).and_then(|id| self.module.types.get(id)),
+                                            Some(HirType::Struct { fields, .. }) if !fields.is_empty()
+                                        );
+                                        if !self.own_declared_type_names.contains(&ctor_name)
+                                            && !conflicting_owner
+                                            && !already_complete
+                                        {
+                                            let class_type_id = if declared_aliases.is_empty() {
+                                                self.register_class(class_def)?
+                                            } else {
+                                                let mut scoped = class_def.clone();
+                                                Self::expand_field_aliases(&mut scoped.fields, &declared_aliases);
+                                                self.register_class(&scoped)?
+                                            };
+                                            self.globals.insert(ctor_name.clone(), class_type_id);
+                                            self.record_imported_method_defaults(&ctor_name, &class_def.methods);
+                                        }
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let _ = matched;
+                        }
                         if let Some(path) = &self.current_file {
                             self.imported_fn_param_defaults
                                 .entry(crate::interpreter::normalize_path_key(path)).or_default()
@@ -950,6 +1067,7 @@ impl Lowerer {
         for item in items {
             if let Node::Function(f) = item {
                 if self.should_import_symbol(&f.name, target) {
+                    self.register_generic_identity_param(&f.name, f);
                     let dispatch = match &f.return_type {
                         Some(simple_parser::ast::Type::Simple(name)) => self.trait_declaration_in_file(name, Some(declaration_file)),
                         _ => None,
@@ -1304,6 +1422,10 @@ impl Lowerer {
                 for item in &imported_module.items {
                     if let Node::Function(f) = item {
                         if self.should_import_symbol(&f.name, target) {
+                            self.register_generic_identity_param(&format!("{}.{}", prefix, f.name), f);
+                            if let Some(short) = module_path.segments.last() {
+                                self.register_generic_identity_param(&format!("{}.{}", short, f.name), f);
+                            }
                             if let Some(dispatch) = self.declared_function_returns.get(&f.name).cloned() {
                                 self.declared_function_returns.insert(format!("{}.{}", prefix, f.name), dispatch);
                             }
