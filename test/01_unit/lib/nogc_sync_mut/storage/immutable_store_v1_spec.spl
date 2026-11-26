@@ -9,7 +9,7 @@ use std.common.hash.hash_policy_v1.{hash_policy_v1_digest, HASH_POLICY_V1_XXH3_1
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, StoreGcV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_publish_root, immutable_store_v1_pin, immutable_store_v1_release_pin,
-    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, StoreFlagV1, StoreCountV1, StoreGenerationV1}
+    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, StoreFlagV1, StoreCountV1, StoreGenerationV1}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
@@ -255,6 +255,61 @@ describe "immutable_store_v1 pinned ingest":
         expect(immutable_store_v1_pin(root, "mine", "owner-b", [one.object_key])).to_equal("pin-owner-mismatch")
         val gc = immutable_store_v1_collect(root, StoreFlagV1(true))
         expect(gc.unreachable.len()).to_equal(0)
+        _store_cleanup(root)
+
+describe "immutable_store_v1 pin release":
+    it "renames the pin aside: no pins entry, no staging residue, id reusable at once":
+        val root = _store_root("rel-aside")
+        val a = immutable_store_v1_ingest(root, "release aside".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_pin(root, "p", "owner-a", [a.object_key])).to_equal("")
+        expect(immutable_store_v1_release_pin(root, "p", "owner-a")).to_equal("")
+        expect(is_dir(root + "/pins/p")).to_equal(false)
+        expect(dir_list(root + "/pins").len()).to_equal(0)
+        expect(dir_list(root + "/staging").len()).to_equal(0)
+        expect(immutable_store_v1_release_pin(root, "p", "owner-a")).to_equal("pin-missing")
+        # The released refs no longer retain the object, and the id is free for another owner.
+        val gc = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(gc.unreachable.len()).to_equal(1)
+        expect(immutable_store_v1_pin(root, "p", "owner-b", [a.object_key])).to_equal("")
+        _store_cleanup(root)
+
+    it "lets only the owner release and leaves a refused release untouched":
+        val root = _store_root("rel-owner")
+        val a = immutable_store_v1_ingest(root, "release owner".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_pin(root, "p", "owner-a", [a.object_key])).to_equal("")
+        expect(immutable_store_v1_release_pin(root, "p", "owner-b")).to_equal("pin-owner-mismatch")
+        expect(is_dir(root + "/pins/p/refs")).to_equal(true)
+        expect(dir_list(root + "/staging").len()).to_equal(0)
+        expect(immutable_store_v1_collect(root, StoreFlagV1(true)).unreachable.len()).to_equal(0)
+        _store_cleanup(root)
+
+    it "releases a half-created ownerless pin dir and GC ignores stray tombstones":
+        val root = _store_root("rel-ownerless")
+        val a = immutable_store_v1_ingest(root, "release ownerless".bytes(), HASH_POLICY_V1_XXH3_128)
+        dir_create_all(root + "/pins/half/refs")
+        expect(immutable_store_v1_release_pin(root, "half", "owner-a")).to_equal("")
+        expect(is_dir(root + "/pins/half")).to_equal(false)
+        # A tombstone left behind by a crashed release lives under staging/, which GC never reads as a pin.
+        dir_create_all(root + "/staging/pinrel-stray/pin/refs")
+        file_write_bytes(root + "/staging/pinrel-stray/pin/refs/" + a.object_key, "x".bytes())
+        val gc = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(gc.status).to_equal("ok")
+        expect(gc.unreachable.len()).to_equal(1)
+        expect(gc.unreachable[0]).to_equal(a.object_key)
+        _store_cleanup(root)
+
+    it "reports pin-released when the pin lost its ref after a pinned ingest":
+        val root = _store_root("rel-live")
+        val one = immutable_store_v1_ingest_pinned(root, "ingest then release".bytes(), HASH_POLICY_V1_XXH3_128, "lane", "owner-a")
+        expect(one.status).to_equal("ok")
+        expect(_isv1_pin_live_error(root, "lane", one.object_key)).to_equal("")
+        expect(_isv1_pin_live_error(root, "", one.object_key)).to_equal("")
+        expect(immutable_store_v1_release_pin(root, "lane", "owner-a")).to_equal("")
+        expect(_isv1_pin_live_error(root, "lane", one.object_key)).to_equal("pin-released")
+        # Re-ingesting after the release recreates the pin and succeeds again.
+        val again = immutable_store_v1_ingest_pinned(root, "ingest then release".bytes(), HASH_POLICY_V1_XXH3_128, "lane", "owner-a")
+        expect(again.status).to_equal("ok")
+        expect(_isv1_pin_live_error(root, "lane", again.object_key)).to_equal("")
         _store_cleanup(root)
 
 describe "immutable_store_v1 garbage collection":
