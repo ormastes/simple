@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: Verify TLS 1.3 record key/IV length guards fail closed and baremetal AES-GCM decrypt stub matches status-prefixed encoding contract.
+Audience: SimpleOS TLS 1.3 and baremetal runtime maintainers.
+"""
+# @req: REQ-TLS-CHECKED-SEAL-001
+# @cover src/os/tls13/record13.spl
+# @cover examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use os.tls13.record13.{
+    RecordKey,
+    RecordResult,
+    record13_encrypt,
+    record13_decrypt,
+    record13_decrypt_fd,
+    record13_encrypt_chacha20_poly1305,
+    record13_decrypt_chacha20_poly1305,
+    record13_make_nonce
+}
+
+fn _seq_bytes(size: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < size:
+        out.push(((i * 7 + 3) & 255).to_u8())
+        i = i + 1
+    out
+
+describe "TLS 1.3 record13 key/IV length guards and baremetal decrypt encoding contract":
+    it "rejects wrong AES-128 key and GCM IV lengths in record13_decrypt and record13_decrypt_fd":
+        step("Verify short and oversized key/IV fail closed without indexing past IV bounds")
+        val dummy_record: [u8] = [0x17u8, 0x03u8, 0x03u8, 0x00u8, 0x11u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+
+        expect(record13_decrypt(RecordKey(key: _seq_bytes(0), iv: _seq_bytes(12)), 0u64, dummy_record)).to_equal(RecordResult.Err("AES-128 key must be 16 bytes"))
+        expect(record13_decrypt(RecordKey(key: _seq_bytes(15), iv: _seq_bytes(12)), 0u64, dummy_record)).to_equal(RecordResult.Err("AES-128 key must be 16 bytes"))
+        expect(record13_decrypt(RecordKey(key: _seq_bytes(17), iv: _seq_bytes(12)), 0u64, dummy_record)).to_equal(RecordResult.Err("AES-128 key must be 16 bytes"))
+
+        expect(record13_decrypt(RecordKey(key: _seq_bytes(16), iv: _seq_bytes(0)), 0u64, dummy_record)).to_equal(RecordResult.Err("GCM nonce must be 12 bytes"))
+        expect(record13_decrypt(RecordKey(key: _seq_bytes(16), iv: _seq_bytes(11)), 0u64, dummy_record)).to_equal(RecordResult.Err("GCM nonce must be 12 bytes"))
+        expect(record13_decrypt(RecordKey(key: _seq_bytes(16), iv: _seq_bytes(13)), 0u64, dummy_record)).to_equal(RecordResult.Err("GCM nonce must be 12 bytes"))
+        expect(record13_decrypt_fd(RecordKey(key: _seq_bytes(16), iv: _seq_bytes(11)), 0u64, dummy_record)).to_equal(RecordResult.Err("GCM nonce must be 12 bytes"))
+
+    it "rejects wrong ChaCha20-Poly1305 key and IV lengths in record13_decrypt_chacha20_poly1305":
+        step("Verify ChaCha20-Poly1305 decrypt rejects wrong key/IV lengths before nonce derivation")
+        val dummy_record: [u8] = [0x17u8, 0x03u8, 0x03u8, 0x00u8, 0x11u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+
+        expect(record13_decrypt_chacha20_poly1305(RecordKey(key: _seq_bytes(31), iv: _seq_bytes(12)), 0u64, dummy_record)).to_equal(RecordResult.Err("invalid key length"))
+        expect(record13_decrypt_chacha20_poly1305(RecordKey(key: _seq_bytes(33), iv: _seq_bytes(12)), 0u64, dummy_record)).to_equal(RecordResult.Err("invalid key length"))
+        expect(record13_decrypt_chacha20_poly1305(RecordKey(key: _seq_bytes(32), iv: _seq_bytes(0)), 0u64, dummy_record)).to_equal(RecordResult.Err("invalid nonce length"))
+        expect(record13_decrypt_chacha20_poly1305(RecordKey(key: _seq_bytes(32), iv: _seq_bytes(11)), 0u64, dummy_record)).to_equal(RecordResult.Err("invalid nonce length"))
+        expect(record13_decrypt_chacha20_poly1305(RecordKey(key: _seq_bytes(32), iv: _seq_bytes(13)), 0u64, dummy_record)).to_equal(RecordResult.Err("invalid nonce length"))
+
+    it "round-trips AES-128-GCM and ChaCha20-Poly1305 records with valid 12-byte IVs and 16/32-byte keys":
+        step("Verify encrypt/decrypt round-trip and record13_make_nonce RFC 8446 XOR behavior")
+        val aes_key = RecordKey(key: _seq_bytes(16), iv: _seq_bytes(12))
+        val pt: [u8] = [0x48u8, 0x65u8, 0x6Cu8, 0x6Cu8, 0x6Fu8]
+        val aes_wire = record13_encrypt(aes_key, 7u64, 23u8, pt)
+        expect(record13_decrypt(aes_key, 7u64, aes_wire)).to_equal(RecordResult.Ok(23, pt))
+        expect(record13_decrypt_fd(aes_key, 7u64, aes_wire)).to_equal(RecordResult.Ok(23, pt))
+
+        val chacha_key = RecordKey(key: _seq_bytes(32), iv: _seq_bytes(12))
+        val chacha_wire = record13_encrypt_chacha20_poly1305(chacha_key, 7u64, 23u8, pt)
+        expect(record13_decrypt_chacha20_poly1305(chacha_key, 7u64, chacha_wire)).to_equal(RecordResult.Ok(23, pt))
+
+        val n0 = record13_make_nonce(aes_key.iv, 0u64)
+        expect(n0).to_equal(aes_key.iv)
+
+    it "enforces canonical status-prefixed decrypt encoding and constant-time tag compare in baremetal_stubs.c":
+        step("Verify baremetal rt_tls13_aes128_gcm_decrypt contract in baremetal_stubs.c")
+        val c_src = file_read("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+        expect(c_src).to_contain("uint8_t status_fail = 0x00U;")
+        expect(c_src).to_contain("framed[0] = 0x01U;")
+        expect(c_src).to_contain("uint8_t tag_diff = 0U;")
+        expect(c_src).to_contain("_rt_bytes_get(")
+        expect(c_src).to_contain("ct_len > UINT32_MAX - 1U")

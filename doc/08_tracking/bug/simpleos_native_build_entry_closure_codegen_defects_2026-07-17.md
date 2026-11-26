@@ -1,5 +1,5 @@
 # Entry-closure freestanding cranelift codegen defects found chasing first desktop frame (2026-07-16/17)
-## Status: BLOCKED 2026-11-11 (lane p3-seedA) — seed-side codegen defects C1–C8 are
+## Status: fix-implemented-verification-pending (2026-11-27 W2-4; prior 2026-11-11 p3-seedA note: seed-side codegen defects C1–C8 are
   resolved or non-reproducing on the current seed (see the dated addendum:
   C1/C8 landed root fixes are ancestors of the lane base; C2–C6 confirmed
   non-reproducing 7/7 on the host Cranelift JIT at the base, matching the
@@ -1713,3 +1713,10 @@ Disposition: BLOCKED. Header flipped Open → BLOCKED 2026-11-11 (lane p3-seedA)
   sh scripts/os/build-simpleos-x86-64-desktop-engine2d-kernel.shs && sh scripts/os/run_simpleos_q35_smoke.shs
   bin/simple test test/03_system/os/simpleos_native_build_entry_closure_spec.spl
   ```
+
+## W2-4 Update (2026-11-27) — `gui_entry_*.spl` C7 `.to_u32()` cleanup & shard extracted (`fix-implemented-verification-pending`)
+
+- **Shard:** Extracted legacy row from `bug_db.sdn` to `doc/08_tracking/bug/db/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.sdn` (`status: fix-implemented-verification-pending`).
+- **OS/entry-closure fix:** Replaced remaining scalar `.to_u32()` alias-bridge calls with explicit `as u32` casts across `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl`, `gui_entry_browser.spl`, `gui_entry_engine2d.spl`, `gui_entry_engine2d_virtio.spl`, and `gui_entry_engine2d_virtio_factory.spl`.
+- **Host specs:** Added `test/01_unit/os/gui/x86_64_entry_u32_cast_contract_spec.spl` (`1 total, 1 passed, 0 failed`) and re-verified `test/01_unit/os/kernel_bf9/bf9_freestanding_init_and_u32_contract_spec.spl` (`2 total, 2 passed, 0 failed`).
+- **Waiting-for:** x86_64 freestanding native-build + QEMU desktop boot verification (`build-simpleos-x86-64-desktop-engine2d-kernel.shs`, `run_simpleos_q35_smoke.shs`, `simpleos_native_build_entry_closure_spec.spl`) including the `vfs_boot_init.spl` C8 check.

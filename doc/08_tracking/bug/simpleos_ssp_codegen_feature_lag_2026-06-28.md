@@ -114,3 +114,9 @@ naked contract (E-NAKED-BODY, pure_backend_naked_fn_gaps_2026-08-28, landed
 Neighbors green: hardening_preset_policy 12/12, naked_no_prologue 11/11,
 aarch64_float_reject 8/8. Still open per above: default Cranelift-route SSP
 policy and QEMU guest evidence.
+
+## W2-4 Update (2026-11-27) — `compile_c_to_object` SSP wiring added; compiler Cranelift slice still `open`
+
+- **CLI wrapper fix (`src/app/compile/native.spl`):** Extracted `native_c_object_compile_flags(platform: text, sanitize: bool) -> text` and updated `compile_c_to_object` to apply `native_stack_protector_flags(detect_platform())` (`-fstack-protector-strong` on `"linux"`, `"freebsd"`, `"simpleos"`), matching `compile_native_source`.
+- **Host spec:** Extended `test/01_unit/app/compile/native_hardening_spec.spl` with `native_c_object_compile_flags` matrix checks -> `5 total, 5 passed, 0 failed`.
+- **Remaining open slice (out of W2-4 scope):** `src/compiler/**` still lacks Cranelift-route SSP policy for baremetal/SimpleOS codegen, and QEMU system verification (`test/03_system/os/qemu/os/harden/pie_ssp_relro_preset_spec.spl`) remains pending. Status kept `open`.

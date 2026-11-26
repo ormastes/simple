@@ -175,10 +175,20 @@ fn host_metal_glass_receipts_valid(
         index = index + 1
     true
 
+fn host_wm_draw_ir_composition_nonempty(composition: DrawIrComposition) -> bool:
+    """Reject empty compositions or compositions whose batches hold zero draw commands."""
+    if composition.batches.len() == 0:
+        return false
+    for batch in composition.batches:
+        if batch.commands.len() > 0:
+            return true
+    false
+
 fn host_wm_draw_ir_result_valid(
     composition: DrawIrComposition, result: Engine2dDrawIrAdvResult,
     expected_pixel_count: i32
 ) -> bool:
+    host_wm_draw_ir_composition_nonempty(composition) and
     host_metal_glass_receipts_valid(composition, result) and
     not result.fallback_required and
     result.skipped_command_count == 0 and
@@ -2520,6 +2530,8 @@ class HostCompositor:
         val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, selected_backend, 1000, taskbar_input.clock_label, 0)
         if not self._capture_external_web_frame_ack(frames):
             return self._reject_engine2d_frame()
+        if not host_wm_draw_ir_composition_nonempty(composition):
+            return self._reject_engine2d_frame()
         # One canonical damage input feeds both the native-window GPU path and
         # the retained CPU mirror path below. It contains the compositor's
         # conservative old/new invalidation rectangles, not inferred command
@@ -2600,10 +2612,13 @@ class HostCompositor:
         ) and host_wm_draw_ir_local_recompose_required(selected_backend)):
             # Preserve the exact validated scene, taskbar, content frames, and
             # image resources. Only the producer's material target changes.
-            accepted_composition = shared_wm_scene_draw_ir_composition_with_content(
+            val cpu_composition = shared_wm_scene_draw_ir_composition_with_content(
                 scene, taskbar_input.taskbar, frames, DRAW_IR_BACKEND_CPU,
                 1000, taskbar_input.clock_label, 0
             )
+            if not host_wm_draw_ir_composition_nonempty(cpu_composition):
+                return self._reject_engine2d_frame()
+            accepted_composition = cpu_composition
             accepted_result = executor.render_draw_ir_composition(
                 accepted_composition, images
             )
@@ -3774,7 +3789,8 @@ fn host_compositor_draw_taskbar(backend: CompositorBackend, windows: [HostedWind
         elif win.minimized:
             item_color = theme.host_window_body
         backend.fill_rect(ix + 2, dock_y + 4, item_w - 4, 36, item_color)
-        backend.draw_text(ix + 8, dock_y + 14, win.title, theme.text_primary, item_color)
+        if win.title != "":
+            backend.draw_text(ix + 8, dock_y + 14, win.title, theme.text_primary, item_color)
         i = i + 1
 
 # Convert an opaque ARGB u32 (as stored in WmChromeColors) to a CSS "#RRGGBB"

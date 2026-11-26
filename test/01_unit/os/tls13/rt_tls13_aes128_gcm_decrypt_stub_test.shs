@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+cd "$root"
+work=$(mktemp -d "${TMPDIR:-/tmp}/x86-aes-gcm-stub.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+runtime=examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+harness=test/01_unit/os/tls13/rt_tls13_aes128_gcm_decrypt_stub_test.c
+out="$work/aes_gcm_stub_test.c"
+
+cat > "$out" <<'EOF'
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef int64_t RuntimeValue;
+static int _ed_bytes_to_rv(const uint8_t *src, uint32_t src_len, int64_t rv)
+{
+    (void)src;
+    (void)src_len;
+    (void)rv;
+    return 0;
+}
+EOF
+
+awk '
+    /^#define TAG_MASK/ { on = 1 }
+    on && /^RuntimeValue rt_bytes_alloc_packed_empty/ { exit }
+    on { print }
+' "$runtime" >> "$out"
+
+awk '
+    /^static const uint8_t _aes_sbox\[256\]/ { on = 1 }
+    on && /^\/\* Lookup functions/ { exit }
+    on { print }
+' "$runtime" >> "$out"
+
+awk '
+    /^static uint8_t \*_tls_copy_runtime_bytes/ && !/;/ { on = 1 }
+    on { print }
+    on && /^}/ { exit }
+' "$runtime" >> "$out"
+
+awk '
+    /^static RuntimeValue _tls_runtime_array_from_bytes/ && !/;/ { on = 1 }
+    on { print }
+    on && /^}/ { exit }
+' "$runtime" >> "$out"
+
+awk '
+    /^static uint8_t _tls_aes128_xtime/ { on = 1 }
+    on && /^RuntimeValue rt_tls13_record_encrypt/ { exit }
+    on { print }
+' "$runtime" >> "$out"
+
+cat "$harness" >> "$out"
+
+"${CC:-clang}" -std=c11 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-const-variable "$out" -o "$work/aes_gcm_stub_test"
+"$work/aes_gcm_stub_test"
