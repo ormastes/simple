@@ -1,0 +1,35 @@
+#!/bin/sh
+# Native owner1 regression for transient_empty_scope_highwater_scan_2026_10_12:
+# builds the real runtime_native.c + runtime_memory.c with the memory owner
+# enabled, then runs the guarded ownership test and the empty-scope perf test.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+test_dir=$(mktemp -d)
+trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
+
+link_gc=-Wl,--gc-sections
+extra_libs="-ldl"
+if [ "$(uname -s)" = Darwin ]; then
+    link_gc=-Wl,-dead_strip
+    extra_libs=""
+fi
+
+flags="-O2 -std=gnu11 -ffunction-sections -fdata-sections \
+    -DSIMPLE_ABI_VERSION=1 -DSIMPLE_ABI_VERSION_DEFERRED=0 \
+    -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 \
+    -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 \
+    -I $repo_root/src/runtime -I $repo_root/src/runtime/platform"
+
+# shellcheck disable=SC2086
+cc $flags -c "$repo_root/src/runtime/runtime_native.c" -o "$test_dir/runtime_native.o"
+# shellcheck disable=SC2086
+cc $flags -c "$repo_root/src/runtime/runtime_memory.c" -o "$test_dir/runtime_memory.o"
+
+for name in transient_empty_scope_guard_test transient_empty_scope_perf_test; do
+    # shellcheck disable=SC2086
+    cc $flags "$repo_root/test/01_unit/runtime/$name.c" \
+        "$test_dir/runtime_native.o" "$test_dir/runtime_memory.o" \
+        "$link_gc" -pthread $extra_libs -lm -o "$test_dir/$name"
+    "$test_dir/$name"
+done
