@@ -68,6 +68,9 @@ fn stage4_canonical_host_symbol(name: text, macho_prefixes: bool) -> text:
             return unprefixed
     name
 
+fn stage4_is_known_stdcall_import(symbol: text) -> bool:
+    symbol == "LoadLibraryA@4" or symbol == "GetProcAddress@8" or symbol == "FreeLibrary@4" or symbol == "GetModuleHandleA@4"
+
 pub fn stage4_provider_symbol(name: text, object_format: text) -> text:
     var symbol = name
     if object_format == "macho" and symbol.starts_with("_"):
@@ -78,13 +81,17 @@ pub fn stage4_provider_symbol(name: text, object_format: text) -> text:
             imported = true
             symbol = symbol.substring(6)
         # x64/ARM64 COFF symbols have no C leading underscore, so `__simple_*`
-        # and other double-underscore compiler/runtime symbols must keep both
-        # leading underscores. Strip one leading `_` only for 32-bit x86 COFF
-        # cdecl/stdcall prefixes (`_foo`, `___simple_*`).
-        if symbol.starts_with("___") or (symbol.starts_with("_") and not symbol.starts_with("__") and symbol.byte_len() > 1):
+        # and single-underscore CRT names like `_strdup` / `_open` must keep
+        # their leading underscores. Strip one leading `_` only for 32-bit x86
+        # COFF triple-underscore (`___simple_*`) or runtime/stdcall prefixes.
+        if symbol.starts_with("___"):
             symbol = symbol.substring(1)
+        elif symbol.starts_with("_") and not symbol.starts_with("__") and symbol.byte_len() > 1:
+            val unprefixed = symbol.substring(1)
+            if stage4_is_runtime_abi_symbol(unprefixed) or stage4_is_known_stdcall_import(unprefixed):
+                symbol = unprefixed
         val decoration = symbol.last_index_of("@")
-        val known_stdcall_import = symbol == "LoadLibraryA@4" or symbol == "GetProcAddress@8" or symbol == "FreeLibrary@4"
+        val known_stdcall_import = stage4_is_known_stdcall_import(symbol)
         if imported and known_stdcall_import:
             symbol = symbol.substring(0, decoration)
     symbol

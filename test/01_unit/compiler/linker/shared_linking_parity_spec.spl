@@ -51,6 +51,36 @@ describe "Shared-library linker parity across ELF, Darwin, MSVC, and MinGW":
         expect_not(args.contains("$ORIGIN"))
         assert_true(args.contains("/SUBSYSTEM:WINDOWS"))
 
+    it "wires i686 MSVC /DLL with /MACHINE:X86 and m:x /INCLUDE underscores":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.target_triple = "i686-pc-windows-msvc"
+        cfg.retained_symbols = ["term_init", "__simple_runtime_init"]
+
+        val msvc_cfg: MsvcConfig = shared_msvc_link_config(["term_native.obj"], cfg)
+        expect(msvc_cfg.machine).to_equal("X86")
+        assert_true(msvc_cfg.extra_args.contains("/INCLUDE:_term_init"))
+        assert_true(msvc_cfg.extra_args.contains("/EXPORT:term_init"))
+        assert_true(msvc_cfg.extra_args.contains("/INCLUDE:___simple_runtime_init"))
+        assert_true(msvc_cfg.extra_args.contains("/EXPORT:__simple_runtime_init"))
+
+        val args = msvc_cfg.build_args("term_native.dll", ["term_native.obj"])
+        assert_true(args.contains("/MACHINE:X86"))
+        assert_true(args.contains("/INCLUDE:_term_init"))
+        assert_true(args.contains("/EXPORT:term_init"))
+
+    it "wires i686 MinGW shared DLL with m:x -Wl,-u underscores and --export-all-symbols":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.target_triple = "i686-pc-windows-gnu"
+        cfg.retained_symbols = ["__simple_runtime_init", "luaopen_demo"]
+
+        val mingw_args = shared_mingw_link_args(["mod.o"], "out.dll", cfg)
+        assert_true(mingw_args.contains("--target=i686-w64-windows-gnu"))
+        assert_true(mingw_args.contains("-Wl,-u,___simple_runtime_init"))
+        assert_true(mingw_args.contains("-Wl,-u,_luaopen_demo"))
+        assert_true(mingw_args.contains("-Wl,--export-all-symbols"))
+
     it "protects retained_symbols even when extra_flags ends with a dangling -rpath":
         var cfg = NativeLinkConfig.default()
         cfg.runtime_path = "none"
@@ -199,6 +229,8 @@ describe "Stage4 COFF provider symbol normalization":
             expect(stage4_provider_symbol("__simple_pow", fmt)).to_equal("__simple_pow")
             expect(stage4_provider_symbol("__simple_main", fmt)).to_equal("__simple_main")
             expect(stage4_provider_symbol("__chkstk", fmt)).to_equal("__chkstk")
+            expect(stage4_provider_symbol("_strdup", fmt)).to_equal("_strdup")
+            expect(stage4_provider_symbol("_open", fmt)).to_equal("_open")
             expect(stage4_provider_symbol("__imp___simple_runtime_init", fmt)).to_equal("__simple_runtime_init")
 
     it "keeps 32-bit cdecl, stdcall, triple-underscore, and __imp_ normalization working":
@@ -208,6 +240,7 @@ describe "Stage4 COFF provider symbol normalization":
             expect(stage4_provider_symbol("_spl_dlopen", fmt)).to_equal("spl_dlopen")
             expect(stage4_provider_symbol("_g_memtrack_enabled", fmt)).to_equal("g_memtrack_enabled")
             expect(stage4_provider_symbol("__imp__LoadLibraryA@4", fmt)).to_equal("LoadLibraryA")
+            expect(stage4_provider_symbol("__imp__GetModuleHandleA@4", fmt)).to_equal("GetModuleHandleA")
             expect(stage4_provider_symbol("__imp__GetProcAddress@8", fmt)).to_equal("GetProcAddress")
             expect(stage4_provider_symbol("__imp__FreeLibrary@4", fmt)).to_equal("FreeLibrary")
             expect(stage4_provider_symbol("__imp_LoadLibraryA", fmt)).to_equal("LoadLibraryA")
