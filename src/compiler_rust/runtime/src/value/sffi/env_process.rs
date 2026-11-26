@@ -1263,8 +1263,9 @@ pub extern "C" fn rt_process_spawn_inherit() -> i64 {
     }
 }
 
-/// Check if a previously spawned async process is still running.
-/// Returns true if the process exists in the registry and has not yet exited.
+/// Check if a process is still running. A child spawned by this process is
+/// answered by try_wait; any other pid falls back to an OS liveness probe,
+/// matching the interpreter and the C runtime (runtime_process.c).
 #[no_mangle]
 pub extern "C" fn rt_process_is_running(pid: i64) -> bool {
     if let Ok(mut map) = SPAWNED_CHILDREN.lock() {
@@ -1275,7 +1276,7 @@ pub extern "C" fn rt_process_is_running(pid: i64) -> bool {
                 Err(_) => false,
             }
         } else {
-            false
+            process_exists_os(pid)
         }
     } else {
         false
@@ -2913,6 +2914,17 @@ mod tests {
         assert!(rt_process_exists(std::process::id() as i64));
         assert!(!rt_process_exists(0));
         assert!(!rt_process_exists(-1));
+    }
+
+    // rt_process_is_running_lane_drift_non_child_pid_2026-11-26: a pid this
+    // process did not spawn is answered by the OS, as the interpreter and the
+    // C runtime do.
+    #[test]
+    fn test_process_is_running_probes_os_for_untracked_pid() {
+        assert!(rt_process_is_running(std::process::id() as i64));
+        assert!(!rt_process_is_running(0));
+        assert!(!rt_process_is_running(-1));
+        assert!(!rt_process_is_running(999_999_999));
     }
 
     #[cfg(unix)]
