@@ -50,56 +50,52 @@ fn SB_L() -> text:
 fn SB_R() -> text:
     "]"
 
-# The 32 C0 control characters, indexed by code point. JSON strings must not
-# carry any of them raw (RFC 8259 §7), so every one maps to an escape.
-fn _json_ctrl_chars() -> [text]:
-    ["\u0000", "\u0001", "\u0002", "\u0003", "\u0004", "\u0005", "\u0006", "\u0007", 
-     "\u0008", "\t", "\n", "\u000B", "\u000C", "\r", "\u000E", "\u000F", 
-     "\u0010", "\u0011", "\u0012", "\u0013", "\u0014", "\u0015", "\u0016", "\u0017", 
-     "\u0018", "\u0019", "\u001A", "\u001B", "\u001C", "\u001D", "\u001E", "\u001F"]
-
-fn _json_ctrl_escape(ch: text) -> text:
-    if ch == "\n":
+fn _json_ctrl_escape_byte(b: i64) -> text:
+    if b == 10:
         return r"\n"
-    if ch == "\r":
+    if b == 13:
         return r"\r"
-    if ch == "\t":
+    if b == 9:
         return r"\t"
-    val table = _json_ctrl_chars()
     val hex = "0123456789ABCDEF"
-    var i = 0
-    while i < table.len():
-        if table[i] == ch:
-            return r"\u00" + hex.substring(i / 16, i / 16 + 1) + hex.substring(i % 16, i % 16 + 1)
-        i = i + 1
-    # Not a C0 control char (multi-byte or >= 0x20): pass through.
-    ch
-
-fn _json_needs_escape(ch: text) -> bool:
-    ch == Q() or ch == "\\" or ch < " "
+    val hi = b / 16
+    val lo = b % 16
+    r"\u00" + hex.substring(hi, hi + 1) + hex.substring(lo, lo + 1)
 
 # Single-pass JSON string escaper. Deliberately does NOT chain `.replace()`:
 # the chained form left raw control characters in the payload and, on the
 # deployed 2026-08-10 native server, shifted the `\n` escape two bytes
-# ("WARNING" -> "W\nRNING"). Every byte is copied or escaped exactly once.
+# ("WARNING" -> "W\nRNING"). Scans bytes in place and slices unescaped runs
+# so multi-KB outputs avoid per-character string allocations.
 fn escape_json(s: text) -> text:
-    var plain = true
-    for ch in s:
-        if _json_needs_escape(ch):
-            plain = false
+    val n = s.byte_len()
+    var i = 0
+    while i < n:
+        val b = s.byte_at(i)
+        if b == 34 or b == 92 or (b >= 0 and b < 32):
             break
-    if plain:
+        i = i + 1
+    if i == n:
         return s
     var parts: [text] = []
-    for ch in s:
-        if ch == Q():
-            parts.push("\\" + Q())
-        elif ch == "\\":
-            parts.push("\\\\")
-        elif ch < " ":
-            parts.push(_json_ctrl_escape(ch))
-        else:
-            parts.push(ch)
+    if i > 0:
+        parts.push(s.substring(0, i))
+    var span_start = i
+    while i < n:
+        val b = s.byte_at(i)
+        if b == 34 or b == 92 or (b >= 0 and b < 32):
+            if i > span_start:
+                parts.push(s.substring(span_start, i))
+            if b == 34:
+                parts.push("\\\"")
+            elif b == 92:
+                parts.push("\\\\")
+            else:
+                parts.push(_json_ctrl_escape_byte(b))
+            span_start = i + 1
+        i = i + 1
+    if span_start < n:
+        parts.push(s.substring(span_start, n))
     parts.join("")
 
 # Public alias: the escaper body without quotes (used by api_tools).
@@ -384,24 +380,38 @@ fn strip_ansi(s: text) -> text:
     val esc = "\u001B"
     if not s.contains(esc):
         return s
+    val blen = s.byte_len()
     var parts: [text] = []
     var in_csi = false
     var after_esc = false
-    for ch in s:
-        if in_csi:
-            # CSI ends at the first byte in 0x40..0x7E
-            if ch >= "@" and ch <= "~":
-                in_csi = false
-            continue
-        if after_esc:
-            after_esc = false
-            if ch == "[":
-                in_csi = true
-            continue
-        if ch == esc:
+    var run_start = 0
+    var i = 0
+    while i < blen:
+        val b = s.byte_at(i)
+        if b == 27:
+            if not in_csi and not after_esc and i > run_start:
+                parts.push(s.substring(run_start, i))
+            in_csi = false
             after_esc = true
-            continue
-        parts.push(ch)
+            run_start = i + 1
+        elif in_csi:
+            # CSI ends at the first byte in 0x40..0x7E ('@'..'~')
+            if b >= 64 and b <= 126:
+                in_csi = false
+            run_start = i + 1
+        elif after_esc:
+            after_esc = false
+            if b == 91:
+                in_csi = true
+                run_start = i + 1
+            elif b >= 32 and b <= 126:
+                run_start = i + 1
+            else:
+                # Preserve C0 bytes and multi-byte UTF-8 lead bytes intact
+                run_start = i
+        i = i + 1
+    if not in_csi and not after_esc and run_start < blen:
+        parts.push(s.substring(run_start, blen))
     parts.join("")
 
 fn _strip_timeout_prefix(command: text) -> text:

@@ -1,7 +1,9 @@
 # MCP server grows to multi-GB RSS over a long session (2026-11-24)
 
-**Status:** partly fixed in source (largest identified per-call accumulator);
-NOT rebuilt, NOT redeployed, NOT measured after the change. Structural fix open.
+**Status:** items 1-4 fixed in source (`tok_record_at` bounded tail + append,
+linear `rt_stdin_read_*_text` framing, byte-slice `escape_json`/`strip_ansi`,
+linear `_ctx_load_stats` + coalesced `_ctx_stats_bump2`); NOT redeployed/measured
+on a live multi-hour session. Structural `transient_scope` fix open.
 
 ## Measurements (read-only `/proc`, live server of an active session)
 
@@ -62,20 +64,24 @@ bytes is consistent with that.
    measured 14 MB per call, and the only term that grows with history (total
    cost quadratic in calls). The constants are estimates from reading the
    source, not measurements.
-2. **Stdin framing, `src/app/mcp/main.spl:276-295` (not changed).**
-   `_mcp_read_line` / `_mcp_read_chars` build the message with one
-   `result + ch` per byte, so an n-byte request retains n^2/2 bytes. Replaying
-   the 616 request sizes from the transcript (sum 419 kB, max 6,973 bytes) gives
-   ~0.3 GB, about 4 % of the total. The runtime already has linear equivalents
-   (`rt_stdin_read_line_text`, `rt_stdin_read_chars_text`,
-   `runtime_native.c:4112,4133`, used by `src/app/md_lsp/md_lsp_main.spl`); the
-   swap was left out because the transport cannot be exercised without a build.
-3. **`_ctx_stats_bump`, `src/app/mcp/main_lazy_ctx_tools.spl:481`.** Two to
-   three load + atomic rewrites of `stats.sdn` per call. Same shape as (1) but
-   the file is 177 bytes and does not grow, so it is a small constant.
-4. **Response building**: `escape_json` (`main_lazy_json.spl:85`) keeps a
-   parts array (8 bytes per output byte) plus the joined copy; average returned
-   output is 6 kB per call, so well under 1 MB per call.
+2. **Stdin framing, `src/app/mcp/main.spl:276-295` (fixed in follow-up).**
+   `_mcp_read_line` / `_mcp_read_chars` previously built the message with one
+   `result + ch` per byte, so an n-byte request retained n^2/2 bytes. Replaced
+   with linear `rt_stdin_read_line_text()` / `rt_stdin_read_chars_text(count)`
+   (`runtime_native.c:4022,4043`, matching `src/app/md_lsp/md_lsp_main.spl`),
+   plus a 64 MiB `Content-Length` cap (`_MCP_MAX_CONTENT_LENGTH`) and short-read
+   EOF guard (`body.byte_len() < content_length`). Note: these are C-runtime
+   primitives (Windows binary stdio mode set by `rt_win_set_binary_stdio`), not
+   registered in the Rust seed interpreter (`src/compiler_rust/.../interpreter_extern`),
+   matching `md_lsp_main.spl` / `tui_shell.spl`.
+3. **`_ctx_stats_bump`, `src/app/mcp/main_lazy_ctx_tools.spl:481` (fixed in follow-up).**
+   Two to three load + atomic rewrites of `stats.sdn` per call using the
+   generic per-character `parse_sdn_table`. Replaced `_ctx_load_stats()` with a
+   linear line parser and coalesced paired stat bumps via `_ctx_stats_bump2`.
+4. **Response building (fixed in follow-up)**: `escape_json` and `strip_ansi`
+   (`main_lazy_json.spl`) previously pushed one 1-char string per byte into
+   `parts`. Replaced with byte-indexed scanning (`byte_at`) and slice runs
+   (`substring(span_start, i)`), avoiding per-character allocations.
 5. **Unexplained remainder**: about half of the 14 MB per call is not
    accounted for by 1-4. Not pinned.
 
@@ -123,8 +129,11 @@ replaced atomically on each event; it is appended like the chunk store.
   `MCP_LOG_LEVEL` and `_MCP_TRANSPORT_MODE` (`main.spl`),
   `_systemd_scope_probe` / `_memscope_sequence` (`resource_scope.spl:248`),
   debug/play/assistant session registries.
-- Item 2 (linear stdin framing) and item 5 (measure a fresh server: RSS delta
-  per call against ledger size) once a build is possible.
+- Item 5 (measure a fresh deployed server: RSS delta per call against ledger
+  size) once a full release binary rebuild is deployed. (Follow-up standalone
+  native probe verified `rt_stdin_read_line_text` / `rt_stdin_read_chars_text`
+  64 KB framed + JSONL read at 5,040 KiB HWM and 50x `escape_json`/`strip_ansi`
+  stress at 8,748 KiB HWM.)
 - A `simple_ctx_execute` call hung until the client's 1,800 s timeout the same
   day. Not reproduced and not pinned. The server caps a ctx command at 120 s
   and the runner's post-timeout path (`runtime_process_owned.c:4840-4857`,

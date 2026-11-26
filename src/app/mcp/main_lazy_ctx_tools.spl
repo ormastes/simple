@@ -59,7 +59,6 @@ use .ctx_redaction.{CtxRawContent, ctx_redact}
 use .ctx_retention.{CtxChunkId, CtxSourceLabel, CtxUnixSecs, CtxAgeLimit, CtxByteCount, CtxRetentionRow, CtxRetentionPolicy, CtxPolicyCheck, CtxPurgeMode, CtxRetentionPlan, ctx_retention_row, ctx_retention_policy, ctx_retention_check, ctx_retention_decide, ctx_policy_check_label}
 use std.io_runtime.{file_rename, env_get, file_read, file_write, file_append_text, file_exists, file_delete, dir_create, time_now_unix_micros, file_size_signed, file_hash_sha256_or_empty}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_text_at}
-use std.database.core.{parse_sdn_table}
 use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
 use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
 use std.nogc_sync_mut.io.http_get_core.{http_get_raw}
@@ -443,29 +442,44 @@ pub fn ctx_index_text(raw_content: text, source: text) -> CtxChunkCount:
     if not _ctx_append_chunks_settled(rows):
         return CtxChunkCount(count: -1)
     _ctx_cache_extend_after_append(pre_append, rows)
-    _ctx_stats_bump("bytes_indexed", content.len())
-    _ctx_stats_bump("index_calls", 1)
+    _ctx_stats_bump2("bytes_indexed", content.len(), "index_calls", 1)
     CtxChunkCount(count: rows.len())
 
 # ---------------------------------------------------------------------------
 # Stats (key/value SDN)
 # ---------------------------------------------------------------------------
 
+fn _ctx_unquote_stats_cell(cell: text) -> text:
+    val c = cell.trim()
+    if c.byte_len() >= 2 and c.starts_with("\"") and c.ends_with("\""):
+        return c.substring(1, c.byte_len() - 1)
+    c
+
 fn _ctx_load_stats() -> Dict<text, i64>:
     var d: Dict<text, i64> = {}
     val path = _ctx_stats_path()
     if not file_exists(path):
         return d
-    val table = parse_sdn_table(file_read(path))
-    match table:
-        Some(t):
-            for row in t.rows:
-                val k = row.get("key") ?? ""
-                val v = (row.get("value") ?? "0").to_int() ?? 0
-                if k != "":
-                    d[k] = v
-        None:
-            pass
+    for line in file_read(path).split("\n"):
+        val t = line.trim()
+        if t == "" or t.starts_with("#") or t == "ctx_stats" or t.starts_with("ctx_stats ") or t.starts_with("ctx_stats|"):
+            continue
+        var k = ""
+        var comma: i64 = -1
+        if t.starts_with("\""):
+            val close = t.index_of("\"", 1) ?? -1
+            if close < 0:
+                continue
+            k = t.substring(1, close).trim()
+            comma = t.index_of(",", close + 1) ?? -1
+        else:
+            comma = t.index_of(",") ?? -1
+            if comma > 0:
+                k = t.substring(0, comma).trim()
+        if comma <= 0 or k == "":
+            continue
+        val v_str = _ctx_unquote_stats_cell(t.substring(comma + 1))
+        d[k] = v_str.to_int() ?? 0
     d
 
 fn _ctx_save_stats(d: Dict<text, i64>) -> bool:
@@ -478,12 +492,23 @@ fn _ctx_save_stats(d: Dict<text, i64>) -> bool:
         lines.push("    " + k + ", " + str(d[k]) + "\n")
     _ctx_write_atomic(_ctx_stats_path(), lines.join(""))
 
+fn _ctx_stats_bump_key(d: Dict<text, i64>, key: text, delta: i64) -> Dict<text, i64>:
+    var out = d
+    if out.contains_key(key):
+        out[key] = out[key] + delta
+    else:
+        out[key] = delta
+    out
+
 fn _ctx_stats_bump(key: text, delta: i64):
     var d = _ctx_load_stats()
-    if d.contains_key(key):
-        d[key] = d[key] + delta
-    else:
-        d[key] = delta
+    d = _ctx_stats_bump_key(d, key, delta)
+    _ctx_save_stats(d)
+
+fn _ctx_stats_bump2(key1: text, delta1: i64, key2: text, delta2: i64):
+    var d = _ctx_load_stats()
+    d = _ctx_stats_bump_key(d, key1, delta1)
+    d = _ctx_stats_bump_key(d, key2, delta2)
     _ctx_save_stats(d)
 
 # ---------------------------------------------------------------------------
@@ -1270,8 +1295,7 @@ pub fn handle_simple_ctx_search(id: text, body: text) -> text:
     for q in queries:
         blocks.push(ctx_format_hits(q, ctx_bm25_search_index(index, q, CtxResultLimit(count: limit))))
     val out = blocks.join("\n")
-    _ctx_stats_bump("bytes_returned", out.len())
-    _ctx_stats_bump("search_calls", 1)
+    _ctx_stats_bump2("bytes_returned", out.len(), "search_calls", 1)
     tok_record(TOK_FEATURE_CTX, "simple_ctx_search", 0, out.len(), false)
     make_tool_result(id, out)
 
@@ -1285,8 +1309,7 @@ fn _ctx_exec_common(id: text, body: text, tool: text, file_path: text) -> text:
     match result:
         Some(raw):
             val r = ctx_cap_exec_stdout(raw)
-            _ctx_stats_bump("exec_calls", 1)
-            _ctx_stats_bump("bytes_returned", r.stdout.len())
+            _ctx_stats_bump2("exec_calls", 1, "bytes_returned", r.stdout.len())
             val out = ctx_format_exec(tool, r)
             val tool_name = if tool.starts_with("simple_ctx_execute_file"): "simple_ctx_execute_file" else: "simple_ctx_execute"
             tok_record(TOK_FEATURE_CTX, tool_name, r.raw_bytes.bytes, out.len(), false)
@@ -1350,8 +1373,7 @@ pub fn handle_simple_ctx_batch_execute(id: text, body: text) -> text:
         for q in queries:
             lines.push(ctx_format_hits(q, ctx_bm25_search_index(index, q, CtxResultLimit(count: limit))))
     val out = lines.join("\n")
-    _ctx_stats_bump("bytes_returned", out.len())
-    _ctx_stats_bump("batch_calls", 1)
+    _ctx_stats_bump2("bytes_returned", out.len(), "batch_calls", 1)
     tok_record(TOK_FEATURE_CTX, "simple_ctx_batch_execute", total_bytes, out.len(), false)
     make_tool_result(id, out)
 
