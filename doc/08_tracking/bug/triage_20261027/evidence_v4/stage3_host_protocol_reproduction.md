@@ -10,8 +10,8 @@ This is one host-side shell argument-builder reproduction. It does not reproduce
 
 | Receipt | Exact command | Exit | What it establishes |
 |---|---|---:|---|
-| `exec-f1426a88-b544-492a-9bb1-3e213ab7524f` | `/bin/bash -lc 'python3 scripts/bootstrap/tests/stage3-source-policy-test.py'` | 1 | Baseline at `b0d3cf73dc19e75640952c220bf0e069230b5eda`; six host protocol tests ran. The admitted failure is actual/digested source-policy argv mismatch. |
-| `exec-12af553a-00fe-44f9-b64c-a872d0e83352` | `/bin/bash -lc 'python3 scripts/bootstrap/tests/stage3-source-policy-test.py'` | 0 | Same host suite after remedy edits and before creation of commit `28493de7580915b9fc0fd104cd55cea9bb07edc5`; the later commit records the matching code state. This is post-target only, not evidence that frozen `c0` is fixed. |
+| `exec-f1426a88-b544-492a-9bb1-3e213ab7524f` | `/bin/bash -lc 'python3 scripts/bootstrap/tests/stage3-source-policy-test.py [deleted 2026-11-26]'` | 1 | Baseline at `b0d3cf73dc19e75640952c220bf0e069230b5eda`; six host protocol tests ran. The admitted failure is actual/digested source-policy argv mismatch. |
+| `exec-12af553a-00fe-44f9-b64c-a872d0e83352` | `/bin/bash -lc 'python3 scripts/bootstrap/tests/stage3-source-policy-test.py [deleted 2026-11-26]'` | 0 | Same host suite after remedy edits and before creation of commit `28493de7580915b9fc0fd104cd55cea9bb07edc5`; the later commit records the matching code state. This is post-target only, not evidence that frozen `c0` is fixed. |
 
 The red command was the next retained command after the owned baseline worktree was created at history ordinal 115; it ran before edits at ordinal 122. The retained review read the command history SQLite database read-only (thread `01a17be0-e526-7de1-9fc3-cc90bf83a25d`). No test, build, or compiler command was rerun for this checkpoint.
 
@@ -27,8 +27,8 @@ The executed baseline was `b0d3cf73dc19e75640952c220bf0e069230b5eda`; the review
 
 | Dependency at frozen target | Blob at baseline and target |
 |---|---|
-| [`scripts/bootstrap/tests/stage3-source-policy-test.py`](https://github.com/ormastes/simple/blob/c0b3ad911f4cb00c0f3550b05baa8d06347d17d0/scripts/bootstrap/tests/stage3-source-policy-test.py) | `07919733f9f9c7c7fb5fa1fb1a0d16f7d7065335` |
-| [`scripts/bootstrap/tests/stage3-worker-lowering-lane-test.py`](https://github.com/ormastes/simple/blob/c0b3ad911f4cb00c0f3550b05baa8d06347d17d0/scripts/bootstrap/tests/stage3-worker-lowering-lane-test.py) | `f91e0b0e82c4e9942a35c036539870bfccf3aa25` |
+| [`scripts/bootstrap/tests/stage3-source-policy-test.py [deleted 2026-11-26]`](https://github.com/ormastes/simple/blob/c0b3ad911f4cb00c0f3550b05baa8d06347d17d0/scripts/bootstrap/tests/stage3-source-policy-test.py [deleted 2026-11-26]) | `07919733f9f9c7c7fb5fa1fb1a0d16f7d7065335` |
+| [`scripts/bootstrap/tests/stage3-worker-lowering-lane-test.py [deleted 2026-11-26]`](https://github.com/ormastes/simple/blob/c0b3ad911f4cb00c0f3550b05baa8d06347d17d0/scripts/bootstrap/tests/stage3-worker-lowering-lane-test.py [deleted 2026-11-26]) | `f91e0b0e82c4e9942a35c036539870bfccf3aa25` |
 | [`scripts/bootstrap/tests/stage3-worker-lowering-lane-p-f-test.shs`](https://github.com/ormastes/simple/blob/c0b3ad911f4cb00c0f3550b05baa8d06347d17d0/scripts/bootstrap/tests/stage3-worker-lowering-lane-p-f-test.shs) | `721d5adcac4ad2810bfa899ce8b13c7612522745` |
 | [`scripts/bootstrap/lib/stage3-native-build-worker.sh`](https://github.com/ormastes/simple/blob/c0b3ad911f4cb00c0f3550b05baa8d06347d17d0/scripts/bootstrap/lib/stage3-native-build-worker.sh) | `061bcd067af864b83aac36505f152d0e801b4f14` |
 | [`scripts/bootstrap/lib/stage3-source-policy.shs`](https://github.com/ormastes/simple/blob/c0b3ad911f4cb00c0f3550b05baa8d06347d17d0/scripts/bootstrap/lib/stage3-source-policy.shs) | `a37c9c3458cbd368f6779d55173e702d025ab79d` |

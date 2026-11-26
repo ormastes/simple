@@ -148,50 +148,50 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `doc/08_tracking/bug/evidence/target_profile_2026_11_14/run_probe.py` | 36 | KEEP (2026-11-26, dead-rest lane): retained evidence script, cited by bug/research docs as provenance; deleting it breaks those links |
 | `scripts/bootstrap/cache-identity-model-check.py` | 128 | cited only from doc/ or the baseline |
 | `scripts/bootstrap/lib/executable_batch_policy.py` | 95 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/archive-root-exclusions-test.py` | 82 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/authority-generation-retention-test.py` | 109 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/archive-root-exclusions-test.py` | 82 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/authority-generation-retention-test.py` | 109 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/bootstrap-test-wave-test.py` | 168 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/bounded-error-summary-test.py` | 84 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/bounded-live-diagnostics-test.py` | 198 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/collect-windows-phase2-objects-test.py` | 255 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/bounded-error-summary-test.py` | 84 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/bounded-live-diagnostics-test.py` | 198 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/collect-windows-phase2-objects-test.py` | 255 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/executable-batch-lease-test.py` | 39 | cited only from doc/ or the baseline |
 | `scripts/bootstrap/tests/executable-batch-owner-test.py` | 61 | cited only from doc/ or the baseline |
 | `scripts/bootstrap/tests/executable-batch-test.py` | 25 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/freebsd-command-telemetry-test.py` | 211 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/full-inventory-selection-test.py` | 92 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/hello-sanity-matrix-env-test.py` | 77 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/host-gpu-provider-contract-test.py` | 151 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/ladder-seed-runtime-retention-test.py` | 111 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/materialization-path-boundary-bench.py` | 97 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/materialization-path-boundary-memory-test.py` | 35 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/materialization-path-boundary-test.py` | 57 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/materialize-source-packet-test.py` | 152 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/module-progress-test.py` | 143 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/phase1-whole-jobs-test.py` | 136 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/phase1-whole-json-command-test.py` | 80 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/freebsd-command-telemetry-test.py` | 211 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/full-inventory-selection-test.py` | 92 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/hello-sanity-matrix-env-test.py` | 77 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/host-gpu-provider-contract-test.py` | 151 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/ladder-seed-runtime-retention-test.py` | 111 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/materialization-path-boundary-bench.py` | 97 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/materialization-path-boundary-memory-test.py` | 35 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/materialization-path-boundary-test.py` | 57 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/materialize-source-packet-test.py` | 152 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/module-progress-test.py` | 143 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/phase1-whole-jobs-test.py` | 136 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/phase1-whole-json-command-test.py` | 80 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/phase1-whole-stream-test.py` | 47 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/phase1-whole-tests-test.py` | 74 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/phase-ladder-hello-windows-test.py` | 73 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/phase1-whole-tests-test.py` | 74 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/phase-ladder-hello-windows-test.py` | 73 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/phase-ladder-prior-failure-test.py` | 39 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/phase-ladder-resume-test.py` | 262 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/phase-ladder-resume-test.py` | 262 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/phase-ladder-strict-seed-test.py` | 365 | cited only from doc/ or the baseline |
 | `scripts/bootstrap/tests/phase-ladder-windows-runtime-test.py` | 38 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/product-first-case-test.py` | 59 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/product-generated-snapshot-test.py` | 152 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/repository-native-row-test.py` | 90 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/repository-test-order-test.py` | 58 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/stage2-canonical-handoff-delegation-test.py` | 92 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/stage2-frontend-continuation-test.py` | 213 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/stage3-focused-composition-binding-test.py` | 83 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/stage3-focused-provenance-test.py` | 308 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/stage3-invocation-consistency-test.py` | 81 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/stage3-source-policy-test.py` | 152 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/stage3-worker-lowering-lane-test.py` | 120 | cited only from doc/ or the baseline |
-| `scripts/bootstrap/tests/subsystem-product-resume-test.py` | 148 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/tool-code-authority-test.py` | 132 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/tool-validator-import-test.py` | 33 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/watchdog-source-path-test.py` | 190 | zero-ref test; may test live code |
-| `scripts/bootstrap/tests/windows-collector-zero-timeout-test.py` | 107 | zero-ref test; may test live code |
+| `scripts/bootstrap/tests/product-first-case-test.py` | 59 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/product-generated-snapshot-test.py` | 152 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/repository-native-row-test.py` | 90 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/repository-test-order-test.py` | 58 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/stage2-canonical-handoff-delegation-test.py` | 92 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/stage2-frontend-continuation-test.py` | 213 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/stage3-focused-composition-binding-test.py` | 83 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/stage3-focused-provenance-test.py` | 308 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/stage3-invocation-consistency-test.py` | 81 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/stage3-source-policy-test.py` | 152 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/stage3-worker-lowering-lane-test.py` | 120 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/subsystem-product-resume-test.py` | 148 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/tool-code-authority-test.py` | 132 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/tool-validator-import-test.py` | 33 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/watchdog-source-path-test.py` | 190 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
+| `scripts/bootstrap/tests/windows-collector-zero-timeout-test.py` | 107 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/windows-output-root-env-test.py` | 80 | cited only from doc/ or the baseline |
 | `scripts/check/assemble-parse-closure-native-probe.py` | 46 | cited only from doc/ or the baseline |
 | `scripts/check/check-arm64-boot-dtb-handoff.py` | 254 | cited only from doc/ or the baseline |
