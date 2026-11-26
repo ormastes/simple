@@ -227,6 +227,8 @@ pub struct InstrContext<'a, M: Module> {
     pub nil_tainted_locals: &'a mut HashMap<usize, (BlockId, cranelift_codegen::ir::Value)>,
     /// Mangled function name → declared parameter count for cross-module free functions.
     pub fn_arities: &'a std::sync::Arc<std::collections::HashMap<String, usize>>,
+    /// Unqualified/raw symbols colliding across multiple modules in a native project.
+    pub ambiguous_names: &'a std::sync::Arc<std::collections::HashSet<String>>,
     /// Global enum definitions with payload field types.
     pub enum_defs:
         &'a std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
@@ -305,6 +307,8 @@ impl<'a, M: Module> InstrContext<'a, M> {
             Box::leak(Box::new(std::collections::HashMap::new()));
         let fn_arities: &'static std::sync::Arc<std::collections::HashMap<String, usize>> =
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
+        let ambiguous_names: &'static std::sync::Arc<std::collections::HashSet<String>> =
+            Box::leak(Box::new(std::sync::Arc::new(std::collections::HashSet::new())));
         let enum_defs: &'static std::sync::Arc<
             std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>,
         > = Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
@@ -357,6 +361,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             nil_tainted,
             nil_tainted_locals,
             fn_arities,
+            ambiguous_names,
             enum_defs,
             tag_runtime_pool_join_result: false,
             baremetal: false,

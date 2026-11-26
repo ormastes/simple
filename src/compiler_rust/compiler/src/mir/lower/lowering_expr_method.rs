@@ -5,7 +5,42 @@ use super::lowering_di::builtin_type_name;
 use crate::hir::{BinOp, DispatchMode, HirExpr, HirExprKind, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
+const TEXT_HASH_OWNERS: [&str; 4] = ["text", "str", "String", "string"];
+
 impl<'a> MirLowerer<'a> {
+    fn has_declared_text_hash_impl(&self) -> bool {
+        for owner in TEXT_HASH_OWNERS {
+            let qualified = format!("{owner}.hash");
+            if self
+                .function_param_types
+                .get(&qualified)
+                .is_some_and(|params| params.is_empty())
+            {
+                return true;
+            }
+            if self.imported_function_names.contains(&qualified) {
+                return true;
+            }
+        }
+        for owner in TEXT_HASH_OWNERS {
+            if self.find_trait_for_method_on_receiver("hash", Some(owner), 0).is_some() {
+                return true;
+            }
+        }
+        if let (Some(infos), Some(global_impls)) = (self.trait_infos, self.global_trait_impls) {
+            for (trait_name, info) in infos {
+                if info.get_method("hash").is_some_and(|sig| sig.param_types.is_empty())
+                    && global_impls
+                        .get(trait_name)
+                        .is_some_and(|impls| TEXT_HASH_OWNERS.iter().any(|o| impls.iter().any(|i| i == o)))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn box_method_args_for_any_params(
         &mut self,
         func_name: &str,
@@ -368,7 +403,7 @@ impl<'a> MirLowerer<'a> {
                     let args = [receiver.clone(), zero];
                     return self.lower_builtin_call_expr("rt_string_char_code_at", &args, TypeId::I64);
                 }
-                "hash" if effective_ty == TypeId::STRING => {
+                "hash" if effective_ty == TypeId::STRING && !self.has_declared_text_hash_impl() => {
                     // Text receivers are tagged RuntimeValues. rt_str_hash also
                     // names the raw C-string ABI in core-c-bootstrap, so using
                     // it hashes object metadata instead of the text bytes.
@@ -2581,10 +2616,15 @@ impl<'a> MirLowerer<'a> {
         // when `str.m` itself is not a declared function.
         let func_name = match func_name.split_once('.') {
             Some(("str", bare)) if bare == method && !self.function_param_types.contains_key(&func_name) => {
-                ["text", "String", "string"]
+                TEXT_HASH_OWNERS
                     .iter()
+                    .filter(|owner| **owner != "str")
                     .map(|owner| format!("{}.{}", owner, method))
-                    .find(|candidate| self.function_param_types.contains_key(candidate))
+                    .find(|candidate| {
+                        self.function_param_types
+                            .get(candidate)
+                            .is_some_and(|params| method != "hash" || params.len() == args.len())
+                    })
                     .unwrap_or(func_name)
             }
             Some(("Array", bare)) if bare == method && !self.function_param_types.contains_key(&func_name) => {

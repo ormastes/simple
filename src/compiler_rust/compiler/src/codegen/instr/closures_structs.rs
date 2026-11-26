@@ -144,49 +144,154 @@ fn unique_unqualified_rebind<'a>(hits: &[&'a str], lookup_name: &str, source: &s
     }
 }
 
-fn resolve_declared_text_hash_func_id<M: Module>(ctx: &InstrContext<'_, M>, arg_count: usize) -> Option<FuncId> {
-    for owner in ["text", "String", "string"] {
-        let qualified = format!("{owner}.hash");
-        let sanitized = format!("{owner}_dot_hash");
-        if let Some(id) = resolve_unique_module_qualified_func(ctx, &qualified)
-            .or_else(|| resolve_unique_module_qualified_func(ctx, &sanitized))
-            .or_else(|| ctx.func_ids.get(&qualified).copied())
-            .or_else(|| ctx.func_ids.get(&sanitized).copied())
-        {
-            return Some(id);
-        }
-        let wanted = arg_count + 1;
-        let candidates: Vec<_> = ctx.func_ids.iter_method_suffix("hash").collect();
-        let fitting: Vec<_> = candidates
-            .iter()
-            .copied()
-            .filter(|(_, id)| crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, **id).1 == wanted)
-            .collect();
-        let pool = if fitting.is_empty() { &candidates } else { &fitting };
-        if let Some((_, id)) = pool.iter().find(|(k, _)| qualified_method_owner_matches(owner, k, "hash")) {
-            return Some(**id);
-        }
-    }
-    None
+const TEXT_HASH_OWNERS: [&str; 4] = ["text", "str", "String", "string"];
+
+fn is_declared_text_hash_key(key: &str) -> bool {
+    TEXT_HASH_OWNERS
+        .iter()
+        .any(|owner| qualified_method_owner_matches(owner, key, "hash"))
 }
 
-fn resolve_declared_text_hash_import<M: Module>(ctx: &InstrContext<'_, M>) -> Option<String> {
-    for owner in ["text", "String", "string"] {
-        for key in [
-            format!("{owner}.hash"),
-            format!("{owner}__hash"),
-            format!("{owner}_dot_hash"),
-            format!("{}_hash", owner.to_lowercase()),
-        ] {
-            if let Some(mapped) = ctx.use_map.get(&key).or_else(|| ctx.import_map.get(&key)) {
-                return Some(mapped.clone());
+fn text_hash_ambiguous_error(func_name: &str, candidates: &[String]) -> String {
+    format!(
+        "[CODEGEN-AMBIGUOUS-METHOD] in '{}' qualified text hash has {} candidates: [{}] — refusing to pick an arbitrary target.",
+        func_name,
+        candidates.len(),
+        candidates.join(", ")
+    )
+}
+
+fn text_hash_func_arity_matches<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    key: &str,
+    id: FuncId,
+    wanted: usize,
+) -> bool {
+    crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, id).1 == wanted
+        && ctx.fn_arities.get(key).is_none_or(|&arity| arity == wanted)
+}
+
+fn resolve_declared_text_hash_func_id<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    arg_count: usize,
+) -> Result<Option<FuncId>, String> {
+    let wanted = arg_count + 1;
+    let mut use_targets: Vec<String> = Vec::new();
+    for (raw, mangled) in ctx.use_map.iter() {
+        if !(is_declared_text_hash_key(raw) || is_declared_text_hash_key(mangled)) {
+            continue;
+        }
+        if ctx.fn_arities.get(mangled.as_str()).is_some_and(|&arity| arity != wanted) {
+            continue;
+        }
+        let mangled_sanitized = mangled.replace('.', "_dot_");
+        if let Some(id) = ctx
+            .func_ids
+            .get(mangled.as_str())
+            .or_else(|| ctx.func_ids.get(&mangled_sanitized))
+            .copied()
+        {
+            if crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, id).1 != wanted {
+                continue;
             }
         }
-        if let Some(mapped) = resolve_unique_module_qualified_import(ctx, &format!("{owner}.hash")) {
-            return Some(mapped);
+        if !use_targets.iter().any(|seen| seen == mangled) {
+            use_targets.push(mangled.clone());
         }
     }
-    None
+    if use_targets.len() > 1 {
+        use_targets.sort();
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &use_targets));
+    }
+    if let Some(mangled) = use_targets.first() {
+        let mangled_sanitized = mangled.replace('.', "_dot_");
+        let id = ctx
+            .func_ids
+            .get(mangled.as_str())
+            .or_else(|| ctx.func_ids.get(&mangled_sanitized))
+            .copied();
+        return Ok(id.filter(|&fid| text_hash_func_arity_matches(ctx, mangled, fid, wanted)));
+    }
+
+    let mut matching: Vec<(String, FuncId)> = Vec::new();
+    for (cand_name, &cand_id) in ctx.func_ids.iter_method_suffix("hash") {
+        if !is_declared_text_hash_key(cand_name) {
+            continue;
+        }
+        if !text_hash_func_arity_matches(ctx, cand_name, cand_id, wanted) {
+            continue;
+        }
+        if !matching.iter().any(|(_, seen)| *seen == cand_id) {
+            matching.push((cand_name.clone(), cand_id));
+        }
+    }
+    if matching.len() > 1 {
+        let mut names: Vec<String> = matching.into_iter().map(|(k, _)| k).collect();
+        names.sort();
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &names));
+    }
+    Ok(matching.first().map(|(_, id)| *id))
+}
+
+fn resolve_declared_text_hash_import<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    arg_count: usize,
+) -> Result<Option<String>, String> {
+    let wanted = arg_count + 1;
+    let collect_from = |map: &std::collections::HashMap<String, String>| -> Vec<String> {
+        let mut hits: Vec<String> = Vec::new();
+        for (raw, mangled) in map.iter() {
+            // Only match qualified text/str/String/string `.hash` / `_dot_hash`
+            // entries — never bare or `{owner}_hash` free functions.
+            if !(is_declared_text_hash_key(raw) || is_declared_text_hash_key(mangled)) {
+                continue;
+            }
+            if ctx.fn_arities.get(mangled.as_str()).is_some_and(|&arity| arity != wanted) {
+                continue;
+            }
+            let mangled_sanitized = mangled.replace('.', "_dot_");
+            if let Some(id) = ctx
+                .func_ids
+                .get(mangled.as_str())
+                .or_else(|| ctx.func_ids.get(&mangled_sanitized))
+                .copied()
+            {
+                if crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, id).1 != wanted {
+                    continue;
+                }
+            }
+            if !hits.iter().any(|seen| seen == mangled) {
+                hits.push(mangled.clone());
+            }
+        }
+        hits.sort();
+        hits
+    };
+
+    let use_hits = collect_from(ctx.use_map);
+    if use_hits.len() > 1 {
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &use_hits));
+    }
+    if let Some(mangled) = use_hits.first() {
+        return Ok(Some(mangled.clone()));
+    }
+
+    let mut ambiguous_keys: Vec<String> = TEXT_HASH_OWNERS
+        .iter()
+        .flat_map(|owner| [format!("{owner}.hash"), format!("{owner}_dot_hash")])
+        .filter(|key| ctx.ambiguous_names.contains(key))
+        .collect();
+    ambiguous_keys.sort();
+    ambiguous_keys.dedup();
+    if !ambiguous_keys.is_empty() {
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &ambiguous_keys));
+    }
+
+    let import_hits = collect_from(ctx.import_map);
+    if import_hits.len() > 1 {
+        return Err(text_hash_ambiguous_error(&ctx.func.name, &import_hits));
+    }
+    Ok(import_hits.first().cloned())
 }
 
 pub(crate) fn strip_erased_receiver_qualifier(lookup_name: &str) -> &str {
@@ -1075,7 +1180,16 @@ pub(crate) fn compile_method_call_static<M: Module>(
     // Candidates of an ambiguous bare method on an erased receiver, kept so
     // the vtable-identity type switch below can dispatch them at runtime.
     let mut vtable_switch_candidates: Option<Vec<(String, FuncId)>> = None;
-    let func_id = resolve_unique_module_qualified_func(ctx, lookup_name)
+    let func_id = if is_qualified_text_hash {
+        match resolve_declared_text_hash_func_id(ctx, args.len()) {
+            Ok(id) => id,
+            Err(error) => {
+                method_resolution_error = Some(error);
+                None
+            }
+        }
+    } else {
+        resolve_unique_module_qualified_func(ctx, lookup_name)
         .or_else(|| resolve_unique_module_qualified_func(ctx, &sanitized_name))
         .or_else(|| ctx
         .func_ids
@@ -1330,13 +1444,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
             picked.map(|(_, v)| **v)
         })
-        .or_else(|| {
-            if is_qualified_text_hash && lookup_name.starts_with("str.") {
-                resolve_declared_text_hash_func_id(ctx, args.len())
-            } else {
-                None
-            }
-        });
+    };
 
     if let Some(error) = method_resolution_error {
         if let Some(cands) = vtable_switch_candidates.take() {
@@ -1373,189 +1481,150 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
     } else {
-        // Cross-module method: resolve via use_map → import_map
-        // First try exact match, then check for "TypeName.method" qualified
-        // entries in use_map (prefers imported types over alphabetical import_map)
-        let mut resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
-        // The Optional/Result helpers must never be suffix-rebound to a user
-        // method of the same name -- same defect as the bare import_map
-        // fallback below already refuses, but reached through the two qualified
-        // scans instead. macOS Stage 2 linker blocker 2026-09-13: a bare
-        // `unwrap` on a `text?` bound to the only `.unwrap` in the import maps
-        // (`Poll.unwrap`), which returns 0 for a text receiver. The LLVM twin
-        // is `pipeline/native_project/mangle.rs`'s `is_enum_helper_method`;
-        // fixing one backend and not the other is how this family recurs.
-        // Keyed on the METHOD SEGMENT, not the whole lookup name: a QUALIFIED
-        // `MirStaticInit.unwrap` / `T.unwrap` skipped this predicate entirely
-        // (it is not literally "unwrap"), so all four scans below still ran and
-        // the bare last-resort one bound it to the only `.unwrap` in the import
-        // maps. That is the second route behind the 208 residual
-        // `bl Poll.unwrap` sites measured on the run-17 Stage 2 candidate
-        // (2026-09-13); the LLVM twin is `mangle.rs`'s
-        // `enum_helper_owner_matches`. The exact `use_map.get(func_name)`
-        // lookup above still runs, so a genuine qualified `Poll.unwrap`
-        // resolves.
-        let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
-        let enum_helper = is_enum_helper_method_name(enum_helper_method);
-        // The BUILTIN collection/text idioms must never be suffix-rebound here
-        // either. `compile_method_call_static`'s first-choice path already
-        // refuses this (the bare `has` / `len` / `length` early-returns at the
-        // `func_ids` suffix scan, and the `bare_builtin_collection` gate that
-        // routes a bare erased-receiver idiom to its tag-dispatching runtime
-        // call) -- but ONLY on the branch where a `func_id` was found. This
-        // `else` branch, reached for a cross-module call, had no such refusal,
-        // so the three unqualified scans below bound a bare `len` to whatever
-        // lone `Type.len` happened to be linked into the closure.
-        //
-        // Measured 2026-09-13 (native-interp differential census, class
-        // `crash`): `most_common_char("hello")` in
-        // `src/lib/common/text_advanced.spl` does `if freqs.len() == 0`, whose
-        // receiver is an erased array. With `common.string_builder` anywhere in
-        // the entry closure the scan below bound it to
-        // `StringBuilder.len` -> `StringBuilder.to_text`, which loads field 0 of
-        // a null receiver: SEGV at `StringBuilder_dot_to_text+16`, `ldr x28,[x8]`
-        // with x8 = 0. Same family and same remedy as the `enum_helper` refusal
-        // directly above, and as the `starts_with` / `slice` / `has` incidents
-        // recorded on `is_bare_builtin_collection_method`.
-        //
-        // Scope: BARE names only (`!lookup_name.contains('.')`). A receiver whose
-        // static type is known arrives qualified as "Type.method" and still
-        // resolves to its real method, so a genuine cross-module
-        // `StringBuilder.len` is untouched. When nothing binds, the builtin
-        // fallback lowers the call to `rt_len` / `rt_contains`, which
-        // tag-dispatch safely on any value -- the same policy the in-module
-        // path already applies.
-        let erasure_stripped = strip_erased_receiver_qualifier(lookup_name);
-        let bare_builtin_collision = !erasure_stripped.contains('.')
-            && is_bare_builtin_collection_method(erasure_stripped, args.len());
-        // One predicate for all the unqualified rebinding scans below: either
-        // family is a name whose qualifier must not be discarded.
-        let no_rebind = enum_helper || bare_builtin_collision;
-        // Once a scan proves ambiguity, a lossy bare-name map must not undo
-        // that refusal later in this resolution chain.
+        let resolved_storage: Option<String>;
+        let mut type_prefixed_storage;
+        let mut dunder_storage;
+        let suffix_resolved_storage;
+        let mut resolved_name: Option<&str>;
         let mut ambiguous_unqualified = false;
-        // Check use_map for "TypeName.func_name" entries (from imported impl methods)
-        //
-        // AMBIGUITY IS REFUSAL, NOT A COIN FLIP (2026-09-13). These scans used
-        // to take the FIRST `raw` ending in `.<method>` and `break`. `use_map`
-        // and `import_map` are HashMaps, so "first" is iteration order — an
-        // arbitrary, closure-dependent pick among every same-named method in
-        // the link closure. `src/lib/common/bytes/ints.spl` defines `store` /
-        // `to_span` on SIX sibling structs; every call to any of them bound to
-        // one arbitrary survivor, the other five bodies were never referenced
-        // and so never emitted, and `U16le.of(x).store(buf)` silently wrote 4
-        // bytes instead of 2. Binding only when the whole scan agrees on ONE
-        // target keeps every unambiguous cross-module rebind these scans exist
-        // for, and turns the ambiguous case into a named diagnostic instead of
-        // a silent miscompile.
-        // doc/08_tracking/bug/native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md
-        if resolved_name.is_none() && !no_rebind {
-            let method_suffix = format!(".{}", func_name);
-            let mut hits: Vec<&str> = Vec::new();
-            for (raw, mangled) in ctx.use_map.iter() {
-                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 && !hits.contains(&mangled.as_str())
-                {
-                    hits.push(mangled.as_str());
+        if is_qualified_text_hash {
+            resolved_storage = match resolve_declared_text_hash_import(ctx, args.len()) {
+                Ok(mapped) => mapped,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return Err(error);
                 }
-            }
-            ambiguous_unqualified |= hits.len() > 1;
-            resolved_name = unique_unqualified_rebind(&hits, lookup_name, "use_map");
-        }
-        // Also check import_map for qualified entries where type is imported
-        if resolved_name.is_none() && !no_rebind {
-            let method_suffix = format!(".{}", lookup_name);
-            let mut hits: Vec<&str> = Vec::new();
-            for (raw, mangled) in ctx.import_map.iter() {
-                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
-                    let type_part = &raw[..raw.len() - method_suffix.len()];
-                    if ctx.use_map.contains_key(type_part) && !hits.contains(&mangled.as_str()) {
+            };
+            resolved_name = resolved_storage.as_deref();
+        } else {
+            // Cross-module method: resolve via use_map → import_map
+            // First try exact match, then check for "TypeName.method" qualified
+            // entries in use_map (prefers imported types over alphabetical import_map)
+            resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
+            // The Optional/Result helpers must never be suffix-rebound to a user
+            // method of the same name -- same defect as the bare import_map
+            // fallback below already refuses, but reached through the two qualified
+            // scans instead. macOS Stage 2 linker blocker 2026-09-13: a bare
+            // `unwrap` on a `text?` bound to the only `.unwrap` in the import maps
+            // (`Poll.unwrap`), which returns 0 for a text receiver. The LLVM twin
+            // is `pipeline/native_project/mangle.rs`'s `is_enum_helper_method`;
+            // fixing one backend and not the other is how this family recurs.
+            // Keyed on the METHOD SEGMENT, not the whole lookup name: a QUALIFIED
+            // `MirStaticInit.unwrap` / `T.unwrap` skipped this predicate entirely
+            // (it is not literally "unwrap"), so all four scans below still ran and
+            // the bare last-resort one bound it to the only `.unwrap` in the import
+            // maps. That is the second route behind the 208 residual
+            // `bl Poll.unwrap` sites measured on the run-17 Stage 2 candidate
+            // (2026-09-13); the LLVM twin is `mangle.rs`'s
+            // `enum_helper_owner_matches`. The exact `use_map.get(func_name)`
+            // lookup above still runs, so a genuine qualified `Poll.unwrap`
+            // resolves.
+            let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+            let enum_helper = is_enum_helper_method_name(enum_helper_method);
+            let erasure_stripped = strip_erased_receiver_qualifier(lookup_name);
+            let bare_builtin_collision = !erasure_stripped.contains('.')
+                && is_bare_builtin_collection_method(erasure_stripped, args.len());
+            // One predicate for all the unqualified rebinding scans below: either
+            // family is a name whose qualifier must not be discarded.
+            let no_rebind = enum_helper || bare_builtin_collision;
+            // Check use_map for "TypeName.func_name" entries (from imported impl methods)
+            if resolved_name.is_none() && !no_rebind {
+                let method_suffix = format!(".{}", func_name);
+                let mut hits: Vec<&str> = Vec::new();
+                for (raw, mangled) in ctx.use_map.iter() {
+                    if raw.ends_with(&method_suffix)
+                        && raw.len() > lookup_name.len() + 1
+                        && !hits.contains(&mangled.as_str())
+                    {
                         hits.push(mangled.as_str());
                     }
                 }
+                ambiguous_unqualified |= hits.len() > 1;
+                resolved_name = unique_unqualified_rebind(&hits, lookup_name, "use_map");
             }
-            ambiguous_unqualified |= hits.len() > 1;
-            resolved_name = unique_unqualified_rebind(&hits, lookup_name, "import_map");
-        }
-        // Final fallback: import_map bare name (may pick wrong overload)
-        if resolved_name.is_none() && !no_rebind {
-            if !ambiguous_unqualified {
-                resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
+            // Also check import_map for qualified entries where type is imported
+            if resolved_name.is_none() && !no_rebind {
+                let method_suffix = format!(".{}", lookup_name);
+                let mut hits: Vec<&str> = Vec::new();
+                for (raw, mangled) in ctx.import_map.iter() {
+                    if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
+                        let type_part = &raw[..raw.len() - method_suffix.len()];
+                        if ctx.use_map.contains_key(type_part) && !hits.contains(&mangled.as_str()) {
+                            hits.push(mangled.as_str());
+                        }
+                    }
+                }
+                ambiguous_unqualified |= hits.len() > 1;
+                resolved_name = unique_unqualified_rebind(&hits, lookup_name, "import_map");
             }
-        }
+            // Final fallback: import_map bare name (may pick wrong overload)
+            if resolved_name.is_none() && !no_rebind {
+                if !ambiguous_unqualified {
+                    resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
+                }
+            }
 
-        // If not found and func_name contains '.', try additional name variants.
-        // Prefer qualified/type-specific spellings before the bare method name.
-        let mut type_prefixed_storage;
-        let mut dunder_storage;
-        if resolved_name.is_none() {
-            if let Some(dot_pos) = lookup_name.rfind('.') {
-                let type_name = &lookup_name[..dot_pos];
-                let method = &lookup_name[dot_pos + 1..];
+            // If not found and func_name contains '.', try additional name variants.
+            // Prefer qualified/type-specific spellings before the bare method name.
+            if resolved_name.is_none() {
+                if let Some(dot_pos) = lookup_name.rfind('.') {
+                    let type_name = &lookup_name[..dot_pos];
+                    let method = &lookup_name[dot_pos + 1..];
 
-                // Try: Type__method (double underscore variant)
-                dunder_storage = format!("{}__{}", type_name, method);
-                resolved_name = ctx
-                    .use_map
-                    .get(&dunder_storage)
-                    .or_else(|| ctx.import_map.get(&dunder_storage))
-                    .map(|s| s.as_str());
-
-                // Try: Type_dot_method (sanitized dot variant, used in cross-compiled targets)
-                if resolved_name.is_none() {
-                    let dot_storage = format!("{}_dot_{}", type_name, method);
+                    // Try: Type__method (double underscore variant)
+                    dunder_storage = format!("{}__{}", type_name, method);
                     resolved_name = ctx
                         .use_map
-                        .get(&dot_storage)
-                        .or_else(|| ctx.import_map.get(&dot_storage))
+                        .get(&dunder_storage)
+                        .or_else(|| ctx.import_map.get(&dunder_storage))
                         .map(|s| s.as_str());
-                    // dot_storage is consumed by the resolved_name reference above
-                }
 
-                // Try: lowercase_type_method (Simple convention)
-                if resolved_name.is_none() {
-                    type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
-                    resolved_name = ctx
-                        .use_map
-                        .get(&type_prefixed_storage)
-                        .or_else(|| ctx.import_map.get(&type_prefixed_storage))
-                        .map(|s| s.as_str());
-                }
+                    // Try: Type_dot_method (sanitized dot variant, used in cross-compiled targets)
+                    if resolved_name.is_none() {
+                        let dot_storage = format!("{}_dot_{}", type_name, method);
+                        resolved_name = ctx
+                            .use_map
+                            .get(&dot_storage)
+                            .or_else(|| ctx.import_map.get(&dot_storage))
+                            .map(|s| s.as_str());
+                    }
 
-                // Never discard an unresolved receiver qualifier: a trait
-                // Read.read_all cannot select a concrete ShbReader.read_all.
-            }
-        }
-
-        // Try: TypeName__method → typename_method (factory/constructor convention)
-        // e.g., TreeSitter__new → treesitter_new
-        if resolved_name.is_none() {
-            if let Some((type_part, method_part)) = func_name.split_once("__") {
-                if type_part.chars().next().is_some_and(|c| c.is_uppercase()) {
-                    type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
-                    resolved_name = ctx
-                        .use_map
-                        .get(&type_prefixed_storage)
-                        .or_else(|| ctx.import_map.get(&type_prefixed_storage))
-                        .map(|s| s.as_str());
+                    // Try: lowercase_type_method (Simple convention)
+                    if resolved_name.is_none() {
+                        type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
+                        resolved_name = ctx
+                            .use_map
+                            .get(&type_prefixed_storage)
+                            .or_else(|| ctx.import_map.get(&type_prefixed_storage))
+                            .map(|s| s.as_str());
+                    }
                 }
             }
-        }
 
-        let suffix_resolved_storage;
-        if resolved_name.is_none() && !ambiguous_unqualified {
-            suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name).or_else(|| {
-                if is_qualified_text_hash && lookup_name.starts_with("str.") {
-                    resolve_declared_text_hash_import(ctx)
-                } else {
-                    None
+            // Try: TypeName__method → typename_method (factory/constructor convention)
+            // e.g., TreeSitter__new → treesitter_new
+            if resolved_name.is_none() {
+                if let Some((type_part, method_part)) = func_name.split_once("__") {
+                    if type_part.chars().next().is_some_and(|c| c.is_uppercase()) {
+                        type_prefixed_storage = format!("{}_{}", type_part.to_lowercase(), method_part);
+                        resolved_name = ctx
+                            .use_map
+                            .get(&type_prefixed_storage)
+                            .or_else(|| ctx.import_map.get(&type_prefixed_storage))
+                            .map(|s| s.as_str());
+                    }
                 }
-            });
-            resolved_name = suffix_resolved_storage.as_deref();
-        }
+            }
 
-        // The same bare-name recursion guard must cover cross-module aliases.
-        // Delegating self.inner.read_all() is not recursion on self.
-        resolved_name = resolved_name.filter(|name| !ambiguous_unqualified && !is_self(name));
+            if resolved_name.is_none() && !ambiguous_unqualified {
+                suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name);
+                resolved_name = suffix_resolved_storage.as_deref();
+            }
+
+            // The same bare-name recursion guard must cover cross-module aliases.
+            // Delegating self.inner.read_all() is not recursion on self.
+            resolved_name = resolved_name.filter(|name| !ambiguous_unqualified && !is_self(name));
+        }
 
         // The cross-module branch binds by NAME ALONE, exactly like the
         // `func_ids` suffix scan on the other branch — but until 2026-09-13 only
@@ -1668,6 +1737,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn qualified_receiver_matches_complete_owner_not_trait_substring() {
@@ -2108,6 +2178,397 @@ mod tests {
             );
         }
     }
+
+    fn with_text_hash_test_ctx<R>(
+        use_map: HashMap<String, String>,
+        import_map: HashMap<String, String>,
+        fn_arities: HashMap<String, usize>,
+        ambiguous_names: std::collections::HashSet<String>,
+        f: impl FnOnce(&mut InstrContext<'_, cranelift_jit::JITModule>) -> R,
+    ) -> R {
+        let jit_builder = cranelift_jit::JITBuilder::new(cranelift_module::default_libcall_names())
+            .expect("jit builder");
+        let mut jit_mod = cranelift_jit::JITModule::new(jit_builder);
+        let rt_funcs = HashMap::new();
+        let mut ctx = InstrContext::new_for_test(&mut jit_mod, &rt_funcs);
+        let use_map_ref: &'static HashMap<String, String> = Box::leak(Box::new(use_map));
+        let import_map_ref: &'static std::sync::Arc<HashMap<String, String>> =
+            Box::leak(Box::new(std::sync::Arc::new(import_map)));
+        let fn_arities_ref: &'static std::sync::Arc<HashMap<String, usize>> =
+            Box::leak(Box::new(std::sync::Arc::new(fn_arities)));
+        let ambiguous_ref: &'static std::sync::Arc<std::collections::HashSet<String>> =
+            Box::leak(Box::new(std::sync::Arc::new(ambiguous_names)));
+        ctx.use_map = use_map_ref;
+        ctx.import_map = import_map_ref;
+        ctx.fn_arities = fn_arities_ref;
+        ctx.ambiguous_names = ambiguous_ref;
+        f(&mut ctx)
+    }
+
+    fn declare_dummy_fn(ctx: &mut InstrContext<'_, cranelift_jit::JITModule>, name: &str, param_count: usize) -> FuncId {
+        let call_conv = ctx.module.isa().default_call_conv();
+        let mut sig = Signature::new(call_conv);
+        for _ in 0..param_count {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+        let id = ctx
+            .module
+            .declare_function(name, Linkage::Import, &sig)
+            .expect("declare dummy fn");
+        ctx.func_ids.insert(name.to_string(), id);
+        id
+    }
+
+    #[test]
+    fn qualified_text_hash_does_not_hijack_free_text_hash_function() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        with_text_hash_test_ctx(
+            HashMap::from([("text_hash".to_string(), "mod_a__text_hash".to_string())]),
+            HashMap::from([
+                ("text_hash".to_string(), "mod_a__text_hash".to_string()),
+                ("string_hash".to_string(), "mod_b__string_hash".to_string()),
+                ("text__hash".to_string(), "mod_c__text__hash".to_string()),
+            ]),
+            HashMap::new(),
+            std::collections::HashSet::new(),
+            |ctx| {
+                declare_dummy_fn(ctx, "text_hash", 1);
+                declare_dummy_fn(ctx, "mod_a__text_hash", 1);
+                assert_eq!(resolve_declared_text_hash_func_id(ctx, 0), Ok(None));
+                assert_eq!(resolve_declared_text_hash_import(ctx, 0), Ok(None));
+            },
+        );
+
+        let mut free_fn = MirFunction::new(
+            "text_hash".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        let free_param = free_fn.new_vreg();
+        free_fn.params.push(MirLocal {
+            name: "s".to_string(),
+            ty: TypeId::STRING,
+            kind: crate::mir::LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let sentinel = free_fn.new_vreg();
+        let free_block = free_fn.block_mut(BlockId(0)).unwrap();
+        let _ = free_param;
+        free_block.instructions.push(MirInst::ConstInt {
+            dest: sentinel,
+            value: 424242,
+        });
+        free_block.terminator = Terminator::Return(Some(sentinel));
+
+        let make_caller = |fn_name: &str, method_name: &str| {
+            let mut caller = MirFunction::new(
+                fn_name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            let recv = caller.new_vreg();
+            let result = caller.new_vreg();
+            let block = caller.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstString {
+                dest: recv,
+                value: "hello".to_string(),
+            });
+            block.instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result),
+                receiver: recv,
+                func_name: method_name.to_string(),
+                args: Vec::new(),
+            });
+            block.terminator = Terminator::Return(Some(result));
+            caller
+        };
+
+        let mut module = MirModule::new();
+        module.functions.push(free_fn);
+        module.functions.push(make_caller("call_text", "text.hash"));
+        module.functions.push(make_caller("call_str", "str.hash"));
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            assert_eq!(
+                jit.call_i64_void("call_text").expect("call_text"),
+                -6615550055289275125i64
+            );
+            assert_eq!(
+                jit.call_i64_void("call_str").expect("call_str"),
+                -6615550055289275125i64
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_text_hash_rejects_wrong_arity_impl() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::from([("text.hash".to_string(), "mod_a__text_dot_hash".to_string())]),
+            HashMap::from([("mod_a__text_dot_hash".to_string(), 2)]),
+            std::collections::HashSet::new(),
+            |ctx| {
+                let id = declare_dummy_fn(ctx, "mod_a__text_dot_hash", 2);
+                assert_eq!(resolve_declared_text_hash_func_id(ctx, 0), Ok(None));
+                assert_eq!(resolve_declared_text_hash_func_id(ctx, 1), Ok(Some(id)));
+                assert_eq!(resolve_declared_text_hash_import(ctx, 0), Ok(None));
+                assert_eq!(
+                    resolve_declared_text_hash_import(ctx, 1),
+                    Ok(Some("mod_a__text_dot_hash".to_string()))
+                );
+            },
+        );
+
+        let mut two_arg_impl = MirFunction::new(
+            "text.hash".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        two_arg_impl.new_vreg();
+        two_arg_impl.new_vreg();
+        two_arg_impl.params.push(MirLocal {
+            name: "self".to_string(),
+            ty: TypeId::STRING,
+            kind: crate::mir::LocalKind::Parameter,
+            is_ghost: false,
+        });
+        two_arg_impl.params.push(MirLocal {
+            name: "seed".to_string(),
+            ty: TypeId::I64,
+            kind: crate::mir::LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let sentinel = two_arg_impl.new_vreg();
+        let impl_block = two_arg_impl.block_mut(BlockId(0)).unwrap();
+        impl_block.instructions.push(MirInst::ConstInt {
+            dest: sentinel,
+            value: 999999,
+        });
+        impl_block.terminator = Terminator::Return(Some(sentinel));
+
+        let mut caller = MirFunction::new(
+            "zero_arg_caller".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        let recv = caller.new_vreg();
+        let result = caller.new_vreg();
+        let block = caller.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstString {
+            dest: recv,
+            value: "hello".to_string(),
+        });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(result),
+            receiver: recv,
+            func_name: "str.hash".to_string(),
+            args: Vec::new(),
+        });
+        block.terminator = Terminator::Return(Some(result));
+
+        let mut module = MirModule::new();
+        module.functions.push(two_arg_impl);
+        module.functions.push(caller);
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            assert_eq!(
+                jit.call_i64_void("zero_arg_caller").expect("zero_arg_caller"),
+                -6615550055289275125i64
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_text_hash_rejects_multi_module_ambiguity() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::from([
+                ("text.hash".to_string(), "mod_a__text_dot_hash".to_string()),
+                ("String.hash".to_string(), "mod_b__String_dot_hash".to_string()),
+            ]),
+            HashMap::new(),
+            std::collections::HashSet::new(),
+            |ctx| {
+                declare_dummy_fn(ctx, "mod_a__text_dot_hash", 1);
+                declare_dummy_fn(ctx, "mod_b__String_dot_hash", 1);
+                let func_err = resolve_declared_text_hash_func_id(ctx, 0).expect_err("func_ids ambiguity");
+                assert!(func_err.contains("[CODEGEN-AMBIGUOUS-METHOD]"));
+                let import_err = resolve_declared_text_hash_import(ctx, 0).expect_err("import_map ambiguity");
+                assert!(import_err.contains("[CODEGEN-AMBIGUOUS-METHOD]"));
+            },
+        );
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            std::collections::HashSet::from(["text.hash".to_string()]),
+            |ctx| {
+                let err = resolve_declared_text_hash_import(ctx, 0).expect_err("ambiguous_names must fail closed");
+                assert!(err.contains("[CODEGEN-AMBIGUOUS-METHOD]"));
+            },
+        );
+
+        with_text_hash_test_ctx(
+            HashMap::from([("text.hash".to_string(), "mod_a__text_dot_hash".to_string())]),
+            HashMap::new(),
+            HashMap::new(),
+            std::collections::HashSet::from(["text.hash".to_string()]),
+            |ctx| {
+                assert_eq!(
+                    resolve_declared_text_hash_import(ctx, 0),
+                    Ok(Some("mod_a__text_dot_hash".to_string()))
+                );
+            },
+        );
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            std::collections::HashSet::from(["hash".to_string()]),
+            |ctx| {
+                assert_eq!(resolve_declared_text_hash_import(ctx, 0), Ok(None));
+            },
+        );
+
+        let make_impl = |name: &str, ret: i64| {
+            let mut f = MirFunction::new(
+                name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            f.new_vreg();
+            f.params.push(MirLocal {
+                name: "self".to_string(),
+                ty: TypeId::STRING,
+                kind: crate::mir::LocalKind::Parameter,
+                is_ghost: false,
+            });
+            let v = f.new_vreg();
+            let b = f.block_mut(BlockId(0)).unwrap();
+            b.instructions.push(MirInst::ConstInt { dest: v, value: ret });
+            b.terminator = Terminator::Return(Some(v));
+            f
+        };
+        let mut caller = MirFunction::new(
+            "ambiguous_caller".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        let recv = caller.new_vreg();
+        let result = caller.new_vreg();
+        let block = caller.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstString {
+            dest: recv,
+            value: "hello".to_string(),
+        });
+        block.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(result),
+            receiver: recv,
+            func_name: "str.hash".to_string(),
+            args: Vec::new(),
+        });
+        block.terminator = Terminator::Return(Some(result));
+
+        let mut module = MirModule::new();
+        module.functions.push(make_impl("mod_a__text_dot_hash", 111));
+        module.functions.push(make_impl("mod_b__String_dot_hash", 222));
+        module.functions.push(caller);
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        assert!(jit.compile_module(&module).is_err());
+    }
+
+    #[test]
+    fn qualified_text_hash_supports_str_and_string_owners_consistently() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        with_text_hash_test_ctx(
+            HashMap::new(),
+            HashMap::from([("str.hash".to_string(), "mod_s__str_dot_hash".to_string())]),
+            HashMap::new(),
+            std::collections::HashSet::new(),
+            |ctx| {
+                assert_eq!(
+                    resolve_declared_text_hash_import(ctx, 0),
+                    Ok(Some("mod_s__str_dot_hash".to_string()))
+                );
+            },
+        );
+
+        let mut string_impl = MirFunction::new(
+            "String.hash".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        string_impl.new_vreg();
+        string_impl.params.push(MirLocal {
+            name: "self".to_string(),
+            ty: TypeId::STRING,
+            kind: crate::mir::LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let sentinel = string_impl.new_vreg();
+        let impl_block = string_impl.block_mut(BlockId(0)).unwrap();
+        impl_block.instructions.push(MirInst::ConstInt {
+            dest: sentinel,
+            value: 777001,
+        });
+        impl_block.terminator = Terminator::Return(Some(sentinel));
+
+        let make_caller = |fn_name: &str, method_name: &str| {
+            let mut caller = MirFunction::new(
+                fn_name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            let recv = caller.new_vreg();
+            let result = caller.new_vreg();
+            let block = caller.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstString {
+                dest: recv,
+                value: "hello".to_string(),
+            });
+            block.instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result),
+                receiver: recv,
+                func_name: method_name.to_string(),
+                args: Vec::new(),
+            });
+            block.terminator = Terminator::Return(Some(result));
+            caller
+        };
+
+        let mut module = MirModule::new();
+        module.functions.push(string_impl);
+        module.functions.push(make_caller("c_text", "text.hash"));
+        module.functions.push(make_caller("c_str", "str.hash"));
+        module.functions.push(make_caller("c_upper", "String.hash"));
+        module.functions.push(make_caller("c_lower", "string.hash"));
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            for name in ["c_text", "c_str", "c_upper", "c_lower"] {
+                assert_eq!(jit.call_i64_void(name).expect(name), 777001);
+            }
+        }
+    }
 }
 
 /// `true` for the integer code-point-to-character builtin, in either the bare
@@ -2405,7 +2866,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "at" => "rt_at",
         "char_code_at" => "rt_string_char_code_at",
         "byte_at" => "rt_string_byte_at",
-        "hash" => "rt_hash_text",
+        "hash" if args.is_empty() => "rt_hash_text",
         // Array methods.
         //
         // Receiver-polymorphic (see calls.rs): the array-only helpers fail

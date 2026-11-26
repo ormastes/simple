@@ -342,6 +342,8 @@ pub struct MirLowerer<'a> {
     pub(super) available_functions: HashSet<String>,
     /// Parameter types for direct function calls whose global expression only carries return type.
     pub(super) function_param_types: HashMap<String, Vec<TypeId>>,
+    /// Imported function names visible in the current module (from `use` declarations).
+    pub(super) imported_function_names: HashSet<String>,
     /// Cross-module private-helper collisions: bare `_name` defined by several
     /// co-compiled files with differing signatures (import flattening merges
     /// them; codegen name maps are last-write-wins → wrong-variant dispatch /
@@ -470,6 +472,7 @@ impl<'a> MirLowerer<'a> {
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
             function_param_types: HashMap::new(),
+            imported_function_names: HashSet::new(),
             private_dup_overloads: HashMap::new(),
             extern_fn_name_set: HashSet::new(),
             global_types: HashMap::new(),
@@ -530,6 +533,7 @@ impl<'a> MirLowerer<'a> {
             inject_functions: HashMap::new(),
             available_functions: HashSet::new(),
             function_param_types: HashMap::new(),
+            imported_function_names: HashSet::new(),
             private_dup_overloads: HashMap::new(),
             extern_fn_name_set: HashSet::new(),
             global_types: HashMap::new(),
@@ -2019,6 +2023,7 @@ impl<'a> MirLowerer<'a> {
         self.inject_functions.clear();
         self.available_functions.clear();
         self.function_param_types.clear();
+        self.imported_function_names = hir.imported_function_names.iter().cloned().collect();
         self.hir_functions_by_name.clear();
         self.pending_specializations.clear();
         self.specialization_cache.clear();
