@@ -2,8 +2,9 @@
 
 Status: open (compiler fix applied; workaround annotation reinstated 2026-11-27 —
 but NOTE: lane v7d proved the annotation does NOT fix the test_runner_build
-packaging failure, which was re-root-caused to
-stage1_file_read_truncates_at_2048_2026-11-27.md. The annotation stays as
+packaging failure. That failure is the seed's `str.slice` -> `str_slice`
+rebinding; see stage2_test_runner_libunit_project_name_missing_2026-11-27.md
+(the 2048-byte truncation theory was refuted). The annotation stays as
 cheap insurance for the original .bytes() MIR issue; this doc's compiler fix
 remains verification-pending.)
 
