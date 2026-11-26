@@ -622,7 +622,11 @@ fn flex_item_percent_style(cst: Style, container_w: i32, container_h: i32) -> St
 # (`A <b>B</b> A ` under rtl: the last `A` ends at x=299; it ended 4 px short
 # here). It is the trailing edge space of a left-to-right `#text` run, or the
 # space a whitespace-only run handed the pen as its lead space.
-fn inline_line_end_space_px(nodes: [HNode], styles: [Style], line_nodes: [i32]) -> i32:
+# `ws_runs_only` counts just the whitespace-only runs: a left-to-right line
+# already leaves a text run's trailing edge space out of the pen, so a centred
+# or right-aligned ltr line only hangs what those runs charged
+# (`<a class=btn>..</a>\n` centred: Chrome 159 x=254, here 252 before).
+fn inline_line_end_space_px(nodes: [HNode], styles: [Style], line_nodes: [i32], ws_runs_only: bool) -> i32:
     var total = 0
     var k = line_nodes.len() - 1
     while k >= 0:
@@ -637,7 +641,7 @@ fn inline_line_end_space_px(nodes: [HNode], styles: [Style], line_nodes: [i32]) 
             total = total + resolved_space_advance(nst, text_codepoints(""))
             k = k - 1
         else:
-            if text_ends_with_collapsible_space(nodes[n].text_data) and not text_has_rtl_strong(nodes[n].text_trimmed):
+            if not ws_runs_only and text_ends_with_collapsible_space(nodes[n].text_data) and not text_has_rtl_strong(nodes[n].text_trimmed):
                 val trail_m: i64 = if nst.resolved_trail_space_milli > 0: nst.resolved_trail_space_milli else: nst.resolved_space_milli
                 total = total + (if trail_m > 0: ((trail_m + 500) / 1000) as i32 else: resolved_space_advance(nst, text_codepoints(nodes[n].text_trimmed)))
             return total
@@ -660,7 +664,11 @@ fn align_inline_line_horizontal(
         align = if st.direction_rtl: "right" else: "left"
     elif align == "end":
         align = if st.direction_rtl: "left" else: "right"
-    val end_space = if st.direction_rtl and align == "right": inline_line_end_space_px(nodes, styles, line_nodes) else: 0
+    var end_space = 0
+    if st.direction_rtl and align == "right":
+        end_space = inline_line_end_space_px(nodes, styles, line_nodes, false)
+    elif not st.direction_rtl and (align == "center" or align == "right"):
+        end_space = inline_line_end_space_px(nodes, styles, line_nodes, true)
     val free_w = line_iw - inline_x + end_space
     if free_w <= 0:
         return PositionOffsetResult(bx: bx, by: by)

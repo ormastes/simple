@@ -1,0 +1,80 @@
+"""
+## Purpose and audience
+Purpose: Pin that a collapsible space ending a `text-align: center | right`
+line hangs (CSS Text 3 4.1.3) and does not move the line, as in Chrome 159.
+A whitespace-only run after an element at the line end handed its space to
+the pen, so the line was centred 2 px (right: 4-5 px) left of Chrome. On
+`examples/06_io/ui/sample_page.html` the hero buttons
+`<a class=btn>..</a><a class="btn secondary">..</a>\n` started at x=252
+against Chrome's 254.
+Audience: web renderer inline layout maintainers.
+
+Chrome oracle (Chromium 1255 Playwright build, `--headless=new
+--hide-scrollbars --force-device-scale-factor=1 --window-size=800,600
+--screenshot`, first red/orange column on the box's row), a 400 px block with
+Arial 16 px; `ib` is a 100x20 red inline-block:
+
+| content of the block      | align  | Chrome x | here (before) |
+|---------------------------|--------|----------|---------------|
+| `ib` + space              | center | 150      | 148           |
+| `ib` + space              | right  | 300      | 296           |
+| `ib` space `ib` + space   | center | 98       | 96            |
+| `ib` space `ib` + space   | right  | 196      | 192           |
+| `<b>Hello</b>` + space    | center | same as `<b>Hello</b>` | 2 px left     |
+| `<b>Hello</b>` + space    | right  | same as `<b>Hello</b>` | 5 px left     |
+| sample_page hero `.btn`   | center | 254      | 252           |
+
+The interior space of `ib space ib` still counts (204.45 px line, centred at
+97.8), so only the trailing run hangs. Known limit, not pinned: a space that
+collapses across an EMPTY inline (`ib <span></span> `) is still counted once
+here (Chrome 150, here 145 before / 148 after). And a right-aligned line whose
+trailing space follows a TEXT element ends 1 px short (361 vs 360 here, 356
+before): the pen charged that space with its milli carry (39.12 + 4.45 ->
+44, i.e. 5 px) while the hang gives back the rounded 4. Centring halves it
+away; the right case is left out of AC-4.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-WHITESPACE-002 — a collapsible space ending a centred or right-aligned line hangs, as in Chrome 159.
+"""
+# @tag: unit, browser_engine, layout, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_element_geometry_lines}
+
+fn _x_of(html: text, path: text) -> i32:
+    for l in simple_web_layout_element_geometry_lines(html, 800, 600):
+        val parts = l.split("|")
+        if parts.len() >= 6 and parts[1] == path:
+            return parts[3].to_int()
+    -1
+
+fn _block(align: text, inner: text) -> text:
+    "<html><head><style>*{margin:0;padding:0}body{font-family:Arial;font-size:16px}.h{width:400px;text-align:" + align + "}.b{display:inline-block;width:100px;height:20px;background:#f00}</style></head><body><div class=\"h\">" + inner + "</div></body></html>"
+
+describe "a collapsible space ending a centred or right-aligned line (Chrome 159)":
+    it "AC-1: a trailing space after an inline-block does not move a centred line":
+        expect(_x_of(_block("center", "<span class=\"b\"></span> "), "path:0/0")).to_equal(150)
+
+    it "AC-2: a trailing space after an inline-block does not move a right-aligned line":
+        expect(_x_of(_block("right", "<span class=\"b\"></span> "), "path:0/0")).to_equal(300)
+
+    it "AC-3: the interior space still counts, only the trailing one hangs":
+        expect(_x_of(_block("center", "<span class=\"b\"></span> <span class=\"b\"></span> "), "path:0/0")).to_equal(98)
+        expect(_x_of(_block("right", "<span class=\"b\"></span> <span class=\"b\"></span> "), "path:0/0")).to_equal(196)
+
+    it "AC-4: a trailing space after an inline text element does not move a centred line":
+        val bare = _x_of(_block("center", "<b>Hello</b>"), "path:0/0")
+        expect(bare > 0).to_equal(true)
+        expect(_x_of(_block("center", "<b>Hello</b> "), "path:0/0")).to_equal(bare)
+        expect(_x_of(_block("center", "<b>Hello </b>"), "path:0/0")).to_equal(bare)
+
+    it "AC-5: no trailing space keeps the unchanged position":
+        expect(_x_of(_block("center", "<span class=\"b\"></span>"), "path:0/0")).to_equal(150)
+        expect(_x_of(_block("right", "<span class=\"b\"></span>"), "path:0/0")).to_equal(300)
+        expect(_x_of(_block("left", "<span class=\"b\"></span> "), "path:0/0")).to_equal(0)
+
+    it "AC-6: the sample_page hero buttons start at Chrome's x":
+        val html = file_read("examples/06_io/ui/sample_page.html")
+        expect(_x_of(html, "path:1/2")).to_equal(254)
