@@ -4797,3 +4797,11 @@ At k=1, paint applies the table in `_html_draw_ir_k1_snapped_boxes` (renamed fro
 **Not covered.**
 - A fractional in-flow margin's k=1 edges belong to the fracmargin lane (`box_x_snap`, which records only at k>1).
 - The authored-width path still assumes a whole-px left edge.
+
+## 2026-11-26 — 4x pixel compare de-JITted on seed1126 (pixdiff lane)
+
+- **Symptom.** On seeds built at or after `b52cbe7a2b7`, `pixel_diff.spl` takes about 12 min and 5.4 GB for one 4x page. The blend seed takes 1.2 s and 0.95 GB. stderr shows `[jit-fallback] unresolved external symbol 'rt_array_is_byte_packed'`, so the whole differ was running on the interpreter.
+- **Cause.** `b52cbe7a2b7` changed `jit_import_resolves` to require membership in `RUNTIME_SYMBOL_NAMES`. The MIR emits `rt_array_is_byte_packed` as the layout probe for every hoisted `[u8]` loop (`lowering_stmt.rs`). The Cranelift backend always lowers it inline, but the name was in neither the list nor `is_inline_lowered_byte_accessor`. The cause is the seed, not `src/lib`: the blend seed runs the same src at full speed.
+- **Fix.** The name is added to `is_inline_lowered_byte_accessor` (`codegen/instr/calls.rs`).
+- **Checks.** `jit_hoisted_u8_read_slot_layout.rs::hoisted_u8_loop_runtime_calls_resolve_without_dlsym` is the Rust test. The `check-chrome-catalog-pixel-diff.shs --selftest` 1 Mpx fixture runs with `SIMPLE_JIT_STRICT=1` and a 30 s bound.
+- **Trap.** If a 4x compare suddenly takes minutes, grep its stderr for `jit-fallback` before suspecting the differ.

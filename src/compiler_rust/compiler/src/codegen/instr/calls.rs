@@ -3939,6 +3939,12 @@ pub fn is_inline_lowered_byte_accessor(name: &str) -> bool {
             | "rt_typed_words_u64_at"
             | "rt_typed_words_u32_unchecked"
             | "rt_typed_words_u64_unchecked"
+            // Layout probe the MIR emits ahead of every hoisted `[u8]` read
+            // (lowering_stmt.rs); `compile_inline_array_is_byte_packed` reads the
+            // gc_flags bit, and it is not in RUNTIME_SYMBOL_NAMES. Unlisted, the
+            // b52cbe7a2b7 resolver tightening de-JITted every module with a
+            // hoisted byte loop (pixel_diff.spl at 4x: <90 s -> >30 min, 4 GB).
+            | "rt_array_is_byte_packed"
             // Float-bit reinterpretation intrinsics: a bare bitcast in
             // `compile_simple_runtime_memory_intrinsic`. Unlisted, the driver spliced every
             // caller through the interpreter bridge. See doc/08_tracking/bug/
