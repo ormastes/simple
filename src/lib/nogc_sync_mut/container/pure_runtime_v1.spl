@@ -27,7 +27,10 @@ use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1, immutable_s
 use std.nogc_sync_mut.storage.rootfs_materialize_v1.{rootfs_materialize_v1, rootfs_dematerialize_v1}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir, dir_is_real_no_follow}
 use std.nogc_sync_mut.io.file_ops.{file_hardlink, file_read_regular_no_follow_bounded}
-use std.nogc_sync_mut.io_runtime.{file_write, file_delete}
+use std.nogc_sync_mut.io_runtime.{file_write, file_delete, getpid}
+# ponytail: the dir, file, io_runtime and std.platform imports in this block are direct, because no SOSIX
+# facade exists for directories, hard links or host identity yet (named gap). Also accepted by design: the
+# reader ACE the read grant puts on store objects survives teardown.
 use std.platform.{host_os, host_arch}
 
 const _QUALIFY_SCOPE = "pure-container-qualify"
@@ -240,10 +243,11 @@ fn _life_destroyed_v1(life: PureLifecycleV1) -> PureLifecycleV1:
             Err(_reason): pass
     PureLifecycleV1(state: life.state, journal: _journal_with_v1(life.journal, LIFECYCLE_PHASE_V1_DESTROYED))
 
-fn _life_after_v1(life: PureLifecycleV1, event: text) -> PureLifecycleV1:
-    match _advance_v1(life, event):
-        Ok(next): next
-        Err(_reason): life
+fn _chain_v1(life: PureLifecycleV1, events: [text]) -> Result<PureLifecycleV1, text>:
+    var current = life
+    for event in events:
+        current = _advance_v1(current, event)?
+    Ok(current)
 
 # ------------------------------------------------------------ admission
 
@@ -326,7 +330,7 @@ fn _prepare_v1(spec: PureContainerSpecV1) -> PurePreparedV1:
     # Effects begin: the journal is `created` from here and every failure walks teardown.
     var session = PureContainerSessionV1(spec: spec, view: _no_view_v1(), request: request, report: unadmitted,
         life: _life_new_v1(spec.container_id, [layout.view_dir, layout.plan.attempt_root]),
-        view_dir: "", attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path)
+        view_dir: layout.view_dir, attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path)
     for dir in [layout.plan.home, layout.plan.tmp, layout.plan.output]:
         if not dir_create_all(dir): return _fail_prepare_v1(session, "scratch-create-failed")
     val created = storage_view_v1_create(spec.store, spec.view_root, spec.container_id, spec.base_root,
@@ -368,9 +372,34 @@ fn _exec_stopped_v1(session: PureContainerSessionV1, life: PureLifecycleV1, stat
             report: session.report, life: life, view_dir: session.view_dir,
             attempt_root: session.attempt_root, stdout_path: session.stdout_path))
 
+# The machine has an interrupted edge only from launch-pending; elsewhere the failed edge is
+# appended to the reason, never hidden.
 fn _exec_unknown_v1(session: PureContainerSessionV1, life: PureLifecycleV1, reason: text) -> PureExecV1:
-    val unknown = _life_after_v1(life, "interrupted")
-    _exec_stopped_v1(session, unknown, "cleanup-unproven", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+    match _advance_v1(life, "interrupted"):
+        Ok(unknown): _exec_stopped_v1(session, unknown, "cleanup-unproven", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+        Err(edge): _exec_stopped_v1(session, life, "cleanup-unproven", reason + "; " + edge, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+
+# Cancel, wait for a terminal state and collect; true only when the tree is proven empty.
+fn _abort_lease_v1(lease: SosixContainLeaseV1) -> bool:
+    val _cancelled = sosix_contain_cancel_v1(lease)
+    val reap = sosix_time_now_monotonic_ms() + _GRACE_MS
+    while sosix_time_now_monotonic_ms() < reap:
+        match sosix_contain_poll_v1(lease):
+            Ok(observed):
+                if observed.terminal.value:
+                    match sosix_contain_collect_v1(lease):
+                        Ok(receipt): return receipt.tree_empty.value
+                        Err(_reason): return false
+            Err(_reason): return false
+        sosix_sleep_ms(20)
+    false
+
+# The run is over for an error that is not a process outcome: abort the tree first, so
+# teardown is safe only when it is proven gone.
+fn _exec_abort_v1(session: PureContainerSessionV1, life: PureLifecycleV1, lease: SosixContainLeaseV1, reason: text) -> PureExecV1:
+    if _abort_lease_v1(lease):
+        return _exec_stopped_v1(session, life, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+    _exec_unknown_v1(session, life, reason + "; tree not proven empty")
 
 # Polls to terminal inside the budget; past it the tree is cancelled and reaped.
 # Err = the lease could not be driven (cleanup unproven).
@@ -404,23 +433,25 @@ fn _execute_v1(session: PureContainerSessionV1) -> PureExecV1:
         SosixContainAdmissionV1.Unknown(reason):
             return _exec_unknown_v1(session, pending, reason)
         SosixContainAdmissionV1.Started(lease):
-            val running = _life_after_v1(pending, "admitted")
+            val running = match _advance_v1(pending, "admitted"):
+                Ok(next): next
+                Err(edge): return _exec_abort_v1(session, pending, lease, "lifecycle: " + edge)
             val waited = _wait_v1(lease, session.spec.limits.wall)
-            if waited.is_err(): return _exec_unknown_v1(session, running, waited.unwrap_err())
+            if waited.is_err(): return _exec_abort_v1(session, running, lease, "wait-failed: " + waited.unwrap_err())
             val cancelled = waited.unwrap() != ""
             val collected = sosix_contain_collect_v1(lease)
             if collected.is_err(): return _exec_unknown_v1(session, running, collected.unwrap_err())
             val receipt = collected.unwrap()
-            var life = running
-            if cancelled:
-                life = _life_after_v1(_life_after_v1(life, "stop"), "retire")
-            else:
-                life = _life_after_v1(life, "leader-exit")
+            val retire = if cancelled: ["stop", "retire"] else: ["leader-exit"]
+            val closing = if receipt.tree_empty.value: retire + ["absence-proven"] else: retire + ["uncertain"]
+            val final_life = match _chain_v1(running, closing):
+                Ok(next): next
+                Err(edge):
+                    val status = if receipt.tree_empty.value: "rejected" else: "cleanup-unproven"
+                    return _exec_stopped_v1(session, running, status, "lifecycle: " + edge, receipt.exit_code, receipt.peak_memory)
             if not receipt.tree_empty.value:
-                return _exec_stopped_v1(session, _life_after_v1(life, "uncertain"), "cleanup-unproven", "tree-not-empty",
-                    receipt.exit_code, receipt.peak_memory)
-            val absent = _life_after_v1(life, "absence-proven")
-            _exec_stopped_v1(session, absent, "exited", waited.unwrap(), receipt.exit_code, receipt.peak_memory)
+                return _exec_stopped_v1(session, final_life, "cleanup-unproven", "tree-not-empty", receipt.exit_code, receipt.peak_memory)
+            _exec_stopped_v1(session, final_life, "exited", waited.unwrap(), receipt.exit_code, receipt.peak_memory)
 
 # Order matters: dematerialize first (destroy refuses while lower/ exists), then the
 # view, then the view directory and the attempt scratch.
@@ -454,33 +485,43 @@ fn _run_of_v1(status: text, reason: text, session: PureContainerSessionV1, life:
 pub fn pure_container_qualify_v1(request: PureContainerQualifyV1) -> PureContainerEvidenceV1:
     val roots = _roots_digest_v1(request.state_root, request.view_root)
     val state_root = _root_text_v1(request.state_root)
-    val work = state_root + "/qualify"
+    val tag = getpid().to_string() + "-" + sosix_time_now_monotonic_ms().to_string()
+    val work = state_root + "/qualify-" + tag
     val no_memory = ContainerCapabilityFlagV1(false)
     var result = SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "qualify-roots-invalid")
     var memory_enforced = no_memory
     var memory_digest = ""
     if request.state_root != "" and request.view_root != "":
         result = SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "qualify-work-dir-failed")
-        if dir_create_all(work) and _same_volume_v1(work, _root_text_v1(request.view_root)):
+        var owned = false
+        if is_dir(work):
+            result = SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "qualify-work-dir-exists")
+        elif not dir_create_all(work):
+            pass
+        elif _same_volume_v1(work, _root_text_v1(request.view_root), tag):
+            owned = true
             result = sosix_contain_qualify_v1(SosixContainQualifyRequestV1(probe_program: request.probe_program,
                 probe_digest: request.probe_digest, probe_script: request.probe_script, work_dir: work,
                 scope: _QUALIFY_SCOPE, wall: SosixContainMillisV1(_QUALIFY_WALL_MS)))
             val memory = sosix_contain_memory_cap_evidence_v1(request.memory_probe)
             memory_enforced = ContainerCapabilityFlagV1(memory.enforced.value)
             memory_digest = memory.evidence_digest
-        elif is_dir(work):
+        else:
             result = SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "qualify-volume-mismatch")
-        val _removed = dir_remove_all(work)
+            owned = true
+        # Only a directory this call created is removed; an existing one was refused above.
+        if owned:
+            val _removed = dir_remove_all(work)
     pure_container_evidence_from_qualify_v1(result, memory_enforced, memory_digest, host_os(), host_arch(), host_os(),
         PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, roots)
 
 # Hard links need one volume, so evidence is only valid for roots on the scratch's
 # volume: a probe link from the scratch into the view root decides it. (No SOSIX op
 # reads a volume serial from host-neutral code; this is the link-based proxy.)
-fn _same_volume_v1(work: text, view_root: text) -> bool:
+fn _same_volume_v1(work: text, view_root: text, tag: text) -> bool:
     if not dir_create_all(view_root): return false
     val source = work + "/volume-probe.txt"
-    val link = view_root + "/.pure-volume-probe"
+    val link = view_root + "/.pure-volume-probe-" + tag
     var same = false
     if file_write(source, "volume-probe"):
         same = file_hardlink(source, link)

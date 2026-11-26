@@ -155,7 +155,10 @@ describe "pure simple container qualify":
         expect(evidence.memory_cap_enforced.value).to_equal(true)
         expect(evidence.base_fully_linked.value).to_equal(false)
         expect(evidence.roots_digest != "").to_equal(true)
-        expect(tree_entries(state_root() + "/qualify")).to_equal(0)
+        var leftovers = 0
+        for entry in dir_walk(state_root()):
+            if entry.contains("qualify"): leftovers = leftovers + 1
+        expect(leftovers).to_equal(0)
 
     it "maps the evidence onto a qualified shared observation that still refuses both profiles":
         if not ready(): return
@@ -312,6 +315,22 @@ describe "pure simple container admission refusals":
     it "refuses an invalid container id before any effect":
         if not ready(): return
         expect(refused_reason(spec_with("Pure_Bad", base_args("0"), evidence, requirement_sandbox(), "host"))).to_equal("container-id-invalid")
+
+    it "tears down a failed prepare: no view, scratch or pin is left and the id runs again":
+        if not ready(): return
+        var spec = spec_with("pure-failprep", base_args("0"), evidence, requirement_sandbox(), "host")
+        # No base means zero linked files, so the read-only-reuse requirement fails after the view, lower/ and pin exist.
+        spec.base_root = ""
+        val failed = pure_container_run_v1(spec)
+        expect(failed.reason).to_equal("readonly-file-backing-reuse-missing")
+        expect(failed.status).to_equal("rejected")
+        expect(failed.journal.phase).to_equal("destroyed")
+        expect(is_dir(view_root() + "/pure-failprep")).to_equal(false)
+        expect(is_dir(state_root() + "/attempts/pure-failprep-a1")).to_equal(false)
+        expect(is_dir(store_root() + "/pins/pure-failprep")).to_equal(false)
+        val again = pure_container_run_v1(spec_with("pure-failprep", base_args("7"), evidence, requirement_sandbox(), "host"))
+        expect(again.reason).to_equal("")
+        expect(again.exit_code.value).to_equal(7)
 
     it "removes the spec root":
         if not ready(): return
