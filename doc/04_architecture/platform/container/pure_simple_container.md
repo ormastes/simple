@@ -35,8 +35,8 @@ pure_runtime_v1            host-neutral lifecycle: view -> rootfs -> launch -> w
         |                  common/contracts/container/pure_backend_v1 (support -> capability report)
         +-- storage        rootfs_materialize_v1 -> storage_view_v1 -> immutable_store_v1
         |
-SOSIX facades              sosix/containment_v1, sosix/readonly_share_v1   (level 0)
-        |                  the only place a host is chosen: one @when(os=) import switch each
+SOSIX facades              sosix/containment_v1, sosix/contained_write_v1, sosix/readonly_share_v1   (level 0)
+        |                  the only place a host is chosen: one @when(os=) import switch per facade
 SOSIX variant bodies       sosix/windows/*   sosix/linux/*   sosix/freebsd/*   sosix/macos/*
         |
 existing host owners       io/windows_process_owner, io/file_ops, sosix/darwin_sandbox_v1, ...
@@ -73,8 +73,9 @@ New files (N) and edited existing files (E). Everything else is reused unchanged
 | `src/lib/nogc_sync_mut/sosix/{linux,freebsd,macos}/containment_v1.spl` | N | Typed-refusal bodies until their lanes |
 | `src/lib/nogc_sync_mut/sosix/windows/restricted_identity_v1.spl` | N | Restricted low-integrity token open/close |
 | `src/lib/nogc_sync_mut/sosix/windows/security_abi_v1.spl` | N | advapi32 externs for token and label |
-| `src/lib/nogc_sync_mut/sosix/readonly_share_v1.spl` | N | Facade: read-only link, contained-write grant |
-| `src/lib/nogc_sync_mut/sosix/windows/readonly_share_v1.spl` | N | Windows body: low mandatory label on a directory |
+| `src/lib/nogc_sync_mut/sosix/readonly_share_v1.spl` | N | Read-only link; portable body over `io/file_ops`, no host switch |
+| `src/lib/nogc_sync_mut/sosix/contained_write_v1.spl` | N | Facade: contained-write grant |
+| `src/lib/nogc_sync_mut/sosix/windows/contained_write_v1.spl` | N | Windows body: low mandatory label on a directory |
 | `src/lib/nogc_sync_mut/io/windows_process_owner.spl` | E | One internal admit core taking token + process-count + CPU-rate extras; existing entry points forward unchanged |
 | `src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl` | E | `CreateProcessAsUserW`, job basic-limit and CPU-rate offsets |
 | `src/lib/nogc_sync_mut/storage/rootfs_materialize_v1.spl` | N | Base manifest -> read-only hardlink tree |
@@ -231,24 +232,31 @@ pub fn sosix_windows_restricted_token_close_v1(token: SosixWindowsTokenV1) -> So
 `SetTokenInformation(TokenIntegrityLevel, S-1-16-4096)`. Reads back the integrity
 level; a mismatch closes the token and returns `Err`.
 
-### 4.4 Read-only sharing — `std.nogc_sync_mut.sosix.readonly_share_v1`
+### 4.4 Read-only sharing and write grant
 
 ```simple
+# std.nogc_sync_mut.sosix.readonly_share_v1
 pub struct SosixFsShareV1:
     status: text    # "linked" | "copied" | "rejected"
     reason: text
 
 pub fn sosix_fs_link_readonly_v1(source: text, destination: text,
         allow_copy: SosixContainFlagV1) -> SosixFsShareV1
+
+# std.nogc_sync_mut.sosix.contained_write_v1
 pub fn sosix_fs_grant_contained_write_v1(empty_dir: text) -> text   # "" = granted
+
+# std.nogc_sync_mut.sosix.windows.contained_write_v1 (body behind the facade)
+pub fn sosix_windows_grant_low_write_v1(empty_dir: text) -> text
 ```
 
 | Op | Windows | Linux / FreeBSD / macOS |
 |---|---|---|
-| `link_readonly` | `file_hardlink` (`CreateHardLinkW`, already in `io/file_ops`). No attribute or ACL change: the object keeps its medium integrity label, so a low-integrity child cannot open it for write | `file_hardlink` + `file_seal_readonly` (0444); the launch variant adds the read-only mount or Seatbelt rule |
+| `link_readonly` | `file_hardlink` (`CreateHardLinkW`, already in `io/file_ops`). `file_seal_readonly` answers false on Windows by design and is not required: the object keeps its medium integrity label, so a low-integrity child cannot open it for write | `file_hardlink` + `file_seal_readonly` (0444); the launch variant adds the read-only mount or Seatbelt rule |
 | `grant_contained_write` | Low mandatory label `(OI)(CI)` on the directory via `SetNamedSecurityInfoW` | returns `""`; the launch variant makes `writable_dirs` writable |
 
-`link_readonly` returns `copied` only when `allow_copy.value` and the link failed
+`link_readonly` has one portable body: it links, then seals where the host can
+seal, and it never branches on the OS. It returns `copied` only when `allow_copy.value` and the link failed
 (cross-volume, link-count limit, filesystem without hard links); otherwise
 `rejected`. `grant_contained_write` refuses a non-empty directory
 (`grant-target-not-empty`). That check is load-bearing: a hard link shares one
