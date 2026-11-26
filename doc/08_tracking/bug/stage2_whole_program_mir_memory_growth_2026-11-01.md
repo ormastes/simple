@@ -123,3 +123,9 @@ Fix landed in 728ddb0170f (#5791); spec `test/01_unit/compiler/driver/smf_staged
 
 - **Classification:** `ROOT-FIXED+STAGE2-GATED`
 - **Disposition:** Kept `scripts/bootstrap/p3-entry-groups.shs:37` (`# @workaround bug=stage2_whole_program_mir_memory_growth_2026-11-01`). While the `OutputFormat.Both` staged codegen / MIR sharding fix (`728ddb0170f`, PR #5791, `src/compiler/80.driver/driver_aot_pipeline.spl` and `smf_staged_parts_v1.spl`) is present in `release/1.0.0` source, `p3-entry-groups.shs` still guards frozen Stage 2 (`ef0681fc0e1`) bootstrap builds and is covered by `scripts/check/check-bootstrap-unified-scripts-contract.shs` and `test/01_unit/scripts/p3_entry_groups_contract_spec.spl`.
+
+## WA-P9 Audit & Test Fix (2026-11-26)
+
+- **Source & script verification:** Confirmed PR `#5791` (`smf_staged_parts_spec.spl` 6/6 pass) and `p3_groups_partition_coverage_spec.spl` (4/4 pass) on `release/1.0.0`; `scripts/bootstrap/p3-entry-groups.shs` line 223 (`stage2_runtime_list_missing_process_tree_2026_11_01`) kept untouched.
+- **Test fix:** `test/01_unit/app/build/p3_entry_groups_cache_and_entry_spec.spl` previously failed example 3 (`expected "" to contain $env:SIMPLE_P3_RUN="P3-GROUPS"`) because its two `p3-entry-groups.shs` invocations omitted `SIMPLE_ALLOW_LEGACY_P3_SCRIPT=1` added in `af66943d438`; updated both invocations to export `SIMPLE_ALLOW_LEGACY_P3_SCRIPT=1`.
+- **Script disposition:** Kept `scripts/bootstrap/p3-entry-groups.shs:37` (`# @workaround bug=stage2_whole_program_mir_memory_growth_2026-11-01`); native Stage 2 RSS measurement with `#5791` remains pending before deprecating the `@workaround` guard on frozen-Stage-2 builds.

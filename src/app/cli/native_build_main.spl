@@ -141,7 +141,7 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_
 use compiler.driver.driver_build.native_file_unit_loop_v1.{native_file_unit_worker_loop_v1}
 use std.nogc_sync_mut.io_runtime.{thread_sleep, env_get_nullable, file_hash_sha256_or_empty}
 use compiler.driver.cache.postbuild_coordinator_v1.{postbuild_record_v1}
-use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_error_reason_publish_v1, native_file_worker_error_reason_read_v1, native_file_worker_first_error_line_v1, native_file_worker_exit_receipt_publish_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_error_reason_publish_v1, native_file_worker_error_reason_read_v1, native_file_worker_first_error_line_v1, native_file_worker_exit_receipt_publish_v1, native_file_worker_env_failure_receipt_publish_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_workers_of_v1}
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_ENV_V1}
 use compiler.driver.driver_build.native_file_worker_incremental_v1.{
@@ -2650,20 +2650,19 @@ pub fn native_build_cache_scope_retention_at_start_v1(args: [text], lease: Nativ
 # BUG-WIN-HIR-WORKER-DIAGNOSTICS-20261010).
 pub fn run_native_build_worker(raw_args: [text]) -> i64:
     if not native_build_child_bind_parent_v1():
+        val _r = native_file_worker_env_failure_receipt_publish_v1(raw_args, 1, "native-build child failed parent death binding")
         return 1
     val lease = match native_cache_lease_begin(native_build_worker_cache_root(raw_args)):
         case Ok(value): value
         case Err(reason):
             eprint(reason)
+            val _r = native_file_worker_env_failure_receipt_publish_v1(raw_args, 1, reason)
             return 1
     val may_sweep = native_build_coordinator_may_sweep(raw_args)
     val code = run_native_build_worker_inner(raw_args, lease)
     native_build_coordinator_cache_finish(lease, raw_args, code == 0 and may_sweep)
     if code != 0:
-        if (env_get("SIMPLE_HIR_SHARD") ?? "") != "":
-            val _h = native_file_worker_exit_receipt_publish_v1(env_get("SIMPLE_HIR_SHARD_QUEUE") ?? "", env_get("SIMPLE_HIR_SHARD_OWNER") ?? "", "hir-shard", code)
-        if (env_get("SIMPLE_MIR_SHARD") ?? "") != "":
-            val _m = native_file_worker_exit_receipt_publish_v1(env_get("SIMPLE_MIR_SHARD_QUEUE") ?? "", env_get("SIMPLE_MIR_SHARD_OWNER") ?? "", "mir-shard", code)
+        val _r = native_file_worker_env_failure_receipt_publish_v1(raw_args, code, "")
     code
 
 fn run_native_build_worker_inner(raw_args: [text], lease: NativeCacheLease) -> i64:
