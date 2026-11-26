@@ -817,7 +817,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         _effect: Effect,
     ) -> Result<(), String> {
         self.backend.compile_indirect_call(
-            *dest, callee, param_types, &return_type, args, self.vreg_map, self.builder,
+            *dest, callee, param_types, &return_type, args, self.vreg_map, self.builder, self.module,
         ).map_err(|error| error.to_string())
     }
 

@@ -315,12 +315,20 @@ const CTOR_OWNER: &str = "struct Limits:\n    depth: i64 = 128\n    nodes: i64 =
 
 #[test]
 fn imported_constructor_default_lowers_in_caller() {
-    for call in ["plan(\"m\")", "plan_named(\"m\")", "plan(name: \"m\")"] {
-        let caller = format!("use owner.limits.{{Limits, plan, plan_named}}\nfn caller() -> i64:\n    {call}\n");
-        let module = ctor_default_project(CTOR_OWNER, &caller).unwrap_or_else(|e| panic!("{call}: {e}"));
+    for caller in [
+        "use owner.limits.{Limits, plan, plan_named}\nfn caller() -> i64:\n    plan(\"m\")\n".to_string(),
+        "use owner.limits.{Limits, plan, plan_named}\nfn caller() -> i64:\n    plan_named(\"m\")\n".to_string(),
+        "use owner.limits.{Limits, plan, plan_named}\nfn caller() -> i64:\n    plan(name: \"m\")\n".to_string(),
+        // Unimported constructor type (`omitted.spl` / pre-workaround `lean_backend.spl`):
+        // caller only imports `plan`, does not declare or import a conflicting `Limits`.
+        "use owner.limits.{plan}\nfn caller() -> i64:\n    plan(\"m\")\n".to_string(),
+        "use owner.limits.{plan_named}\nfn caller() -> i64:\n    plan_named(\"m\")\n".to_string(),
+        "use owner.limits.{plan as p}\nfn caller() -> i64:\n    p(\"m\")\n".to_string(),
+    ] {
+        let module = ctor_default_project(CTOR_OWNER, &caller).unwrap_or_else(|e| panic!("{caller}: {e}"));
         let args = call_args(&module, "caller");
-        assert_eq!(args.len(), 2, "{call}");
-        assert!(!matches!(args[1].kind, HirExprKind::Nil), "{call}: {:?}", args[1]);
+        assert_eq!(args.len(), 2, "{caller}");
+        assert!(!matches!(args[1].kind, HirExprKind::Nil), "{caller}: {:?}", args[1]);
     }
 }
 
@@ -330,9 +338,10 @@ fn constructor_default_with_nonconstant_args_or_unresolved_type_still_errors() {
     let caller = "use owner.limits.{Limits, plan_dynamic}\nfn caller() -> i64:\n    plan_dynamic(\"m\")\n";
     let err = ctor_default_project(CTOR_OWNER, caller).expect_err("dynamic ctor arg");
     assert!(err.contains("omits argument 2"), "{err}");
-    // Caller does not see `Limits` at all: cannot be lowered in the caller.
-    let caller = "use owner.limits.{plan}\nfn caller() -> i64:\n    plan(\"m\")\n";
-    let err = ctor_default_project(CTOR_OWNER, caller).expect_err("unimported ctor");
+    // Missing/unknown constructor type stays rejected.
+    let owner_missing = "fn plan_missing(name: text, lim: i64 = MissingCtor()) -> i64:\n    lim\n";
+    let caller = "use owner.limits.{plan_missing}\nfn caller() -> i64:\n    plan_missing(\"m\")\n";
+    let err = ctor_default_project(owner_missing, caller).expect_err("missing ctor");
     assert!(err.contains("omits argument 2"), "{err}");
     // Caller's `Limits` is a DIFFERENT type than the callee's parameter type.
     let caller = "use owner.limits.{plan}\nstruct Limits:\n    depth: i64 = 1\nfn caller() -> i64:\n    plan(\"m\")\n";
@@ -358,5 +367,130 @@ fn constructor_default_with_same_named_unrelated_type_still_errors() {
         let lowerer = Lowerer::with_module_resolver(resolver, src.join("main.spl"));
         let err = lowerer.lower_module(&ast).expect_err(other_use);
         assert!(format!("{err}").contains("omits argument 2"), "{other_use}: {err}");
+    }
+}
+
+fn flatten_binding_marker(importer: &str, local: &str, source_owner: &str, source_name: &str) -> simple_parser::ast::Node {
+    use simple_parser::ast::{ConstStmt, Expr, Node, Visibility};
+    use simple_parser::token::Span;
+    Node::Const(ConstStmt {
+        span: Span::new(0, 0, 0, 0),
+        name: format!(
+            "{}{}:{importer}{}:{local}{}:{source_owner}{}:{source_name}",
+            crate::interpreter::FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+            importer.len(),
+            local.len(),
+            source_owner.len(),
+            source_name.len()
+        ),
+        ty: None,
+        value: Expr::Nil,
+        visibility: Visibility::Private,
+        attributes: vec![],
+    })
+}
+
+fn flatten_owned_items(source: &str, owner: &str) -> Vec<simple_parser::ast::Node> {
+    use simple_parser::ast::{Attribute, Node};
+    let mut items = Vec::new();
+    for mut item in Parser::new(source).parse().expect("parse flattened").items {
+        let attr = |span| Attribute {
+            span,
+            name: format!("{}{owner}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX),
+            value: None,
+            args: None,
+            named_args: None,
+        };
+        match &mut item {
+            Node::Function(f) => crate::interpreter::tag_function_module_owner(f, owner),
+            Node::Struct(s) => {
+                s.attributes.push(attr(s.span));
+                for m in &mut s.methods {
+                    crate::interpreter::tag_function_module_owner(m, owner);
+                }
+            }
+            Node::Class(c) => {
+                c.attributes.push(attr(c.span));
+                for m in &mut c.methods {
+                    crate::interpreter::tag_function_module_owner(m, owner);
+                }
+            }
+            _ => {}
+        }
+        items.push(item);
+    }
+    items
+}
+
+#[test]
+fn flattened_jit_constructor_default_lowers_with_imported_or_unimported_ctor_type() {
+    for (case, extra_bindings) in [
+        (
+            "imported_ctor",
+            vec![
+                flatten_binding_marker("<entry>", "Limits", "policy.spl", "Limits"),
+                flatten_binding_marker("<entry>", "plan", "policy.spl", "plan"),
+            ],
+        ),
+        (
+            "unimported_ctor_omitted_shape",
+            vec![flatten_binding_marker("<entry>", "plan", "policy.spl", "plan")],
+        ),
+        (
+            "glob_import",
+            vec![flatten_binding_marker("<entry>", "*", "policy.spl", "*")],
+        ),
+    ] {
+        let mut module = Parser::new("fn caller() -> i64:\n    plan(\"m\")\n")
+            .parse()
+            .expect("parse caller");
+        module.items.extend(extra_bindings);
+        module.items.extend(flatten_owned_items(CTOR_OWNER, "policy.spl"));
+        let lowered = crate::hir::lower(&module).unwrap_or_else(|e| panic!("{case}: {e}"));
+        let args = call_args(&lowered, "caller");
+        assert_eq!(args.len(), 2, "{case}");
+        assert!(!matches!(args[1].kind, HirExprKind::Nil), "{case}: {:?}", args[1]);
+    }
+}
+
+#[test]
+fn flattened_jit_constructor_default_isolates_colliding_and_rejects_shadowed_ctor() {
+    // Same-named colliding `Limits` in an unrelated module that the caller does
+    // NOT import must NOT block or mis-bind `policy.spl`'s `Limits()`.
+    let unrelated = "struct Limits:\n    weight: i64 = 9\n";
+    let mut module = Parser::new("fn caller() -> i64:\n    plan(\"m\")\n")
+        .parse()
+        .expect("parse caller");
+    module.items.push(flatten_binding_marker("<entry>", "plan", "policy.spl", "plan"));
+    module.items.extend(flatten_owned_items(unrelated, "unrelated.spl"));
+    module.items.extend(flatten_owned_items(CTOR_OWNER, "policy.spl"));
+    let lowered = crate::hir::lower(&module).expect("colliding unimported unrelated Limits must not poison callee default");
+    let args = call_args(&lowered, "caller");
+    assert_eq!(args.len(), 2);
+    assert!(!matches!(args[1].kind, HirExprKind::Nil), "{:?}", args[1]);
+
+    // Caller-local `struct Limits` must stay rejected.
+    let mut shadowed = Parser::new("struct Limits:\n    depth: i64 = 1\n\nfn caller() -> i64:\n    plan(\"m\")\n")
+        .parse()
+        .expect("parse shadowed");
+    shadowed.items.push(flatten_binding_marker("<entry>", "plan", "policy.spl", "plan"));
+    shadowed.items.extend(flatten_owned_items(CTOR_OWNER, "policy.spl"));
+    let err = crate::hir::lower(&shadowed).expect_err("flattened local Limits shadows callee");
+    assert!(format!("{err}").contains("omits argument 2"), "{err}");
+
+    // Caller selectively or glob-importing unrelated `Limits` must stay rejected.
+    for other_binding in [
+        flatten_binding_marker("<entry>", "Limits", "unrelated.spl", "Limits"),
+        flatten_binding_marker("<entry>", "*", "unrelated.spl", "*"),
+    ] {
+        let mut conflicting = Parser::new("fn caller() -> i64:\n    plan(\"m\")\n")
+            .parse()
+            .expect("parse conflicting");
+        conflicting.items.push(flatten_binding_marker("<entry>", "plan", "policy.spl", "plan"));
+        conflicting.items.push(other_binding);
+        conflicting.items.extend(flatten_owned_items(unrelated, "unrelated.spl"));
+        conflicting.items.extend(flatten_owned_items(CTOR_OWNER, "policy.spl"));
+        let err = crate::hir::lower(&conflicting).expect_err("flattened unrelated imported Limits must fail");
+        assert!(format!("{err}").contains("omits argument 2"), "{err}");
     }
 }

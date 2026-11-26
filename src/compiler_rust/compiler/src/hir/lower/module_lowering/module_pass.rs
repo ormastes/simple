@@ -498,18 +498,9 @@ impl Lowerer {
                     let fn_ty = self.module.types.register(HirType::Function { params, ret: ret_ty });
                     self.declared_function_value_types.insert(f.name.clone(), fn_ty);
                 }
+                self.register_generic_identity_param(&symbol, f);
                 if owner.is_none() {
-                    if let Some(ast::Type::Simple(ret_param)) = &f.return_type {
-                        if f.generic_params.iter().any(|g| g == ret_param) {
-                            let idx = f
-                                .params
-                                .iter()
-                                .position(|p| matches!(&p.ty, Some(ast::Type::Simple(n)) if n == ret_param));
-                            if let Some(idx) = idx {
-                                self.generic_identity_param.insert(f.name.clone(), idx);
-                            }
-                        }
-                    }
+                    self.register_generic_identity_param(&f.name, f);
                 }
                 // Track pure functions for CTR-030-032
                 if f.is_pure() {
@@ -1631,6 +1622,8 @@ impl Lowerer {
                     .insert(symbol.clone(), if f.params.iter().any(|p| p.variadic) { Vec::new() } else { f.params.iter().map(|p| p.name.clone()).collect() });
                 self.fn_param_defaults
                     .insert(symbol.clone(), self.call_site_defaults(owner.as_deref(), &f.params));
+                self.fn_param_default_owners
+                    .insert(symbol.clone(), owner.clone());
                 // Bool-admission slots: which declared parameters are exactly
                 // `bool`. Parallel to `fn_param_names` (same keying rules,
                 // including the empty-for-variadic rule — a variadic call

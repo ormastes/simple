@@ -6,7 +6,7 @@ use inkwell::builder::Builder;
 #[cfg(feature = "llvm")]
 use inkwell::module::Module;
 #[cfg(feature = "llvm")]
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicType, BasicTypeEnum};
 #[cfg(feature = "llvm")]
 use inkwell::values::BasicValue;
 #[cfg(feature = "llvm")]
@@ -3053,144 +3053,207 @@ impl LlvmBackend {
         args: &[crate::mir::VReg],
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<(), CompileError> {
         use crate::hir::TypeId;
-        use inkwell::types::BasicType;
 
         let i8_type = self.context_ref().i8_type();
         let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+        let rv_type = self.runtime_int_type();
 
         let callee_val = self.get_vreg(&callee, vreg_map)?;
+        let callee_rv = self.coerce_value_to_type(callee_val, Some(rv_type.into()), builder)?;
+        let callee_int = callee_rv.into_int_value();
 
-        // Coerce callee to pointer: i64 values are inttoptr'd (Simple's tagged-value ABI)
-        let closure_ptr = match callee_val {
-            inkwell::values::BasicValueEnum::PointerValue(p) => p,
-            inkwell::values::BasicValueEnum::IntValue(iv) => builder
-                .build_int_to_ptr(iv, i8_ptr_type, "callee_ptr")
-                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
-            _ => {
-                // Fallback: insert default dest value and return
-                if let Some(d) = dest {
-                    let default_val = self.runtime_int_type().const_int(0, false);
-                    vreg_map.insert(d, default_val.into());
-                }
-                return Ok(());
-            }
+        let parent = builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| CompileError::semantic("indirect call has no enclosing function"))?;
+
+        // Uniform RuntimeClosure dispatch first: `rt_closure_func_ptr` returns
+        // the `$boxed` entry for every `rt_closure_new` closure/function value
+        // (and 0 for non-closures such as `extern fn` direct records).
+        let closure_func_ptr_fn = self.declare_rt_closure_func_ptr(module);
+        let rt_fn_call = builder
+            .build_call(closure_func_ptr_fn, &[callee_rv.into()], "rt_closure_fn_i64")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_closure_func_ptr call", &e))?;
+        let rt_fn_i64 = rt_fn_call
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CompileError::semantic("rt_closure_func_ptr returned void"))?
+            .into_int_value();
+        let is_rt_closure = builder
+            .build_int_compare(IntPredicate::NE, rt_fn_i64, rv_type.const_zero(), "is_rt_closure")
+            .map_err(|e| crate::error::factory::llvm_build_failed("compare rt_closure_func_ptr", &e))?;
+
+        let rt_closure_block = self.context_ref().append_basic_block(parent, "call_rt_closure");
+        let legacy_check_block = self.context_ref().append_basic_block(parent, "call_legacy_check");
+        let legacy_valid_block = self.context_ref().append_basic_block(parent, "call_legacy_valid");
+        let direct_block = self.context_ref().append_basic_block(parent, "call_direct");
+        let closure_block = self.context_ref().append_basic_block(parent, "call_closure");
+        let legacy_null_block = self.context_ref().append_basic_block(parent, "call_legacy_null");
+        let merge_block = self.context_ref().append_basic_block(parent, "call_result");
+
+        builder
+            .build_conditional_branch(is_rt_closure, rt_closure_block, legacy_check_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("branch closure kind", &e))?;
+
+        // --- Branch 1: Registered RuntimeClosure pointing to `$boxed` entry ---
+        builder.position_at_end(rt_closure_block);
+        let rt_fn_ptr = builder
+            .build_int_to_ptr(rt_fn_i64, i8_ptr_type, "rt_fn_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr rt_fn", &e))?;
+        let mut boxed_arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![callee_rv.into()];
+        let mut boxed_param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![rv_type.into()];
+        for (i, arg) in args.iter().enumerate() {
+            let raw = self.get_vreg(arg, vreg_map)?;
+            let ty = param_types.get(i).copied().unwrap_or(TypeId::ANY);
+            let boxed = self.box_closure_boundary_value(raw, ty, builder, module)?;
+            boxed_arg_vals.push(boxed.into());
+            boxed_param_tys.push(rv_type.into());
+        }
+        let boxed_fn_type = rv_type.fn_type(&boxed_param_tys, false);
+        let rt_call = builder
+            .build_indirect_call(boxed_fn_type, rt_fn_ptr, &boxed_arg_vals, "rt_closure_call")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt closure call", &e))?;
+        let rt_unboxed = if dest.is_some() && *return_type != TypeId::VOID {
+            let tagged = rt_call
+                .try_as_basic_value()
+                .basic()
+                .unwrap_or_else(|| rv_type.const_zero().into());
+            self.unbox_closure_boundary_value(tagged, *return_type, builder, module)?
+        } else {
+            rv_type.const_zero().into()
+        };
+        let rt_exit_block = builder
+            .get_insert_block()
+            .unwrap_or(rt_closure_block);
+        builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("merge rt closure call", &e))?;
+
+        // --- Branch 2: Legacy direct-fn record (`rt_alloc([fn_ptr, 0x5344_4952_4543_5446])`) ---
+        builder.position_at_end(legacy_check_block);
+        let non_zero = builder
+            .build_int_compare(IntPredicate::NE, callee_int, rv_type.const_zero(), "legacy_non_null")
+            .map_err(|e| crate::error::factory::llvm_build_failed("compare legacy non_null", &e))?;
+        let tag_bits = builder
+            .build_and(callee_int, rv_type.const_int(0x7, false), "legacy_tag_bits")
+            .map_err(|e| crate::error::factory::llvm_build_failed("and tag bits", &e))?;
+        let is_aligned = builder
+            .build_int_compare(IntPredicate::EQ, tag_bits, rv_type.const_zero(), "legacy_aligned")
+            .map_err(|e| crate::error::factory::llvm_build_failed("compare legacy aligned", &e))?;
+        let valid_legacy = builder
+            .build_and(non_zero, is_aligned, "valid_legacy_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("and valid legacy", &e))?;
+        builder
+            .build_conditional_branch(valid_legacy, legacy_valid_block, legacy_null_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("branch legacy ptr", &e))?;
+
+        builder.position_at_end(legacy_valid_block);
+        let base_ptr = builder
+            .build_int_to_ptr(callee_int, i8_ptr_type, "legacy_base_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr legacy", &e))?;
+        let ptr_slot_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+        let offset_zero = self.context_ref().i32_type().const_int(0, false);
+        let fn_ptr_slot = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_zero], "fn_ptr_slot") }
+            .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
+        let fn_ptr_slot_cast = builder
+            .build_pointer_cast(fn_ptr_slot, ptr_slot_type, "fn_ptr_slot_cast")
+            .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot ptr", &e))?;
+        let func_ptr = builder
+            .build_load(i8_ptr_type, fn_ptr_slot_cast, "loaded_func")
+            .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?
+            .into_pointer_value();
+
+        let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![callee_rv.into()];
+        for arg in args {
+            let val = self.get_vreg(arg, vreg_map)?;
+            let casted = self.coerce_value_to_type(val, Some(rv_type.into()), builder)?;
+            arg_vals.push(casted.into());
+        }
+        let llvm_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+            (0..(1 + args.len())).map(|_| rv_type.into()).collect();
+        let fn_type = if *return_type == TypeId::VOID {
+            self.context_ref().void_type().fn_type(&llvm_param_types, false)
+        } else {
+            rv_type.fn_type(&llvm_param_types, false)
         };
 
-        {
-            let base_ptr = builder
-                .build_pointer_cast(closure_ptr, i8_ptr_type, "closure_ptr")
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?;
-            let ptr_slot_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+        let marker_ptr = unsafe {
+            builder.build_gep(
+                i8_type,
+                base_ptr,
+                &[self.context_ref().i32_type().const_int(8, false)],
+                "call_marker_ptr",
+            )
+        }
+        .map_err(|e| crate::error::factory::llvm_build_failed("gep marker", &e))?;
+        let marker = builder
+            .build_load(rv_type, marker_ptr, "call_marker")
+            .map_err(|e| crate::error::factory::llvm_build_failed("load marker", &e))?
+            .into_int_value();
+        let is_direct = builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                marker,
+                rv_type.const_int(0x5344_4952_4543_5446, false),
+                "is_direct_function",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("compare marker", &e))?;
+        builder
+            .build_conditional_branch(is_direct, direct_block, closure_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("branch callable kind", &e))?;
 
-            let offset_val = self.context_ref().i32_type().const_int(0, false);
-            let fn_ptr_slot = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot") }
-                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
+        builder.position_at_end(direct_block);
+        let direct_type = match fn_type.get_return_type() {
+            Some(result) => result.fn_type(&llvm_param_types[1..], false),
+            None => self.context_ref().void_type().fn_type(&llvm_param_types[1..], false),
+        };
+        let direct_call = builder
+            .build_indirect_call(direct_type, func_ptr, &arg_vals[1..], "direct_call")
+            .map_err(|e| crate::error::factory::llvm_build_failed("direct function call", &e))?;
+        builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("merge direct call", &e))?;
 
-            let fn_ptr_slot = builder
-                .build_pointer_cast(fn_ptr_slot, ptr_slot_type, "fn_ptr_slot_cast")
-                .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot ptr", &e))?;
+        builder.position_at_end(closure_block);
+        let closure_call = builder
+            .build_indirect_call(fn_type, func_ptr, &arg_vals, "closure_call")
+            .map_err(|e| crate::error::factory::llvm_build_failed("closure call", &e))?;
+        builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("merge closure call", &e))?;
 
-            let func_ptr = builder
-                .build_load(i8_ptr_type, fn_ptr_slot, "loaded_func")
-                .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
+        builder.position_at_end(legacy_null_block);
+        builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("merge null call", &e))?;
 
-            if let inkwell::values::BasicValueEnum::PointerValue(fn_ptr) = func_ptr {
-                let i64_type = self.runtime_int_type();
-                // Prepend closure pointer (coerced to i64) as implicit first argument
-                // This matches Cranelift's behavior in closures_structs.rs:67-78
-                let closure_as_i64 = builder
-                    .build_ptr_to_int(closure_ptr, self.runtime_int_type(), "closure_i64")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("ptrtoint", &e))?;
-                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![closure_as_i64.into()];
-                for arg in args {
-                    let val = self.get_vreg(arg, vreg_map)?;
-                    let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
-                    arg_vals.push(casted.into());
-                }
-
-                // Prepend i64 type for the implicit closure pointer parameter.
-                // Use actual arg count for function type (param_types from HIR may differ).
-                // All args are coerced to i64 matching the tagged-value ABI.
-                let mut llvm_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                    vec![self.runtime_int_type().into()];
-                let user_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                    args.iter().map(|_| i64_type.into()).collect();
-                llvm_param_types.extend(user_param_types);
-
-                let fn_type = if *return_type == TypeId::VOID {
-                    self.context_ref().void_type().fn_type(&llvm_param_types, false)
-                } else {
-                    match self.llvm_type(return_type)? {
-                        inkwell::types::BasicTypeEnum::ArrayType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::FloatType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::IntType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::ScalableVectorType(t) => {
-                            t.fn_type(&llvm_param_types, false)
-                        }
-                    }
-                };
-
-                // GlobalLoad and global function initializers store a direct
-                // function record. Unlike ClosureCreate, that entry takes no
-                // hidden environment argument. Inspect the existing record
-                // marker before selecting the call signature.
-                let marker_ptr = unsafe {
-                    builder.build_gep(
-                        i8_type, base_ptr,
-                        &[self.context_ref().i32_type().const_int(8, false)],
-                        "call_marker_ptr",
-                    )
-                }.map_err(|e| crate::error::factory::llvm_build_failed("gep marker", &e))?;
-                let marker = builder.build_load(i64_type, marker_ptr, "call_marker")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("load marker", &e))?
-                    .into_int_value();
-                let is_direct = builder.build_int_compare(
-                    IntPredicate::EQ, marker,
-                    i64_type.const_int(0x5344_4952_4543_5446, false), "is_direct_function",
-                ).map_err(|e| crate::error::factory::llvm_build_failed("compare marker", &e))?;
-                let parent = builder.get_insert_block().and_then(|block| block.get_parent())
-                    .ok_or_else(|| CompileError::semantic("indirect call has no enclosing function"))?;
-                let direct_block = self.context_ref().append_basic_block(parent, "call_direct");
-                let closure_block = self.context_ref().append_basic_block(parent, "call_closure");
-                let merge_block = self.context_ref().append_basic_block(parent, "call_result");
-                builder.build_conditional_branch(is_direct, direct_block, closure_block)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("branch callable kind", &e))?;
-
-                builder.position_at_end(direct_block);
-                let direct_type = match fn_type.get_return_type() {
-                    Some(result) => result.fn_type(&llvm_param_types[1..], false),
-                    None => self.context_ref().void_type().fn_type(&llvm_param_types[1..], false),
-                };
-                let direct_call = builder.build_indirect_call(direct_type, fn_ptr, &arg_vals[1..], "direct_call")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("direct function call", &e))?;
-                builder.build_unconditional_branch(merge_block)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("merge direct call", &e))?;
-
-                builder.position_at_end(closure_block);
-                let closure_call = builder.build_indirect_call(fn_type, fn_ptr, &arg_vals, "closure_call")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("closure call", &e))?;
-                builder.build_unconditional_branch(merge_block)
-                    .map_err(|e| crate::error::factory::llvm_build_failed("merge closure call", &e))?;
-
-                builder.position_at_end(merge_block);
-                if let Some(d) = dest {
-                    if let (Some(direct_result), Some(closure_result)) = (
-                        direct_call.try_as_basic_value().basic(),
-                        closure_call.try_as_basic_value().basic(),
-                    ) {
-                        let result = builder.build_phi(direct_result.get_type(), "call_value")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("call result phi", &e))?;
-                        result.add_incoming(&[(&direct_result, direct_block), (&closure_result, closure_block)]);
-                        vreg_map.insert(d, result.as_basic_value());
-                    } else {
-                        vreg_map.insert(d, self.runtime_int_type().const_zero().into());
-                    }
-                }
+        builder.position_at_end(merge_block);
+        if let Some(d) = dest {
+            if *return_type == TypeId::VOID {
+                vreg_map.insert(d, rv_type.const_zero().into());
+            } else {
+                let direct_result = direct_call
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap_or_else(|| rv_type.const_zero().into());
+                let closure_result = closure_call
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap_or_else(|| rv_type.const_zero().into());
+                let null_result: inkwell::values::BasicValueEnum = rv_type.const_zero().into();
+                let phi = builder
+                    .build_phi(rv_type, "call_value")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("call result phi", &e))?;
+                phi.add_incoming(&[
+                    (&rt_unboxed, rt_exit_block),
+                    (&direct_result, direct_block),
+                    (&closure_result, closure_block),
+                    (&null_result, legacy_null_block),
+                ]);
+                vreg_map.insert(d, phi.as_basic_value());
             }
         }
 

@@ -149,3 +149,24 @@ workaround must stay. Separately, the committed `omitted.spl`/`policy.spl` fixtu
 3. Unit specs updated/added:
    - `test/01_unit/compiler/mir/resident_default_ctor_relocate_spec.spl`
    - `test/01_unit/compiler/backend/wa_src_lane6_lean_default_spec.spl`
+
+## 2026-11-26 — Rust Seed HIR/JIT Default-Arg Fix (WA-P6)
+
+- Fixed Rust seed omitted constructor default-argument lowering across cross-module,
+  flattened, and JIT scopes in `src/compiler_rust/compiler/src/hir/lower/expr/calls.rs`,
+  `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`,
+  `src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs`,
+  and `src/compiler_rust/compiler/src/hir/lower/lowerer.rs`
+  (`is_fillable_default`, `ctor_type_matches_callee`,
+  `flattened_ctor_type_matches_callee`, `lower_default_expr_in_callee_scope`,
+  and cross-module/flattened struct ctor registration for unimported default constructor types).
+- Added unit tests in `src/compiler_rust/compiler/src/hir/lower/tests/imported_default_metadata_tests.rs`.
+- Pure-Simple `50.mir` relocation and `lean_backend.spl` retirement already landed
+  upstream in `#11848` (`8f38effacc1`), so those files were left untouched.
+- Verified:
+  - `cargo test -p simple-compiler --lib -j 4 hir::lower::tests`: `405 passed; 0 failed` (default & `--features llvm`)
+  - `cargo test -p simple-compiler --lib -j 4 mir::lower::tests`: `660 passed; 0 failed`
+  - `test/01_unit/compiler/mir/resident_default_ctor_relocate_spec.spl --mode=interpreter`: `3 passed, 0 failed`
+  - `test/01_unit/compiler/backend/lean_backend_spec.spl --mode=interpreter`: `10 passed, 0 failed`
+  - Note: `test/01_unit/compiler/backend/wa_src_lane6_lean_default_spec.spl` currently fails `1/1` (`semantic: variable 'self' not found`) on `origin/release/1.0.0` due to unescaped `{self.module_prefix}` introduced in upstream commit `8f38effacc1`.
+

@@ -70,7 +70,7 @@ pub fn is_outlined_lambda(func: &MirFunction) -> bool {
 
 /// Does a tagged `RuntimeValue` need a decode step to reach `ty`'s raw
 /// representation? Heap-shaped and unknown types are carried verbatim.
-fn is_raw_scalar(ty: TypeId) -> bool {
+pub(crate) fn is_raw_scalar(ty: TypeId) -> bool {
     matches!(
         ty,
         TypeId::I8

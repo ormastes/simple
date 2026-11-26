@@ -161,6 +161,19 @@ fn stage2_map_placeholder_uses_collection_element_owner() {
     );
 }
 
+#[test]
+fn result_map_placeholder_uses_ok_payload_owner() {
+    let source = "struct Decoy:\n    filler: i64\n    roots: [i64]\n\nstruct StorageRootResolution:\n    roots: text\n\nenum Result<T, E>:\n    Ok(T)\n    Err(E)\n\nfn inspect() -> Result<StorageRootResolution, text>:\n    Result.Ok(StorageRootResolution(roots: \"ok\"))\n\nfn probe():\n    inspect().map(_.roots)\n";
+    let module = parse_and_lower(source).expect("Result.map(_.roots) must lower");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let body = format!("{:?}", function.body);
+    assert!(body.contains("field_index: 0"), "StorageRootResolution.roots is slot zero: {body}");
+    assert!(
+        !body.contains("field_index: 1"),
+        "Decoy.roots must not supply a slot: {body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // jit_is_some_is_none_method_dispatch_gap_2026-08-17 (silent-wrong-value shape)
 //
@@ -946,4 +959,130 @@ fn vec_literal_assignment_target_without_local_stays_rejected() {
         "unbound vec[...] assignment must stay rejected, got {:?}",
         result.map(|m| format!("{:?}", m.functions.iter().map(|f| &f.name).collect::<Vec<_>>()))
     );
+}
+
+#[test]
+fn imported_generic_visitor_walk_hir_expr_infers_struct_return_without_type_annotation() {
+    use simple_parser::Parser;
+    use crate::module_resolver::ModuleResolver;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().expect("tempdir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(src.join("compiler/hir/generated")).unwrap();
+    std::fs::write(
+        src.join("compiler/hir/generated/hir_visitor.spl"),
+        concat!(
+            "struct HirExpr:\n    line: i64\n\n",
+            "struct HirWalkNode:\n    line: i64\n\n",
+            "fn walk_hir_expr<C>(node: HirExpr, ctx: C, f: fn(HirWalkNode, C) -> C) -> C:\n    ctx\n",
+        ),
+    )
+    .unwrap();
+    let entry_source = concat!(
+        "use compiler.hir.generated.hir_visitor.{HirExpr, HirWalkNode, walk_hir_expr, walk_hir_expr as walk_aliased}\n\n",
+        "struct MatchSiteScan:\n    sites: [i64]\n\n",
+        "fn collect_match_site(node: HirWalkNode, acc: MatchSiteScan) -> MatchSiteScan:\n    acc\n\n",
+        "fn walk_expr(e: HirExpr, acc: [i64]) -> [i64]:\n",
+        "    val start = MatchSiteScan(sites: acc)\n",
+        "    val done = walk_hir_expr(e, start, collect_match_site)\n",
+        "    val done_aliased = walk_aliased(e, start, collect_match_site)\n",
+        "    val done_explicit = walk_hir_expr<MatchSiteScan>(e, start, collect_match_site)\n",
+        "    val direct_len = walk_hir_expr(e, start, collect_match_site).sites.len()\n",
+        "    if done_aliased.sites.len() == done_explicit.sites.len() and direct_len >= 0:\n",
+        "        return done.sites\n",
+        "    done.sites\n",
+    );
+    let main_path = src.join("main.spl");
+    std::fs::write(&main_path, entry_source).unwrap();
+    let ast = Parser::new(entry_source).parse().expect("parse");
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+    let hir = Lowerer::with_module_resolver(resolver, main_path)
+        .lower_module(&ast)
+        .expect("imported generic visitor call must infer MatchSiteScan without annotation");
+    let walk_expr = hir.functions.iter().find(|f| f.name == "walk_expr").unwrap();
+    for local_name in ["done", "done_aliased", "done_explicit"] {
+        let local = walk_expr.locals.iter().find(|l| l.name == local_name).unwrap();
+        assert_eq!(
+            hir.types.get_type_name(local.ty),
+            Some("MatchSiteScan"),
+            "local {local_name} must inherit MatchSiteScan instead of ANY"
+        );
+    }
+    crate::mir::lower_to_mir(&hir).expect("MIR lowering must succeed for inferred MatchSiteScan return");
+}
+
+#[test]
+fn flattened_generic_identity_return_isolates_colliding_symbols_and_infers_struct() {
+    use simple_parser::ast::{Attribute, ConstStmt, Expr, Node, Visibility};
+    use simple_parser::token::Span;
+    use simple_parser::Parser;
+
+    let binding_marker = |importer: &str, local: &str, source_owner: &str, source_name: &str| -> Node {
+        Node::Const(ConstStmt {
+            span: Span::new(0, 0, 0, 0),
+            name: format!(
+                "{}{}:{importer}{}:{local}{}:{source_owner}{}:{source_name}",
+                crate::interpreter::FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+                importer.len(),
+                local.len(),
+                source_owner.len(),
+                source_name.len()
+            ),
+            ty: None,
+            value: Expr::Nil,
+            visibility: Visibility::Private,
+            attributes: vec![],
+        })
+    };
+
+    let tag_items = |source: &str, owner: &str| -> Vec<Node> {
+        let parsed = Parser::new(source).parse().expect("parse");
+        parsed
+            .items
+            .into_iter()
+            .map(|mut item| {
+                let make_attr = |span| Attribute {
+                    span,
+                    name: format!("{}{owner}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX),
+                    value: None,
+                    args: None,
+                    named_args: None,
+                };
+                match &mut item {
+                    Node::Function(f) => crate::interpreter::tag_function_module_owner(f, owner),
+                    Node::Struct(s) => s.attributes.push(make_attr(s.span)),
+                    Node::Class(c) => c.attributes.push(make_attr(c.span)),
+                    _ => {}
+                }
+                item
+            })
+            .collect()
+    };
+
+    let mut nodes = tag_items(
+        "struct MatchSiteScan:\n    sites: [i64]\n\nfn walk_hir_expr<C>(ctx: C) -> C:\n    ctx\n",
+        "visitor_mod.spl",
+    );
+    nodes.extend(tag_items(
+        "fn walk_hir_expr(x: i64) -> i64:\n    x + 1\n\nfn collide_caller() -> i64:\n    walk_hir_expr(41)\n",
+        "plain_mod.spl",
+    ));
+    let mut entry = Parser::new(
+        "fn walk_expr(acc: [i64]) -> [i64]:\n    val start = MatchSiteScan(sites: acc)\n    val done = walk_hir_expr(start)\n    done.sites\n",
+    )
+    .parse()
+    .expect("parse entry");
+    entry
+        .items
+        .push(binding_marker("<entry>", "MatchSiteScan", "visitor_mod.spl", "MatchSiteScan"));
+    entry
+        .items
+        .push(binding_marker("<entry>", "walk_hir_expr", "visitor_mod.spl", "walk_hir_expr"));
+    entry.items.extend(nodes);
+
+    let hir = crate::hir::lower(&entry).expect("flattened colliding generic identity");
+    let walk_expr = hir.functions.iter().find(|f| f.name == "walk_expr").unwrap();
+    let done_local = walk_expr.locals.iter().find(|l| l.name == "done").unwrap();
+    assert_eq!(hir.types.get_type_name(done_local.ty), Some("MatchSiteScan"));
 }

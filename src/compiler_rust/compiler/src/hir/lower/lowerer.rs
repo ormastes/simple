@@ -21,6 +21,13 @@ type AmbiguousFieldNames = std::sync::Arc<HashSet<String>>;
 type GlobalEnumDefs = std::sync::Arc<HashMap<String, Vec<(String, Option<Vec<Type>>)>>>;
 pub(crate) type QualifiedImportFunctions = std::sync::Arc<HashMap<String, String>>;
 
+#[derive(Debug, Clone)]
+pub(super) struct GenericIdentityParamSpec {
+    pub index: usize,
+    pub name: String,
+    pub generic_param_pos: Option<usize>,
+}
+
 pub struct Lowerer {
     pub(super) module: HirModule,
     pub(super) globals: HashMap<String, TypeId>,
@@ -144,6 +151,11 @@ pub struct Lowerer {
     pub(super) imported_type_owners: HashMap<String, std::collections::HashSet<std::path::PathBuf>>,
     /// Defining files of every imported free function, by bare name.
     pub(super) imported_fn_owners: HashMap<String, std::collections::HashSet<std::path::PathBuf>>,
+    /// All struct/class module owners in a flattened unit, keyed by bare name
+    /// (recorded before `qualify_flattened_structs` renames colliding types).
+    pub(super) flatten_all_type_owners: HashMap<String, Vec<Option<String>>>,
+    /// Defining module owner for each entry in `fn_param_defaults` (emitted symbol -> owner).
+    pub(super) fn_param_default_owners: HashMap<String, Option<String>>,
     /// Reverse lookup for suggestions: original -> Vec<aliases>
     pub(super) type_aliases_reverse: HashMap<String, Vec<String>>,
     /// Reverse lookup for function suggestions: original -> Vec<aliases>
@@ -290,10 +302,11 @@ pub struct Lowerer {
     /// at registration so a module-level `val G = f` (lowered before any body)
     /// is typed as a function value rather than ANY.
     pub(super) declared_function_value_types: HashMap<String, TypeId>,
-    /// Generic free functions `fn f<T>(.., x: T, ..) -> T`: name -> index of
-    /// the first parameter typed by the returned type param. Erased generics
-    /// type the call as Any; a class argument recovers the class identity.
-    pub(super) generic_identity_param: HashMap<String, usize>,
+    /// Generic free functions `fn f<T>(.., x: T, ..) -> T`: name -> parameter
+    /// index/name and generic parameter index of the returned type param.
+    /// Erased generics type the call as Any; a struct/class argument (or
+    /// explicit `<Struct>`) recovers the nominal struct identity.
+    pub(super) generic_identity_param: HashMap<String, GenericIdentityParamSpec>,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
     /// Canonical `module_prefix__Type` -> declared field `= default` exprs,
@@ -456,6 +469,8 @@ impl Lowerer {
             own_imported_names: std::collections::HashSet::new(),
             imported_type_owners: HashMap::new(),
             imported_fn_owners: HashMap::new(),
+            flatten_all_type_owners: HashMap::new(),
+            fn_param_default_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
@@ -560,6 +575,8 @@ impl Lowerer {
             own_imported_names: std::collections::HashSet::new(),
             imported_type_owners: HashMap::new(),
             imported_fn_owners: HashMap::new(),
+            flatten_all_type_owners: HashMap::new(),
+            fn_param_default_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
@@ -687,6 +704,8 @@ impl Lowerer {
             own_imported_names: std::collections::HashSet::new(),
             imported_type_owners: HashMap::new(),
             imported_fn_owners: HashMap::new(),
+            flatten_all_type_owners: HashMap::new(),
+            fn_param_default_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
@@ -1139,6 +1158,7 @@ impl Lowerer {
         self.flatten_owner_import_bindings.clear();
         self.flatten_owner_glob_sources.clear();
         self.flatten_owner_module_namespaces.clear();
+        self.flatten_all_type_owners.clear();
         let mut definition_counts: HashMap<&str, usize> = HashMap::new();
         // Every name the flattened unit really DECLARES, function or value. The
         // alias branch in `lower_identifier` now runs ahead of the
@@ -1154,6 +1174,26 @@ impl Lowerer {
                     declared_names.insert(f.name.as_str());
                     let owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
                     self.flatten_fn_owners.entry(f.name.clone()).or_default().push(owner);
+                }
+                simple_parser::Node::Struct(s) => {
+                    let owner = Self::flatten_owner_of(s.attributes.iter().map(|a| a.name.as_str())).or_else(|| {
+                        Self::flatten_owner_of(
+                            s.methods
+                                .iter()
+                                .flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())),
+                        )
+                    });
+                    self.flatten_all_type_owners.entry(s.name.clone()).or_default().push(owner);
+                }
+                simple_parser::Node::Class(c) => {
+                    let owner = Self::flatten_owner_of(c.attributes.iter().map(|a| a.name.as_str())).or_else(|| {
+                        Self::flatten_owner_of(
+                            c.methods
+                                .iter()
+                                .flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())),
+                        )
+                    });
+                    self.flatten_all_type_owners.entry(c.name.clone()).or_default().push(owner);
                 }
                 simple_parser::Node::Const(c) => {
                     declared_names.insert(c.name.as_str());
@@ -1748,6 +1788,39 @@ impl Lowerer {
             }
         }
         None
+    }
+
+    pub(super) fn generic_identity_param_spec(
+        f: &simple_parser::ast::FunctionDef,
+    ) -> Option<GenericIdentityParamSpec> {
+        let Type::Simple(ret_param) = f.return_type.as_ref()? else {
+            return None;
+        };
+        let generic_param_pos = f.generic_params.iter().position(|g| g == ret_param)?;
+        let (index, param) = f.params.iter().enumerate().find(|(_, p)| {
+            matches!(&p.ty, Some(Type::Simple(n)) if n == ret_param)
+        })?;
+        Some(GenericIdentityParamSpec {
+            index,
+            name: param.name.clone(),
+            generic_param_pos: Some(generic_param_pos),
+        })
+    }
+
+    pub(super) fn register_generic_identity_param(
+        &mut self,
+        key: &str,
+        f: &simple_parser::ast::FunctionDef,
+    ) {
+        if let Some(spec) = Self::generic_identity_param_spec(f) {
+            self.generic_identity_param.insert(key.to_string(), spec);
+        }
+    }
+
+    pub(super) fn record_generic_identity_param_alias(&mut self, original: &str, alias: &str) {
+        if let Some(spec) = self.generic_identity_param.get(original).cloned() {
+            self.generic_identity_param.insert(alias.to_string(), spec);
+        }
     }
 
     /// Find non-deprecated alternatives for a deprecated type

@@ -31,6 +31,7 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         let _ = self.expected_target_type.take();
+        let orig_callee = callee;
         let callee = match callee {
             Expr::GenericInst { expr, .. } => expr.as_ref(),
             other => other,
@@ -267,18 +268,19 @@ impl Lowerer {
             }
             _ => self.call_return_type(callee, func_hir.ty),
         };
-        let ret_ty = self.refine_generic_identity_return(callee, args, ret_ty, ctx);
+        let resolved_callee_symbol = match (&func_hir.kind, callee) {
+            (HirExprKind::Global(symbol), Expr::Identifier(_)) => Some(symbol.as_str()),
+            (_, Expr::Identifier(name)) => Some(name.as_str()),
+            (HirExprKind::Global(symbol), _) => Some(symbol.as_str()),
+            _ => None,
+        };
+        let ret_ty = self.refine_generic_identity_return(orig_callee, resolved_callee_symbol, args, ret_ty, ctx);
         // Check the RESOLVED symbol, not the bare callee name: in a flattened
         // unit with a cross-module same-named collision, `func_hir.kind` may
         // carry a different (owner-mangled) symbol than `callee`'s bare text,
         // and `proven_nonescaping_functions`/other per-symbol sets below are
         // keyed by the symbol `lower_function` actually emitted
         // (`flatten_emitted_symbol`), not by the ambiguous bare name.
-        let resolved_callee_symbol = match (&func_hir.kind, callee) {
-            (HirExprKind::Global(symbol), Expr::Identifier(_)) => Some(symbol.as_str()),
-            (_, Expr::Identifier(name)) => Some(name.as_str()),
-            _ => None,
-        };
         let proven_nonescaping = resolved_callee_symbol
             .is_some_and(|symbol| self.proven_nonescaping_functions.contains(symbol))
             && !self.is_reference_type(ret_ty);
@@ -639,7 +641,9 @@ impl Lowerer {
             match slot {
                 Some(hir) => out.push(hir),
                 None => match defaults.get(index).and_then(|d| d.as_ref()) {
-                    Some(expr) if self.is_fillable_default(callee, expr) => out.push(self.lower_expr(expr, ctx)?),
+                    Some(expr) if self.is_fillable_default(callee, expr) => {
+                        out.push(self.lower_default_expr_in_callee_scope(callee, expr, ctx)?)
+                    }
                     Some(_) => {
                         return Err(LowerError::Unsupported(format!(
                             "call to `{callee}` omits argument {} whose default is not a call-site constant; \
@@ -681,7 +685,7 @@ impl Lowerer {
         for (index, slot) in defaults.iter().enumerate().skip(first_omitted) {
             match slot {
                 Some(expr) if self.is_fillable_default(callee, expr) => {
-                    let lowered = self.lower_expr(expr, ctx)?;
+                    let lowered = self.lower_default_expr_in_callee_scope(callee, expr, ctx)?;
                     args_hir.push(lowered);
                 }
                 Some(_) => {
@@ -697,21 +701,154 @@ impl Lowerer {
         Ok(())
     }
 
+    fn lower_default_expr_in_callee_scope(
+        &mut self,
+        callee: &str,
+        expr: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if let Some(callee_owner) = self.fn_param_default_owners.get(callee).cloned() {
+            if callee_owner != self.current_function_owner {
+                let prev_owner = std::mem::replace(&mut self.current_function_owner, callee_owner);
+                let prev_scope = self.enter_flatten_struct_scope();
+                let res = self.lower_expr(expr, ctx);
+                self.module.types.replace_scope_aliases(prev_scope);
+                self.current_function_owner = prev_owner;
+                return res;
+            }
+        }
+        self.lower_expr(expr, ctx)
+    }
+
+    fn is_flattened_unit(&self) -> bool {
+        !self.flatten_owner_import_bindings.is_empty()
+            || !self.flatten_owner_glob_sources.is_empty()
+            || self
+                .flatten_fn_owners
+                .values()
+                .any(|owners| owners.iter().any(Option::is_some))
+            || self
+                .flatten_all_type_owners
+                .values()
+                .any(|owners| owners.iter().any(Option::is_some))
+    }
+
+    fn flatten_type_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
+        self.flatten_all_type_owners
+            .get(name)
+            .is_some_and(|owners| owners.iter().any(|o| o.as_deref() == owner))
+    }
+
+    fn flatten_reexport_type_definer(&self, importer: &str, source_owner: &str, source_name: &str) -> Option<(String, String)> {
+        const HOP_BUDGET: usize = 64;
+        let mut found: Option<(String, String)> = None;
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        let mut pending = vec![(source_owner.to_string(), source_name.to_string())];
+        let mut hops = 0usize;
+        while let Some((owner, name)) = pending.pop() {
+            hops += 1;
+            if hops > HOP_BUDGET {
+                return None;
+            }
+            if owner == importer || !seen.insert((owner.clone(), name.clone())) {
+                continue;
+            }
+            if self.flatten_type_owner_defines(Some(&owner), &name) {
+                match &found {
+                    None => found = Some((owner, name)),
+                    Some(previous) if previous.0 == owner && previous.1 == name => {}
+                    Some(_) => return None,
+                }
+                continue;
+            }
+            if let Some(next) = self
+                .flatten_owner_import_bindings
+                .get(&owner)
+                .and_then(|bindings| bindings.get(&name))
+            {
+                pending.push(next.clone());
+                continue;
+            }
+            if let Some(globs) = self.flatten_owner_glob_sources.get(&owner) {
+                for glob_owner in globs.iter().rev() {
+                    pending.push((glob_owner.clone(), name.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    fn flattened_ctor_type_matches_callee(&self, fn_name: &str, type_name: &str) -> bool {
+        let Some(callee_owner) = self.fn_param_default_owners.get(fn_name).map(|o| o.as_deref()) else {
+            return false;
+        };
+        let caller_owner = self.current_function_owner.as_deref();
+        if !self.flatten_type_owner_defines(callee_owner, type_name) {
+            return false;
+        }
+        if callee_owner == caller_owner {
+            return self.resolve_constructor_type(type_name).is_some();
+        }
+        // Caller-local same-named struct shadows the callee's default type.
+        if self.flatten_type_owner_defines(caller_owner, type_name) {
+            return false;
+        }
+        let caller_importer = caller_owner.unwrap_or("<entry>");
+        if let Some((source_owner, source_name)) = self
+            .flatten_owner_import_bindings
+            .get(caller_importer)
+            .and_then(|bindings| bindings.get(type_name))
+        {
+            match self.flatten_reexport_type_definer(caller_importer, source_owner, source_name) {
+                Some((owner, orig_name)) if Some(owner.as_str()) == callee_owner && orig_name == type_name => {}
+                _ => return false,
+            }
+        }
+        if let Some(globs) = self.flatten_owner_glob_sources.get(caller_importer) {
+            for glob_owner in globs {
+                if let Some((owner, _)) = self.flatten_reexport_type_definer(caller_importer, glob_owner, type_name) {
+                    if Some(owner.as_str()) != callee_owner {
+                        return false;
+                    }
+                }
+            }
+        }
+        let scoped_name = if !self.flatten_struct_owners.is_empty() {
+            super::super::module_lowering::resolve_owned_struct(
+                &self.flatten_struct_owners,
+                &self.flatten_owner_import_bindings,
+                &self.flatten_owner_glob_sources,
+                callee_owner,
+                type_name,
+            )
+            .unwrap_or_else(|| type_name.to_string())
+        } else {
+            type_name.to_string()
+        };
+        self.resolve_constructor_type(&scoped_name).is_some()
+    }
+
     /// The constructor type the caller sees must be the very type the callee
     /// module declares: the callee has exactly one defining file, and the
-    /// caller imported `type_name` from that single file and no other (an
-    /// unrelated same-named type, directly or via glob, adds a second owner).
+    /// caller imported or resolved `type_name` from that single file and no
+    /// other (an unrelated same-named type, directly or via glob, adds a second
+    /// owner).
     fn ctor_type_matches_callee(&self, callee: &str, type_name: &str) -> bool {
-        match (self.imported_fn_owners.get(callee), self.imported_type_owners.get(type_name)) {
+        let fn_owners = self.imported_fn_owners.get(callee).or_else(|| {
+            self.resolve_function_alias(callee)
+                .and_then(|original| self.imported_fn_owners.get(original))
+        });
+        match (fn_owners, self.imported_type_owners.get(type_name)) {
             (Some(f), Some(t)) => f.len() == 1 && f == t,
             _ => false,
         }
     }
 
     /// `is_constant_default`, plus a constructor call `T(const, ...)` whose `T`
-    /// resolves in the CALLER to a struct/class not declared by the caller's
-    /// own module (a local `T` would shadow the callee's type). Constructor
-    /// arguments must themselves be fillable, so nothing captures caller scope.
+    /// resolves to the callee's own struct/class (imported or resolved from the
+    /// callee's defining module) and is not shadowed by a caller-local or
+    /// unrelated imported `T`. Constructor arguments must themselves be
+    /// fillable, so nothing captures caller scope.
     /// (lean_native_constructor_default_argument_2026_10_21)
     pub(super) fn is_fillable_default(&self, fn_name: &str, expr: &Expr) -> bool {
         if Self::is_constant_default(expr) || self.is_unit_enum_variant(expr) {
@@ -720,11 +857,20 @@ impl Lowerer {
         match expr {
             Expr::Call { callee, args } => match callee.as_ref() {
                 Expr::Identifier(name) => {
-                    !self.own_declared_type_names.contains(name)
-                        && (self.own_imported_names.contains(name) || self.own_imported_names.contains("*"))
-                        && self.resolve_constructor_type(name).is_some()
-                        && self.ctor_type_matches_callee(fn_name, name)
-                        && args.iter().all(|a| self.is_fillable_default(fn_name, &a.value))
+                    let ctor_ok = if self.is_flattened_unit() {
+                        self.flattened_ctor_type_matches_callee(fn_name, name)
+                    } else if self.own_declared_function_names.contains(fn_name)
+                        && !self.imported_fn_owners.contains_key(fn_name)
+                    {
+                        self.own_declared_type_names.contains(name)
+                            && !self.imported_type_owners.contains_key(name)
+                            && self.resolve_constructor_type(name).is_some()
+                    } else {
+                        !self.own_declared_type_names.contains(name)
+                            && self.resolve_constructor_type(name).is_some()
+                            && self.ctor_type_matches_callee(fn_name, name)
+                    };
+                    ctor_ok && args.iter().all(|a| self.is_fillable_default(fn_name, &a.value))
                 }
                 _ => false,
             },

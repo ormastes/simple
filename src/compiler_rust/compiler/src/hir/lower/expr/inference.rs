@@ -97,9 +97,13 @@ impl Lowerer {
                 _ => self.infer_type(operand, ctx),
             },
             Expr::Call { callee, args } => {
-                let callee_ty = self.infer_type(callee, ctx)?;
-                let ret = self.call_return_type(callee, callee_ty);
-                Ok(self.refine_generic_identity_return(callee, args, ret, ctx))
+                let base_callee = match callee.as_ref() {
+                    Expr::GenericInst { expr, .. } => expr.as_ref(),
+                    other => other,
+                };
+                let callee_ty = self.infer_type(base_callee, ctx)?;
+                let ret = self.call_return_type(base_callee, callee_ty);
+                Ok(self.refine_generic_identity_return(callee, None, args, ret, ctx))
             }
             Expr::If { then_branch, .. } => {
                 // Type of if-expression is the type of the then branch

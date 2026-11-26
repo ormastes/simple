@@ -97,3 +97,27 @@ new Result tags are not a claim of portable/archive qualification. These are
 explicit compatibility limits pending separate native Phase3 evidence, not a
 reason to relax the validator. Both original source workarounds remain in place.
 No runtime, SFFI, fixed Phase2, Rust, or frozen-source changes were performed.
+
+## 2026-11-26 — Rust Seed Generic Identity Return Inference Fix (WA-P6, `ROOT-FIXED+SEED-GATED`)
+
+- Fixed Rust seed `generic_identity_param` inference across local, imported, aliased,
+  and flattened generic functions (such as `walk_hir_expr<C>(node, ctx: C, f) -> C`) in:
+  - `src/compiler_rust/compiler/src/hir/lower/lowerer.rs` (`GenericIdentityParamSpec`,
+    `register_generic_identity_param`, `record_generic_identity_param_alias`)
+  - `src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs`
+  - `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`
+  - `src/compiler_rust/compiler/src/hir/lower/expr/mod.rs`
+    (`lookup_generic_identity_param_spec`, `refine_generic_identity_return`)
+  - `src/compiler_rust/compiler/src/hir/lower/expr/calls.rs`
+  - `src/compiler_rust/compiler/src/hir/lower/expr/inference.rs` (`Expr::GenericInst` unwrap)
+- Added unit tests
+  `imported_generic_visitor_walk_hir_expr_infers_struct_return_without_type_annotation`
+  and `flattened_generic_identity_return_isolates_colliding_symbols_and_infers_struct`
+  in `src/compiler_rust/compiler/src/hir/lower/tests/seed_regression_tests.rs`.
+- Kept caller guard in `src/compiler/35.semantics/enum_contract/hir_match_coverage.spl:237`
+  with `@workaround bug=mono_return_context_and_fixed_nominal_binding_2026-10-05 recover=58246517a37 reason=ROOT-FIXED+SEED-GATED: ...`
+  until bootstrap seed artifacts incorporate this fix.
+- Verified:
+  - `cargo test -p simple-compiler --lib -j 4 hir::lower::tests`: `405 passed; 0 failed` (default & `--features llvm`)
+  - `test/01_unit/compiler/semantics/enum_contract_hir_wiring_spec.spl --mode=interpreter`: `10 passed, 0 failed`
+

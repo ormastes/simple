@@ -917,46 +917,24 @@ impl LlvmBackend {
                 .find(|meta| meta.is_lambda && !meta.lambda_capture_local_indices.is_empty())
             {
                 if let Some(ctx_param) = function.get_nth_param(0) {
-                    let i8_type = self.context_ref().i8_type();
-                    let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
-                    let i64_type = self.runtime_int_type();
-                    let ctx_ptr = match ctx_param {
-                        inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
-                            .build_pointer_cast(ptr, i8_ptr_type, "lambda_ctx_ptr")
-                            .map_err(|e| crate::error::factory::llvm_cast_failed("cast lambda ctx", &e))?,
-                        inkwell::values::BasicValueEnum::IntValue(iv) => builder
-                            .build_int_to_ptr(iv, i8_ptr_type, "lambda_ctx_ptr")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("lambda ctx int_to_ptr", &e))?,
-                        _ => {
-                            return Err(crate::error::factory::llvm_build_failed(
-                                "lambda ctx",
-                                &"unsupported ctx parameter kind",
-                            ))
-                        }
-                    };
+                    let rv_type = self.runtime_int_type();
+                    let ctx_rv = self.coerce_value_to_type(ctx_param.into(), Some(rv_type.into()), builder)?;
+                    let get_capture = self.declare_rt_closure_get_capture(module);
 
                     for (capture_index, local_index) in meta.lambda_capture_local_indices.iter().enumerate() {
                         let Some(&alloca) = local_allocas.get(local_index) else {
                             continue;
                         };
-                        // Match the reserved kind word in compile_closure_create.
-                        let offset = 16 + (capture_index as u64 * 8);
-                        let offset_val = self.context_ref().i32_type().const_int(offset, false);
-                        let field_ptr = unsafe {
-                            builder
-                                .build_gep(i8_type, ctx_ptr, &[offset_val], "lambda_capture_ptr")
-                                .map_err(|e| crate::error::factory::llvm_build_failed("lambda capture gep", &e))?
-                        };
-                        let typed_ptr = builder
-                            .build_pointer_cast(
-                                field_ptr,
-                                self.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                                "lambda_capture_typed_ptr",
+                        let idx_rv = rv_type.const_int(capture_index as u64, false);
+                        let cap_call = builder
+                            .build_call(get_capture, &[ctx_rv.into(), idx_rv.into()], "lambda_capture")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_closure_get_capture", &e))?;
+                        let loaded = cap_call.try_as_basic_value().basic().ok_or_else(|| {
+                            crate::error::factory::llvm_build_failed(
+                                "rt_closure_get_capture",
+                                &"rt_closure_get_capture returned void",
                             )
-                            .map_err(|e| crate::error::factory::llvm_cast_failed("cast lambda capture ptr", &e))?;
-                        let loaded = builder
-                            .build_load(i64_type, typed_ptr, "lambda_capture")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("load lambda capture", &e))?;
+                        })?;
                         builder
                             .build_store(alloca, loaded)
                             .map_err(|e| crate::error::factory::llvm_build_failed("store lambda capture", &e))?;
@@ -1309,7 +1287,7 @@ impl LlvmBackend {
                 args,
                 ..
             } => {
-                self.compile_indirect_call(*dest, *callee, param_types, return_type, args, vreg_map, builder)?;
+                self.compile_indirect_call(*dest, *callee, param_types, return_type, args, vreg_map, builder, module)?;
             }
             MirInst::InterpCall {
                 dest, func_name, args, ..
@@ -3230,7 +3208,11 @@ impl LlvmBackend {
                     "all" => Some("rt_array_all"),
                     // LLVM-specific mappings (not in Cranelift, verified to exist)
                     "repeat" => Some("lib__common__string_core__str_repeat"),
-                    "map" => Some("rt_option_map"),
+                    // Route every `.map` through `rt_map` (matching `emitter.rs`):
+                    // `rt_map` dispatches array receivers to `rt_array_map` and
+                    // Option/Result receivers to `rt_option_map`. Using
+                    // `rt_option_map` here dropped Array.map into Option map.
+                    "map" => Some("rt_map"),
                     // Option/Result methods (LLVM-specific)
                     // `.unwrap()` must use the trap helper, NOT the raw payload reader.
                     // `rt_enum_payload` returns NIL for any receiver that is not a boxed
@@ -4028,12 +4010,19 @@ impl LlvmBackend {
                         .map(|s| s.as_str())
                         .unwrap_or(global_name.as_str());
                     let resolved_dotted = resolved_name.replace("_dot_", ".");
-                    let func = module
+                    let boxed_fn = module
+                        .get_function(&crate::codegen::boxed_entry_name(global_name))
+                        .or_else(|| module.get_function(&crate::codegen::boxed_entry_name(resolved_name)))
+                        .or_else(|| module.get_function(&crate::codegen::boxed_entry_name(&resolved_dotted)));
+
+                    if let Some(boxed_fn) = boxed_fn {
+                        let closure_rv = self.build_zero_capture_boxed_closure(boxed_fn, builder, module)?;
+                        vreg_map.insert(*dest, closure_rv);
+                    } else if let Some(func) = module
                         .get_function(resolved_name)
                         .or_else(|| module.get_function(&resolved_dotted))
-                        .or_else(|| module.get_function(global_name));
-
-                    if let Some(func) = func {
+                        .or_else(|| module.get_function(global_name))
+                    {
                         let alloc_fn_type = i64_type.fn_type(&[i64_type.into()], false);
                         let alloc_fn = module
                             .get_function("rt_alloc")
