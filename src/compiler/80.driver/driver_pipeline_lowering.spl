@@ -8,6 +8,7 @@ use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value, warning_phase_env_var_name}
 use compiler.hir.hir.*
 use compiler.mir.mir.*
+use compiler.mir._MirLowering.provider_metadata.{mir_no_mangle_leaf_claims_reset}
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.common.build_phase_accounting.{build_phase_record_failed_module_v1}
 use compiler.common.driver_core_modes.{driver_output_format_is_both}
@@ -399,6 +400,14 @@ fn _mir_advisory_code(message: text) -> text:
         return "E-MIR-ADVISORY"
     message.substring(0, colon)
 
+fn _append_mir_advisories(dest: [MirError], src: [MirError]) -> [MirError]:
+    var out = dest
+    var i = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
 fn driver_collect_mir_advisories(ctx: CompileContext, advisories: [MirError]):
     """Report MIR lowering advisories (`MirLowering.mir_advisories`:
     E-MIR-TYPE-Error, E-MIR-MATCH-GUARD at their default level) as driver
@@ -739,6 +748,7 @@ impl CompilerDriver:
         val collection_target = driver_collection_target_options(target_context, self.ctx.options)
         # A foreign borrowed lease cannot own compiler context mutations.
         if transient_array_scope_state_v1() != 0: return false
+        mir_no_mangle_leaf_claims_reset()
         log_phase("aot:mir_setup:warm_names:start")
         log_build_progress("mir", "modules", 0, self.ctx.hir_modules.len(),
             "mir_setup:warm_names", 4, 6, 0, 0, "running")
@@ -1720,6 +1730,11 @@ impl CompilerDriver:
                             else:
                                 solo_names = solo_names.push(so_module)
                         mir_walk_order = native_mir_fork_front_load_v1(solo_order, solo_names, solo_rows)
+            if direct_lowering.errors.len() > 0:
+                _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
+                direct_lowering.errors = []
+            var collected_mir_advisories: [MirError] = direct_lowering.mir_advisories
+            direct_lowering.mir_advisories = []
             val go_to_end_active = go_to_end_enabled_v1()
             self.go_to_end.mir_scan_complete = false
             val mir_progress_started_ms = time_now_monotonic_ms()
@@ -1868,6 +1883,10 @@ impl CompilerDriver:
                             log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
                     if ice_message != "":
                         if not _driver_mir_ice_continue(self.ctx, name_direct, src_direct.path, ice_message, ice_arena_aborted):
+                            if direct_lowering.errors.len() > 0:
+                                _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
+                                direct_lowering.errors = []
+                            direct_lowering.mir_advisories = []
                             mir_failed_modules = build_phase_record_failed_module_v1(mir_failed_modules, true)
                             log_build_progress("mir", "modules", direct_pos + 1,
                                 mir_source_indices.len(), name_direct, 4, 6, mir_failed_modules, 0, "running")
@@ -1900,6 +1919,15 @@ impl CompilerDriver:
                     self.ctx.mir_modules[name_direct] = mir_direct
                     if name_direct == "app.cli.bootstrap_main":
                         self.ctx.set_bootstrap_entry_mir(name_direct, mir_direct)
+                # Drain per-module diagnostics off direct_lowering so each module's
+                # lower_module_transient_scoped promotion does not re-walk and retain
+                # prior modules' errors/advisories across the entire closure.
+                if direct_lowering.errors.len() > 0:
+                    _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
+                    direct_lowering.errors = []
+                if direct_lowering.mir_advisories.len() > 0:
+                    collected_mir_advisories = _append_mir_advisories(collected_mir_advisories, direct_lowering.mir_advisories)
+                    direct_lowering.mir_advisories = []
                 direct_pos = direct_pos + 1
                 mir_failed_modules = build_phase_record_failed_module_v1(mir_failed_modules,
                     module_mir_failed)
@@ -1927,10 +1955,15 @@ impl CompilerDriver:
             # go-to-end: the whole schedule was attempted (no early return).
             self.go_to_end.mir_scan_complete = true
             log_phase("aot:mir_diagnostics:errors:start")
-            _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
+            if direct_lowering.errors.len() > 0:
+                _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
+                direct_lowering.errors = []
             log_phase("aot:mir_diagnostics:errors:done")
             log_phase("aot:mir_diagnostics:advisories:start")
-            driver_collect_mir_advisories(self.ctx, direct_lowering.mir_advisories)
+            if direct_lowering.mir_advisories.len() > 0:
+                collected_mir_advisories = _append_mir_advisories(collected_mir_advisories, direct_lowering.mir_advisories)
+                direct_lowering.mir_advisories = []
+            driver_collect_mir_advisories(self.ctx, collected_mir_advisories)
             log_phase("aot:mir_diagnostics:advisories:done")
             if self.native_staged_codegen.failed_batches.len() > 0:
                 val staged_failed = self.native_staged_codegen.failed_batches

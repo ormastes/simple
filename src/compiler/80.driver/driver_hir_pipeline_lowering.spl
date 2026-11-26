@@ -1771,6 +1771,8 @@ impl CompilerDriver:
         # defect that split has_errors() from error_message_at() in
         # driver_orchestration.spl.
         if (self.ctx.error_count_value > 0):
+            self.release_streaming_surface_custody_v1()
+            self.release_hir_validation_transports_v1()
             return false
         if file_worker_unit_interface_hir_armed_v1():
             print "[file-worker] hir-residency loaded {mir_shard_hir_residency_counters_v1()} bodies_dropped={hir_cache_interface_only_bodies_dropped_v1()}"
@@ -1779,7 +1781,10 @@ impl CompilerDriver:
         log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()} array={self.ctx.validation_module_array.len()}")
         var validation_error_count: i64 = 0
         driver_admit_nogc_param_effects_v1(self.ctx, surfaces.surfaces)
-        if self.ctx.error_count_value > 0: return false
+        if self.ctx.error_count_value > 0:
+            self.release_streaming_surface_custody_v1()
+            self.release_hir_validation_transports_v1()
+            return false
         for validation_error in driver_validate_value_struct_layout_declarations_v1(
                 validation_module_keys, validation_module_values,
                 self.ctx.hir_modules, self.ctx.validation_module_array,
@@ -1792,10 +1797,12 @@ impl CompilerDriver:
         log_phase("phase3:hir:validate:done errors={validation_error_count}")
         self.release_hir_validation_transports_v1()
         if (self.ctx.error_count_value > 0):
+            self.release_streaming_surface_custody_v1()
             return false
         log_phase("phase3:hir:cold_receipts:start")
         if not self.capture_cold_hir_typed_receipts_v1():
             log_phase("phase3:hir:cold_receipts:failed")
+            self.release_streaming_surface_custody_v1()
             return false
         log_phase("phase3:hir:cold_receipts:done")
         ast_reset()
@@ -1829,13 +1836,7 @@ impl CompilerDriver:
         # IMPLIDX lifetime: the lowerers keep impl_index_* positions into the
         # surface arrays released just below. Invalidate them with the surfaces.
         lowering.invalidate_impl_index()
-        for owner_word in _driver_source_body_lowerers_v1.keys():
-            val owner: DriverHirSourceLoweringOwnerV1 = _driver_source_body_lowerers_v1[owner_word]
-            owner.lowering.invalidate_impl_index()
-        if self.identity_id != 0 and _driver_source_body_lowerers_v1.has(self.identity_id):
-            _driver_source_body_lowerers_v1.remove(self.identity_id)
-        if _driver_source_body_lowerers_v1.len() == 0:
-            _driver_source_body_custody_v1 = {}
+        self.release_streaming_surface_custody_v1()
         self.ctx.module_surfaces = None
         # MIR setup runs after this release; keep the flat call-origin rows
         # (PM3 unit lane, driver_surface_call_origin_rows_v1.spl).
@@ -1845,6 +1846,15 @@ impl CompilerDriver:
         self.streaming_module_surfaces_owner = ModuleSurfacesByName.empty()
         self.streaming_surface_owner_ready = false
         true
+
+    me release_streaming_surface_custody_v1():
+        for owner_word in _driver_source_body_lowerers_v1.keys():
+            val owner: DriverHirSourceLoweringOwnerV1 = _driver_source_body_lowerers_v1[owner_word]
+            owner.lowering.invalidate_impl_index()
+        if self.identity_id != 0 and _driver_source_body_lowerers_v1.has(self.identity_id):
+            _driver_source_body_lowerers_v1.remove(self.identity_id)
+        if _driver_source_body_lowerers_v1.len() == 0:
+            _driver_source_body_custody_v1 = {}
 
     me release_hir_validation_transports_v1():
         self.ctx.validation_module_array = []
@@ -1886,6 +1896,11 @@ impl CompilerDriver:
         val streaming_config_gate = driver_streaming_surface_enabled(self.ctx)
         if streaming_ready_flag or streaming_config_gate:
             val streamed_ok = self.lower_and_check_streaming_surfaces_impl()
+            if not streamed_ok:
+                self.release_streaming_surface_custody_v1()
+                self.release_hir_validation_transports_v1()
+                self.streaming_module_surfaces_owner = ModuleSurfacesByName.empty()
+                self.streaming_surface_owner_ready = false
             return streamed_ok
         self.ctx.aop_source_epoch_v2 = join_point_attr_begin_epoch_v2()
         self.ctx.aop_snapshot_captured_v2 = false
@@ -2911,6 +2926,14 @@ impl CompilerDriver:
                 ctx.hir_module_count_value = ctx.hir_module_count_value + 1
             ctx.hir_modules[name] = hir_module
         (ctx, not ctx.has_errors())
+
+pub fn driver_hir_source_body_custody_reset_v1():
+    for owner_word in _driver_source_body_lowerers_v1.keys():
+        val owner: DriverHirSourceLoweringOwnerV1 = _driver_source_body_lowerers_v1[owner_word]
+        owner.lowering.invalidate_impl_index()
+    _driver_source_body_lowerers_v1 = {}
+    _driver_source_body_custody_v1 = {}
+
 use compiler.common.diagnostics.span.{Span}
-export DriverHirShardTransactionReceiptV1
+export DriverHirShardTransactionReceiptV1, driver_hir_source_body_custody_reset_v1
 

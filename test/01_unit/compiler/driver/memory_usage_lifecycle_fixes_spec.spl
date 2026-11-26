@@ -1,0 +1,93 @@
+# Regression tests for compiler driver, lowering, and backend memory lifecycle fixes.
+
+use std.spec.{describe, it, expect}
+use compiler.driver.session.build_session.{build_session_end_reset_globals_v1}
+use compiler.hir.exhaustiveness.value_match_coverage.{
+    vm_record_desugar_verdict, vm_desugar_verdict_at, vm_desugar_verdicts_reset}
+use compiler.mir._MirLowering.provider_metadata.{
+    mir_no_mangle_claim_leaf, mir_no_mangle_leaf_claims_reset}
+use compiler.driver.cache.phase_compatibility_admission.{
+    driver_stage_phase2_frontend_frozen_raw_v1,
+    driver_reset_phase2_frontend_frozen_raw_v1}
+use compiler.driver.driver_hir_pipeline_lowering.{driver_hir_source_body_custody_reset_v1}
+use compiler.backend._MirToLlvm.asm_constraints_helpers.{
+    llvm_bootstrap_string_globals_reset, llvm_bootstrap_string_globals_add,
+    llvm_bootstrap_string_globals_text, llvm_bootstrap_string_globals_retain_for_scope}
+use compiler.backend.llvm_backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir.mir_verify.{mir_verify_type_text}
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+
+fn _empty_hir(name: text) -> HirModule:
+    HirModule(name: name, path: "{name}.spl", imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+describe "compiler memory lifecycle and global reset fixes":
+    it "resets VM_DESUGAR_VERDICTS and _mir_no_mangle_leaf_owners at session end":
+        build_session_end_reset_globals_v1()
+        val sp = Span(start: 0, end: 1, line: 42, col: 7, file: "mem_probe.spl", length: 1)
+        vm_record_desugar_verdict(sp, "text|\"missing\"")
+        expect(vm_desugar_verdict_at(sp)).to_equal("text|\"missing\"")
+
+        expect(mir_no_mangle_claim_leaf("probe_leaf_sym", "mod.first")).to_equal("")
+        val collision = mir_no_mangle_claim_leaf("probe_leaf_sym", "mod.second")
+        expect(collision).to_contain("--no-mangle symbol collision")
+
+        build_session_end_reset_globals_v1()
+        expect(vm_desugar_verdict_at(sp)).to_equal("")
+        expect(mir_no_mangle_claim_leaf("probe_leaf_sym", "mod.second")).to_equal("")
+        mir_no_mangle_leaf_claims_reset()
+        vm_desugar_verdicts_reset()
+
+    it "clears per-module vm_stmt_match_keys and vm_reported across lower_module_transient_scoped":
+        val hir = _empty_hir("mem_probe_mod")
+        var lw = MirLowering.new(hir.symbols)
+        lw.vm_stmt_match_keys["prev.spl:12:3"] = true
+        lw.vm_reported["prev.spl:12:3"] = true
+        expect(lw.vm_stmt_match_keys.len()).to_equal(1)
+        expect(lw.vm_reported.len()).to_equal(1)
+
+        val lowered = lw.lower_module_transient_scoped(hir, [], false)
+        expect(lowered.is_ok()).to_equal(true)
+        expect(lw.vm_stmt_match_keys.len()).to_equal(0)
+        expect(lw.vm_reported.len()).to_equal(0)
+
+    it "resets LLVM bootstrap string global cache after module translation and explicit reset":
+        llvm_bootstrap_string_globals_reset()
+        llvm_bootstrap_string_globals_add("@.str.mem = private constant [2 x i8] c\"a\\00\"")
+        expect(llvm_bootstrap_string_globals_text()).to_contain("@.str.mem")
+        llvm_bootstrap_string_globals_reset()
+        expect(llvm_bootstrap_string_globals_text()).to_equal("")
+        expect(llvm_bootstrap_string_globals_retain_for_scope()).to_equal(true)
+
+        val mir = MirModule(
+            name: "mem_llvm_probe",
+            functions: {},
+            statics: {},
+            constants: {},
+            types: {},
+            external_layout_traces: [],
+            collection_plan_explanations: [],
+            enum_semantic_declarations: [],
+            attr_sites: [],
+            initializer_plan_v1: None,
+            xray_ring_wrap: false
+        )
+        var translator = MirToLlvm.create("mem_llvm_probe", CodegenTarget.Host, None)
+        val ir = translator.translate_module(mir)
+        expect(ir.len()).to_be_greater_than(0)
+        expect(llvm_bootstrap_string_globals_text()).to_equal("")
+
+    it "resets staged phase2 frontend raw map and HIR custody safely":
+        expect(driver_stage_phase2_frontend_frozen_raw_v1({"a.spl": "1|a"})).to_equal(true)
+        driver_reset_phase2_frontend_frozen_raw_v1()
+        driver_hir_source_body_custody_reset_v1()
+        expect(mir_verify_type_text(MirType(kind: MirTypeKind.Tuple([MirType.i64(), MirType.bool()])))).to_equal("(i64,bool)")
