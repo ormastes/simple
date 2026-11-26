@@ -1,0 +1,55 @@
+"""
+# @req REQ-SSPEC-OS
+# @cover src/os/services/web/web_service.spl
+#
+# Host unit specification for BF-9 Bug #6:
+#   simpleos_simple_web_decode_string_fault_storm_2026-07-12
+#
+# Verifies web_service_dispatch routing, HTML XSS escaping, and safe multi-byte
+# UTF-8 request path handling without string decode faults.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.services.web.web_service.{
+    WebService, web_service_new, web_service_dispatch, web_demo_handler
+}
+use std.http_server.{HttpRequestData, default_location_config}
+
+fn _make_req(method: text, path: text) -> HttpRequestData:
+    HttpRequestData(
+        method: method,
+        path: path,
+        query: "",
+        version: "HTTP/1.1",
+        headers: [],
+        body: "",
+        params: {},
+        peer_addr: "127.0.0.1"
+    )
+
+describe "SimpleOS web service UTF-8 and HTML escape contract":
+    it "serves root demo page and rejects unknown routes cleanly":
+        step("dispatch GET / and GET /missing across WebService")
+        val svc = web_service_new(8080)
+        val ok_resp = web_service_dispatch(svc, _make_req("GET", "/"))
+        expect(ok_resp.status).to_equal(200)
+        expect(ok_resp.body).to_contain("SimpleOS Web")
+        val miss_resp = web_service_dispatch(svc, _make_req("GET", "/nonexistent"))
+        expect(miss_resp.status).to_equal(404)
+
+    it "escapes HTML special characters and preserves UTF-8 request paths safely":
+        step("verify XSS characters and multi-byte UTF-8 text pass html_escape_core cleanly")
+        val xss_resp = web_demo_handler(_make_req("GET", "/<script>\"x\"&'y'</script>"), default_location_config())
+        expect(xss_resp.status).to_equal(200)
+        expect(xss_resp.body).to_contain("&lt;script&gt;")
+        expect(xss_resp.body).to_contain("&amp;")
+        expect(xss_resp.body.contains("<script>")).to_equal(false)
+
+        val utf8_resp = web_demo_handler(_make_req("GET", "/café/모두"), default_location_config())
+        expect(utf8_resp.status).to_equal(200)
+        expect(utf8_resp.body).to_contain("café")
+
+        val svc = web_service_new(8080)
+        val utf8_miss = web_service_dispatch(svc, _make_req("GET", "/café"))
+        expect(utf8_miss.status).to_equal(404)
