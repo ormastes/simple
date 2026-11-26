@@ -63,3 +63,9 @@ Run the shard under lldb with the fresh dir, get the faulting frame, and
 nil-check the cold cache-index path. Add a smoke: fresh-dir parse of a
 2-file closure must not crash (regression test belongs next to the existing
 hir-cache store tests).
+
+
+## Analysis & Regression Spec Update (2026-11-26)
+
+- **Root cause linkage:** On cold caches (every file misses `.spab` and parses fresh in a per-file transient scope), `project_public_summary_v1` (`src/compiler/10.frontend/cache_artifact/public_summary_projector.spl`) previously re-parsed `_tldr.spl` directly onto reclaimed flat pools (`stage2_parse_shard_segv_named_type_find_2026-11-13`, fixed in `2d84d415db4` via `flat_pool_state_take`/`flat_pool_state_install`), and `frontend_parse_cache_scope` could leave `_fe_cache_scope_memo` unpromoted across transient scopes (fixed in `a4ec15f90dd` in `src/compiler/10.frontend/retained_parse_owners_v1.spl` & `frontend_parse_cache.spl`). Warm default runs (`26 hits, 2 misses` across 2 shards) avoided the multi-file reclaimed-pool collision.
+- **Verification:** Added `test/01_unit/compiler/driver/parse_shard_cold_cache_isolation_spec.spl` pinning multi-module public-summary isolation and fresh empty `SIMPLE_HIR_CACHE_DIR` / `SIMPLE_FRONTEND_CACHE_DIR` decoupling. Native macOS Stage 2 confirmation remains pending on a macOS host.

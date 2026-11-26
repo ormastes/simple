@@ -1,7 +1,6 @@
 use compiler.driver.cache.initializer_link_capture_v1.{native_link_with_initializer_capture_v1}
 use compiler.driver.cache.initializer_object_capture_v1.{driver_capture_initializer_object_v1}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_cap_bytes}
-use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_lease_begin, native_cache_lease_end, native_cache_sweep_with_lease, native_cache_build_root}
+use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_lease_begin, native_cache_lease_end, native_cache_build_root}
 use std.common.cache_host_authority_v1.{CacheRootAuthorityV1, CacheObjectAuthorityV1, CacheTempAuthorityV1,
     cache_host_open_root_v1, cache_host_root_valid_v1, cache_host_open_read_v1,
     cache_host_object_valid_v1, cache_host_size_v1, cache_host_pread_receipt_v1,
@@ -106,7 +105,7 @@ use compiler.driver.smf.runtime_std_package_membership_v1.{
 use compiler.driver.cache.runtime_std_membership_policy_v1.{
     RuntimeStdMembershipPolicyOutputV1}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
-use compiler.driver.driver_build.native_mir_shard.{native_cache_scope_eviction_role_allowed_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_cache_scope_eviction_role_allowed_v1, native_cache_scope_midbuild_sweep_v1}
 use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_link_run_v1,
     go_to_end_trial_manifest_block_v1, GoToEndHostedTrialLinkerV1}
 use compiler.driver.driver_build.native_full_inventory_sources.{
@@ -2641,6 +2640,9 @@ impl CompilerDriver:
         # the same build had published into and the link still needed. The
         # current scope stays live without the pass: the phase and ownership
         # markers below are rewritten on every call.
+        # Default floor is max(6, mir_shard_count + 2) when SIMPLE_MIR_SHARD_COUNT
+        # is set (preserving explicit SIMPLE_NATIVE_CACHE_SCOPES_KEEP), and active
+        # shard ledger scopes are marked live before sweeping.
         if native_cache_scope_eviction_role_allowed_v1(
                 env_get_nullable("SIMPLE_MIR_SHARD") ?? "",
                 env_get_nullable("SIMPLE_HIR_SHARD") ?? "",
@@ -2649,8 +2651,13 @@ impl CompilerDriver:
                 env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "",
                 env_get_nullable("SIMPLE_NATIVE_BUILD_WORKER") ?? "") and
                 _native_cache_scope_retention_first_call_v1():
-            val _scopes_evicted = native_cache_sweep_with_lease(lease, base_cache_scope_name,
-                disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6))
+            val _scopes_evicted = native_cache_scope_midbuild_sweep_v1(
+                lease,
+                base_cache_scope_name,
+                env_get_nullable("SIMPLE_HIR_CACHE_DIR") ?? "",
+                env_get_nullable("SIMPLE_MIR_SHARD_QUEUE") ?? "",
+                env_get_nullable("SIMPLE_MIR_SHARD_LINK") ?? "",
+                env_get_nullable("SIMPLE_MIR_SHARD_COUNT") ?? "")
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")

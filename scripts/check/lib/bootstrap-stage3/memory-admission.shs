@@ -111,6 +111,69 @@ bootstrap_stage3_memory_linux_actual_kind() {
 # Darwin cannot enforce the virtual-memory limit with ulimit -v. Keep its RSS
 # watchdog at or below both the validated Stage 3 process cap and the existing
 # process-tree cap. Reject an invalid tree cap instead of masking it with min().
+bootstrap_stage3_memory_darwin_default_cap_kib() {
+    bootstrap_stage3_darwin_floor_kib=11534336
+    bootstrap_stage3_darwin_ceil_kib=20971520
+    bootstrap_stage3_darwin_bytes=${1:-}
+    if [ -z "$bootstrap_stage3_darwin_bytes" ]; then
+        bootstrap_stage3_darwin_bytes=$(sysctl -n hw.memsize 2>/dev/null || printf '0\n')
+    fi
+    if bootstrap_stage3_memory_is_uint "$bootstrap_stage3_darwin_bytes" &&
+            [ "$bootstrap_stage3_darwin_bytes" -gt 0 ]; then
+        bootstrap_stage3_darwin_scaled_kib=$((bootstrap_stage3_darwin_bytes / 1024 / 3))
+        if [ "$bootstrap_stage3_darwin_scaled_kib" -lt "$bootstrap_stage3_darwin_floor_kib" ]; then
+            bootstrap_stage3_darwin_scaled_kib=$bootstrap_stage3_darwin_floor_kib
+        elif [ "$bootstrap_stage3_darwin_scaled_kib" -gt "$bootstrap_stage3_darwin_ceil_kib" ]; then
+            bootstrap_stage3_darwin_scaled_kib=$bootstrap_stage3_darwin_ceil_kib
+        fi
+        printf '%s\n' "$bootstrap_stage3_darwin_scaled_kib"
+        return 0
+    fi
+    printf '%s\n' "$bootstrap_stage3_darwin_floor_kib"
+}
+
+bootstrap_stage3_memory_posix_args_kind() {
+    [ "$#" -eq 1 ] || { printf 'none\n'; return 0; }
+    case "$1" in
+        *qemu-system-*|*native-build*|*bootstrap-from-scratch.sh*|*missing-build-log.json*) ;;
+        *) printf 'none\n'; return 0 ;;
+    esac
+    printf '%s\n' "$1" | awk '
+        {
+            n = split($0, tok, /[ \t]+/)
+            saw_dash_c = 0
+            for (i = 1; i <= n; i++) {
+                t = tok[i]
+                if (t == "") continue
+                if (saw_dash_c) break
+                if (t ~ /^-[A-Za-z]*c[A-Za-z]*$/) {
+                    saw_dash_c = 1
+                    continue
+                }
+                if (t ~ /qemu-system-/) {
+                    print "qemu"
+                    exit
+                }
+                if (t ~ /(^|\/)scripts\/bootstrap\/bootstrap-from-scratch\.sh$/) {
+                    print "bootstrap"
+                    exit
+                }
+                if (t ~ /(^|\/)simple$/) {
+                    if (i + 2 <= n && tok[i + 1] == "replay" && tok[i + 2] == "missing-build-log.json") {
+                        print "replay-chain"
+                        exit
+                    }
+                    if (i + 1 <= n && tok[i + 1] == "native-build") {
+                        print "native-build"
+                        exit
+                    }
+                }
+            }
+            print "none"
+        }
+    '
+}
+
 bootstrap_stage3_memory_darwin_rss_cap_kib() {
     [ "$#" -eq 2 ] || return 1
     bootstrap_stage3_memory_is_uint "$1" && [ "$1" -gt 0 ] || return 1
@@ -670,20 +733,17 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
                 rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
             [ "$bootstrap_stage3_memory_kind" != none ] || continue
         else
+            case "$bootstrap_stage3_memory_cmd" in
+                *qemu-system-*|*native-build*|*bootstrap-from-scratch.sh*|*missing-build-log.json*) ;;
+                *) continue ;;
+            esac
             case "$bootstrap_stage3_memory_ancestors" in
                 *"|$bootstrap_stage3_memory_pid|"*) continue ;;
             esac
-            case "$bootstrap_stage3_memory_cmd" in
-            *qemu-system-*)
-                bootstrap_stage3_memory_kind=qemu ;;
-            *'/simple replay missing-build-log.json'*)
-                bootstrap_stage3_memory_kind=replay-chain ;;
-            *scripts/bootstrap/bootstrap-from-scratch.sh*)
-                bootstrap_stage3_memory_kind=bootstrap ;;
-            *'/simple native-build '*|*'/simple native-build')
-                bootstrap_stage3_memory_kind=native-build ;;
-            *) continue ;;
-            esac
+            bootstrap_stage3_memory_kind=$(bootstrap_stage3_memory_posix_args_kind \
+                "$bootstrap_stage3_memory_cmd") || {
+                rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+            [ "$bootstrap_stage3_memory_kind" != none ] || continue
         fi
         case "$bootstrap_stage3_memory_kind" in
             qemu) bootstrap_stage3_memory_qemu_count=$((bootstrap_stage3_memory_qemu_count + 1)) ;;

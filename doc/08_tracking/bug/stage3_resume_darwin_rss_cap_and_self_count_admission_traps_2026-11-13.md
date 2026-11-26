@@ -70,3 +70,10 @@ script AND whose ppid chain does not include the scanning process.
   (self-wrapper counted as `kind=bootstrap`).
 - Both traps burned ~1 h of lane time on 2026-11-13 before the resume
   proceeded with the workarounds above.
+
+
+## Resolution Update (2026-11-26)
+
+- **Trap 1 (Darwin RSS cap):** `bootstrap_stage3_memory_darwin_default_cap_kib` in `scripts/check/lib/bootstrap-stage3/memory-admission.shs` now computes `max(11534336, min(20971520, host_kib / 3))` from `sysctl -n hw.memsize` (falling back to `11534336` when unavailable), and `scripts/bootstrap/resume-stage3-from-admitted.sh` uses it when `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` is unset.
+- **Trap 2 (non-Linux wrapper self-count):** Added `bootstrap_stage3_memory_posix_args_kind` in `scripts/check/lib/bootstrap-stage3/memory-admission.shs` so `-c` wrapper strings containing `scripts/bootstrap/bootstrap-from-scratch.sh` are ignored on Darwin/BSD just like Linux `/proc`, alongside ancestor PID exclusion (`bootstrap_stage3_memory_ancestors`).
+- **Tests:** Updated `test/01_unit/scripts/bootstrap_stage3_darwin_rss_cap_contract_test.shs` (replacing stale `6835937`/`6835938` assertions and covering host scaling + wrapper filtering) and extended `test/01_unit/compiler/driver/bootstrap_stage3_resume_admission_prevention_spec.spl`.

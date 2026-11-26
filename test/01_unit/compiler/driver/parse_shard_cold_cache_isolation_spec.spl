@@ -1,0 +1,97 @@
+"""
+Regression coverage for parse-shard cold HIR/frontend cache isolation.
+Bugs:
+  - doc/08_tracking/bug/native_build_fresh_hir_cache_dir_parse_shard_segfault_2026-11-12.md
+  - doc/08_tracking/bug/stage2_parse_shard_segv_named_type_find_2026-11-13.md
+"""
+# @cover src/compiler/10.frontend/cache_artifact/public_summary_projector.spl
+# @cover src/compiler/80.driver/driver_parse_shard_entry.spl
+# @req REQ-SSPEC-COMPILER
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{env_get, env_set, env_unset, dir_create_all, dir_remove_all, getpid}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1}
+use compiler.frontend.cache_artifact.*
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.types.{reset_all_pools, named_type_find, unit_decl_pool_reset}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_dir}
+use compiler.driver.driver_hir_cache.{hir_cache_dir, hir_cache_has}
+
+fn _make_decl_pair(symbol: text, bytes: text) -> [FrozenPublicFactV1]:
+    [FrozenPublicFactV1(
+        fact_kind: FrontendPublicFactKindV1.ForwardDeclaration,
+        stable_symbol_id: symbol,
+        canonical_bytes: bytes,
+        is_public: true,
+        contains_executable_body: false,
+        contains_private_source: false,
+        dependency_symbol_ids: [],
+    ),
+     FrozenPublicFactV1(
+        fact_kind: FrontendPublicFactKindV1.Declaration,
+        stable_symbol_id: symbol,
+        canonical_bytes: bytes,
+        is_public: true,
+        contains_executable_body: false,
+        contains_private_source: false,
+        dependency_symbol_ids: [],
+    )]
+
+fn _summary_req(path: text, facts: [FrozenPublicFactV1]) -> PublicSummaryProjectionInputV1:
+    PublicSummaryProjectionInputV1(
+        snapshot_id: sha256_text("snap:" + path),
+        logical_path: LogicalSourcePathV1(
+            repository_namespace_digest: sha256_text("repo"),
+            module_relative_utf8: path,
+            path_semantics: PathSemanticsV1.CaseSensitiveNfc,
+        ),
+        source_blob_digest: sha256_text("src:" + path),
+        compiler_owner_digest: sha256_text("comp"),
+        grammar_digest: sha256_text("grammar"),
+        facts: facts,
+    )
+
+describe "parse-shard cold cache isolation":
+    it "isolates repeated multi-module summary re-parses cleanly without leaking named types":
+        step("Parse two sequential modules and run isolated public-summary validation")
+        reset_all_pools()
+        unit_decl_pool_reset()
+        expect(parse_module_silent_checked("struct ColdOne:\n    x: i64\n", "pkg/cold_one.spl")).to_equal(false)
+        val first_idx = named_type_find("ColdOne")
+        expect(first_idx >= 0).to_equal(true)
+        val res1 = project_public_summary_v1(_summary_req("pkg/cold_one.spl",
+            _make_decl_pair("sym:p1", "pub extern fn p1(a: SummaryOnlyColdOne) -> SummaryOnlyColdOne")))
+        expect(res1.is_ok()).to_equal(true)
+        expect(named_type_find("SummaryOnlyColdOne")).to_equal(-1)
+        expect(named_type_find("ColdOne")).to_equal(first_idx)
+
+        reset_all_pools()
+        expect(parse_module_silent_checked("struct ColdTwo:\n    y: text\n", "pkg/cold_two.spl")).to_equal(false)
+        val second_idx = named_type_find("ColdTwo")
+        expect(second_idx >= 0).to_equal(true)
+        val res2 = project_public_summary_v1(_summary_req("pkg/cold_two.spl",
+            _make_decl_pair("sym:p2", "pub extern fn p2(b: SummaryOnlyColdTwo) -> SummaryOnlyColdTwo")))
+        expect(res2.is_ok()).to_equal(true)
+        expect(named_type_find("SummaryOnlyColdTwo")).to_equal(-1)
+        expect(named_type_find("ColdTwo")).to_equal(second_idx)
+        reset_all_pools()
+
+    it "keeps fresh empty SIMPLE_HIR_CACHE_DIR decoupled from frontend parse cache scope":
+        step("Bind fresh empty HIR and frontend cache directories")
+        val tmp_base = "build/test_tmp/parse_shard_cold_{getpid()}"
+        val hir_dir = tmp_base + "/hir"
+        val fe_dir = tmp_base + "/frontend"
+        val _clean = dir_remove_all(tmp_base)
+        expect(dir_create_all(hir_dir)).to_equal(true)
+        expect(dir_create_all(fe_dir)).to_equal(true)
+        val old_hir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        val old_fe = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+        val _s1 = env_set("SIMPLE_HIR_CACHE_DIR", hir_dir)
+        val _s2 = env_set("SIMPLE_FRONTEND_CACHE_DIR", fe_dir)
+        expect(hir_cache_dir()).to_equal(hir_dir)
+        expect(frontend_parse_cache_dir()).to_equal(fe_dir)
+        expect(hir_cache_has("00000000000000000000000000000000")).to_equal(false)
+        val _r1 = if old_hir == "": env_unset("SIMPLE_HIR_CACHE_DIR") else: env_set("SIMPLE_HIR_CACHE_DIR", old_hir)
+        val _r2 = if old_fe == "": env_unset("SIMPLE_FRONTEND_CACHE_DIR") else: env_set("SIMPLE_FRONTEND_CACHE_DIR", old_fe)
+        val _rm = dir_remove_all(tmp_base)

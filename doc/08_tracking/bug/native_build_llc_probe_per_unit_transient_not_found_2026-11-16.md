@@ -82,3 +82,9 @@ occurrences through HIR+MIR; codegen confirmation is pending.
 - Ratchet check (`scripts/check/check-nil-outside-unsafe-added.shs --rank`): `0` violations in both `src/compiler/95.interp/interpreter/llvm/tools.spl` and `test/01_unit/compiler/interp/llvm_tool_probe_transient_cache_spec.spl`.
 - Diff check (`git diff --check`): clean (exit 0).
 - Full native-build verification under Phase 2 compiler load remains pending.
+
+
+## Diagnostic Surfacing & Verification Update (2026-11-26)
+
+- **Backend diagnostics:** Added `llvm_llc_not_found_message_v1` in `src/compiler/70.backend/backend/llvm_backend_tools.spl` and wired `last_tool_probe_diagnostic()` into all three `"llc not found"` error returns (`compile_ir_to_object`, `compile_ir_to_object_path`, `compile_ir_to_wasm`), so callers see transient `--version` probe diagnostics instead of bare `"llc not found"`.
+- **Tests:** Verified `test/01_unit/compiler/interp/llvm_tool_probe_transient_cache_spec.spl` (13/13) and added `test/01_unit/compiler/backend/llvm_llc_probe_diagnostic_spec.spl`.

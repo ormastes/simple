@@ -201,3 +201,10 @@ Limits of the follow-up:
 - `test/01_unit/lib/nogc_sync_mut/io/disk_bound_spec.spl`
   ("a scope with a fresh liveness marker is not evictable", "the idle window
   is inclusive at its edge and never covers a future time")
+
+
+## Follow-up Fix (2026-11-26, mid-build shard scope eviction)
+
+- **Root cause:** `driver_aot_native_output.spl` (`_compile_to_native_with_backend_session`) called `native_cache_sweep_with_lease` with hardcoded fallback `6` (`disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6)`), and did not mark active/in-progress shard ledger scopes live before sweeping. Under an 8-shard native build (`SIMPLE_MIR_SHARD_COUNT=8`), Shard `0/8` & `1/8` object scope directories could be swept before Shard `7/8` finished.
+- **Fix:** Added `native_cache_scopes_keep_default_v1` (`max(6, mir_shard_count + 2)` when `SIMPLE_MIR_SHARD_COUNT` is set, preserving explicit `SIMPLE_NATIVE_CACHE_SCOPES_KEEP`), `native_mir_shard_active_ledger_paths_v1`, `native_cache_protect_active_shard_ledgers_v1`, and `native_cache_scope_midbuild_sweep_v1` in `src/compiler/80.driver/driver_build/native_mir_shard.spl`, wired into `src/compiler/80.driver/driver_aot_native_output.spl`. (`src/app/cli/native_build_main.spl` lines `617, 2625` still use `6` and were left untouched due to concurrent `WA-P9` ownership.)
+- **Tests:** Extended `test/01_unit/compiler/driver/native_cache_scope_live_build_eviction_spec.spl`.
