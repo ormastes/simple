@@ -13,7 +13,7 @@ use app.bug.closure_gate.{BugIdV1, SnapshotDigestV1, TestCaseIdV1, ClosureRation
 use app.test_runner_new.test_query_cli.{TestDbFilePath}
 use std.common.traceability.test_query.{TestRunId}
 use app.bug.workaround_autoretire.{AutoRetireVerdictV1}
-use app.bug.workaround_autoretire_cli.{workaround_auto_retire_print_v1}
+use app.bug.workaround_autoretire_cli.{workaround_auto_retire_print_v1, workaround_recover_for_bug_cli_v1}
 
 val BUG_DB_PATH = "doc/08_tracking/bug/bug_db.sdn"
 
@@ -42,6 +42,11 @@ fn print_help():
     print "  --required-backend=<name>             Required backend (repeatable or comma-separated)"
     print "  --test-db=<path>                      TestDB path (default: doc/08_tracking/test/test_db.sdn)"
     print "  --auto-retire                         After resolving, list live workaround sites (path:line); exits 1 while any remain (default off, edits nothing)"
+    print "  --recover                             After resolving, preview bug-linked @workaround recovery candidates (dry-run)"
+    print "  --recover-apply                       After resolving, apply eligible non-Stage2-gated @workaround recoveries"
+    print "  --fix-commit=<sha>                    Optional verified fix commit SHA passed to workaround recovery"
+    print "  --link-recover                        Auto-discover W^ when recover=<sha> is missing"
+    print "  --allow-stage2-gated                  Allow --recover-apply on Stage 2 / Phase 2 / Seed gated sites"
     print "  --json         Output as JSON"
     for line in log_options_help():
         print "  {line}"
@@ -229,12 +234,38 @@ fn main() -> i64:
     if argument_problem != "":
         print "Error: close rejected: {argument_problem}"
         return 1
+    val recover_apply = args.contains("--recover-apply")
+    val recover_preview = args.contains("--recover")
+    val fix_commit = parse_flag(args, "--fix-commit=")
+    val allow_stage2 = args.contains("--allow-stage2-gated")
+    val link_recover = args.contains("--link-recover")
+    var pre_recovered = false
     # The evaluator is the single source of the verdict; nothing is written before it is Allowed.
-    val evaluation = match bug_closure_cli_evaluate(request, BugDbPathV1(value: BUG_DB_PATH)):
+    var evaluation = match bug_closure_cli_evaluate(request, BugDbPathV1(value: BUG_DB_PATH)):
         case Ok(value): value
         case Err(reason):
             print "Error: close rejected: {reason}"
             return 1
+    if evaluation.receipt.verdict != BugClosureVerdictV1.Allowed and recover_apply and fix_commit != "":
+        var saw_wr = false
+        var saw_other = false
+        for line in bug_closure_render_v1(evaluation):
+            val t = line.trim()
+            if t.starts_with("E-BUG-WR-004"):
+                saw_wr = true
+            elif t.starts_with("E-"):
+                saw_other = true
+        if saw_wr and not saw_other:
+            val pre_rec_code = workaround_recover_for_bug_cli_v1(
+                BugIdV1(value: id), fix_commit, true, allow_stage2, link_recover, as_json)
+            if pre_rec_code != 0:
+                return pre_rec_code
+            pre_recovered = true
+            evaluation = match bug_closure_cli_evaluate(request, BugDbPathV1(value: BUG_DB_PATH)):
+                case Ok(value): value
+                case Err(reason):
+                    print "Error: close rejected: {reason}"
+                    return 1
     if evaluation.receipt.verdict != BugClosureVerdictV1.Allowed:
         print "Error: close rejected by the closure gate"
         for line in bug_closure_render_v1(evaluation):
@@ -286,6 +317,11 @@ fn main() -> i64:
         print "{\"command\":\"bug-resolve\",\"status\":\"ok\",\"id\":\"" + id + "\",\"updated_at\":\"" + timestamp + "\"}"
     else:
         print "Resolved bug {id} (status: Closed, updated_at: {timestamp})"
+    if (recover_apply or recover_preview) and not pre_recovered:
+        val rec_code = workaround_recover_for_bug_cli_v1(
+            BugIdV1(value: id), fix_commit, recover_apply, allow_stage2, link_recover, as_json)
+        if rec_code != 0:
+            return rec_code
     if args.contains("--auto-retire") and workaround_auto_retire_print_v1(BugIdV1(value: id)) != AutoRetireVerdictV1.NothingToRetire:
         return 1
     0

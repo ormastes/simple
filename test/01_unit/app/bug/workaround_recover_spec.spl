@@ -1,0 +1,380 @@
+"""
+## Purpose and audience
+
+Purpose: verify the pure recovery helpers in `app.bug.workaround_recover`
+and `app.bug.workaround_revert`: rollback-commit marker insertion, `-U0` diff
+parsing, narrow-hunk extraction and fail-closed application, unique block
+replacement, Stage 2 bootstrap gating, sharded/markdown bug status lookup,
+and SDN/JSON rendering. Audience: bug-linked workaround maintainers.
+"""
+# @cover src/app/bug/workaround_recover.spl
+# @cover src/app/bug/workaround_revert.spl
+
+use std.spec.{describe, it, expect, step}
+use app.bug.workaround_revert.{workaround_is_stage2_gated_text}
+use app.bug.workaround_recover.{
+    WorkaroundDiffHunk, WorkaroundNarrowPatch, WorkaroundRecoverEntry,
+    WorkaroundRecoverCounts, WorkaroundRecoverResult,
+    workaround_parse_unified_diff_u0, workaround_affected_block_end,
+    workaround_extract_narrow_hunk, workaround_apply_narrow_patch,
+    workaround_replace_unique_hunk, workaround_insert_recover_into_line,
+    workaround_parse_shard_bug_status, workaround_parse_md_bug_status,
+    workaround_status_is_resolved,
+    workaround_recover_render_sdn, workaround_recover_render_json
+}
+
+describe "workaround recover line linking":
+    it "inserts recover sha after bug id while preserving indentation, comment style, expires, and reason":
+        step("Simple # marker with reason")
+        val res1 = workaround_insert_recover_into_line(
+            "# @workaround bug=demo_1 reason=temp fix",
+            "demo_1",
+            "1234567890abcdef1234567890abcdef12345678"
+        )
+        expect(res1.is_ok()).to_equal(true)
+        expect(res1.unwrap()).to_equal("# @workaround bug=demo_1 recover=1234567890abcdef1234567890abcdef12345678 reason=temp fix")
+
+        step("indented // marker with expires and reason")
+        val res2 = workaround_insert_recover_into_line(
+            "    // @workaround bug=demo_2 expires=2026-12-31 reason=c shim",
+            "demo_2",
+            "abcdef1"
+        )
+        expect(res2.is_ok()).to_equal(true)
+        expect(res2.unwrap()).to_equal("    // @workaround bug=demo_2 recover=abcdef1 expires=2026-12-31 reason=c shim")
+
+        step("rejects existing recover field and invalid sha")
+        val res3 = workaround_insert_recover_into_line(
+            "# @workaround bug=demo_1 recover=1234567 reason=already",
+            "demo_1",
+            "abcdef1"
+        )
+        expect(res3.is_err()).to_equal(true)
+
+        val res4 = workaround_insert_recover_into_line(
+            "# @workaround bug=demo_1 reason=bad",
+            "demo_1",
+            "abc"
+        )
+        expect(res4.is_err()).to_equal(true)
+
+        val res5 = workaround_insert_recover_into_line(
+            "# @workaround bug=demo_1 reason=nonhex",
+            "demo_1",
+            "zzzzzzz"
+        )
+        expect(res5.is_err()).to_equal(true)
+
+        step("inserts recover even when reason prose mentions recover= or bug=")
+        val res_prose = workaround_insert_recover_into_line(
+            "# @workaround bug=demo_1 reason=until recover=abcdef1 bug=demo_1 lands",
+            "demo_1",
+            "1234567890abcdef1234567890abcdef12345678"
+        )
+        expect(res_prose.is_ok()).to_equal(true)
+        expect(res_prose.unwrap()).to_equal("# @workaround bug=demo_1 recover=1234567890abcdef1234567890abcdef12345678 reason=until recover=abcdef1 bug=demo_1 lands")
+
+describe "workaround unified diff -U0 parser and block end":
+    it "parses multi-hunk -U0 diffs including single-line omitted counts and pure insertions":
+        val diff_text = [
+            "diff --git a/demo.spl b/demo.spl",
+            "index 1111111..2222222 100644",
+            "--- a/demo.spl",
+            "+++ b/demo.spl",
+            "@@ -4,3 +4 @@ fn compute(x):",
+            "-# @workaround bug=demo_1 reason=clamp",
+            "-    if x < 0:",
+            "-        return 0",
+            "+    return x",
+            "@@ -10,0 +9,2 @@ fn helper():",
+            "+    val ok = true",
+            "+    ok"
+        ].join("\n")
+        val parsed = workaround_parse_unified_diff_u0(diff_text)
+        expect(parsed.is_ok()).to_equal(true)
+        val hunks = parsed.unwrap()
+        expect(hunks.len()).to_equal(2)
+        expect(hunks[0].old_start).to_equal(4)
+        expect(hunks[0].old_count).to_equal(3)
+        expect(hunks[0].new_start).to_equal(4)
+        expect(hunks[0].new_count).to_equal(1)
+        expect(hunks[0].old_lines.len()).to_equal(3)
+        expect(hunks[0].new_lines).to_equal(["    return x"])
+        expect(hunks[1].old_start).to_equal(10)
+        expect(hunks[1].old_count).to_equal(0)
+        expect(hunks[1].new_start).to_equal(9)
+        expect(hunks[1].new_count).to_equal(2)
+
+    it "stops affected block before next unindented item or next marker":
+        val lines = [
+            "fn a(x):",
+            "    # @workaround bug=b1 reason=wa",
+            "    if x == 0:",
+            "        return 1",
+            "    x + 1",
+            "",
+            "fn b():",
+            "    42"
+        ]
+        val end_a = workaround_affected_block_end(lines, 2)
+        expect(end_a).to_equal(3)
+
+        val c_lines = [
+            "    // @workaround bug=b2 reason=brace",
+            r"    if (x) {",
+            "        return 0;",
+            r"    }",
+            "    return x;"
+        ]
+        val end_c = workaround_affected_block_end(c_lines, 1)
+        expect(end_c).to_equal(3)
+
+describe "narrow workaround hunk extraction and application":
+    it "extracts narrow hunk, preserves unrelated edits, handles linked markers, and detects conflicts":
+        val w_lines = [
+            "fn compute(x: i64) -> i64:",
+            "# @workaround bug=demo_1 reason=wa",
+            "    if x < 0:",
+            "        return 0",
+            "    x * 2",
+            "",
+            "fn helper(y: i64) -> i64:",
+            "    y + 1"
+        ]
+        val diff_text = [
+            "@@ -2,3 +2 @@ fn compute(x: i64) -> i64:",
+            "-# @workaround bug=demo_1 reason=wa",
+            "-    if x < 0:",
+            "-        return 0",
+            "+    x * 2"
+        ].join("\n")
+        val hunks = workaround_parse_unified_diff_u0(diff_text).unwrap()
+        val patch_res = workaround_extract_narrow_hunk(w_lines, 1, hunks, "demo_1")
+        expect(patch_res.is_ok()).to_equal(true)
+        val patch = patch_res.unwrap()
+
+        step("apply succeeds when marker line later gained recover= and helper() changed in another commit")
+        val cur_lines = [
+            "fn compute(x: i64) -> i64:",
+            "# @workaround bug=demo_1 recover=abcdef1234567 reason=wa",
+            "    if x < 0:",
+            "        return 0",
+            "    x * 2",
+            "",
+            "fn helper(y: i64) -> i64:",
+            "    y + 99"
+        ]
+        val applied = workaround_apply_narrow_patch(cur_lines, 1, "demo_1", patch)
+        expect(applied.is_ok()).to_equal(true)
+        val out = applied.unwrap()
+        expect(out).to_contain("    x * 2")
+        expect(out).to_contain("    y + 99")
+        expect(out.join("\n").contains("@workaround")).to_equal(false)
+
+        step("apply is idempotent when code already matches recovered_body")
+        val already_lines = [
+            "fn compute(x: i64) -> i64:",
+            "# @workaround bug=demo_1 recover=abcdef1234567 reason=wa",
+            "    x * 2",
+            "    x * 2",
+            "",
+            "fn helper(y: i64) -> i64:",
+            "    y + 99"
+        ]
+        val idem = workaround_apply_narrow_patch(already_lines, 1, "demo_1", patch)
+        expect(idem.is_ok()).to_equal(true)
+
+        step("apply fails closed with conflict when workaround block changed")
+        val dirty_lines = [
+            "fn compute(x: i64) -> i64:",
+            "# @workaround bug=demo_1 recover=abcdef1234567 reason=wa",
+            "    if x < 0:",
+            "        return -1",
+            "    x * 2"
+        ]
+        val conflict_res = workaround_apply_narrow_patch(dirty_lines, 1, "demo_1", patch)
+        expect(conflict_res.is_err()).to_equal(true)
+        expect(conflict_res.unwrap_err()).to_start_with("conflict:")
+
+        step("empty recovered_body never false-matches modified code")
+        val empty_rec_patch = WorkaroundNarrowPatch(
+            pre_expected: [],
+            expected_body: ["    if x == 5:", "        return 55"],
+            recovered_body: []
+        )
+        val pure_dirty = [
+            "fn c(x: i64) -> i64:",
+            "# @workaround bug=demo_empty reason=wa",
+            "    if x == 5:",
+            "        return 77",
+            "    x + 1"
+        ]
+        val empty_conf = workaround_apply_narrow_patch(pure_dirty, 1, "demo_empty", empty_rec_patch)
+        expect(empty_conf.is_err()).to_equal(true)
+        expect(empty_conf.unwrap_err()).to_start_with("conflict:")
+
+    it "preserves stacked sibling markers when retiring one marker":
+        val w_lines = [
+            "fn stacked(x: i64) -> i64:",
+            "# @workaround bug=demo_1 reason=first",
+            "# @workaround bug=demo_2 reason=second",
+            "    return 0"
+        ]
+        val diff_text = [
+            "@@ -2 +2,0 @@ fn stacked(x: i64) -> i64:",
+            "-# @workaround bug=demo_1 reason=first"
+        ].join("\n")
+        val hunks = workaround_parse_unified_diff_u0(diff_text).unwrap()
+        val patch = workaround_extract_narrow_hunk(w_lines, 1, hunks, "demo_1").unwrap()
+        val applied = workaround_apply_narrow_patch(w_lines, 1, "demo_1", patch).unwrap()
+        val joined = applied.join("\n")
+        expect(joined.contains("bug=demo_1")).to_equal(false)
+        expect(joined.contains("bug=demo_2")).to_equal(true)
+
+    it "fails closed when stacked sibling marker above or below shares a code-modifying block":
+        val w_lines = [
+            "fn stacked(x: i64) -> i64:",
+            "# @workaround bug=demo_1 reason=first",
+            "# @workaround bug=demo_2 reason=second",
+            "    return 0"
+        ]
+        val diff_with_code = [
+            "@@ -2,3 +2 @@ fn stacked(x: i64) -> i64:",
+            "-# @workaround bug=demo_1 reason=first",
+            "-# @workaround bug=demo_2 reason=second",
+            "-    return 0",
+            "+    return x + 1"
+        ].join("\n")
+        step("extract rejects code change when lower sibling demo_2 shares block")
+        val lower_res = workaround_extract_narrow_hunk(w_lines, 1, workaround_parse_unified_diff_u0(diff_with_code).unwrap(), "demo_1")
+        expect(lower_res.is_err()).to_equal(true)
+        expect(lower_res.unwrap_err()).to_contain("stacked sibling marker")
+
+        step("extract rejects code change when upper sibling demo_1 shares block")
+        val upper_res = workaround_extract_narrow_hunk(w_lines, 2, workaround_parse_unified_diff_u0(diff_with_code).unwrap(), "demo_2")
+        expect(upper_res.is_err()).to_equal(true)
+        expect(upper_res.unwrap_err()).to_contain("stacked sibling marker")
+
+        step("apply rejects patch when current file gained an upper sibling marker")
+        val solo_w_lines = [
+            "fn stacked(x: i64) -> i64:",
+            "# @workaround bug=demo_2 reason=second",
+            "    return 0"
+        ]
+        val solo_diff = [
+            "@@ -2,2 +2 @@ fn stacked(x: i64) -> i64:",
+            "-# @workaround bug=demo_2 reason=second",
+            "-    return 0",
+            "+    return x + 1"
+        ].join("\n")
+        val solo_patch = workaround_extract_narrow_hunk(solo_w_lines, 1, workaround_parse_unified_diff_u0(solo_diff).unwrap(), "demo_2").unwrap()
+        val apply_res = workaround_apply_narrow_patch(w_lines, 2, "demo_2", solo_patch)
+        expect(apply_res.is_err()).to_equal(true)
+        expect(apply_res.unwrap_err()).to_contain("stacked sibling marker")
+
+describe "unique hunk replacement":
+    it "replaces only when old_lines occurs exactly once and rejects 0 or 2+ matches":
+        val src = "a\nb\nc\nd\n"
+        val ok = workaround_replace_unique_hunk(src, ["b", "c"], ["X"])
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap()).to_equal("a\nX\nd\n")
+
+        val missing = workaround_replace_unique_hunk(src, ["z"], ["X"])
+        expect(missing.is_err()).to_equal(true)
+        expect(missing.unwrap_err()).to_start_with("conflict:")
+
+        val dup = "x\na\ny\na\n"
+        val ambig = workaround_replace_unique_hunk(dup, ["a"], ["Q"])
+        expect(ambig.is_err()).to_equal(true)
+        expect(ambig.unwrap_err()).to_contain("ambiguous")
+
+describe "stage2 bootstrap safety gate and bug status parsing":
+    it "detects all Stage 2 / frozen bootstrap markers case-insensitively":
+        expect(workaround_is_stage2_gated_text("STAGE2-GATED until bootstrap")).to_equal(true)
+        expect(workaround_is_stage2_gated_text("ROOT-FIXED+STAGE2-GATED")).to_equal(true)
+        expect(workaround_is_stage2_gated_text("frozen stage2 binary")).to_equal(true)
+        expect(workaround_is_stage2_gated_text("Frozen Stage 2 artifact")).to_equal(true)
+        expect(workaround_is_stage2_gated_text("frozen phase 2 compiler")).to_equal(true)
+        expect(workaround_is_stage2_gated_text("SEED-GATED on old seed")).to_equal(true)
+        expect(workaround_is_stage2_gated_text("normal compiler workaround")).to_equal(false)
+
+    it "parses sharded bug SDN status, valid=false, empty tombstones, and markdown fallback":
+        val closed_shard = [
+            "bugs |id, severity, status, title, description, file, line, reproducible_by, fix_strategy, investigation_log, root_cause, fix_commit, regression_test, created_at, updated_at, valid|",
+            "    demo_bug_1, P1, Closed, \"title\", \"desc\", a.spl, 1, t.spl, \"\", \"\", \"\", \"\", \"\", \"2026-01-01\", \"2026-01-02\", true"
+        ].join("\n")
+        val st1 = workaround_parse_shard_bug_status(closed_shard, "demo_bug_1")
+        expect(st1.is_ok()).to_equal(true)
+        expect(st1.unwrap()).to_equal("Closed")
+        expect(workaround_status_is_resolved(st1.unwrap())).to_equal(true)
+
+        val invalid_shard = [
+            "bugs |id, severity, status, valid|",
+            "    demo_bug_1, P1, Closed, false"
+        ].join("\n")
+        val st2 = workaround_parse_shard_bug_status(invalid_shard, "demo_bug_1")
+        expect(st2.is_ok()).to_equal(true)
+        expect(st2.unwrap()).to_equal("")
+
+        val tombstone = "bugs |id, severity, status, valid|\n"
+        val st3 = workaround_parse_shard_bug_status(tombstone, "demo_bug_1")
+        expect(st3.is_ok()).to_equal(true)
+        expect(st3.unwrap()).to_equal("")
+
+        val md = "# Bug\n\n**Status:** Fixed in main\n"
+        expect(workaround_parse_md_bug_status(md)).to_equal("fixed")
+        val md_qual = "# Bug\n\n**Status:** fixed in source; verification pending\n"
+        expect(workaround_status_is_resolved(workaround_parse_md_bug_status(md_qual))).to_equal(false)
+        val md_open = "# Bug\n\n**Status:** fixed in source; open in bug_db.sdn\n"
+        expect(workaround_status_is_resolved(workaround_parse_md_bug_status(md_open))).to_equal(false)
+        val md_closed = "# Bug\n\n**Status:** Closed (2026-11-12)\n"
+        expect(workaround_parse_md_bug_status(md_closed)).to_equal("closed")
+        expect(workaround_status_is_resolved(md_closed)).to_equal(false)
+        expect(workaround_status_is_resolved(workaround_parse_md_bug_status(md_closed))).to_equal(true)
+        expect(workaround_status_is_resolved("open")).to_equal(false)
+        expect(workaround_status_is_resolved("Confirmed")).to_equal(false)
+        expect(workaround_status_is_resolved("Fixed")).to_equal(true)
+        expect(workaround_status_is_resolved("Closed")).to_equal(true)
+
+describe "SDN and JSON recovery report rendering":
+    it "renders both SDN default summary and JSON output cleanly":
+        val counts = WorkaroundRecoverCounts(
+            recovered: 1,
+            linked: 0,
+            would_recover: 0,
+            would_link: 0,
+            skipped_stage2_gated: 1,
+            conflict: 0,
+            no_recover_ref: 0,
+            skipped_pinned: 0,
+            skipped_excluded: 0,
+            not_eligible: 0,
+            error: 0
+        )
+        val entry = WorkaroundRecoverEntry(
+            bug_id: "demo_bug_1",
+            path: "src/demo.spl",
+            line: 2,
+            status: "Closed",
+            recover: "1234567",
+            fix_commit: "abcdef1",
+            action: "recovered",
+            detail: "restored from 1234567"
+        )
+        val res = WorkaroundRecoverResult(
+            ok: true,
+            mode: "recover",
+            apply: true,
+            counts: counts,
+            entries: [entry],
+            message: "ok"
+        )
+        val sdn = workaround_recover_render_sdn(res)
+        expect(sdn).to_contain("recover_summary")
+        expect(sdn).to_contain("recover_plan |bug_id, path, line, status, recover, fix_commit, action, detail|")
+        expect(sdn).to_contain("demo_bug_1")
+
+        val js = workaround_recover_render_json(res)
+        expect(js).to_contain("\"ok\":true")
+        expect(js).to_contain("\"bug_id\":\"demo_bug_1\"")
+        expect(js).to_contain("\"skipped_stage2_gated\":1")

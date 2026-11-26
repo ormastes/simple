@@ -1,0 +1,137 @@
+# Simple CLI - workaround-recover command
+# Discovers pre-workaround rollback commits (`recover=<sha>`) and safely applies
+# narrow bug-linked workaround recoveries after a bug fix or verified --fix-commit.
+
+use std.cli.cli_util.{get_cli_args}
+use std.cli.log_modes.{parse_log_options, log_options_help}
+use app.bug.workaround_recover.{
+    WorkaroundRecoverOptions, default_workaround_recover_options,
+    workaround_recover_run, workaround_recover_render_sdn,
+    workaround_recover_render_json
+}
+
+fn print_help():
+    print "Usage: simple workaround-recover [options]"
+    print ""
+    print "Discover rollback commits (recover=<sha>) and safely recover bug-linked @workaround sites."
+    print "Dry-run by default; pass --apply to write changes."
+    print ""
+    print "Options:"
+    print "  --list                  List live @workaround sites and their bug/recover status (dry-run)"
+    print "  --bug=<id>              Target bug ID (repeatable)"
+    print "  --all-fixed             Recover all sites whose linked bug is Fixed or Closed"
+    print "  --link-recover          Discover W^ for markers missing recover= (and use it)"
+    print "  --fix-commit=<sha>      Verified fix commit SHA (must be an ancestor of HEAD)"
+    print "  --apply                 Apply edits to disk (default: dry-run preview)"
+    print "  --allow-stage2-gated    Allow recovering Stage 2 / Phase 2 / Seed gated sites"
+    print "  --allow-pinned          Allow editing files listed in source_bindings.txt"
+    print "  --exclude=<path>        Skip paths matching directory/file prefix or exact path (repeatable)"
+    print "  --path=<dir|file>       Limit scan to repo-relative directory or file (repeatable)"
+    print "  --root=<dir>            Repository root override (default: cwd)"
+    print "  --bug-db=<path>         Bug database path override"
+    print "  --json                  Output JSON instead of default SDN"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help              Show this help"
+
+fn _is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    var args: [text] = []
+    if raw_args.len() > 0 and raw_args[0] == "workaround-recover":
+        var idx = 1
+        while idx < raw_args.len():
+            args.push(raw_args[idx])
+            idx = idx + 1
+    else:
+        args = raw_args
+
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        print "Error: {log_opts.error}"
+        return 1
+
+    var opts = default_workaround_recover_options()
+    if log_opts.log_mode == "json":
+        opts.as_json = true
+
+    var saw_selector = false
+    var ai = 0
+    while ai < args.len():
+        val arg = args[ai]
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--":
+            pass
+        elif arg == "--json" or arg == "--log-mode=json":
+            opts.as_json = true
+        elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+            ai = ai + 1
+        elif _is_log_option(arg):
+            pass
+        elif arg == "--list":
+            opts.list_only = true
+            saw_selector = true
+        elif arg == "--all-fixed":
+            opts.all_fixed = true
+            saw_selector = true
+        elif arg == "--link-recover":
+            opts.link_recover = true
+            saw_selector = true
+        elif arg == "--apply":
+            opts.apply = true
+        elif arg == "--allow-stage2-gated":
+            opts.allow_stage2_gated = true
+        elif arg == "--allow-pinned":
+            opts.allow_pinned = true
+        elif arg.starts_with("--bug="):
+            val bug_id = arg.substring(6).trim()
+            if bug_id == "":
+                print "Error: --bug requires a non-empty bug ID"
+                return 1
+            opts.bug_ids.push(bug_id)
+            saw_selector = true
+        elif arg.starts_with("--fix-commit="):
+            opts.fix_commit = arg.substring(13).trim()
+            if opts.fix_commit == "":
+                print "Error: --fix-commit requires a commit SHA"
+                return 1
+            saw_selector = true
+        elif arg.starts_with("--exclude="):
+            val ex = arg.substring(10).trim()
+            if ex != "":
+                opts.excludes.push(ex)
+        elif arg.starts_with("--path="):
+            val p = arg.substring(7).trim()
+            if p != "":
+                opts.paths_filter.push(p)
+        elif arg.starts_with("--root="):
+            opts.root = arg.substring(7).trim()
+        elif arg.starts_with("--bug-db="):
+            opts.bug_db_path = arg.substring(9).trim()
+        else:
+            print "Error: unknown option '{arg}'"
+            print_help()
+            return 1
+        ai = ai + 1
+
+    if not saw_selector:
+        if opts.apply:
+            print "Error: --apply requires --bug=<id>, --all-fixed, or --link-recover"
+            return 1
+        opts.all_fixed = true
+
+    val result = workaround_recover_run(opts)
+    if opts.as_json:
+        print workaround_recover_render_json(result)
+    else:
+        print workaround_recover_render_sdn(result)
+    if result.ok: 0 else: 1

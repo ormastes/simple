@@ -174,16 +174,71 @@ live workaround still cites the bug. Outside a git repository it exits 2 with
 
 ### `bug-resolve` closure flags
 
-`--disposition`, `--rationale`, `--source-head` and `--auto-retire` join the
-existing receipt flags (`--date`, `--*-tokens`, `--token-source`,
-`--token-provider`, `--knowledge`, `--reproducer`, `--prevention`). The same
-gate runs first; a blocked close writes nothing. Labels to keep honest:
+`--disposition`, `--rationale`, `--source-head`, `--auto-retire`, `--recover`, and
+`--recover-apply` join the existing receipt flags (`--date`, `--*-tokens`,
+`--token-source`, `--token-provider`, `--knowledge`, `--reproducer`,
+`--prevention`). The same gate runs first; a blocked close writes nothing unless
+`--recover-apply` is combined with a verified `--fix-commit=<sha>` when only
+`E-BUG-WR-004` live workaround sites blocked the gate (it applies eligible
+non-Stage2-gated recoveries, refreshes `.simple/workarounds.sdn`, and re-checks
+the gate before writing). Labels to keep honest:
 - the CLI has no TestDB run source, so every close is `run_evidence=not_observed`:
   it is NOT a test-verified fix;
 - a non-fix disposition is logged as `not_a_verified_fix`;
 - `--auto-retire` (default off) only LISTS live workaround sites as `path:line`
   after resolving and edits nothing; exit 1 while any remain or the index is
-  unavailable.
+  unavailable;
+- `--recover` previews recovery candidates (`would_recover`, etc.) in SDN (or
+  JSON with `--json`) without modifying files;
+- `--recover-apply` applies eligible non-Stage2-gated recoveries (`--fix-commit=`,
+  `--link-recover`, and `--allow-stage2-gated` are forwarded).
+
+### `workaround-recover`: link `recover=<sha>` and apply narrow hunk recovery
+
+`simple workaround-recover` (`src/app/workaround_recover/main.spl`, backed by
+`src/app/bug/workaround_recover.spl`) completes bug-linked workaround retirement
+while staying **dry-run by default** (pass `--apply` to write files):
+
+- **Discovery & dry-run listing (`--list`)**: lists every live `@workaround`
+  site with its bug database status (`listed`, `would_recover`,
+  `skipped_stage2_gated`, or `no_recover_ref`) without modifying files (cannot
+  be combined with `--apply`).
+- **Rollback link discovery (`--link-recover`)**: for markers missing
+  `recover=<sha>`, searches commit history for the introducing commit `W` that
+  added `# @workaround bug=<id>` and discovers `R = W^`. With `--apply`, inserts
+  `recover=<sha>` right after `bug=<id>` while preserving comment style,
+  indentation, `expires=`, and `reason=`.
+- **Eligibility preconditions (fail closed)**:
+  - either the linked bug status is `Fixed`/`Closed` (`--all-fixed` or
+    `--bug=<id>`, looking up `doc/08_tracking/bug/db/<id>.sdn` first, then
+    `<id>.md`, then `bug_db.sdn`), OR the caller supplies `--bug=<id>` with a
+    verified `--fix-commit=<sha>` (verified via `git rev-parse --verify` and
+    `git merge-base --is-ancestor <sha> HEAD`).
+- **Bootstrap & pinned-file safety**:
+  - Stage 2 / frozen bootstrap markers (`STAGE2-GATED`, `frozen stage2`,
+    `frozen Stage 2`, `frozen phase 2`, `ROOT-FIXED+STAGE2-GATED`,
+    `SEED-GATED`) are reported as `skipped_stage2_gated` and never modified unless
+    `--allow-stage2-gated` is explicitly passed;
+  - paths listed in `src/verification/cache_protocol/source_bindings.txt` are
+    reported as `skipped_pinned` unless `--allow-pinned` is passed; `--exclude=<path>`
+    filters paths by exact path or prefix.
+- **Narrow hunk extraction (never blind `git checkout`)**:
+  - diffs only `W:<path>` vs `R:<path>` (`git diff -U0`) for the block guarded by
+    `# @workaround bug=<id>` and removes the marker + restores that narrow block
+    only when the workaround body matches uniquely in the current working tree.
+    Unrelated edits elsewhere in the same file are preserved; conflicting edits to
+    the workaround block fail closed as `conflict` and exit non-zero;
+  - after `--apply` mutates files in a repo with `.simple/workarounds.sdn`,
+    refreshes `.simple/workarounds.sdn` incrementally via `refresh_workarounds_at`.
+- **Output format**: SDN by default (`recover_summary` + `recover_plan` tables),
+  or compact JSON with `--json`. Observed dry-run output on `src/lib/nogc_async_mut/io/file.spl`:
+
+```text
+recover_summary |mode, apply, recovered, linked, would_recover, would_link, skipped_stage2_gated, conflict, no_recover_ref, skipped_pinned, error|
+    "recover", false, 0, 0, 1, 0, 0, 0, 0, 0, 0
+recover_plan |bug_id, path, line, status, recover, fix_commit, action, detail|
+    "native_future_receiver_typeparam_2026_10_18", "src/lib/nogc_async_mut/io/file.spl", 235, "would_recover", "dd8d1c9521d7047e88b7fcd2a2bc8bc1ee821ddc", "", "dry-run", "restored narrow block from dd8d1c9 (workaround 9ed6715)"
+```
 
 ```text
 $ bin/simple bug-resolve --id=guide_scratch_bug --input-tokens=unavailable \
