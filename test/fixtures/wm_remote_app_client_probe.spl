@@ -1,0 +1,35 @@
+# Remote application process for the two-process remote presentation proof.
+# Opens a 200x120 window in the WM named by SIMPLE_WM_DAEMON_DIR, fills it
+# with one known colour through the shared slot, presents, then stays alive
+# (a window lives as long as its client) until it is killed.
+# WM_REMOTE_CLIENT_CORRUPT=1 publishes a checksum that does not match the
+# slot, which the WM must refuse.
+# Tracks: wm_host_external_content_owner_2026-07-29
+
+use std.daemon_sdk.client.{daemon_submit_and_wait}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.sffi.system.{sleep_ms}
+use app.play.wm_daemon_client.{wm_daemon_config}
+use app.play.wm_remote_app_client.{wm_remote_app_open, wm_remote_app_present_request}
+
+fn main() -> i64:
+    val window = wm_remote_app_open("Remote probe", 200, 120)
+    if not window.ok:
+        print "client pid={getpid()} open=failed"
+        return 2
+    var pixels: [u32] = []
+    var i: i64 = 0
+    while i < 200 * 120:
+        pixels.push(0xFF12AB34u32)
+        i = i + 1
+    var req = wm_remote_app_present_request(window, pixels, 1, getpid())
+    if env_get("WM_REMOTE_CLIENT_CORRUPT") == "1":
+        req.set_field("checksum", "12345")
+    val resp = daemon_submit_and_wait(req, wm_daemon_config(), 30000)
+    print "client pid={getpid()} window={window.window_id} accepted={resp.get_field("accepted")} reason={resp.get_field("reason")}"
+    var waited: i64 = 0
+    while waited < 600000:
+        sleep_ms(200)
+        waited = waited + 200
+    0
