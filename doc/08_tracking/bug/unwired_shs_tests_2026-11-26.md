@@ -707,3 +707,25 @@ Re-run with `build/` and `scratch/` pre-created: 4 green, 122 still fail.
   for text the target no longer contains (for example `entry_closure_app_doc_source_contract`,
   `dynsmf_facet_ref_count_contract`, `aspect_pack_cardinality_contract`). Each needs a
   `git log` check on its target to decide stale test (update) versus real bug (fix + bug doc).
+
+## Batch 2 (2026-11-27): 5 wired, findings on the rest
+Wired (advisory `push-unwired-*`), each checked with `git log` on its target:
+- `aspect_pack_cardinality_contract` - class 3, real bug in source (host-offer setter
+  rematerialized keys); fixed, bug doc `aspect_pack_host_offer_rematerializes_binding_keys_2026-11-27.md`.
+- `dynsmf_facet_ref_count_contract` - class 2, test pinned a `retained_count` recount; source keeps the
+  counter by increment/decrement, which is the same contract.
+- `binary_size_go_parity_producer` - class 2, checker's mutation id is `machine-id-mismatch`.
+- `process_tree_rss_absolute_limit`, `process_tree_rss_watchdog` - class 2, the watchdog ceiling was
+  deliberately widened eight times (now 58720256 KiB, per-job 1 GiB, wrapper message reworded); the
+  limit test now reads the ceiling from the watchdog instead of copying it.
+Checked and left (not green, need an owner call or a larger rewrite):
+- `no_refresh_file_lock`: real violation, 5 file-lock sites in `src/lib/scv/compile_snapshot_retention_v1.spl`
+  (lockless-by-default policy needs a fix or a documented exception).
+- `bootstrap_compile_context_authority_contract`: source still transports `(ctx, bool)` tuples; the
+  bool-only refactor the test pins was not kept (owner decision: restore it or retire the test).
+- `db_server_request_port_evidence`: checker was redesigned (`--source-closure`, `--build-origin`),
+  test needs rewriting against the new interface.
+- `bootstrap_stop_after_stage2_contract`: help wording changed (stale) and the script hardcodes `/tmp`,
+  but it then fails further on `incompatible invocation did not explain rejection`.
+- `runtime_memory_owner_composition`: `core_array.spl` no longer carries the documented
+  "retain the whole bounded scope" contract.

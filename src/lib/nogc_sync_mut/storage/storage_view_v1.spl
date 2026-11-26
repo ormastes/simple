@@ -31,7 +31,7 @@ use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_size_raw,
     file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes}
 use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
-use std.nogc_sync_mut.sosix.fs_v1.{dir_create_all, dir_create_new, dir_remove_all, is_dir, dir_walk,
+use std.nogc_sync_mut.sosix.fs_v1.{dir_create_all, dir_create_new, dir_remove_all, is_dir, dir_list_optional,
     dir_is_real_no_follow}
 
 pub unit ViewBytesV1: i64
@@ -419,25 +419,63 @@ fn _sv_journal_load(view_root: text, view_id: text) -> Result<ContainerLifecycle
 
 # --------------------------------------------------------------- scanning
 
+# Fail-closed upper scan. `dir_walk` (rt_dir_walk) collapses a read_dir error
+# to an empty result, so an unreadable upper could be saved or accepted as
+# empty. This walk uses `dir_list_optional` (nil on failure) and refuses a
+# subdirectory that is not a real (non-reparse) directory.
+fn _sv_collect(dir: text, rel_prefix: text, paths: [text]) -> Result<[text], text>:
+    val listed = dir_list_optional(dir)
+    if listed == nil:
+        return Err("upper-unreadable")
+    var out: [text] = paths
+    for raw in listed ?? []:
+        val name = raw.trim()
+        if name == "" or name == "." or name == "..":
+            continue
+        val full = dir + "/" + name
+        val rel = rel_prefix + name
+        if is_dir(full):
+            if not dir_is_real_no_follow(full):
+                return Err("upper-entry-not-real-dir")
+            out = match _sv_collect(full, rel + "/", out):
+                case Ok(value): value
+                case Err(reason): return Err(reason)
+        else:
+            if out.len() >= _SV_MAX_FILES:
+                return Err("upper-too-many-files")
+            out.push(rel)
+    Ok(out)
+
 fn _sv_scan_upper(upper: text) -> Result<SvScanV1, text>:
     if not dir_is_real_no_follow(upper):
         return Err("upper-missing")
-    val prefix = upper + "/"
-    var paths: [text] = []
+    var paths = match _sv_collect(upper, "", []):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    paths.sort()
     var sizes: [i64] = []
-    for raw in dir_walk(upper):
-        val entry = raw.replace("\\", "/")
-        if not entry.starts_with(prefix):
-            return Err("scan-path-unexpected")
-        if paths.len() >= _SV_MAX_FILES:
-            return Err("upper-too-many-files")
-        val rel = entry.substring(prefix.byte_len(), entry.byte_len())
-        val size = file_size_raw(entry)
+    for rel in paths:
+        val size = file_size_raw(upper + "/" + rel)
         if size < 0 or size > _SV_MAX_SIZE_SANE:
             return Err("upper-file-size-invalid")
-        paths.push(rel)
         sizes.push(size)
     Ok(SvScanV1(paths: paths, sizes: sizes))
+
+# A handle is only usable while the view is live: its journal exists, is not
+# destroyed, and the view dir and view root are real (non-reparse) dirs. A
+# stale handle therefore cannot reach volume dirs after destroy, and a
+# junction swapped in for the view dir is refused.
+fn _sv_live(view_root: text, view_id: text) -> text:
+    if not dir_is_real_no_follow(view_root):
+        return "view-root-not-real-dir"
+    if not dir_is_real_no_follow(_sv_view_dir(view_root, view_id)):
+        return "view-dir-not-real-dir"
+    val journal = match _sv_journal_load(view_root, view_id):
+        case Ok(value): value
+        case Err(reason): return reason
+    if journal.phase == LIFECYCLE_PHASE_V1_DESTROYED:
+        return "view-destroyed"
+    ""
 
 # Walk every parent component below `base` with no-follow checks, shared by
 # reads and writes so a pre-existing junction/symlink cannot redirect either.
@@ -504,6 +542,8 @@ fn _sv_create_with(store: text, view_root_in: text, view_id: text, base_root: te
     # creates cannot both pass it.
     if not dir_create_all(view_root):
         return _sv_handle_rejected("view-dir-failed")
+    if not dir_is_real_no_follow(view_root):
+        return _sv_handle_rejected("view-root-not-real-dir")
     val claimed = dir_create_new(view_dir)
     if claimed == "exists":
         return _sv_handle_rejected("view-exists")
@@ -578,6 +618,9 @@ pub fn storage_view_v1_add_volume(view: StorageViewV1, name: text, host_dir: tex
         writable: ViewFlagV1) -> ViewHandleV1:
     if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
         return _sv_handle_rejected("view-id-invalid")
+    val live = _sv_live(view.view_root, view.view_id)
+    if live != "":
+        return _sv_handle_rejected(live)
     if name.contains("/") or _sv_path_error(name) != "":
         return _sv_handle_rejected("volume-name-invalid")
     if not _sv_root_valid(_sv_normalize_root(host_dir)):
@@ -612,6 +655,9 @@ pub fn storage_view_v1_write(view: StorageViewV1, rel_path: text, bytes: [u8]) -
         return _sv_write_rejected(policy)
     if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
         return _sv_write_rejected("view-id-invalid")
+    val live = _sv_live(view.view_root, view.view_id)
+    if live != "":
+        return _sv_write_rejected(live)
     if bytes.len() > _SV_MAX_FILE_BYTES:
         return _sv_write_rejected("file-too-large")
     val vol = _sv_volume_index(view, rel_path)
@@ -701,6 +747,9 @@ pub fn storage_view_v1_read(view: StorageViewV1, rel_path: text) -> ViewReadV1:
         return _sv_read_result("rejected", policy)
     if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
         return _sv_read_result("rejected", "view-id-invalid")
+    val live = _sv_live(view.view_root, view.view_id)
+    if live != "":
+        return _sv_read_result("rejected", live)
     val vol = _sv_volume_index(view, rel_path)
     if vol >= 0:
         val rest_at = rel_path.index_of("/")
@@ -808,6 +857,9 @@ fn _sv_save_inner(view: StorageViewV1, root_name: text, expected: StoreGeneratio
 pub fn storage_view_v1_save(view: StorageViewV1, root_name: text, expected: StoreGenerationV1) -> ViewSaveV1:
     if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
         return _sv_save_rejected("view-id-invalid")
+    val live = _sv_live(view.view_root, view.view_id)
+    if live != "":
+        return _sv_save_rejected(live)
     if not _sv_root_name_valid(root_name):
         return _sv_save_rejected("root-name-invalid")
     if expected.value < 0:
@@ -854,6 +906,9 @@ pub fn storage_view_v1_load(store: text, view_root: text, view_id: text, root_na
 pub fn storage_view_v1_clone(src: StorageViewV1, new_view_id: text) -> ViewHandleV1:
     if not _sv_id_valid(src.view_id) or not _sv_root_valid(src.view_root):
         return _sv_handle_rejected("view-id-invalid")
+    val live = _sv_live(src.view_root, src.view_id)
+    if live != "":
+        return _sv_handle_rejected(live)
     val scan = match _sv_scan_upper(_sv_upper_dir(src.view_root, src.view_id)):
         case Ok(value): value
         case Err(reason): return _sv_handle_rejected(reason)
@@ -864,17 +919,54 @@ pub fn storage_view_v1_clone(src: StorageViewV1, new_view_id: text) -> ViewHandl
 
 # --------------------------------------------------------------- destroy
 
+# Recovery for a create that crashed after claiming the view dir but before the
+# journal/meta landed. A live view always has a valid journal (writes require
+# `_sv_live`), so a dir with a missing or unparseable journal is removed only
+# when it holds nothing but the create artifacts: journal.sdn and view.sdn as
+# plain files and an EMPTY real upper/. Anything else is refused untouched.
+fn _sv_destroy_half_created(view_root: text, view_id: text, reason: text) -> ViewDestroyV1:
+    val view_dir = _sv_view_dir(view_root, view_id)
+    val listed = dir_list_optional(view_dir)
+    if listed == nil:
+        return _sv_destroy_result("rejected", reason)
+    for raw in listed ?? []:
+        val name = raw.trim()
+        if name == "" or name == "." or name == "..":
+            continue
+        val full = view_dir + "/" + name
+        if name == "journal.sdn" or name == "view.sdn":
+            if is_dir(full):
+                return _sv_destroy_result("rejected", reason)
+        elif name == "upper":
+            if not dir_is_real_no_follow(full):
+                return _sv_destroy_result("rejected", reason)
+            val inner = dir_list_optional(full)
+            if inner == nil or (inner ?? []).len() > 0:
+                return _sv_destroy_result("rejected", reason)
+        else:
+            return _sv_destroy_result("rejected", reason)
+    if not dir_remove_all(view_dir) or is_dir(view_dir):
+        return _sv_destroy_result("rejected", "view-dir-remove-failed")
+    _sv_destroy_result("ok", "")
+
 # Refuses while a materialized `lower/` exists: its links and the store pin are
 # owned by rootfs_materialize_v1, so the caller must run rootfs_dematerialize_v1
 # first (reason "lower-materialized").
 pub fn storage_view_v1_destroy(view: StorageViewV1) -> ViewDestroyV1:
     if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
         return _sv_destroy_result("rejected", "view-id-invalid")
+    # Never remove through a reparse point in the view root or view dir: the
+    # runtime canonicalizes first, so a junction ancestor would redirect it.
+    if not dir_is_real_no_follow(view.view_root) or not dir_is_real_no_follow(_sv_view_dir(view.view_root, view.view_id)):
+        return _sv_destroy_result("rejected", "view-dir-not-real-dir")
     if is_dir(_sv_view_dir(view.view_root, view.view_id) + "/lower"):
         return _sv_destroy_result("rejected", "lower-materialized")
     val journal = match _sv_journal_load(view.view_root, view.view_id):
         case Ok(value): value
-        case Err(reason): return _sv_destroy_result("rejected", reason)
+        case Err(reason):
+            if reason == "journal-missing" or reason == "journal-unreadable" or reason == "journal-invalid":
+                return _sv_destroy_half_created(view.view_root, view.view_id, reason)
+            return _sv_destroy_result("rejected", reason)
     val upper = _sv_upper_dir(view.view_root, view.view_id)
     val actions = lifecycle_recovery_actions_v1(journal, ContainerNativeAliveV1(false))
     for action in actions:
