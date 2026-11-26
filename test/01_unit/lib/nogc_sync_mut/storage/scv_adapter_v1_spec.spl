@@ -139,3 +139,36 @@ describe "scv_adapter_v1 pin_reachable":
         val none = immutable_store_v1_collect(root, StoreFlagV1(true))
         expect(none.unreachable.len()).to_equal(2)
         _cleanup(repo)
+
+describe "scv_adapter_v1 fail-closed":
+    it "rejects on a store-side failure and keeps the previous generation pinned":
+        val repo = _repo("failclosed")
+        val a = _put_chunk(repo, "chunk a".bytes())
+        val b = _put_chunk(repo, "chunk b".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        expect(scv_adapter_v1_pin_reachable(repo, a + "\n", "scv").status).to_equal("ok")
+        # Break ingest: objects/ becomes a file, so importing b cannot publish.
+        expect(dir_remove_all(root + "/objects")).to_equal(true)
+        expect(file_write_bytes(root + "/objects", "x".bytes())).to_equal(true)
+        val failed = scv_adapter_v1_pin_reachable(repo, a + "\n" + b + "\n", "scv")
+        expect(failed.status).to_equal("rejected")
+        # The previous generation was not released: its pin dir still names a.
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        _cleanup(repo)
+
+    it "releases an ownerless pin dir and lets gc proceed":
+        val repo = _repo("ownerless")
+        val a = _put_chunk(repo, "chunk a".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        expect(scv_adapter_v1_pin_reachable(repo, a + "\n", "scv").status).to_equal("ok")
+        # Half-created generation: pin dir with no owner file.
+        expect(dir_create_all(root + "/pins/scv-gc-5-0/refs")).to_equal(true)
+        expect(immutable_store_v1_release_pin(root, "scv-gc-5-0", "other")).to_equal("")
+        expect(dir_create_all(root + "/pins/scv-gc-6-0/refs")).to_equal(true)
+        val again = scv_adapter_v1_pin_reachable(repo, a + "\n", "scv")
+        expect(again.status).to_equal("ok")
+        expect(is_dir(root + "/pins/scv-gc-6-0")).to_equal(false)
+        val gc = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(gc.status).to_equal("ok")
+        expect(gc.unreachable.len()).to_equal(0)
+        _cleanup(repo)

@@ -67,3 +67,4 @@ Open (P2, next increment):
 - Pointer-cache write failures are ignored; an unrefreshable pointer bricks a root after 4096 generations (`root-claim-chain-too-long`).
 - Drop the `.value` condition reads on the new bool units once the seed bool-unit bug is fixed.
 - Specs: no gxhash known-answer vector through the policy; lost-race publish path not exercised.
+- SCV adapter generation race: concurrent `scv gc` runs can release each other's fresh `scv-gc-<g>-<n>` pins; the next import/pin run heals it (re-import is idempotent).

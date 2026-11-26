@@ -812,13 +812,14 @@ pub fn immutable_store_v1_release_pin(root: text, pin_id: text, owner: text) -> 
     if not is_dir(pin_dir):
         return "pin-missing"
     val owner_path = pin_dir + "/owner"
-    if not file_exists(owner_path):
-        return "pin-corrupt"
-    val existing = match file_read_regular_no_follow_bounded(owner_path, 512):
-        case Ok(value): value
-        case Err(_): return "pin-unreadable"
-    if existing != owner:
-        return "pin-owner-mismatch"
+    # A dir with no owner file (half-created or half-removed) holds no committed
+    # owner, so it is releasable; GC still counts its refs until it is removed.
+    if file_exists(owner_path):
+        val existing = match file_read_regular_no_follow_bounded(owner_path, 512):
+            case Ok(value): value
+            case Err(_): return "pin-unreadable"
+        if existing != owner:
+            return "pin-owner-mismatch"
     if not dir_remove_all(pin_dir):
         return "pin-remove-failed"
     ""

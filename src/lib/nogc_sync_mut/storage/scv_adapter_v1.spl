@@ -11,12 +11,11 @@ use std.nogc_sync_mut.storage.immutable_store_v1.{StoreOpenV1, StoreFlagV1, Stor
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_pin, immutable_store_v1_release_pin}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded_bytes}
-use std.nogc_sync_mut.io.dir_ops.{dir_list, is_dir}
+use std.io_runtime.{dir_list_optional}
 
 val _SCVA1_MAX_CHUNK_BYTES: i64 = 268435456
 val _SCVA1_MAX_PIN_REFS: i64 = 16384
 val _SCVA1_PIN_PREFIX = "scv-gc-"
-val _SCVA1_OWNER = "scv"
 val _SCVA1_ID_PREFIX = "sha256_"
 
 pub struct ScvImportV1:
@@ -120,6 +119,9 @@ pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: tex
     if owner == "":
         return _scva1_pin_rejected("pin-owner-invalid", 0, 0)
     val root = scv_adapter_v1_store_root(repo_root)
+    val init_reason = immutable_store_v1_init(root)
+    if init_reason != "":
+        return _scva1_pin_rejected(init_reason, 0, 0)
     var keys: [text] = []
     var seen: Dict<text, bool> = {}
     var skipped: i64 = 0
@@ -128,6 +130,7 @@ pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: tex
         if id == "" or seen.contains_key(id):
             continue
         seen[id] = true
+        # Only a non-chunk id or an absent chunk file may be skipped.
         if not _scva1_id_valid(id):
             skipped = skipped + 1
             continue
@@ -136,21 +139,27 @@ pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: tex
             continue
         val imported = scv_adapter_v1_import_chunk(repo_root, id)
         if imported.status != "ok":
-            skipped = skipped + 1
-            continue
+            # A corrupt blob is fsck's finding, not a store failure: leave it
+            # unpinned. Every other rejection fails closed.
+            if imported.reason == "legacy-digest-mismatch":
+                skipped = skipped + 1
+                continue
+            return _scva1_pin_rejected(imported.reason, keys.len(), skipped)
         keys.push(imported.object_key)
     val pins_dir = root + "/pins"
+    val entries = match dir_list_optional(pins_dir):
+        case Some(value): value
+        case None: return _scva1_pin_rejected("pins-dir-unlistable", 0, skipped)
     var old_pins: [text] = []
     var generation: i64 = 0
-    if is_dir(pins_dir):
-        for entry in dir_list(pins_dir):
-            val name = entry.trim()
-            val old_generation = _scva1_pin_generation(name)
-            if old_generation < 0:
-                continue
-            old_pins.push(name)
-            if old_generation >= generation:
-                generation = old_generation + 1
+    for entry in entries:
+        val name = entry.trim()
+        val old_generation = _scva1_pin_generation(name)
+        if old_generation < 0:
+            continue
+        old_pins.push(name)
+        if old_generation >= generation:
+            generation = old_generation + 1
     var batches: i64 = 0
     var start: i64 = 0
     while start < keys.len():
@@ -162,6 +171,7 @@ pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: tex
             return _scva1_pin_rejected(reason, start, skipped)
         batches = batches + 1
         start = end
+    # Old generations are released only after every new pin is written.
     for name in old_pins:
         val released = immutable_store_v1_release_pin(root, name, owner)
         if released != "" and released != "pin-missing":
