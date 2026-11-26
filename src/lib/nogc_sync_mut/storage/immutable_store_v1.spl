@@ -19,12 +19,14 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_publish_noreplace_raw,
 use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
 use std.io_runtime.{file_delete, dir_list_optional}
+use std.nogc_sync_mut.sosix.readonly_share_v1.{sosix_fs_link_readonly_v1}
+use std.common.contracts.sosix.containment_v1.{SosixContainFlagV1}
 use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure,
     timestamp_year, timestamp_month, timestamp_day}
 
-unit StoreFlagV1: bool
-unit StoreCountV1: i64
-unit StoreGenerationV1: i64
+pub unit StoreFlagV1: bool
+pub unit StoreCountV1: i64
+pub unit StoreGenerationV1: i64
 export StoreFlagV1, StoreCountV1, StoreGenerationV1
 
 pub struct StoreIngestV1:
@@ -1086,3 +1088,24 @@ pub fn immutable_store_v1_collect(root: text, dry_run: StoreFlagV1) -> StoreGcV1
     if first_error != "":
         status = "partial"
     StoreGcV1(status: status, reason: first_error, dry_run: StoreFlagV1(false), unreachable: unreachable, moved: StoreCountV1(moved))
+
+pub struct StoreLinkV1:
+    status: text    # "linked" | "copied" | "missing" | "rejected"
+    reason: text
+
+# Shares one verified store object under `destination` as a read-only link.
+# The object is digest-verified first, so a corrupt object is never shared.
+# `allow_copy` permits a private copy when the link fails (cross-volume, no
+# hard-link support); otherwise a failed link is `rejected`.
+pub fn immutable_store_v1_link_object(root: text, object_key: text, destination: text,
+        allow_copy: StoreFlagV1) -> StoreLinkV1:
+    val opened = immutable_store_v1_open(root, object_key)
+    if opened.status == "missing":
+        return StoreLinkV1(status: "missing", reason: opened.reason)
+    if opened.status != "ok":
+        return StoreLinkV1(status: "rejected", reason: "object-" + opened.status + ": " + _isv1_bound_reason(opened.reason))
+    val shared = sosix_fs_link_readonly_v1(_isv1_object_path(root, object_key), destination,
+        SosixContainFlagV1(allow_copy.value))
+    if shared.status == "rejected":
+        return StoreLinkV1(status: "rejected", reason: shared.reason)
+    StoreLinkV1(status: shared.status, reason: "")

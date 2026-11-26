@@ -1,0 +1,109 @@
+"""Materializes a StorageViewV1 base as a `lower/` directory of store-object links.
+
+<view_root>/<view_id>/lower/ holds read-only links to store objects; `upper/` is
+the only writable directory and `storage_view_v1_save` keeps scanning it alone.
+There is no union and no copy-on-write over links: a changed file is written
+under `upper/`. Base refs are pinned (owner `pure-container`, pin id = view id)
+before linking so GC cannot reclaim an object being linked.
+"""
+
+use std.nogc_sync_mut.storage.storage_view_v1.{StorageViewV1, ViewFlagV1, ViewCountV1,
+    storage_view_v1_base_entries}
+use std.nogc_sync_mut.storage.immutable_store_v1.{StoreFlagV1, immutable_store_v1_link_object,
+    immutable_store_v1_pin, immutable_store_v1_release_pin}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir, dir_is_real_no_follow}
+
+val ROOTFS_PIN_OWNER_V1 = "pure-container"
+
+pub struct RootfsMaterializeV1:
+    status: text    # "ok" | "rejected"
+    reason: text
+    lower_dir: text
+    upper_dir: text
+    linked: ViewCountV1
+    copied: ViewCountV1
+
+fn _rfs_lower(view: StorageViewV1) -> text:
+    view.view_root + "/" + view.view_id + "/lower"
+
+fn _rfs_upper(view: StorageViewV1) -> text:
+    view.view_root + "/" + view.view_id + "/upper"
+
+fn _rfs_rejected(reason: text) -> RootfsMaterializeV1:
+    RootfsMaterializeV1(status: "rejected", reason: reason, lower_dir: "", upper_dir: "",
+        linked: ViewCountV1(0), copied: ViewCountV1(0))
+
+fn _rfs_parent(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash < 0:
+        return ""
+    path.substring(0, slash)
+
+# Removes a half-built lower and the pin; the original reason is kept.
+fn _rfs_abort(view: StorageViewV1, reason: text) -> RootfsMaterializeV1:
+    val lower = _rfs_lower(view)
+    var extra = ""
+    if is_dir(lower) and (not dir_is_real_no_follow(lower) or not dir_remove_all(lower)):
+        extra = "; lower-cleanup-failed"
+    immutable_store_v1_release_pin(view.store, view.view_id, ROOTFS_PIN_OWNER_V1)
+    _rfs_rejected(reason + extra)
+
+fn _rfs_view_valid(view: StorageViewV1) -> bool:
+    if view.view_id.byte_len() < 1 or view.view_id.byte_len() > 64 or view.view_root.byte_len() < 1:
+        return false
+    for b in view.view_id.bytes():
+        val ok = (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45 or b == 95
+        if not ok:
+            return false
+    for b in view.view_root.bytes():
+        if b < 33 or b > 126:
+            return false
+    true
+
+pub fn rootfs_materialize_v1(view: StorageViewV1, allow_copy: ViewFlagV1) -> RootfsMaterializeV1:
+    val entries = storage_view_v1_base_entries(view)
+    if entries.status != "ok":
+        return _rfs_rejected(entries.reason)
+    val lower = _rfs_lower(view)
+    if is_dir(lower):
+        return _rfs_rejected("lower-exists")
+    if not is_dir(_rfs_upper(view)):
+        return _rfs_rejected("upper-missing")
+    val pin_reason = immutable_store_v1_pin(view.store, view.view_id, ROOTFS_PIN_OWNER_V1, entries.keys)
+    if pin_reason != "":
+        immutable_store_v1_release_pin(view.store, view.view_id, ROOTFS_PIN_OWNER_V1)
+        return _rfs_rejected(pin_reason)
+    if not dir_create_all(lower):
+        return _rfs_abort(view, "lower-create-failed")
+    var linked: i64 = 0
+    var copied: i64 = 0
+    for i in 0..entries.paths.len():
+        val dest = lower + "/" + entries.paths[i]
+        val parent = _rfs_parent(dest)
+        if not is_dir(parent) and not dir_create_all(parent):
+            return _rfs_abort(view, "lower-parent-failed")
+        val got = immutable_store_v1_link_object(view.store, entries.keys[i], dest,
+            StoreFlagV1(allow_copy.value))
+        if got.status == "linked":
+            linked = linked + 1
+        elif got.status == "copied":
+            copied = copied + 1
+        else:
+            return _rfs_abort(view, "link-" + got.status + ": " + got.reason)
+    RootfsMaterializeV1(status: "ok", reason: "", lower_dir: lower, upper_dir: _rfs_upper(view),
+        linked: ViewCountV1(linked), copied: ViewCountV1(copied))
+
+# "" = lower removed and pin released.
+pub fn rootfs_dematerialize_v1(view: StorageViewV1) -> text:
+    if not _rfs_view_valid(view):
+        return "view-id-invalid"
+    val lower = _rfs_lower(view)
+    if is_dir(lower):
+        if not dir_is_real_no_follow(lower):
+            return "lower-not-real-dir"
+        if not dir_remove_all(lower) or is_dir(lower):
+            return "lower-remove-failed"
+    val released = immutable_store_v1_release_pin(view.store, view.view_id, ROOTFS_PIN_OWNER_V1)
+    if released != "" and released != "pin-missing":
+        return released
+    ""
