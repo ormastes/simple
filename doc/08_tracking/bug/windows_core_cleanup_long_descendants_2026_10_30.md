@@ -23,7 +23,7 @@ points themselves without traversing their targets. Enumeration errors and
 deletion failures remain failures. Existing missing-path policy remains core
 success versus full-runtime failure; core file removal remains supported.
 
-Validation: `python scripts/check/check-windows-remove-tree.py --cc <Windows-GNU-clang>
+Validation: `python scripts/check/check-windows-remove-tree.py [deleted 2026-11-26] --cc <Windows-GNU-clang>
 --work-dir <new-private-directory>` passes eight cases linked with eight actual
 production core-C owners and eight cases using the shared full-runtime policy:
 normal trees, Unicode, descendants over 350 characters, missing paths,

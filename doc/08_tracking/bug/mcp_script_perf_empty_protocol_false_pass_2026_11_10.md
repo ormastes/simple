@@ -40,7 +40,7 @@ The executable regression invokes the production gate with controlled child
 processes, including valid Unicode/reordered responses and malformed controls:
 
 ```text
-python scripts/check/check-mcp-script-mode-perf-contract.py
+python scripts/check/check-mcp-script-mode-perf-contract.py [deleted 2026-11-26]
 ```
 
 Results and individual raw outputs are retained under

@@ -122,7 +122,7 @@ rows. Application/GUI owners still require their real runtime/capsule/display
 authorities. A cached Caret artifact and its provenance, rather than
 `SIMPLE_BINARY` alone, select the PTY checker artifact.
 
-Contract tests under `scripts/check/test-stage4-retained-manual.py` use only
+Contract tests under `scripts/check/test-stage4-retained-manual.py [deleted 2026-11-26]` use only
 explicitly synthetic tiny headers and receipts. They never execute a compiler,
 runtime, native artifact or fake production capsule.
 
@@ -170,7 +170,7 @@ qualification, not a source edit:
 - Lane constraints forbid it: the tracked `bin/simple.exe` must stay (no
   redeploy), no push/PR, and there is no admitted native producer on this
   Windows host to build the per-role `--emit-object --mode dynload` aggregates.
-  The contract tests under `scripts/check/test-stage4-retained-manual.py` use
+  The contract tests under `scripts/check/test-stage4-retained-manual.py [deleted 2026-11-26]` use
   only synthetic tiny headers/receipts and never execute a compiler, runtime or
   native artifact, so they cannot qualify raw1 either.
 

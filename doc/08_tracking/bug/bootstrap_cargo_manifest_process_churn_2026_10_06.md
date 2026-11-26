@@ -32,7 +32,7 @@ regex inspection; actual Git-for-Windows awk text input strips CR, so both old
 and new parsers emitted the same valid dependency. The expectation was corrected
 and only that failed case rerun. This is not a demonstrated CRLF production bug.
 
-Run `scripts/check/check-bootstrap-cargo-path-batch.py` with the candidate
+Run `scripts/check/check-bootstrap-cargo-path-batch.py [deleted 2026-11-26]` with the candidate
 authority script, a new output directory, and optionally an immutable captured
 manifest root for the memory check. The test executes extracted production
 helpers and the original containment block without running bootstrap or a

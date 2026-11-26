@@ -36,7 +36,7 @@ Neither attempt compiled modules or deleted the preserved cache.
 
 ## Verification
 
-`python3 scripts/check/check-stage2-scv-cold-init.py` passed. It executes the
+`python3 scripts/check/check-stage2-scv-cold-init.py [deleted 2026-11-26]` passed. It executes the
 actual shell fragments used to build the invocation and args digest, capturing
 only the compiler execution boundary. Linux and FreeBSD fixtures validate the
 real environment-name guard and a child launched through `env -i`, require

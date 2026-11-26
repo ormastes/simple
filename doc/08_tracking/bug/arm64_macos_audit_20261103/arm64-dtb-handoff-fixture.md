@@ -53,7 +53,7 @@ No full firmware boot, DTB-byte survival, Simple compiler acceptance, ARM64 desk
 
 ## Reproducible repository checker and zero case
 
-Prepared `scripts/check/check-arm64-boot-dtb-handoff.py` in the PCI handoff candidate worktree. It extracts the actual candidate save/publication/getter and actual relocation/BSS loops; refuses a clobber before save or any later early-boot x20 use, assembles full production crt0, and generates the reduced fixture with SDN evidence. It refuses existing evidence directories and enforces 1-second emulator timeouts. Invocation: `python3 scripts/check/check-arm64-boot-dtb-handoff.py --output /tmp/<fresh-owned-evidence-directory>`.
+Prepared `scripts/check/check-arm64-boot-dtb-handoff.py [deleted 2026-11-26]` in the PCI handoff candidate worktree. It extracts the actual candidate save/publication/getter and actual relocation/BSS loops; refuses a clobber before save or any later early-boot x20 use, assembles full production crt0, and generates the reduced fixture with SDN evidence. It refuses existing evidence directories and enforces 1-second emulator timeouts. Invocation: `python3 scripts/check/check-arm64-boot-dtb-handoff.py [deleted 2026-11-26] --output /tmp/<fresh-owned-evidence-directory>`.
 
 Checker syntax was validated with Python AST parsing; generated baseline fixture matches the already-executed exact fixture modulo assembly whitespace, and C/linker inputs match byte-for-byte. Source-order negative controls (inject x0 clobber before save; inject x20 clobber during EL setup) both reject. The packaged whole runner was not reexecuted, to preserve prior green checks; its generated inputs match retained actual execution evidence.
 

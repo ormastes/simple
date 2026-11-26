@@ -59,10 +59,10 @@ origin/release/1.0.0 history). The spec's `OFFICE_UI_BASE` is now
 `build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access/runs/`
 (`office_cli_tui_ui_access_spec.spl:25`), which joins to the same root the
 gate writes (`check-office-cli-tui-ui-access.spl:26,73-74`). The commit also
-added `scripts/check/check-office-handoff-evidence-root.py`.
+added `scripts/check/check-office-handoff-evidence-root.py [deleted 2026-11-26]`.
 
 Seed-smoke verification on refreshed seed (build-commit 0791c2b7f4a7):
-- `python scripts/check/check-office-handoff-evidence-root.py` →
+- `python scripts/check/check-office-handoff-evidence-root.py [deleted 2026-11-26]` →
   `PASS: 9 receipt paths, two isolated runs; historical mismatch rejected`.
 - `bin/simple.exe test test/03_system/plan_acceptance/office_cli_tui_ui_access_spec.spl
   --mode=interpreter --no-cache` → 3 passed / 9 failed; every failure is the
@@ -78,5 +78,5 @@ Verdict: SUPERSEDED by 8bc5c33e3bd4.
 ## Triage 2026-11-13 (P3 tools lane)
 No code change this lane; SUPERSEDED by 8bc5c33e3bd4 per the record addendum
 (evidence root aligned and guarded by
-scripts/check/check-office-handoff-evidence-root.py). Verdict trusted, not
+scripts/check/check-office-handoff-evidence-root.py [deleted 2026-11-26]). Verdict trusted, not
 re-run.

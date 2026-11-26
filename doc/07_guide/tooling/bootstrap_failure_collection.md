@@ -25,7 +25,7 @@ visible. `bash scripts/check/check-windows-msvc-sdk-discovery.shs` checks that
 boundary; see the [SDK discovery bug](../../08_tracking/bug/windows_msvc_sdk_discovery_pipefail_2026-10-11.md).
 
 Run the PATH fixture with
-`python scripts/check/check-bootstrap-path-access.py --script scripts/bootstrap/bootstrap-from-scratch.sh --output <fresh-private-directory>`.
+`python scripts/check/check-bootstrap-path-access.py [deleted 2026-11-26] --script scripts/bootstrap/bootstrap-from-scratch.sh --output <fresh-private-directory>`.
 On Windows it discovers native Bash beside Git on PATH; for MSYS2 or a custom
 installation, pass `--shell "C:/path with spaces/bash.exe"`. On POSIX it resolves
 `bash` from PATH. Windows ambient Bash is not selected automatically because it

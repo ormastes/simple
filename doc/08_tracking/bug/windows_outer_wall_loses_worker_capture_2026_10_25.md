@@ -40,6 +40,6 @@ evidence, not compiler, Phase3 or whole-suite qualification.
 
 The repository helper additionally enforces workload/argv hashes and reviewed
 CLI plan/helper hashes. Its focused authority-binding regression is
-`python scripts/check/check-owned-worker-drain-binding-windows.py --output <new-dir>`.
+`python scripts/check/check-owned-worker-drain-binding-windows.py [deleted 2026-11-26] --output <new-dir>`.
 Concrete launcher integration still requires independent review and its own
 actual terminal evidence. No full bootstrap was launched for this change.

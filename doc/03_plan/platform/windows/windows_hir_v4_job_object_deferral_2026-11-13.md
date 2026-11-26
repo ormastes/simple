@@ -201,7 +201,7 @@ Native rows (a Windows host, PowerShell, repo root):
 powershell -NoProfile -File scripts/check/check-owned-process-windows-adapter.ps1
 powershell -NoProfile -File scripts/check/check-owned-process-windows-async.ps1
 powershell -NoProfile -File scripts/check/check-bootstrap-stage3-windows-process-inventory.ps1   # -WorkerLabel sleeper = retirement fixture
-python scripts/check/check-windows-host-capacity.py
+python scripts/check/check-windows-host-capacity.py [deleted 2026-11-26]
 bin/simple run test/01_unit/app/bootstrap_builder/windows_capacity_headroom_spec.spl
 ```
 
