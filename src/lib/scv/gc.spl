@@ -15,6 +15,8 @@ use std.scv.integrity.{scv_fsck}
 use std.scv.stabilize.{scv_checkpoint_verify}
 use std.scv.maintenance.{SCV_GC_QUARANTINE_DAYS, scv_gc_roots_reachable_checked, scv_gc_unreachable_rows, scv_gc_quarantine}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.io.dir_ops.{is_dir}
+use std.nogc_sync_mut.storage.scv_adapter_v1.{scv_adapter_v1_store_root, scv_adapter_v1_pin_reachable}
 
 fn scv_gc_command(root: text, args: [text]) -> text:
     if not scv_repo_exists(root):
@@ -37,6 +39,12 @@ fn scv_gc_command(root: text, args: [text]) -> text:
     val reachable = match scv_gc_roots_reachable_checked(root):
         Ok(value): value
         Err(error): return error
+    # Repos without .scv/store behave exactly as before; with one, reachable
+    # chunks are imported and pinned for the shared store (fail closed).
+    if is_dir(scv_adapter_v1_store_root(root)):
+        val pinned = scv_adapter_v1_pin_reachable(root, reachable, "scv")
+        if pinned.status != "ok":
+            return "FAIL — scv store pin failed: {pinned.reason}\n"
     val rows = scv_gc_unreachable_rows(root, reachable)
     var out_rows: [text] = []
     for row in rows:
