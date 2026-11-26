@@ -20,7 +20,8 @@ pub(crate) use bdd::{
 };
 pub(crate) use core::{
     bind_args, bind_args_with_injected, bind_args_with_values, bind_args_with_values_named, name_callee,
-    reject_bool_literal_args_for_slice, captured_env_with_live_globals, exec_function,
+    reject_bool_literal_args_for_slice, reject_bool_literal_args_with_self, captured_env_with_live_globals,
+    exec_function,
     exec_function_with_bound_args, exec_function_with_captured_env, exec_function_with_values,
     exec_function_with_values_and_self, exec_lambda, write_back_borrow_arguments, execute_function_body,
     instantiate_class, noinit_named_type_default, publish_and_repoint, publish_before_block_clone,
@@ -712,6 +713,63 @@ where
     }
 }
 
+/// Evaluate arguments and dispatch a matching static method overload while
+/// enforcing static bool-literal admission before callee execution (and before
+/// argument evaluation when there is a single matching-name static method).
+#[allow(clippy::too_many_arguments)]
+fn eval_and_exec_static_overload<'a, I, F>(
+    candidates: I,
+    method_name: &str,
+    type_name: &str,
+    args: &[Argument],
+    track_new_guard: bool,
+    warn_deprecated_new: bool,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError>
+where
+    I: IntoIterator<Item = &'a F> + Clone,
+    F: Borrow<FunctionDef> + 'a,
+{
+    let mut static_matching = candidates.clone().into_iter().filter_map(|func| {
+        let f = func.borrow();
+        let is_static = f.is_static || !f.params.iter().any(|param| param.name == METHOD_SELF);
+        (f.name == method_name && is_static).then_some(f)
+    });
+    let Some(first) = static_matching.next() else {
+        return Ok(None);
+    };
+    if static_matching.next().is_none() {
+        core::reject_bool_literal_args_for_slice(&first.params, args).map_err(|e| core::name_callee(e, first))?;
+    }
+    let evaluated_args: Vec<Value> = args
+        .iter()
+        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(func) = select_named_static_overload(candidates, method_name, &evaluated_args) else {
+        return Ok(None);
+    };
+    core::reject_bool_literal_args_for_slice(&func.params, args).map_err(|e| core::name_callee(e, &func))?;
+    let is_new_method = track_new_guard && method_name == "new";
+    if is_new_method {
+        if warn_deprecated_new {
+            eprintln!(
+                "[WARN] Deprecated: {}.new() should be replaced with {}(). Use direct construction instead.",
+                type_name, type_name
+            );
+        }
+        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+    }
+    let result = core::exec_function_with_values(&func, &evaluated_args, env, functions, classes, enums, impl_methods);
+    if is_new_method {
+        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+    }
+    result.map(Some)
+}
+
 /// Dispatch an already-evaluated `Value` as a callable.
 ///
 /// Returns `Ok(Some(result))` when `val` was callable and the call was made,
@@ -979,7 +1037,8 @@ fn evaluate_identifier_user_call(
                 // Judge the definition the binding resolved to (its own
                 // name), not the call-site spelling.
                 gate_private_call(&func.name, &func)?;
-                return core::exec_function_with_values_and_writeback(
+                let dsl = (!env.is_local(name)).then(|| bdd::begin_spec_dsl_def(&func)).flatten();
+                let call_res = core::exec_function_with_values_and_writeback(
                     &func,
                     evaluated_args,
                     args,
@@ -989,6 +1048,7 @@ fn evaluate_identifier_user_call(
                     enums,
                     impl_methods,
                 );
+                return bdd::finish_spec_dsl_def(args, dsl, call_res);
             }
             // Own-module definitions first: `FUNCTION_OVERLOADS` is keyed by
             // the bare name process-wide, so it also holds every OTHER
@@ -1022,7 +1082,8 @@ fn evaluate_identifier_user_call(
                         CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())
                     );
                 }
-                return core::exec_function_with_values_and_writeback(
+                let dsl = (!env.is_local(name)).then(|| bdd::begin_spec_dsl_def(&func)).flatten();
+                let call_res = core::exec_function_with_values_and_writeback(
                     &func,
                     evaluated_args,
                     args,
@@ -1032,6 +1093,7 @@ fn evaluate_identifier_user_call(
                     enums,
                     impl_methods,
                 );
+                return bdd::finish_spec_dsl_def(args, dsl, call_res);
             }
         }
     }
@@ -1102,11 +1164,17 @@ fn evaluate_identifier_user_call(
             // An env-bound import (notably `use m.{secret as s}`, which
             // never enters FUNCTION_OVERLOADS) is gated by the def's own
             // name; nested fns have no owner and pass.
+            let mut dsl = None;
             if let Value::Function { def, .. } = &val {
                 gate_private_call(&def.name, def)?;
+                if !env.is_local(name) {
+                    dsl = bdd::begin_spec_dsl_def(def);
+                }
             }
-            if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
-                return Ok(result);
+            match call_value_as_callable(val, args, env, functions, classes, enums, impl_methods) {
+                Ok(Some(result)) => return bdd::finish_spec_dsl_def(args, dsl, Ok(result)),
+                Ok(None) => {}
+                Err(err) => return bdd::finish_spec_dsl_def(args, dsl, Err(err)),
             }
         }
     }
@@ -1124,15 +1192,18 @@ fn evaluate_identifier_user_call(
                 CURRENT_EXEC_MODULE.with(|c| c.borrow().clone())
             );
         }
+        let dsl = (!env.is_local(name)).then(|| bdd::begin_spec_dsl_def(&func)).flatten();
         // AOP join point. `has_advice()` is a thread-local emptiness check,
         // so a program with no `on pc{...}` declaration pays nothing.
-        if core::aop_runtime::has_advice() {
+        let call_res = if core::aop_runtime::has_advice() {
             core::aop_runtime::run_before(&func, env, functions, classes, enums, impl_methods)?;
             let result = core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None)?;
             core::aop_runtime::run_after(&func, &result, env, functions, classes, enums, impl_methods)?;
-            return Ok(result);
-        }
-        return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+            Ok(result)
+        } else {
+            core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None)
+        };
+        return bdd::finish_spec_dsl_def(args, dsl, call_res);
     }
 
     // Try mock library
@@ -1367,18 +1438,6 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
         phase_end(&pc::EVALCALL_NS_P3_BDD, t);
-        if let Some(snapshot) = bdd::begin_spec_dsl_call(name, functions) {
-            let call_res = evaluate_identifier_user_call(
-                name,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            );
-            return bdd::finish_spec_dsl_call(name, args, functions, snapshot, call_res);
-        }
         return evaluate_identifier_user_call(name, args, env, functions, classes, enums, impl_methods);
     }
 
@@ -1449,32 +1508,20 @@ pub(crate) fn evaluate_call(
             // imported A's `Config` used to run B's `impl Config: default`).
             let scoped_fa_class = crate::interpreter::resolve_class_in_scope(classes, module_name)?;
             if let Some(class_def) = scoped_fa_class.clone() {
-                let evaluated_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_named_static_overload(class_def.methods.iter(), field, &evaluated_args) {
-                    core::reject_bool_literal_args_for_slice(&func.params, args)
-                        .map_err(|e| core::name_callee(e, &func))?;
-                    // If calling a `new` method, mark it to prevent double execution via instantiate_class
-                    let is_new_method = field == "new";
-                    if is_new_method {
-                        eprintln!("[WARN] Deprecated: {}.new() should be replaced with {}(). Use direct construction instead.", module_name, module_name);
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(module_name.to_string()));
-                    }
-                    let result = core::exec_function_with_values(
-                        &func,
-                        &evaluated_args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
-                    if is_new_method {
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(module_name));
-                    }
-                    return result;
+                if let Some(result) = eval_and_exec_static_overload(
+                    class_def.methods.iter(),
+                    field,
+                    module_name,
+                    args,
+                    true,
+                    true,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(result);
                 }
             }
             // Try local impl_methods first, then GLOBAL_IMPL_METHODS fallback
@@ -1483,32 +1530,20 @@ pub(crate) fn evaluate_call(
                 .cloned()
                 .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(module_name).cloned()));
             if let Some(methods) = impl_methods_for_type {
-                let evaluated_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_named_static_overload(methods.iter(), field, &evaluated_args) {
-                    core::reject_bool_literal_args_for_slice(&func.params, args)
-                        .map_err(|e| core::name_callee(e, &func))?;
-                    // If calling a `new` method, mark it to prevent double execution via instantiate_class
-                    let is_new_method = field == "new";
-                    if is_new_method {
-                        eprintln!("[WARN] Deprecated: {}.new() should be replaced with {}(). Use direct construction instead.", module_name, module_name);
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(module_name.to_string()));
-                    }
-                    let result = core::exec_function_with_values(
-                        &func,
-                        &evaluated_args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
-                    if is_new_method {
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(module_name));
-                    }
-                    return result;
+                if let Some(result) = eval_and_exec_static_overload(
+                    methods.iter(),
+                    field,
+                    module_name,
+                    args,
+                    true,
+                    true,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(result);
                 }
             }
 
@@ -1771,29 +1806,20 @@ pub(crate) fn evaluate_call(
             // an error here instead of a last-registration-wins pick.
             let scoped_class = crate::interpreter::resolve_class_in_scope(classes, type_name)?;
             if let Some(class_def) = scoped_class.as_ref() {
-                let evaluated_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_named_static_overload(class_def.methods.iter(), method_name, &evaluated_args)
-                {
-                    let is_new_method = method_name == "new";
-                    if is_new_method {
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
-                    }
-                    let result = core::exec_function_with_values(
-                        &func,
-                        &evaluated_args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
-                    if is_new_method {
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
-                    }
-                    return result;
+                if let Some(result) = eval_and_exec_static_overload(
+                    class_def.methods.iter(),
+                    method_name,
+                    type_name,
+                    args,
+                    true,
+                    false,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(result);
                 }
             }
 
@@ -1804,29 +1830,20 @@ pub(crate) fn evaluate_call(
                 .cloned()
                 .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(type_name).cloned()));
             if let Some(methods) = path_impl_methods {
-                let evaluated_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_named_static_overload(methods.iter(), method_name, &evaluated_args) {
-                    // If calling a `new` method, mark it to prevent double execution via instantiate_class
-                    let is_new_method = method_name == "new";
-                    if is_new_method {
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
-                    }
-                    let result = core::exec_function_with_values(
-                        &func,
-                        &evaluated_args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
-                    if is_new_method {
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
-                    }
-                    return result;
+                if let Some(result) = eval_and_exec_static_overload(
+                    methods.iter(),
+                    method_name,
+                    type_name,
+                    args,
+                    true,
+                    false,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(result);
                 }
             }
 
@@ -1840,54 +1857,40 @@ pub(crate) fn evaluate_call(
             let path_overloaded_classes = CLASS_OVERLOADS.with(|cell| cell.borrow().get(type_name).cloned());
             if !flat_class_has_method {
                 if let Some(class_defs) = path_overloaded_classes.as_ref() {
-                    let evaluated_args: Vec<Value> = args
-                        .iter()
-                        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if let Some(func) = select_named_static_overload(
+                    if let Some(result) = eval_and_exec_static_overload(
                         class_defs.iter().flat_map(|class_def| class_def.methods.iter()),
                         method_name,
-                        &evaluated_args,
-                    ) {
-                        return core::exec_function_with_values(
-                            &func,
-                            &evaluated_args,
-                            env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        );
+                        type_name,
+                        args,
+                        false,
+                        false,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )? {
+                        return Ok(result);
                     }
                 }
             }
 
             // Check for class associated function (static method)
             if let Some(class_def) = classes.get(type_name).cloned() {
-                let evaluated_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_named_static_overload(class_def.methods.iter(), method_name, &evaluated_args)
-                {
-                    // If calling a `new` method, mark it to prevent double execution via instantiate_class
-                    let is_new_method = method_name == "new";
-                    if is_new_method {
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
-                    }
-                    let result = core::exec_function_with_values(
-                        &func,
-                        &evaluated_args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
-                    if is_new_method {
-                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
-                    }
-                    return result;
+                if let Some(result) = eval_and_exec_static_overload(
+                    class_def.methods.iter(),
+                    method_name,
+                    type_name,
+                    args,
+                    true,
+                    false,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(result);
                 }
             }
 
@@ -2039,22 +2042,20 @@ pub(crate) fn evaluate_call(
             // class this source module declares or imports under the name).
             let scoped_class = crate::interpreter::resolve_class_in_scope(classes, type_name.as_str())?;
             if let Some(class_def) = scoped_class.clone() {
-                let evaluated_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Some(method) =
-                    select_named_static_overload(class_def.methods.iter(), method_name, &evaluated_args)
-                {
-                    return core::exec_function_with_values(
-                        &method,
-                        &evaluated_args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
+                if let Some(result) = eval_and_exec_static_overload(
+                    class_def.methods.iter(),
+                    method_name,
+                    type_name.as_str(),
+                    args,
+                    false,
+                    false,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(result);
                 }
             }
 
@@ -2064,20 +2065,20 @@ pub(crate) fn evaluate_call(
                 .cloned()
                 .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(type_name.as_str()).cloned()));
             if let Some(methods) = path_static_impl_methods {
-                let evaluated_args: Vec<Value> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Some(method) = select_named_static_overload(methods.iter(), method_name, &evaluated_args) {
-                    return core::exec_function_with_values(
-                        &method,
-                        &evaluated_args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
+                if let Some(result) = eval_and_exec_static_overload(
+                    methods.iter(),
+                    method_name,
+                    type_name.as_str(),
+                    args,
+                    false,
+                    false,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(result);
                 }
             }
 

@@ -150,15 +150,33 @@ pub(crate) fn reject_bool_literal_args(
     Ok(())
 }
 
+/// Convenience wrapper for pre-evaluated / static / UFCS / method call sites
+/// that have a raw `Parameter` slice and AST `Argument` slice without prebuilt
+/// lookup sets. When `skip_self` is `true` (mirroring `SelfMode::SkipSelf`),
+/// any parameter named `self` is excluded from positional/named admission.
+pub(crate) fn reject_bool_literal_args_with_self(
+    params: &[Parameter],
+    args: &[Argument],
+    skip_self: bool,
+) -> Result<(), CompileError> {
+    if args.is_empty() || args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+        return Ok(());
+    }
+    let params_to_bind: Vec<&Parameter> = params
+        .iter()
+        .filter(|p| !(skip_self && p.name == METHOD_SELF))
+        .collect();
+    if params_to_bind.iter().any(|p| p.variadic) {
+        return Ok(());
+    }
+    let named_params: std::collections::HashSet<&str> = args.iter().filter_map(|a| a.name.as_deref()).collect();
+    reject_bool_literal_args(args, &params_to_bind, &named_params)
+}
+
 /// Convenience wrapper for pre-evaluated / static / UFCS call sites that have
 /// a raw `Parameter` slice and AST `Argument` slice without prebuilt lookup sets.
 pub(crate) fn reject_bool_literal_args_for_slice(params: &[Parameter], args: &[Argument]) -> Result<(), CompileError> {
-    if args.is_empty() || params.iter().any(|p| p.variadic) || args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
-        return Ok(());
-    }
-    let params_to_bind: Vec<&Parameter> = params.iter().collect();
-    let named_params: std::collections::HashSet<&str> = args.iter().filter_map(|a| a.name.as_deref()).collect();
-    reject_bool_literal_args(args, &params_to_bind, &named_params)
+    reject_bool_literal_args_with_self(params, args, false)
 }
 
 // Value-type (struct) arguments are passed by copy. Until 2026-08-21 every

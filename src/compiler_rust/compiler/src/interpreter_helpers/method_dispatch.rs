@@ -55,6 +55,38 @@ pub(crate) fn call_method_on_value(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn exec_method_with_values_and_self_checked(
+    func: &FunctionDef,
+    args: &[Value],
+    arg_exprs: Option<&[Argument]>,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
+) -> Result<Value, CompileError> {
+    if let Some(exprs) = arg_exprs {
+        crate::interpreter::interpreter_call::reject_bool_literal_args_with_self(
+            &func.params,
+            exprs,
+            self_ctx.is_some(),
+        )
+        .map_err(|e| crate::interpreter::interpreter_call::name_callee(e, func))?;
+    }
+    exec_function_with_values_and_self(
+        func,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_ctx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn call_method_on_value_with_args(
     recv_val: Value,
     method: &str,
@@ -809,9 +841,10 @@ pub(crate) fn call_method_on_value_with_args(
             if let Some(class_def) = crate::interpreter::resolve_class_for_instance(_classes, class, fields) {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
                     // Call method with self context
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -825,9 +858,10 @@ pub(crate) fn call_method_on_value_with_args(
             // Search for method in impl blocks (local first, then GLOBAL_IMPL_METHODS fallback)
             if let Some(methods) = _impl_methods.get(class) {
                 if let Some(func) = methods.iter().find(|m| m.name == method) {
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -843,9 +877,10 @@ pub(crate) fn call_method_on_value_with_args(
                     .and_then(|methods| methods.iter().find(|m| m.name == method).cloned())
             });
             if let Some(func) = global_impl {
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     &func,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -870,9 +905,10 @@ pub(crate) fn call_method_on_value_with_args(
                     let mut enum_fields = HashMap::new();
                     enum_fields.insert("self".to_string(), recv_val.clone());
                     let enum_fields = Arc::new(enum_fields);
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -891,9 +927,10 @@ pub(crate) fn call_method_on_value_with_args(
                     let mut enum_fields = HashMap::new();
                     enum_fields.insert("self".to_string(), recv_val.clone());
                     let enum_fields = Arc::new(enum_fields);
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -953,9 +990,10 @@ pub(crate) fn call_method_on_value_with_args(
                 let mut self_fields = HashMap::new();
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     method_def.as_ref(),
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -1015,9 +1053,10 @@ pub(crate) fn call_method_on_value_with_args(
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
                 let type_name = type_names[0];
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     &func,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -1043,9 +1082,10 @@ pub(crate) fn call_method_on_value_with_args(
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
                 let type_name = type_names[0];
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     &func,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,

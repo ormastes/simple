@@ -195,6 +195,10 @@ thread_local! {
     // whose message starts with `precondition:`). They are recorded as skipped in
     // BDD_TEST_RESULTS and named here so the SPEC FILE VERDICT carries `blocked=`.
     pub(crate) static BDD_BLOCKED_TOTAL: RefCell<usize> = const { RefCell::new(0) };
+    // Whether the active `std.spec` helper inside `it` already recorded a failure
+    // into `BDD_TOTALS.1` via `rt_bdd_record_result(0)`, so the enclosing `it`
+    // runner does not count the same example twice.
+    pub(crate) static BDD_FAILED_RECORDED_IN_IT: RefCell<bool> = const { RefCell::new(false) };
     // Failure message from expect (for display in it block)
     pub(crate) static BDD_FAILURE_MSG: RefCell<BddFailures> = const { RefCell::new(BddFailures::new()) };
     // Provisional "hollow call" failure: a bare `expect(<call>)` whose result is
@@ -332,67 +336,115 @@ fn mark_skip_in_example() -> bool {
     true
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct SpecDslCallSnapshot {
-    owners: Vec<Arc<str>>,
+/// RAII guard restoring `std.spec._case_depth` when leaving an in-`it`
+/// `std.spec.skip(...)` call (even on errors or panics), mutating only stores
+/// that already hold `_case_depth`.
+#[derive(Debug)]
+struct CaseDepthGuard {
+    owner: Arc<str>,
+    prev_owned: Option<Value>,
+    prev_flat: Option<Value>,
+}
+
+impl CaseDepthGuard {
+    fn enter(owner: &Arc<str>, def_name: &str) -> Option<Self> {
+        if def_name != "skip" || !BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+            return None;
+        }
+        let prev_owned = crate::interpreter::owned_global(owner, "_case_depth");
+        let prev_flat = crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().get("_case_depth").cloned());
+        let current = prev_owned.as_ref().or(prev_flat.as_ref())?;
+        let Value::Array(arr) = current else {
+            return None;
+        };
+        if !arr.is_empty() {
+            return None;
+        }
+        let pushed = Value::array(vec![Value::Int(1)]);
+        if prev_owned.is_some() {
+            crate::interpreter::set_owned_global(owner, "_case_depth", pushed.clone(), false);
+        }
+        if prev_flat.is_some() {
+            crate::interpreter::MODULE_GLOBALS.with(|cell| {
+                cell.borrow_mut().insert("_case_depth".to_owned(), pushed);
+            });
+        }
+        Some(Self {
+            owner: Arc::clone(owner),
+            prev_owned,
+            prev_flat,
+        })
+    }
+}
+
+impl Drop for CaseDepthGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev_owned.take() {
+            crate::interpreter::set_owned_global(&self.owner, "_case_depth", prev, false);
+        }
+        if let Some(prev) = self.prev_flat.take() {
+            crate::interpreter::MODULE_GLOBALS.with(|cell| {
+                cell.borrow_mut().insert("_case_depth".to_owned(), prev);
+            });
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SpecDslCallGuard {
+    def_name: String,
+    owner: Arc<str>,
     current_test_errors_len: usize,
     test_errors_len: usize,
     test_failed: i64,
     bdd_failed_total: i64,
-    saved_case_depth: Option<(Option<Arc<str>>, Value)>,
+    case_depth_guard: Option<CaseDepthGuard>,
 }
 
-fn spec_dsl_owners(name: &str, functions: &HashMap<String, Arc<FunctionDef>>) -> Vec<Arc<str>> {
-    use crate::interpreter::{FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS};
-    let mut owners: Vec<Arc<str>> = Vec::new();
-    let mut push_fn_owner = |f: &Arc<FunctionDef>| {
-        let ptr = Arc::as_ptr(f) as usize;
-        let owner = FUNCTION_MODULE_OWNER.with(|cell| cell.borrow().get(&ptr).cloned());
-        if let Some(o) = owner {
-            if !owners.iter().any(|existing| Arc::ptr_eq(existing, &o) || existing.as_ref() == o.as_ref()) {
-                owners.push(o);
-            }
-        }
-    };
-    if let Some(f) = functions.get(name) {
-        push_fn_owner(f);
+fn is_spec_outcome_dsl(name: &str) -> bool {
+    matches!(name, "pending" | "pending_it" | "skip" | "skip_it" | "skip_context")
+}
+
+fn is_std_spec_owner(owner: &str) -> bool {
+    let normalized = owner.replace('\\', "/").to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "lib/nogc_sync_mut/spec.spl"
+            | "lib/nogc_sync_mut/spec/__init__.spl"
+            | "lib/nogc_sync_mut/spec/dsl.spl"
+            | "lib/gc_async_mut/spec.spl"
+            | "lib/gc_async_mut/spec/__init__.spl"
+            | "lib/nogc_async_mut/spec.spl"
+            | "lib/nogc_async_mut/spec/__init__.spl"
+            | "lib/std/src/spec/dsl.spl"
+            | "lib/std/src/spec/__init__.spl"
+    ) || normalized.ends_with("/lib/nogc_sync_mut/spec.spl")
+        || normalized.ends_with("/lib/nogc_sync_mut/spec/__init__.spl")
+        || normalized.ends_with("/lib/nogc_sync_mut/spec/dsl.spl")
+        || normalized.ends_with("/lib/gc_async_mut/spec.spl")
+        || normalized.ends_with("/lib/gc_async_mut/spec/__init__.spl")
+        || normalized.ends_with("/lib/nogc_async_mut/spec.spl")
+        || normalized.ends_with("/lib/nogc_async_mut/spec/__init__.spl")
+        || normalized.ends_with("/lib/std/src/spec/dsl.spl")
+        || normalized.ends_with("/lib/std/src/spec/__init__.spl")
+}
+
+fn std_spec_outcome_owner(def: &Arc<FunctionDef>) -> Option<Arc<str>> {
+    if !is_spec_outcome_dsl(&def.name) {
+        return None;
     }
-    FUNCTION_OVERLOADS.with(|cell| {
-        if let Some(list) = cell.borrow().get(name) {
-            for f in list {
-                push_fn_owner(f);
-            }
-        }
-    });
-    owners
+    let ptr = Arc::as_ptr(def) as usize;
+    let owner = crate::interpreter::FUNCTION_MODULE_OWNER.with(|cell| cell.borrow().get(&ptr).cloned())?;
+    is_std_spec_owner(&owner).then_some(owner)
 }
 
-fn read_spec_global_with_owner(owners: &[Arc<str>], key: &str) -> Option<(Option<Arc<str>>, Value)> {
-    for owner in owners {
-        if let Some(val) = crate::interpreter::owned_global(owner, key) {
-            return Some((Some(Arc::clone(owner)), val));
-        }
-    }
-    crate::interpreter::MODULE_GLOBALS
-        .with(|cell| cell.borrow().get(key).cloned())
-        .map(|val| (None, val))
+fn read_spec_global(owner: &Arc<str>, key: &str) -> Option<Value> {
+    crate::interpreter::owned_global(owner, key)
+        .or_else(|| crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().get(key).cloned()))
 }
 
-fn read_spec_global(owners: &[Arc<str>], key: &str) -> Option<Value> {
-    read_spec_global_with_owner(owners, key).map(|(_, v)| v)
-}
-
-fn write_spec_global(owner: Option<&Arc<str>>, key: &str, value: Value) {
-    if let Some(owner) = owner {
-        crate::interpreter::set_owned_global(owner, key, value.clone(), false);
-    }
-    crate::interpreter::MODULE_GLOBALS.with(|cell| {
-        cell.borrow_mut().insert(key.to_owned(), value);
-    });
-}
-
-fn read_spec_array_info(owners: &[Arc<str>], key: &str) -> (usize, Option<String>) {
-    match read_spec_global(owners, key) {
+fn read_spec_array_info(owner: &Arc<str>, key: &str) -> (usize, Option<String>) {
+    match read_spec_global(owner, key) {
         Some(Value::Array(arr)) => {
             let last = arr.last().map(|v| v.to_display_string());
             (arr.len(), last)
@@ -401,76 +453,49 @@ fn read_spec_array_info(owners: &[Arc<str>], key: &str) -> (usize, Option<String
     }
 }
 
-fn read_spec_int(owners: &[Arc<str>], key: &str) -> i64 {
-    match read_spec_global(owners, key) {
+fn read_spec_int(owner: &Arc<str>, key: &str) -> i64 {
+    match read_spec_global(owner, key) {
         Some(Value::Int(n)) => n,
         _ => 0,
     }
 }
 
-fn is_spec_outcome_dsl(name: &str) -> bool {
-    matches!(name, "pending" | "pending_it" | "skip" | "skip_it" | "skip_context")
-}
-
-/// Snapshot the Simple spec library's error/failure counters before dispatching
-/// to `.spl` implementations of `pending`/`skip`/`skip_it`/`skip_context`.
-pub(crate) fn begin_spec_dsl_call(
-    name: &str,
-    functions: &HashMap<String, Arc<FunctionDef>>,
-) -> Option<SpecDslCallSnapshot> {
-    if !is_spec_outcome_dsl(name) || !functions.contains_key(name) {
-        return None;
-    }
-    let owners = spec_dsl_owners(name, functions);
-    let (current_test_errors_len, _) = read_spec_array_info(&owners, "current_test_errors");
-    let (test_errors_len, _) = read_spec_array_info(&owners, "test_errors");
-    let test_failed = read_spec_int(&owners, "test_failed");
+/// Snapshot `std.spec` error/failure counters right before dispatching a
+/// resolved non-local `std.spec` `pending`/`pending_it`/`skip`/`skip_it`/
+/// `skip_context` definition. Returns `None` for any user or non-spec fn.
+pub(crate) fn begin_spec_dsl_def(def: &Arc<FunctionDef>) -> Option<SpecDslCallGuard> {
+    let owner = std_spec_outcome_owner(def)?;
+    let (current_test_errors_len, _) = read_spec_array_info(&owner, "current_test_errors");
+    let (test_errors_len, _) = read_spec_array_info(&owner, "test_errors");
+    let test_failed = read_spec_int(&owner, "test_failed");
     let bdd_failed_total = BDD_TOTALS.with(|cell| cell.borrow().1);
-    let saved_case_depth = if name == "skip" && BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
-        if let Some((owner, prev @ Value::Array(_))) = read_spec_global_with_owner(&owners, "_case_depth") {
-            if let Value::Array(ref arr) = prev {
-                if arr.is_empty() {
-                    write_spec_global(owner.as_ref(), "_case_depth", Value::array(vec![Value::Int(1)]));
-                    Some((owner, prev))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    Some(SpecDslCallSnapshot {
-        owners,
+    let case_depth_guard = CaseDepthGuard::enter(&owner, &def.name);
+    Some(SpecDslCallGuard {
+        def_name: def.name.clone(),
+        owner,
         current_test_errors_len,
         test_errors_len,
         test_failed,
         bdd_failed_total,
-        saved_case_depth,
+        case_depth_guard,
     })
 }
 
-/// Reconcile the Rust BDD harness bookkeeping with the actual `.spl` DSL
-/// execution outcome. If the `.spl` body rejected the call (or returned an error),
-/// report a failure instead of marking the example pending or skipped.
-pub(crate) fn finish_spec_dsl_call(
-    name: &str,
+/// Reconcile the Rust BDD harness bookkeeping with the resolved `std.spec`
+/// `.spl` DSL outcome, returning `call_res` unchanged when `guard` is `None`.
+pub(crate) fn finish_spec_dsl_def(
     args: &[Argument],
-    _functions: &HashMap<String, Arc<FunctionDef>>,
-    before: SpecDslCallSnapshot,
+    guard: Option<SpecDslCallGuard>,
     call_res: Result<Value, CompileError>,
 ) -> Result<Value, CompileError> {
-    if let Some((owner, prev_depth)) = before.saved_case_depth {
-        write_spec_global(owner.as_ref(), "_case_depth", prev_depth);
-    }
+    let Some(mut before) = guard else {
+        return call_res;
+    };
+    drop(before.case_depth_guard.take());
     let val = call_res?;
-    let (after_case_errs, last_case_err) = read_spec_array_info(&before.owners, "current_test_errors");
-    let (after_suite_errs, last_suite_err) = read_spec_array_info(&before.owners, "test_errors");
-    let after_test_failed = read_spec_int(&before.owners, "test_failed");
+    let (after_case_errs, last_case_err) = read_spec_array_info(&before.owner, "current_test_errors");
+    let (after_suite_errs, last_suite_err) = read_spec_array_info(&before.owner, "test_errors");
+    let after_test_failed = read_spec_int(&before.owner, "test_failed");
     let after_bdd_failed_total = BDD_TOTALS.with(|cell| cell.borrow().1);
 
     let rejected = after_case_errs > before.current_test_errors_len
@@ -479,6 +504,7 @@ pub(crate) fn finish_spec_dsl_call(
         || after_bdd_failed_total > before.bdd_failed_total;
 
     if rejected {
+        let dsl_name = &before.def_name;
         let msg = if after_case_errs > before.current_test_errors_len {
             last_case_err
         } else if after_suite_errs > before.test_errors_len {
@@ -486,11 +512,14 @@ pub(crate) fn finish_spec_dsl_call(
         } else {
             None
         }
-        .unwrap_or_else(|| format!("{name} rejected by active safety profile"));
+        .unwrap_or_else(|| format!("{dsl_name} rejected by active safety profile"));
 
         if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
             push_bdd_failure(msg);
+            if after_bdd_failed_total > before.bdd_failed_total {
+                BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow_mut() = true);
+            }
         } else if BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
             let desc_path = get_current_describe_path();
             let name_str = extract_desc_str(args, "unnamed");
@@ -507,7 +536,7 @@ pub(crate) fn finish_spec_dsl_call(
         return Ok(val);
     }
 
-    if matches!(name, "pending" | "pending_it") {
+    if matches!(before.def_name.as_str(), "pending" | "pending_it") {
         if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
             BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = true);
             if extract_desc_str(args, "").trim_start().starts_with("BLOCKED:") {
@@ -1322,6 +1351,7 @@ pub(super) fn eval_bdd_builtin(
             BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);
             BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
             BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = None);
+            BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow_mut() = false);
             BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
             BDD_SKIP_IN_IT.with(|cell| *cell.borrow_mut() = false);
             BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = false);
@@ -1401,7 +1431,9 @@ pub(super) fn eval_bdd_builtin(
                     println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
                     println!("{}  \x1b[31m{}\x1b[0m", indent_str, e);
                     BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
-                    BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
+                    if !BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow()) {
+                        BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
+                    }
                     let desc_path = get_current_describe_path();
                     record_test_result(desc_path, name_str.clone(), false, false);
                     // Don't propagate the error - allow other tests to run
@@ -1476,7 +1508,9 @@ pub(super) fn eval_bdd_builtin(
                             println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
                         }
                         BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
-                        BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
+                        if !BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow()) {
+                            BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
+                        }
                         record_test_result(desc_path, name_str.clone(), false, false);
                     } else if pending {
                         // Same rule as spec.spl `_execute_it`: the pending counter
@@ -1561,7 +1595,7 @@ pub(super) fn eval_bdd_builtin(
             // its outcome in `begin_spec_dsl_call` / `finish_spec_dsl_call` so
             // governance rejections (e.g. SIMPLE_SAFETY_PROFILE=critical) fail
             // instead of silently passing/skipping.
-            if functions.contains_key(name) {
+            if env.get(name).is_some() || functions.contains_key(name) {
                 return Ok(None);
             }
 
@@ -2643,6 +2677,7 @@ pub fn clear_bdd_state() {
     BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = false);
     BDD_BLOCKED_TOTAL.with(|cell| *cell.borrow_mut() = 0);
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
+    BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
     BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow_mut() = 0);

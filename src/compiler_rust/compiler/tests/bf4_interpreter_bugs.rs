@@ -157,6 +157,38 @@ fn bug1_rejects_literal_non_bool_across_all_call_paths() {
             "chained ufcs method",
             "class Tag:\n    v: i64\nfn make_tag() -> Tag:\n    Tag(v: 7)\nfn ufcs_check(t: Tag, b: bool) -> i64:\n    if b: return t.v\n    return 0\nfn run() -> i64:\n    make_tag().ufcs_check(42)\n    return 0\nmain = run()\n",
         ),
+        (
+            "path static class method",
+            "class Gate:\n    v: i64\n    static fn make(b: bool) -> i64:\n        if b: return 1\n        return 0\nmain = Gate::make(42)\n",
+        ),
+        (
+            "path static impl method",
+            "class ImplGate:\n    v: i64\nimpl ImplGate:\n    static fn make(b: bool) -> i64:\n        if b: return 1\n        return 0\nmain = ImplGate::make(\"bad\")\n",
+        ),
+        (
+            "path static overloaded method",
+            "class OvGate:\n    v: i64\n    static fn make(b: bool) -> i64:\n        if b: return 1\n        return 0\n    static fn make(b: bool, extra: i64) -> i64:\n        if b: return extra\n        return 0\nmain = OvGate::make(nil)\n",
+        ),
+        (
+            "stmt chained method_dispatch object",
+            "class Boxed:\n    v: i64\n    fn check(b: bool) -> i64:\n        if b: return self.v\n        return 0\nclass Holder:\n    dummy: i64\n    fn get_box() -> Boxed:\n        Boxed(v: 3)\nfn run() -> i64:\n    val h = Holder(dummy: 0)\n    h.get_box().check(42)\n    return 0\nmain = run()\n",
+        ),
+        (
+            "stmt chained method_dispatch enum",
+            "enum Kind:\n    One\n    fn check(b: bool) -> i64:\n        if b: return 1\n        return 0\nclass Holder:\n    dummy: i64\n    fn get_kind() -> Kind:\n        Kind.One\nfn run() -> i64:\n    val h = Holder(dummy: 0)\n    h.get_kind().check(42)\n    return 0\nmain = run()\n",
+        ),
+        (
+            "stmt chained method_dispatch enum impl",
+            "enum PlainKind:\n    Two\nimpl PlainKind:\n    fn impl_check(b: bool) -> i64:\n        if b: return 2\n        return 0\nclass Holder:\n    dummy: i64\n    fn get_kind() -> PlainKind:\n        PlainKind.Two\nfn run() -> i64:\n    val h = Holder(dummy: 0)\n    h.get_kind().impl_check(-1)\n    return 0\nmain = run()\n",
+        ),
+        (
+            "stmt chained method_dispatch trait on builtin",
+            "trait GateTrait:\n    fn trait_check(b: bool) -> i64\nimpl GateTrait for i64:\n    fn trait_check(b: bool) -> i64:\n        if b: return self\n        return 0\nclass Holder:\n    dummy: i64\n    fn get_num() -> i64:\n        7\nfn run() -> i64:\n    val h = Holder(dummy: 0)\n    h.get_num().trait_check(42)\n    return 0\nmain = run()\n",
+        ),
+        (
+            "stmt chained method_dispatch ufcs",
+            "class Tag:\n    v: i64\nclass Holder:\n    dummy: i64\n    fn get_tag() -> Tag:\n        Tag(v: 9)\nfn ufcs_check(t: Tag, b: bool) -> i64:\n    if b: return t.v\n    return 0\nfn run() -> i64:\n    val h = Holder(dummy: 0)\n    h.get_tag().ufcs_check(42)\n    return 0\nmain = run()\n",
+        ),
     ];
 
     for (label, src) in cases {
@@ -171,15 +203,58 @@ fn bug1_rejects_literal_non_bool_across_all_call_paths() {
 #[test]
 fn bug1_preserves_bool_and_presence_query_contract() {
     let src = r#"
+class Gate:
+    v: i64
+    static fn make(b: bool, x: i64) -> i64:
+        if b: return x
+        return 0
+
+enum Kind:
+    One
+    fn check(b: bool) -> i64:
+        if b: return 5
+        return 0
+
+trait GateTrait:
+    fn trait_check(b: bool) -> i64
+
+impl GateTrait for i64:
+    fn trait_check(b: bool) -> i64:
+        if b: return self
+        return 0
+
+class Holder:
+    dummy: i64
+    fn get_kind() -> Kind:
+        Kind.One
+    fn get_num() -> i64:
+        3
+
 fn check_presence(b: bool) -> i64:
     if b: return 1
     return 0
 
 val some_zero: i64? = Some(0)
 val none_val: i64? = nil
-main = check_presence(true) * 1000 + check_presence(false) * 100 + check_presence(some_zero.?) * 10 + check_presence(none_val.?)
+val h = Holder(dummy: 0)
+val p = Gate::make(true, 2) + h.get_kind().check(some_zero.?) + h.get_num().trait_check(true)
+main = check_presence(true) * 1000 + check_presence(false) * 100 + check_presence(some_zero.?) * 10 + check_presence(none_val.?) + p
 "#;
-    assert_eq!(eval_parse_only(src), Ok(1010));
+    assert_eq!(eval_parse_only(src), Ok(1020));
+
+    // Single-candidate static call rejects non-bool literal BEFORE evaluating arg side-effects.
+    let no_side_effect = r#"
+fn fail_if_eval() -> i64:
+    return 1 / 0
+class Gate:
+    v: i64
+    static fn make(b: bool, x: i64) -> i64:
+        if b: return x
+        return 0
+main = Gate::make(42, fail_if_eval())
+"#;
+    let err = eval_parse_only(no_side_effect).expect_err("Gate::make(42, fail_if_eval()) must reject literal bool mismatch before eval");
+    assert!(err.contains("declared 'bool'"), "{err}");
 }
 
 #[test]
@@ -323,6 +398,179 @@ describe "moderate skips":
         "valid moderate describe skip_it must mark skipped: {r4:?}"
     );
     assert_eq!(i4.len(), 1, "{i4:?}");
+}
+
+#[test]
+fn bug2_user_and_shadowed_pending_skip_not_hijacked_and_no_double_count() {
+    // 1. User-defined `pending` / `pending_it` without `std.spec` (mirrors
+    // `bdd_pending_dsl_dispatch_test.rs::user_pending_names_reach_their_simple_bodies`).
+    let user_pending_src = r#"
+fn pending(name: text) -> i64:
+    17
+
+fn pending_it(name: text) -> i64:
+    23
+
+describe "user pending dispatch":
+    it "uses the user pending function":
+        expect(pending("must execute")).to_equal(17)
+    it "uses the user pending_it function":
+        expect(pending_it("must execute")).to_equal(23)
+"#;
+    let (up_code, up_res, up_ign) = eval_with_imports(user_pending_src, None).unwrap();
+    assert_eq!(up_code, 0);
+    assert_eq!(up_res.len(), 2, "{up_res:?}");
+    assert!(
+        up_res.iter().all(|(_, _, p, s)| *p && !*s),
+        "user pending/pending_it must pass rather than mark pending: {up_res:?}"
+    );
+    assert!(up_ign.is_empty(), "user pending must not record ignored: {up_ign:?}");
+
+    // 2. Even when `use std.spec.*` is active, user-defined `fn pending` /
+    // `fn skip` and lexically-shadowed `val pending` / `val skip` inside `it`
+    // must run user code without triggering `std.spec` governance/skip markers.
+    let shadowed_with_spec_src = r#"
+use std.spec.*
+
+fn pending(name: text) -> i64:
+    17
+
+fn skip(n: i64) -> i64:
+    n * 2
+
+describe "user & shadowed DSL names alongside std.spec":
+    it "calls top-level user pending and skip":
+        expect(pending("run me")).to_equal(17)
+        expect(skip(5)).to_equal(10)
+
+    it "calls lexically shadowed pending and skip closures":
+        val pending = \s: 41
+        val skip = \a, b: a + b
+        expect(pending("local")).to_equal(41)
+        expect(skip(20, 22)).to_equal(42)
+"#;
+    let (sh_code, sh_res, sh_ign) = eval_with_imports(shadowed_with_spec_src, Some("critical")).unwrap();
+    assert_eq!(sh_code, 0);
+    assert_eq!(sh_res.len(), 2, "{sh_res:?}");
+    assert!(
+        sh_res.iter().all(|(_, _, p, s)| *p && !*s),
+        "user/shadowed pending & skip must pass even under critical profile: {sh_res:?}"
+    );
+    assert!(sh_ign.is_empty(), "user/shadowed names must not enter ignored list: {sh_ign:?}");
+
+    let nested_fn_with_spec_src = r#"
+use std.spec.*
+
+describe "nested fn DSL names alongside std.spec":
+    it "calls nested fn pending and skip inside it":
+        fn pending(x: i64) -> i64:
+            x + 5
+        fn skip(a: i64, b: i64) -> i64:
+            a * b
+        expect(pending(7)).to_equal(12)
+        expect(skip(6, 7)).to_equal(42)
+"#;
+    let (nf_code, nf_res, nf_ign) = eval_with_imports(nested_fn_with_spec_src, Some("critical")).unwrap();
+    assert_eq!(nf_code, 0);
+    assert_eq!(nf_res.len(), 1, "{nf_res:?}");
+    assert!(
+        nf_res[0].2 && !nf_res[0].3,
+        "nested fn pending/skip inside it must pass under critical profile: {nf_res:?}"
+    );
+    assert!(nf_ign.is_empty(), "{nf_ign:?}");
+
+    // 3. Real repo parser spec with `fn skip(n)` and `class MyClass: fn skip(n)`.
+    let (pk_code, pk_res, pk_ign) =
+        run_repo_spec("test/03_system/feature/usage/parser_contextual_keywords_simple_spec.spl", None)
+            .expect("parser_contextual_keywords_simple_spec");
+    assert_eq!(pk_code, 0);
+    assert!(!pk_res.is_empty(), "expected parser contextual keyword examples");
+    assert!(
+        pk_res.iter().all(|(_, _, p, s)| *p && !*s),
+        "parser_contextual_keywords_simple_spec examples must pass: {pk_res:?}"
+    );
+    assert!(pk_ign.is_empty(), "{pk_ign:?}");
+
+    // 4. Calling `skip_it` (with SIMPLE_TEST_FILTER=skipped) or `skip_context`
+    // inside `it` under critical profile records exactly ONE failure in
+    // `BDD_TOTALS.1` (no double-counting).
+    struct FilterGuard;
+    impl Drop for FilterGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("SIMPLE_TEST_FILTER");
+        }
+    }
+    for (filter, call_snippet) in [
+        (
+            Some("skipped"),
+            r#"skip_it("nested", fn(): expect(true).to_equal(true))"#,
+        ),
+        (None, r#"skip_context("nested weak reason")"#),
+    ] {
+        let double_count_probe = format!(
+            r#"
+use std.spec.*
+extern fn rt_bdd_failed_total() -> i64
+
+describe "no double count inside it":
+    it "fails once":
+        {call_snippet}
+
+main = rt_bdd_failed_total()
+"#
+        );
+        if let Some(f) = filter {
+            std::env::set_var("SIMPLE_TEST_FILTER", f);
+        } else {
+            std::env::remove_var("SIMPLE_TEST_FILTER");
+        }
+        let _fg = FilterGuard;
+        let (dc_failed_total, dc_res, dc_ign) = eval_with_imports(&double_count_probe, Some("critical")).unwrap();
+        assert_eq!(dc_res.len(), 1, "{dc_res:?}");
+        assert!(!dc_res[0].2 && !dc_res[0].3, "{dc_res:?}");
+        assert!(dc_ign.is_empty(), "{dc_ign:?}");
+        assert_eq!(
+            dc_failed_total, 1,
+            "`{call_snippet}` inside `it` under critical must increment rt_bdd_failed_total once, got {dc_failed_total}"
+        );
+    }
+
+    // 5. Calling `std.spec.skip` inside `it` restores `_case_depth` cleanly
+    // (both on valid moderate skip and on critical rejection), so a subsequent
+    // describe-level `skip` without `SIMPLE_TEST_FILTER=skipped` does not see
+    // a stale `_case_depth = [1]` and misclassify as an in-case error.
+    let case_depth_restore_src = r#"
+use std.spec.*
+extern fn rt_bdd_failed_total() -> i64
+
+describe "case_depth restore":
+    it "fails on inner":
+        skip("inner", "todo")
+    skip("outer describe skip", "todo")
+
+main = rt_bdd_failed_total()
+"#;
+    let (cd_failed_total, cd_res, cd_ign) = eval_with_imports(case_depth_restore_src, Some("critical")).unwrap();
+    assert_eq!(
+        cd_res,
+        vec![
+            (
+                "case_depth restore".to_string(),
+                "fails on inner".to_string(),
+                false,
+                false
+            ),
+            (
+                "case_depth restore".to_string(),
+                "outer describe skip".to_string(),
+                true,
+                true
+            ),
+        ],
+        "describe-level skip must stay gated (not fail via leaked _case_depth): {cd_res:?}"
+    );
+    assert_eq!(cd_ign, vec!["outer describe skip".to_string()]);
+    assert_eq!(cd_failed_total, 1, "only the in-it skip should fail: {cd_failed_total}");
 }
 
 #[test]
