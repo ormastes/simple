@@ -47,3 +47,29 @@ servers, not available to this lane). No change made.
 - **PureDatabase CRUD driver (`test/05_perf/bench/db_crud_compare_driver.spl`):**
   - Bootstrap seed interpreter exited `2` at `stage=insert` with `validation_failed=insert_present` (matching `dbrow_option_native_probe.spl` / `db_crud_native_probe.spl` where `row.?` renders `<invalid-heap:...>` in the seed interpreter).
   - Stage-2 native build of `db_crud_compare_driver.spl` was deferred/cancelled during concurrent P3a bootstrap when host `MemAvailable` dipped to ~8 GiB. Host lacks `nginx`, `wrk`, `sqlite3`, and `psql`. Status stays OPEN (P2).
+
+## Verification 2026-11-26 (Linux aarch64, DGX GB10): still OPEN
+
+Tip `79445b063c4`, Rust seed sha256 prefix `fb80903917d6d5f5`.
+
+- **The DB `insert_present` failure was a driver bug, not a PureDatabase
+  bug.** `db_crud_compare_driver.spl:37` compared `row.?` with `want: bool`.
+  `.?` returns `T?` (a pass-through, per
+  `syntax_quick_reference.md` § Existence Check), so the comparison was never
+  equal. The `<invalid-heap:…>` text is just how the seed prints a class
+  value: `row.unwrap()` and a plain class instance print the same way.
+  - Fix: `row.is_some() != want` at `:37`, and `row.is_none()` at `:72`.
+  - Seed run: rc 2 -> 0, and all five stages pass (insert 556 us, where 103,
+    update 189, delete 252, txn 265).
+- **HTTP:** `static_listener_publication_contract_spec.spl` passes 2/2 on
+  aarch64.
+- **Native: not verified.** The Stage 2 built from `cd29cfa8b64c`
+  (`stage2-admitted`, 2026-11-22) cannot native-build the driver closure, on
+  tip or on its own pinned tree. MIR/codegen ICEs block the link, in
+  `common.encoding.external_text`, `common.search.ranking`,
+  `db.dbfs_engine.fts.search`, `io.external_file` and
+  `io.file_text_session`. So two things are still unproven on aarch64: the
+  original native invalid-array-handle, and the live HTTP listener. Whether
+  the native diagnostic was this same driver comparison is open.
+- **Checker gap (not filed):** the seed accepts `i64? != bool` without a
+  type error. That is how this driver bug went unnoticed.
