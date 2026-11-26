@@ -88,6 +88,7 @@ pub class SmuxHostContinuationV6:
     agent_pane_operation_id: text = ""
     remote_agent_pane: Option<SmuxRemotePaneV6> = None
     agent_pane_target_intent: text = ""
+    agent_pane_target_operation_id: text = ""
     agent_pane_target: Option<HostAgentPaneTargetReceiptV6> = None
 
     pub fn execution_pending_v6() -> bool: self.execution.is_some()
@@ -214,6 +215,12 @@ fn retain_agent_attach_state_v6(original: SmuxHostContinuationV6, request: HostS
         state.remote_agent_pane = None
         state.agent_pane_lease = None
         state.agent_pane_revoked = true
+    # The run that owned the pane target has ended; the next run may allocate its own.
+    if (request.action == "host-agent-detach" or request.action == "host-agent-cancel") and exit_code == 0 and
+            state.agent_pane_target_intent != "" and state.agent_pane_target_operation_id == request.operation_id:
+        state.agent_pane_target_intent = ""
+        state.agent_pane_target_operation_id = ""
+        state.agent_pane_target = None
     state
 
 # milestone_0024 PR3c: the pane family. Claim and Read reach the agent only through the domain pass-throughs
@@ -279,6 +286,7 @@ fn remote_pane_target_v6(domain: HostServiceDomainV3, original: SmuxHostContinua
         if session.name == name:
             return refused_v6(domain, state, "runtime-agent-pane-target-name-collision")
     state.agent_pane_target_intent = name
+    state.agent_pane_target_operation_id = request.operation_id
     val created = smux_runtime_target_create_v3(name, authority.service_incarnation)
     if created.is_err(): return refused_v6(domain, state, "runtime-agent-pane-target-unconfirmed")
     val target = smux_runtime_target_decode_v3(created.unwrap())
