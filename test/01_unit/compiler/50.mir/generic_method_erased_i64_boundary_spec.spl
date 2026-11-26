@@ -3,7 +3,9 @@
 #
 # Fixed 2026-11-26: Store<T> Result<T, E> / T? returns and Box<T>.get() -> T
 # now instantiate receiver type arguments at the call/match site so the caller
-# does not double-decode (>> 3 / >> 6). AttrI64StoreV1 stays (mixed raw/Dict).
+# does not double-decode (>> 3 / >> 6), and AttributeStoreV1<T> stores `T?`
+# uniformly across owner/slots/hash (`Dict<i64, T?>`) so all four placements
+# agree on raw `i64` payloads (AttrI64StoreV1 @workaround retired).
 #
 # Erased <-> concrete i64 boundary of a generic-CLASS method
 # (doc/08_tracking/bug/native_erased_generic_optional_return_2026-11-15.md,
@@ -180,3 +182,48 @@ describe "generic-class method: erased <-> concrete i64 Dict<K, T> boundary":
         expect(s.errors.len()).to_equal(0)
         expect(count_calls(function_body(s.ir, "probe_box"), "rt_value_int_wide")).to_equal(0)
         expect(count_calls(function_body(s.ir, "probe_box"), "rt_value_as_int_wide")).to_equal(0)
+
+    it "mixed slots [T?] + Dict<i64, T?> store keeps raw i64 caller/callee ABI without >> 3 or << 3":
+        val mixed_src = "class MixedAttrStore<T>:\n" +
+            "    slots: [T?]\n" +
+            "    hash: Dict<i64, T?>\n" +
+            "\n" +
+            "impl MixedAttrStore<T>:\n" +
+            "    me set(node: i64, use_hash: bool, value: T):\n" +
+            "        if use_hash:\n" +
+            "            self.hash[node] = Some(value)\n" +
+            "        else:\n" +
+            "            while self.slots.len() <= node:\n" +
+            "                self.slots = self.slots.push(None)\n" +
+            "            self.slots[node] = Some(value)\n" +
+            "\n" +
+            "    fn get(node: i64, use_hash: bool) -> Result<T, text>:\n" +
+            "        if use_hash:\n" +
+            "            if self.hash.contains_key(node):\n" +
+            "                match self.hash[node]:\n" +
+            "                    case Some(v): return Ok(v)\n" +
+            "                    case None: pass\n" +
+            "        elif node >= 0 and node < self.slots.len():\n" +
+            "            match self.slots[node]:\n" +
+            "                case Some(v): return Ok(v)\n" +
+            "                case None: pass\n" +
+            "        Err(\"absent\")\n" +
+            "\n" +
+            "fn probe_mixed(v: i64) -> i64:\n" +
+            "    val h: Dict<i64, i64?> = {}\n" +
+            "    val sl: [i64?] = []\n" +
+            "    var s = MixedAttrStore(slots: sl, hash: h)\n" +
+            "    s.set(1, true, v)\n" +
+            "    s.set(2, false, v)\n" +
+            "    val a = match s.get(1, true):\n" +
+            "        case Ok(x): x\n" +
+            "        case Err(_): -1\n" +
+            "    val b = match s.get(2, false):\n" +
+            "        case Ok(y): y\n" +
+            "        case Err(_): -1\n" +
+            "    a + b\n"
+        val s = shape_src(mixed_src, "testdata/gmeb_mixed_attr_probe.spl")
+        expect(s.errors.len()).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_mixed"), "rt_value_int_wide")).to_equal(0)
+        expect(count_calls(function_body(s.ir, "probe_mixed"), "rt_value_as_int_wide")).to_equal(0)
+        expect(count_calls(function_body(s.ir, "MixedAttrStore.get"), "rt_value_as_int_wide")).to_equal(0)
