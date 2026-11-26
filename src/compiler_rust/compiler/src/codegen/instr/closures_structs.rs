@@ -2186,8 +2186,12 @@ mod tests {
         ambiguous_names: std::collections::HashSet<String>,
         f: impl FnOnce(&mut InstrContext<'_, cranelift_jit::JITModule>) -> R,
     ) -> R {
-        let jit_builder = cranelift_jit::JITBuilder::new(cranelift_module::default_libcall_names())
-            .expect("jit builder");
+        // Same ISA settings as JitCompiler: JITBuilder::new defaults to
+        // is_pic=true, whose PLT path cranelift-jit implements only on x86_64
+        // ("PLT is currently only supported on x86_64" on aarch64).
+        let settings = crate::codegen::common_backend::BackendSettings::jit();
+        let (_flags, isa) = crate::codegen::common_backend::create_isa_and_flags(&settings).expect("jit isa");
+        let jit_builder = cranelift_jit::JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let mut jit_mod = cranelift_jit::JITModule::new(jit_builder);
         let rt_funcs = HashMap::new();
         let mut ctx = InstrContext::new_for_test(&mut jit_mod, &rt_funcs);

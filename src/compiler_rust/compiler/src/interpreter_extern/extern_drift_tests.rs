@@ -105,7 +105,6 @@ const ALLOWED_KNOWN_GAPS: &[(&str, &str)] = &[
     ("rt_stdin_read_all", "see rt_stdin_read"),
     ("rt_term_flush", "raw terminal write/flush pair (io_print.rs); no interpreter handler"),
     ("rt_term_write", "see rt_term_flush"),
-    ("rt_enum_new", "generic `rt_enum_new<T>(id, discriminant, payload) -> T`; the interpreter would need an id->enum map plus a raw-word->Value bridge. Blocks interpreted enum_wire_restore_nil one call after rt_tuple_new/rt_tuple_set"),
     ("rt_atexit_check", "interp registers rt_atexit_install but not the check probe"),
     ("rt_atomic_bool_fetch_and", "atomic.rs registers the AtomicBool core set and compare_exchange, not fetch_and/not/or"),
     ("rt_atomic_bool_fetch_not", "see rt_atomic_bool_fetch_and"),

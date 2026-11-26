@@ -1,0 +1,96 @@
+# @tag:in-development
+# Tracks: optional_return_into_scalar_fn_accepted_2026-11-26
+"""Typed-return contract: an Option value must not be returned from a scalar fn.
+
+`Dict.get` returns `V?` (seed 9d21958ee39, 2026-11-03). Returning it bare
+from a `-> i64` function is ADMITTED by the seed today. `simple check` prints
+"declared return type mismatch admitted (seed aggregate typing not
+authoritative)" and passes, and `simple run` prints the Option's heap word
+(measured 2026-11-26, aarch64: 6057657724097 / 5904280416257) instead of
+failing. Under the seed JIT the same shape broke
+codegen::local_execution_tests float_get, which now unwraps with `?? 0`.
+
+RED today: both probes run to exit 0 and print a heap word. Expected: a
+nonzero exit and no heap-word line. The `?? 0` form must keep running and
+print exactly 7. Each probe is capped at 120 s and its temp dir is removed.
+Binary: $SIMPLE_BINARY if set, else bin/simple.
+"""
+use std.spec
+use std.io_runtime.{process_run_timeout, env_get, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+fn simple_binary() -> text:
+    val from_env = env_get("SIMPLE_BINARY")
+    if from_env != "": return from_env
+    "bin/simple"
+
+# Writes `source` to a fresh private dir, runs it (120 s cap), removes the dir;
+# returns (exit code, stdout, stderr).
+fn run_probe(source: text) -> (i32, text, text):
+    val dir = secure_temp_dir(get_temp_dir(), "simple-optional-return-").unwrap()
+    val path = dir + "/probe.spl"
+    expect(file_write(path, source)).to_equal(true)
+    val (stdout, stderr, code) = process_run_timeout(simple_binary(), ["run", path], 120000)
+    # Guarded: only ever remove the private dir this probe created.
+    if dir != "" and dir.contains("simple-optional-return-"):
+        dir_remove_all(dir)
+    (code, stdout, stderr)
+
+# A line of 10+ digits is an Option heap word leaking through `-> i64`.
+fn has_heap_word_line(out: text) -> bool:
+    for line in out.split("\n"):
+        val t = line.trim()
+        var rest = t
+        for d in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]:
+            rest = rest.replace(d, "")
+        if t.len() >= 10 and rest == "":
+            return true
+    false
+
+# Probe sources are triple-quoted (raw): a `{1: 7}` dict literal inside an
+# ordinary "..." string is interpolation and would silently become "1".
+val DICT_GET_BARE = """fn lookup() -> i64:
+    val map: Dict<i64, i64> = {1: 7}
+    return map.get(1)
+
+fn main() -> i64:
+    print lookup()
+    0
+"""
+
+val OPTIONAL_BARE = """fn maybe() -> i64?:
+    return Some(7)
+
+fn value() -> i64:
+    return maybe()
+
+fn main() -> i64:
+    print value()
+    0
+"""
+
+val DICT_GET_UNWRAPPED = """fn lookup() -> i64:
+    val map: Dict<i64, i64> = {1: 7}
+    return map.get(1) ?? 0
+
+fn main() -> i64:
+    print lookup()
+    0
+"""
+
+describe "optional value returned from a scalar fn":
+    it "rejects a Dict.get Option returned from -> i64":
+        val (code, stdout, stderr) = run_probe(DICT_GET_BARE)
+        expect(code != 0).to_equal(true)
+        expect(has_heap_word_line(stdout)).to_equal(false)
+
+    it "rejects an explicit i64? returned from -> i64":
+        val (code, stdout, stderr) = run_probe(OPTIONAL_BARE)
+        expect(code != 0).to_equal(true)
+        expect(has_heap_word_line(stdout)).to_equal(false)
+
+    it "keeps running the unwrapped form":
+        val (code, stdout, stderr) = run_probe(DICT_GET_UNWRAPPED)
+        expect(code).to_equal(0)
+        expect(stdout.trim()).to_equal("7")
