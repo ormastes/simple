@@ -39,22 +39,50 @@ pub fn disk_bound_mark_used(dir: text, path: text):
 pub fn disk_bound_forget(dir: text, path: text):
     val _removed = file_delete(_disk_bound_used_path(dir, path))
 
-fn _disk_bound_is_coordination_path(canonical: text) -> bool:
-    (canonical.contains("/.by-source/") or canonical.contains("/.used/") or
-        canonical.contains("/queue-") or canonical.contains("/mir-queue-") or
-        canonical.contains("/closure-request-"))
+fn _disk_bound_canonical_norm(path: text) -> text:
+    var out = path.replace("\\", "/")
+    if out.starts_with("//?/"):
+        out = out.substring(4)
+    while out.ends_with("/") and out.byte_len() > 1:
+        if out.byte_len() == 3 and out.substring(1, 3) == ":/":
+            break
+        out = out.substring(0, out.byte_len() - 1)
+    out
 
-fn _disk_bound_is_entry(path: text) -> bool:
-    val canonical = path.replace("\\", "/")
-    val name = canonical.substring(canonical.last_index_of("/") + 1)
-    # candidate-* receipts are another build's in-flight publish;
+fn _disk_bound_rel_path(dir: text, path: text) -> text:
+    val canon_dir = _disk_bound_canonical_norm(dir)
+    val canon_path = _disk_bound_canonical_norm(path)
+    val prefix = if canon_dir == "": "" elif canon_dir.ends_with("/"): canon_dir else: canon_dir + "/"
+    if prefix != "" and canon_path.starts_with(prefix):
+        return canon_path.substring(prefix.byte_len())
+    _disk_bound_basename(canon_path)
+
+fn _disk_bound_is_coordination_rel(rel: text) -> bool:
+    val segs = rel.split("/")
+    if segs.len() < 2:
+        return false
+    var i: i64 = 0
+    while i < segs.len() - 1:
+        val seg = segs[i]
+        if (seg == ".by-source" or seg == ".used" or
+                seg.starts_with("queue-") or
+                seg.starts_with("mir-queue-") or
+                seg.starts_with("closure-request-")):
+            return true
+        i = i + 1
+    false
+
+fn _disk_bound_is_entry(dir: text, path: text) -> bool:
+    val rel = _disk_bound_rel_path(dir, path)
+    val name = _disk_bound_basename(rel)
+    # candidate-*.receipt are another build's in-flight warm publish;
     # queue-*/mir-queue-*/closure-request-* and *.peak_kib/mir-run-latest
     # belong to active shard coordination with their own retention windows.
-    not _disk_bound_is_coordination_path(canonical) and
-        not canonical.ends_with(".tmp") and
-        not canonical.ends_with(".peak_kib") and
+    not _disk_bound_is_coordination_rel(rel) and
+        not name.ends_with(".tmp") and
+        not name.ends_with(".peak_kib") and
         name != "mir-run-latest" and
-        not name.starts_with("candidate-")
+        not (name.starts_with("candidate-") and name.ends_with(".receipt"))
 
 fn _disk_bound_cleanup_used_markers(dir: text) -> i64:
     var removed: i64 = 0
@@ -71,15 +99,15 @@ fn _disk_bound_cleanup_used_markers(dir: text) -> i64:
 
 fn _disk_bound_maybe_reap_orphan_file(dir: text, path: text, now_secs: i64,
         tmp_age_s: i64, candidate_age_s: i64) -> bool:
-    val canonical = path.replace("\\", "/")
-    if _disk_bound_is_coordination_path(canonical) or dir_exists(path):
+    val rel = _disk_bound_rel_path(dir, path)
+    if _disk_bound_is_coordination_rel(rel) or dir_exists(path):
         return false
-    val name = _disk_bound_basename(canonical)
-    val is_tmp = canonical.ends_with(".tmp")
-    val is_cand = name.starts_with("candidate-")
+    val name = _disk_bound_basename(rel)
+    val is_tmp = name.ends_with(".tmp")
+    val is_cand = name.starts_with("candidate-") and name.ends_with(".receipt")
     if not is_tmp and not is_cand:
         return false
-    val age_limit = if is_cand: candidate_age_s else: tmp_age_s
+    val age_limit = if is_tmp: tmp_age_s else: candidate_age_s
     if age_limit <= 0:
         return false
     val mtime = file_modified_time(path)
@@ -90,7 +118,7 @@ fn _disk_bound_maybe_reap_orphan_file(dir: text, path: text, now_secs: i64,
         return true
     false
 
-# Reap dangling `.used/*` markers and stale crashed-worker `*.tmp` / `candidate-*`
+# Reap dangling `.used/*` markers and stale crashed-worker `*.tmp` / `candidate-*.receipt`
 # files older than the configured grace ages. Returns the number of orphans removed.
 # reason: directory path, unix-second timestamp, and age thresholds match disk_bound_keep_newest_dirs
 @allow(primitive_api)
@@ -111,7 +139,7 @@ fn _disk_bound_measure_and_reap_at(dir: text, now_secs: i64,
         return 0
     var total: i64 = 0
     for path in dir_walk(dir):
-        if _disk_bound_is_entry(path) and not dir_exists(path):
+        if _disk_bound_is_entry(dir, path) and not dir_exists(path):
             val size = file_size_signed(path)
             if size > 0:
                 total = total + size
@@ -133,7 +161,7 @@ pub fn disk_bound_dir_bytes(dir: text) -> i64:
         return 0
     var total: i64 = 0
     for path in dir_walk(dir):
-        if _disk_bound_is_entry(path) and not dir_exists(path):
+        if _disk_bound_is_entry(dir, path) and not dir_exists(path):
             val size = file_size_signed(path)
             if size > 0:
                 total = total + size
@@ -145,7 +173,7 @@ fn _disk_bound_sweep_at(dir: text, target_bytes: i64, now_secs: i64) -> i64:
     var rows: [text] = []
     var total: i64 = 0
     for path in dir_walk(dir):
-        if _disk_bound_is_entry(path) and not dir_exists(path):
+        if _disk_bound_is_entry(dir, path) and not dir_exists(path):
             val size = file_size_signed(path)
             if size >= 0:
                 # Last use = max(entry mtime, hit marker mtime); within one
