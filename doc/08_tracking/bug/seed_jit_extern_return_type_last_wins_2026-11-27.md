@@ -116,3 +116,60 @@ compiler-sized files): PASS 84 MB with the scopes, FAIL 554 MB without. It is a
 probe with `main`, not a spec, because the test runner interprets specs and the
 interpreter shows no retention. Specs `bound_origin_facts_spec`,
 `robust_source_parity_spec`, `origin_sif_summary_spec` stay green.
+
+## Follow-up: remove conflicting extern declarations at the source (2026-11-27)
+
+The per-module fix above covers only an extern a module declares itself. The
+ratchet `scripts/check/check-extern-return-shape.shs` (push row
+`push-extern-return-shape`, advisory) freezes every `rt_*` name that has more
+than one return shape in `src/**/*.spl`. Its baseline only shrinks:
+
+| PR | scope | baseline |
+|---|---|---|
+| #12059 | gate + baseline | 150 |
+| #12065 | batch 3: memory/fd (`rt_alloc`, `rt_free`, `rt_mem*`, `rt_m*map`, fds) | 140 |
+| #12076 | batch 4: `rt_array_data_ptr_text`, `rt_dict_contains` | 138 |
+| #12079 | batch 2: env/file (`text?` / `bool` per the runtime ABI) + string-literal false positives | 131 |
+| batch 5 | exclude the stale `src/compiler_rust/lib/std` snapshot (its f32 math externs have no f32 backing) | 79 |
+
+### Batch 1 plan (HELD): typed per-enum wrappers for `rt_enum_payload`
+
+This batch has the highest risk, and it needs a lane that can bootstrap.
+`rt_enum_payload` has 22 declarations:
+- seven HIR modules declare `(StmtKind) -> Expr?`;
+- MIR declares `(HirStmtKind) -> HirExpr?`;
+- the parser and backend declare `-> i64`;
+- `00.common/value_access.spl` has the generic `<T, TPayload>(T) -> TPayload`;
+- `simple_core` and the os shims declare `(i64) -> i64`.
+
+The typed declarations are load-bearing: they are how the seed decodes the
+untyped `RuntimeValue` payload into the right type. Collapsing them onto one
+raw extern without a typed layer is exactly the miscompile this bug describes.
+
+1. Keep one raw `extern fn rt_enum_payload<T, TPayload>(value: T) -> TPayload`
+   in `src/compiler/00.common/value_access.spl`.
+2. Next to it, add typed wrappers, one per enum, each with an explicit return
+   type: `stmt_expr_payload(k: StmtKind) -> Expr?`,
+   `hir_stmt_expr_payload(k: HirStmtKind) -> HirExpr?`,
+   `variant_kind_payload(k: VariantKind) -> i64`,
+   `type_kind_payload(k: TypeKind) -> i64` and
+   `mir_inst_payload(k: MirInstKind) -> i64`.
+3. Delete the local declarations in `20.hir/hir_lowering/_Items/*`,
+   `20.hir/hir_lowering/statements.spl`, `50.mir/mir_lowering_stmts.spl`,
+   `10.frontend/parser_types*.spl` and the backend files. Import the wrappers
+   and rewrite each call site to use them.
+4. Write a spec for each wrapper: build a value of each enum variant that
+   carries a payload, and assert the payload round-trips with the right type.
+   Also cover a variant with no payload, where the wrapper must return
+   `None`/`0`.
+5. **Verification (required before landing):** run the sanctioned bootstrap
+   `scripts/bootstrap/bootstrap-from-scratch.sh` through **Stage 2**. A green
+   `bin/simple test` is not enough. The Stage 2 compiler must self-compile the
+   HIR and MIR lowering with byte-identical output against the pre-change
+   Stage 2. Re-run the repro from this doc on the Stage 2 binary as well.
+6. The `simple_core` and `src/os/kernel/arch/*` `(i64) -> i64` declarations
+   use the raw-value shim layer. The C side returns `int8_t` or `int64_t`,
+   while the Rust side returns `bool` or `RuntimeValue`. They need an owner
+   decision: either give them distinct `rt_*_raw` names or exempt that layer.
+
+Status: verification-pending.
