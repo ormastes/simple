@@ -13,7 +13,13 @@
 # todo (remaining scope): doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
 use std.spec.*
 use std.spec.step
-use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_delete}
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, dir_create_all, file_delete}
+
+# Fixture paths live under build/test_tmp, absent on a fresh checkout:
+# create it so a write never silently fails and leaves nothing to load.
+fn write_fixture(path: text, bytes: [u8]) -> bool:
+    val _ = dir_create_all("build/test_tmp")
+    file_write_bytes(path, bytes)
 
 use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
 use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
@@ -57,7 +63,7 @@ describe "RB-LOAD-02: lazy loader live replace goes through the hot-swap slot":
         # @req: REQ-BUILD-SRC-001
         val path = "build/test_tmp/hs_lazy_refuse.smf"
         val v0 = image_with(good_identity(), 0x90)
-        expect(file_write_bytes(path, v0)).to_equal(true)
+        expect(write_fixture(path, v0)).to_equal(true)
         var loader = lazymoduleloader_with_defaults()
         step("load and pin generation 0")
         expect(moduleloader_load_native_batch_v1(loader, [path], 4096).is_ok()).to_equal(true)
@@ -66,7 +72,7 @@ describe "RB-LOAD-02: lazy loader live replace goes through the hot-swap slot":
         step("replace the artifact with an ABI-changed image and reload")
         var bad = good_identity()
         bad.abi_digest = "abi-v1-bbbb"
-        expect(file_write_bytes(path, image_with(bad, 0x91))).to_equal(true)
+        expect(write_fixture(path, image_with(bad, 0x91))).to_equal(true)
         val r = moduleloader_reload(loader, path)
         expect(error_text(r).contains("SMF-E-UNIT-ABI-MISMATCH")).to_equal(true)
         expect(loader.modules[path].version).to_equal(version0)
@@ -78,12 +84,12 @@ describe "RB-LOAD-02: lazy loader live replace goes through the hot-swap slot":
 
     it "admits a matching live replace and readers then use the new image":
         val path = "build/test_tmp/hs_lazy_admit.smf"
-        expect(file_write_bytes(path, image_with(good_identity(), 0x90))).to_equal(true)
+        expect(write_fixture(path, image_with(good_identity(), 0x90))).to_equal(true)
         var loader = lazymoduleloader_with_defaults()
         expect(moduleloader_load_native_batch_v1(loader, [path], 4096).is_ok()).to_equal(true)
         expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).is_ok()).to_equal(true)
         val v1 = image_with(good_identity(), 0x92)
-        expect(file_write_bytes(path, v1)).to_equal(true)
+        expect(write_fixture(path, v1)).to_equal(true)
         expect(is_success(moduleloader_reload(loader, path))).to_equal(true)
         val read = moduleloader_hot_swap_read_begin(loader, path).unwrap()
         expect(read.generation()).to_equal(1)
