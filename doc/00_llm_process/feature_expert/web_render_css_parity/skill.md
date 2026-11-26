@@ -4894,3 +4894,35 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
   is not a layout `device_dy` problem.
 - **Ownership:** the gray path above 48 px is excluded by the lcdround claim,
   so file a HANDOFF in the claims file rather than leaving it implied.
+## 2026-11-26 — union line box for inline-element text and mixed-script text nodes (span-linebox lane)
+
+- **An inline element holds every face its text uses.** `Hx <span lang=ar>مرحبا</span>`
+  under `line-height: normal` has the same 34 px line (k=4: 135) and baseline 22
+  as a bare Arabic block. `inline_box_shifted_ascent/descent` (and the `_device`
+  twins) now take the union strut of a direct `#text` child whose style carries
+  `used_face_units` (`style_used_face_line(st, 1).len() == 2`). Check
+  `used_face_units.len() > 0` first: every Latin #text goes through that loop.
+- **The span background is still its own content area** (17 px, k=1 38..54) inside
+  the 34 px line. The inline clamp in layout_engine also accepts a box as tall as
+  `inline_element_union_text_line_h`, so the span is not treated as wrapped.
+- **Mixed text node in a `lang=en` page** (`Hx مرحبا`): Chrome falls back per script
+  to Noto Sans Arabic. Simple picked the bundled face by `lang` (Noto Sans SC), could
+  not shape the run, and returned `font-shaping-unavailable`. Now
+  `_resolved_font_script_language` (font_renderer) hands an Arabic (Devanagari) run
+  the `ar` (`hi`) face when the page language is written in another script, `und`
+  included, before the candidate lookup. Trap: a "retry after failure" version gave
+  the same pixels but paid a cold 2.6 s Noto Sans SC load first (the front cache made
+  repeats free, so a per-call cache would not have helped). Choose the face up front.
+- **Devanagari under `line-height:40px`** is NOT a line-box bug: the ink bottom
+  matches Chrome at k=1 (145) and k=4 (585), and the top AA row is off by one in
+  opposite directions. Interior coverage rows match the normal-line-height block
+  shifted by 66 rows on both sides; that block has the same extra top row at 63, outside
+  its own background, so a per-block ink probe misses it. It is raster phase, pinned as AC-10/AC-11 in the in-development
+  `glyph_vertical_raster_phase_chrome159_spec.spl` (raster lane).
+- Open, in-development: k=4 span backgrounds use Chrome's device content area
+  (`inline_box_device_content_area_chrome159_spec.spl`, 150..221). Pinned by
+  `inline_element_used_font_line_box_chrome159_spec.spl` (5/5 head, 0/5 base).
+- Perf (k=4, 3 alternated rounds, seed1126b, interpreter): intl / stack / html flat, md5
+  equal. The span page wall is 26.00 -> 25.97 s (doc 22531 -> 23580 ms because the run is
+  now shaped, paint 2366 -> 1327 ms) and RSS 1958 -> 1125 MB, because the Noto Sans SC face
+  is never loaded for an Arabic run.
