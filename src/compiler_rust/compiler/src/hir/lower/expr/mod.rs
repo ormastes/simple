@@ -2937,12 +2937,12 @@ impl Lowerer {
 
         if is_any {
             let result_ty = match method {
-                // Dict/Map operations. For a typed Dict<K,V>, `get`/`remove`
-                // return the bare value V (the erased builtin dict returns the
-                // bare stored word — NOT an Option; see the bug doc iteration
-                // 12). `keys`/`values` return typed arrays.
+                // Dict/Map operations. For a typed Dict<K,V>, `remove` returns
+                // the bare value V (the erased builtin dict returns the bare
+                // stored word); `get` is `V?` (arm below). `keys`/`values`
+                // return typed arrays.
                 // `get_or` returns the bare value V (or the caller-supplied
-                // default, itself V-typed) — same shape as `get`/`remove`.
+                // default, itself V-typed) — same shape as `remove`.
                 // Without this arm the whole `.get_or(...)` expr fell through
                 // to the untyped-ANY default below while the MIR lowering
                 // (lowering_expr_method.rs, task: dict_get_or_jit_not_found)
@@ -2961,7 +2961,11 @@ impl Lowerer {
                 }
                 "get" | "remove" | "get_or" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
                 "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
-                "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
+                // `has_key` is the same raw-bool rt_contains route (MIR
+                // lowering_expr_method.rs matches all four). Left ANY, an `and`
+                // operand was re-decoded through rt_value_truthy as a tagged word
+                // and the raw 1 read as false.
+                "contains_key" | "has_key" | "has" | "contains" => Some(TypeId::BOOL),
                 // Same raw-result class on an untyped receiver: `any`/`all`
                 // return a raw 0/1 and `index_of` (rt_index_of, array or text)
                 // a raw i64 position, so they need the BOOL / BoxInt
