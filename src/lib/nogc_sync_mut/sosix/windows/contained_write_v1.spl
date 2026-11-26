@@ -1,0 +1,168 @@
+#![allow(primitive_api)]
+# Contained write and read grants: Windows variant (architecture 4.4).
+# Write grant: low mandatory label plus an inheritable modify ACE for the scope SID on an
+# EMPTY directory. Read grant: one read+execute ACE for the fixed reader SID per object.
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_list, dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity_abi.GetFileAttributesW
+use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{sosix_windows_scope_sid_v1, sosix_windows_reader_sid_v1, sosix_windows_dacl_grants_world_write_v1}
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_is_win64_v1, sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_read_ptr_v1, sec_u8_v1, sec_u16_v1, sec_u32_v1, sec_put_u8_v1, sec_put_u16_v1, sec_put_u32_v1, sec_wide_v1, sec_sid_from_text_v1, sec_sid_len_v1, sec_sid_equal_v1, sec_set_entries_v1, sec_access_entry_v1, sec_get_dacl_v1, sec_set_dacl_label_v1, sec_set_dacl_v1}
+
+# FILE_GENERIC_READ|FILE_GENERIC_EXECUTE and modify (read, write, execute, delete).
+const _READ_EXEC_MASK = 0x1200A9
+const _MODIFY_MASK = 0x1301BF
+const _INHERIT_OBJECT_CONTAINER = 3
+const _READ_OBJECT_BOUND = 100000
+const _ATTR_DIRECTORY = 0x10
+const _ATTR_REPARSE = 0x400
+
+fn _native(path: text) -> text:
+    path.replace("/", "\\")
+
+# Attributes of the entry itself (never followed); -1 when unreadable.
+fn _attributes(path: text) -> i64:
+    val wide = sec_wide_v1(_native(path))
+    if wide == 0: return -1
+    val value = GetFileAttributesW(wide) as i64
+    sec_free_v1(wide)
+    if value == 0xFFFFFFFF: return -1
+    value
+
+# Mandatory label SACL with one NO_WRITE_UP ACE for low integrity; 0 on failure (sec_free_v1).
+fn _low_label_sacl() -> i64:
+    val low = sec_sid_from_text_v1("S-1-16-4096")
+    if low == 0: return 0
+    val sid_len = sec_sid_len_v1(low)
+    val ace_size = 8 + sid_len
+    val total = 8 + ace_size
+    val acl = sec_alloc_v1(total)
+    if acl != 0:
+        sec_put_u8_v1(acl, 2)
+        sec_put_u16_v1(acl + 2, total)
+        sec_put_u16_v1(acl + 4, 1)
+        sec_put_u8_v1(acl + 8, 0x11)
+        sec_put_u8_v1(acl + 9, _INHERIT_OBJECT_CONTAINER)
+        sec_put_u16_v1(acl + 10, ace_size)
+        sec_put_u32_v1(acl + 12, 1)
+        var index = 0
+        while index < sid_len:
+            sec_put_u8_v1(acl + 16 + index, sec_u8_v1(low + index))
+            index = index + 1
+    sec_local_free_v1(low)
+    acl
+
+# Merge one allow ACE for `sid` into the path's DACL and write it (plus the label when sacl != 0).
+fn _add_ace(path: text, sid: i64, mask: i64, inheritance: i64, sacl: i64) -> text:
+    val slot = sec_alloc_v1(8)
+    val entries = sec_alloc_v1(48)
+    if slot == 0 or entries == 0:
+        sec_free_v1(slot)
+        sec_free_v1(entries)
+        return "grant-alloc-failed"
+    var reason = ""
+    val descriptor = sec_get_dacl_v1(_native(path), slot)
+    if descriptor == 0:
+        reason = "grant-dacl-read-failed"
+    else:
+        sec_access_entry_v1(entries, 0, mask, inheritance, sid)
+        val merged = sec_set_entries_v1(1, entries, sec_read_ptr_v1(slot))
+        if merged == 0:
+            reason = "grant-dacl-build-failed"
+        elif sacl != 0:
+            if not sec_set_dacl_label_v1(_native(path), merged, sacl): reason = "grant-set-failed"
+        else:
+            if not sec_set_dacl_v1(_native(path), merged): reason = "grant-set-failed"
+        sec_local_free_v1(merged)
+    sec_local_free_v1(descriptor)
+    sec_free_v1(entries)
+    sec_free_v1(slot)
+    reason
+
+pub fn sosix_fs_grant_contained_write_v1(empty_dir: text, scope: text) -> text:
+    if not sec_is_win64_v1(): return "grant-unsupported-width"
+    if empty_dir == "" or empty_dir.contains("\0"): return "grant-target-invalid"
+    val scope_text = sosix_windows_scope_sid_v1(scope)
+    if scope_text.is_err(): return scope_text.unwrap_err()
+    if not is_dir(empty_dir) or not dir_is_real_no_follow(empty_dir): return "grant-target-missing"
+    if dir_list(empty_dir).len() != 0: return "grant-target-not-empty"
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return "grant-alloc-failed"
+    val descriptor = sec_get_dacl_v1(_native(empty_dir), slot)
+    if descriptor == 0:
+        sec_free_v1(slot)
+        return "grant-dacl-read-failed"
+    val verdict = sosix_windows_dacl_grants_world_write_v1(sec_read_ptr_v1(slot))
+    sec_local_free_v1(descriptor)
+    sec_free_v1(slot)
+    if verdict.is_err(): return "grant-dacl-read-failed"
+    if verdict.unwrap().value: return "grant-target-world-writable"
+    val sid = sec_sid_from_text_v1(scope_text.unwrap())
+    val sacl = _low_label_sacl()
+    var reason = ""
+    if sid == 0 or sacl == 0:
+        reason = "grant-alloc-failed"
+    else:
+        reason = _add_ace(empty_dir, sid, _MODIFY_MASK, _INHERIT_OBJECT_CONTAINER, sacl)
+    sec_free_v1(sacl)
+    sec_local_free_v1(sid)
+    reason
+
+# True when the path's DACL already holds an allow ACE for the reader SID with the read bits.
+fn _has_reader_ace(dacl: i64, reader: i64) -> bool:
+    if dacl == 0: return false
+    val count = sec_u16_v1(dacl + 4)
+    var ace = dacl + 8
+    var index = 0
+    while index < count and index < 4096:
+        val size = sec_u16_v1(ace + 2)
+        if size < 8: return false
+        if sec_u8_v1(ace) == 0 and (sec_u32_v1(ace + 4) & _READ_EXEC_MASK) == _READ_EXEC_MASK:
+            if sec_sid_equal_v1(ace + 8, reader): return true
+        ace = ace + size
+        index = index + 1
+    false
+
+fn _grant_read_one(path: text, reader: i64) -> text:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return "grant-alloc-failed"
+    val descriptor = sec_get_dacl_v1(_native(path), slot)
+    if descriptor == 0:
+        sec_free_v1(slot)
+        return "grant-dacl-read-failed"
+    val present = _has_reader_ace(sec_read_ptr_v1(slot), reader)
+    sec_local_free_v1(descriptor)
+    sec_free_v1(slot)
+    if present: return ""
+    _add_ace(path, reader, _READ_EXEC_MASK, 0, 0)
+
+# One read+execute ACE for the reader SID on every object of the tree. Reparse points are
+# neither labelled nor entered. Idempotent and bounded; never writes a write ACE or a label.
+pub fn sosix_fs_grant_contained_read_v1(tree: text) -> text:
+    if not sec_is_win64_v1(): return "grant-unsupported-width"
+    if tree == "" or tree.contains("\0"): return "grant-target-invalid"
+    if not is_dir(tree) or not dir_is_real_no_follow(tree): return "grant-target-missing"
+    val reader = sec_sid_from_text_v1(sosix_windows_reader_sid_v1())
+    if reader == 0: return "grant-alloc-failed"
+    var pending: [text] = [tree]
+    var visited = 0
+    var reason = ""
+    while pending.len() > 0 and reason == "":
+        val current = pending.pop()
+        val attributes = _attributes(current)
+        if attributes < 0:
+            reason = "grant-target-unreadable"
+        elif (attributes & _ATTR_REPARSE) == 0:
+            visited = visited + 1
+            if visited > _READ_OBJECT_BOUND:
+                reason = "grant-tree-bound-exceeded"
+            else:
+                reason = _grant_read_one(current, reader)
+                if reason == "" and (attributes & _ATTR_DIRECTORY) != 0:
+                    for child in dir_list(current):
+                        pending.push(_join(current, child))
+    sec_local_free_v1(reader)
+    reason
+
+fn _join(parent: text, child: text) -> text:
+    var base = parent
+    if base.ends_with("/") or base.ends_with("\\"): base = base[0:base.byte_len() - 1]
+    "{base}/{child}"

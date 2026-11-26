@@ -8,6 +8,9 @@ TODO(platform-variant-migration): move here — windows_memory_v1.spl.
 ## Entries
 
 - **FILE.md** — this manifest.
+- **security_abi_v1.spl** — advapi32 token/SID/ACL externs and bounded helpers (Win64).
+- **restricted_identity_v1.spl** — restricted low-integrity token and scope SID for contained children.
+- **contained_write_v1.spl** — low-label write grant and reader-SID read grant (Windows body).
 
 ## Child Manifests
 

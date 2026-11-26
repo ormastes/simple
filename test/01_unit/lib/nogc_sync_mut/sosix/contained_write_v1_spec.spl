@@ -1,0 +1,184 @@
+use std.spec.*
+use std.nogc_sync_mut.env.platform.{detect_os, get_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists, file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.io_runtime.{process_run_timeout, env_get}
+use std.nogc_sync_mut.sosix.contained_write_v1.{sosix_fs_grant_contained_write_v1, sosix_fs_grant_contained_read_v1}
+use std.nogc_sync_mut.sosix.linux.contained_write_v1 as linux_variant
+use std.nogc_sync_mut.sosix.freebsd.contained_write_v1 as freebsd_variant
+use std.nogc_sync_mut.sosix.macos.contained_write_v1 as macos_variant
+use std.nogc_sync_mut.sosix.simpleos.contained_write_v1 as simpleos_variant
+use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{sosix_windows_restricted_token_open_v1, sosix_windows_restricted_token_close_v1}
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_run_as_token_v1, sec_label_rid_v1, sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_read_ptr_v1, sec_sid_from_text_v1, sec_set_entries_v1, sec_access_entry_v1, sec_get_dacl_v1, sec_set_dacl_v1}
+
+val _CMD = "C:\\Windows\\System32\\cmd.exe"
+
+fn _native(path: text) -> text:
+    path.replace("/", "\\")
+
+fn _fresh_dir(label: text) -> text:
+    secure_temp_dir(get_temp_dir(), "sosix-cw-{label}-").unwrap()
+
+# Exit code of an echo redirect to path run as the token; the caller also checks file presence.
+fn _write_as(token: i64, path: text) -> i64:
+    sec_run_as_token_v1(token, "{_CMD} /c \"echo x>{_native(path)}\"", "C:\\Windows", 20000)
+
+fn _read_as(token: i64, path: text) -> i64:
+    sec_run_as_token_v1(token, "{_CMD} /c \"type {_native(path)}>nul\"", "C:\\Windows", 20000)
+
+# Adds a modify ACE for sid_text to the directory DACL (builds a world-writable target).
+fn _grant_sid_modify(dir: text, sid_text: text) -> bool:
+    val slot = sec_alloc_v1(8)
+    val entries = sec_alloc_v1(48)
+    val sid = sec_sid_from_text_v1(sid_text)
+    var ok = false
+    val descriptor = sec_get_dacl_v1(_native(dir), slot)
+    if descriptor != 0 and sid != 0:
+        sec_access_entry_v1(entries, 0, 0x1301BF, 3, sid)
+        val merged = sec_set_entries_v1(1, entries, sec_read_ptr_v1(slot))
+        if merged != 0:
+            ok = sec_set_dacl_v1(_native(dir), merged)
+        sec_local_free_v1(merged)
+    sec_local_free_v1(descriptor)
+    sec_local_free_v1(sid)
+    sec_free_v1(entries)
+    sec_free_v1(slot)
+    ok
+
+describe "non-windows variants refuse, never grant":
+    it "returns typed refusals":
+        expect(linux_variant.sosix_fs_grant_contained_write_v1("d", "s")).to_equal("contained-write-unimplemented-linux")
+        expect(linux_variant.sosix_fs_grant_contained_read_v1("d")).to_equal("contained-read-unimplemented-linux")
+        expect(freebsd_variant.sosix_fs_grant_contained_write_v1("d", "s")).to_equal("contained-write-unimplemented-freebsd")
+        expect(freebsd_variant.sosix_fs_grant_contained_read_v1("d")).to_equal("contained-read-unimplemented-freebsd")
+        expect(macos_variant.sosix_fs_grant_contained_write_v1("d", "s")).to_equal("contained-write-unimplemented-macos")
+        expect(macos_variant.sosix_fs_grant_contained_read_v1("d")).to_equal("contained-read-unimplemented-macos")
+        expect(simpleos_variant.sosix_fs_grant_contained_write_v1("d", "s")).to_equal("contained-write-unimplemented-simpleos")
+        expect(simpleos_variant.sosix_fs_grant_contained_read_v1("d")).to_equal("contained-read-unimplemented-simpleos")
+
+describe "windows contained write grant":
+    it "grants an empty directory and the label reads back low":
+        expect(detect_os()).to_equal("windows")
+        val root = _fresh_dir("g1")
+        val dir = "{root}/granted"
+        expect(dir_create_all(dir)).to_equal(true)
+        expect(sosix_fs_grant_contained_write_v1(dir, "scope-a")).to_equal("")
+        expect(sec_label_rid_v1(_native(dir))).to_equal(4096)
+        dir_remove_all(root)
+
+    it "refuses a non-empty, a missing, a world-writable target and a bad scope":
+        expect(detect_os()).to_equal("windows")
+        val root = _fresh_dir("g2")
+        val full = "{root}/full"
+        expect(dir_create_all(full)).to_equal(true)
+        expect(file_write("{full}/a.txt", "a")).to_equal(true)
+        expect(sosix_fs_grant_contained_write_v1(full, "scope-a")).to_equal("grant-target-not-empty")
+        expect(sosix_fs_grant_contained_write_v1("{root}/missing", "scope-a")).to_equal("grant-target-missing")
+        expect(sosix_fs_grant_contained_write_v1(full, "Bad Scope")).to_equal("scope-invalid")
+        val users = "{root}/users"
+        expect(dir_create_all(users)).to_equal(true)
+        expect(_grant_sid_modify(users, "S-1-5-32-545")).to_equal(true)
+        expect(sosix_fs_grant_contained_write_v1(users, "scope-a")).to_equal("grant-target-world-writable")
+        val everyone = "{root}/everyone"
+        expect(dir_create_all(everyone)).to_equal(true)
+        expect(_grant_sid_modify(everyone, "S-1-1-0")).to_equal(true)
+        expect(sosix_fs_grant_contained_write_v1(everyone, "scope-a")).to_equal("grant-target-world-writable")
+        # positive control: a plain empty directory in the same root is still granted
+        val ok_dir = "{root}/ok"
+        expect(dir_create_all(ok_dir)).to_equal(true)
+        expect(sosix_fs_grant_contained_write_v1(ok_dir, "scope-a")).to_equal("")
+        dir_remove_all(root)
+
+describe "windows restricted child write canaries (measured)":
+    it "writes only inside its own granted directory":
+        expect(detect_os()).to_equal("windows")
+        val root = _fresh_dir("c1")
+        val own = "{root}/own"
+        val other = "{root}/other"
+        val store = "{root}/store"
+        expect(dir_create_all(own)).to_equal(true)
+        expect(dir_create_all(other)).to_equal(true)
+        expect(dir_create_all(store)).to_equal(true)
+        expect(sosix_fs_grant_contained_write_v1(own, "scope-a")).to_equal("")
+        expect(sosix_fs_grant_contained_write_v1(other, "scope-b")).to_equal("")
+        val token = sosix_windows_restricted_token_open_v1("scope-a").unwrap()
+        # own-dir-write: allow
+        expect(_write_as(token.value, "{own}/f.txt")).to_equal(0)
+        expect(file_exists("{own}/f.txt")).to_equal(true)
+        # other-scope-write: deny, paired with an allow in the same run
+        expect(_write_as(token.value, "{other}/f.txt") != 0).to_equal(true)
+        expect(file_exists("{other}/f.txt")).to_equal(false)
+        expect(_write_as(token.value, "{own}/g.txt")).to_equal(0)
+        # store (user-only ACL, not granted): deny, paired with a fresh allow
+        expect(_write_as(token.value, "{store}/f.txt") != 0).to_equal(true)
+        expect(file_exists("{store}/f.txt")).to_equal(false)
+        expect(_write_as(token.value, "{own}/h.txt")).to_equal(0)
+        # the other scope token is the mirror image
+        val token_b = sosix_windows_restricted_token_open_v1("scope-b").unwrap()
+        expect(_write_as(token_b.value, "{other}/b.txt")).to_equal(0)
+        expect(_write_as(token_b.value, "{own}/b.txt") != 0).to_equal(true)
+        expect(file_exists("{own}/b.txt")).to_equal(false)
+        expect(sosix_windows_restricted_token_close_v1(token_b).value).to_equal(true)
+        expect(sosix_windows_restricted_token_close_v1(token).value).to_equal(true)
+        dir_remove_all(root)
+
+    it "cannot write into the user LocalLow directory":
+        expect(detect_os()).to_equal("windows")
+        val profile = env_get("USERPROFILE") ?? ""
+        expect(profile != "").to_equal(true)
+        val low = "{profile}\\AppData\\LocalLow"
+        val root = _fresh_dir("c2")
+        val own = "{root}/own"
+        expect(dir_create_all(own)).to_equal(true)
+        expect(sosix_fs_grant_contained_write_v1(own, "scope-a")).to_equal("")
+        val token = sosix_windows_restricted_token_open_v1("scope-a").unwrap()
+        val probe = "{low}\\sosix-p1-canary.txt"
+        expect(_write_as(token.value, "{own}/f.txt")).to_equal(0)
+        expect(_write_as(token.value, probe) != 0).to_equal(true)
+        expect(file_exists(probe)).to_equal(false)
+        expect(sosix_windows_restricted_token_close_v1(token).value).to_equal(true)
+        dir_remove_all(root)
+
+describe "windows contained read grant":
+    it "makes a user-only tree readable to the restricted child, once per object":
+        expect(detect_os()).to_equal("windows")
+        val root = _fresh_dir("r1")
+        val tree = "{root}/lower"
+        expect(dir_create_all("{tree}/sub")).to_equal(true)
+        expect(file_write("{tree}/a.txt", "a")).to_equal(true)
+        expect(file_write("{tree}/sub/b.txt", "b")).to_equal(true)
+        val token = sosix_windows_restricted_token_open_v1("scope-a").unwrap()
+        # before the grant the user-only ACL denies the child (control for the allow after)
+        expect(_read_as(token.value, "{tree}/a.txt") != 0).to_equal(true)
+        expect(sosix_fs_grant_contained_read_v1(tree)).to_equal("")
+        expect(_read_as(token.value, "{tree}/a.txt")).to_equal(0)
+        expect(_read_as(token.value, "{tree}/sub/b.txt")).to_equal(0)
+        # idempotent: a second grant succeeds and read still works
+        expect(sosix_fs_grant_contained_read_v1(tree)).to_equal("")
+        expect(_read_as(token.value, "{tree}/sub/b.txt")).to_equal(0)
+        # read is not write
+        expect(_write_as(token.value, "{tree}/w.txt") != 0).to_equal(true)
+        expect(file_exists("{tree}/w.txt")).to_equal(false)
+        expect(sosix_windows_restricted_token_close_v1(token).value).to_equal(true)
+        dir_remove_all(root)
+
+    it "does not follow a junction out of the tree":
+        expect(detect_os()).to_equal("windows")
+        val root = _fresh_dir("r2")
+        val tree = "{root}/lower"
+        val outside = "{root}/outside"
+        expect(dir_create_all(tree)).to_equal(true)
+        expect(dir_create_all(outside)).to_equal(true)
+        expect(file_write("{tree}/in.txt", "i")).to_equal(true)
+        expect(file_write("{outside}/secret.txt", "s")).to_equal(true)
+        val made = process_run_timeout("cmd", ["/c", "mklink", "/J", _native("{tree}/link"), _native(outside)], 15000)
+        expect(made.2).to_equal(0)
+        val token = sosix_windows_restricted_token_open_v1("scope-a").unwrap()
+        expect(sosix_fs_grant_contained_read_v1(tree)).to_equal("")
+        # control: the real file in the tree became readable
+        expect(_read_as(token.value, "{tree}/in.txt")).to_equal(0)
+        # the junction target outside the tree was never granted
+        expect(_read_as(token.value, "{outside}/secret.txt") != 0).to_equal(true)
+        expect(sosix_windows_restricted_token_close_v1(token).value).to_equal(true)
+        val _rm = process_run_timeout("cmd", ["/c", "rmdir", _native("{tree}/link")], 15000)
+        dir_remove_all(root)

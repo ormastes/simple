@@ -8,6 +8,7 @@ TODO(platform-variant-migration): move here — nothing yet; new freebsd-specifi
 ## Entries
 
 - **FILE.md** — this manifest.
+- **contained_write_v1.spl** — typed refusal for contained write/read grants (`contained-write-unimplemented-freebsd`).
 
 ## Child Manifests
 

@@ -8,6 +8,7 @@ TODO(platform-variant-migration): move here — nothing yet; new macos-specific 
 ## Entries
 
 - **FILE.md** — this manifest.
+- **contained_write_v1.spl** — typed refusal for contained write/read grants (`contained-write-unimplemented-macos`).
 
 ## Child Manifests
 
