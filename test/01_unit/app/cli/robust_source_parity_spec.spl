@@ -10,15 +10,16 @@ Audience: compiler and tooling engineers migrating robust consumers to HIR.
 ## Operator workflow
 Run this spec with the test runner; a FAIL names each unallowed diff line.
 ## Compatibility and limitations
-Until the HIR origin side table lands the `hir` source is unavailable and the
-gate asserts that explicitly (no silent fallback to text).
+`hir` is the default source. Its origin column is the HIR root origin, so the
+let-copy alias fixture differs from text by design and is allowlisted with a
+reason; any other diff fails.
 """
 # @req: REQ-DIAG-POLICY-001
 
 use std.spec.*
 use std.spec.step
 use std.io_runtime.{file_read}
-use app.cli.robust_source.{robust_render, robust_source_available, robust_parity_check, robust_parity_diff, robust_fixture_paths, ROBUST_PARITY_ALLOW, RobustParityAllow, ROBUST_SURFACES}
+use app.cli.robust_source.{ROBUST_DEFAULT_SOURCE, robust_render, robust_source_available, robust_parity_check, robust_parity_diff, robust_fixture_paths, ROBUST_PARITY_ALLOW, RobustParityAllow, ROBUST_SURFACES}
 use app.cli.robust_command.{run_robust}
 
 fn fixture_sources(paths: [text]) -> [text]:
@@ -84,3 +85,37 @@ describe "robust text/hir source parity":
         expect(run_robust(["inventory", "--source", "text", "test/01_unit/compiler/lint/fixtures/bound_graph"])).to_equal(0)
         if not robust_source_available("hir"):
             expect(run_robust(["boundaries", "--source", "hir", "test/01_unit/compiler/lint/fixtures/bound_graph"])).to_equal(2)
+
+describe "robust hir source is the default":
+    """`--source hir` is the default and its alias-chain precision is allowlisted."""
+
+    it "defaults to hir and renders it":
+        # @req: REQ-DIAG-POLICY-001
+        step("Default source and an hir render of the alias fixture")
+        expect(ROBUST_DEFAULT_SOURCE).to_equal("hir")
+        expect(robust_source_available("hir")).to_equal(true)
+        val p = "test/01_unit/compiler/lint/fixtures/robust_alias/alias_chain.spl"
+        val out = robust_render("inventory_text", "hir", [p], [file_read(p)]).unwrap()
+        expect(out.contains("alias_chain.spl:6 alias_chain b extern_return plain")).to_equal(true)
+        expect(run_robust(["inventory", p])).to_equal(0)
+
+    it "the alias-chain diff is real and only the allowlist hides it":
+        # @req: REQ-DIAG-POLICY-001
+        step("Without the allowlist the alias fixture diffs; with it, nothing")
+        val paths = robust_fixture_paths()
+        val sources = fixture_sources(paths)
+        val raw = robust_parity_check("text", "hir", paths, sources, [])
+        expect(raw.len() > 0).to_equal(true)
+        for d in raw:
+            expect(d.contains("alias_chain")).to_equal(true)
+        var alias_entries = 0
+        for e in ROBUST_PARITY_ALLOW:
+            if e.needle.contains("alias_chain"):
+                alias_entries = alias_entries + 1
+                expect(e.reason.contains("alias")).to_equal(true)
+        expect(alias_entries).to_equal(5)
+
+    it "an unparseable file makes the hir render unavailable, not text":
+        # @req: REQ-DIAG-POLICY-001
+        step("Render hir over a source with a syntax error")
+        expect(robust_render("inventory_sdn", "hir", ["bad.spl"], ["fn broken(:\n    )\n"]).?).to_equal(false)
