@@ -1,5 +1,6 @@
 # Agent task plan — Simple Container Improvement, increment 1
 
+- Atomic pin creation residual (Fable review, 2026-11-27): `_isv1_pin_add_in_place` opens with `dir_create_all(pin_dir + "/refs")`. If a release renames the pin away after the `is_dir(target)` check, that recreates an ownerless `pins/<id>`. Fix: on the existing-target path, never recreate `pin_dir`; if it vanished, retry the staged create. The losing-rename path has no spec.
 - Store sweeper and cross-owner follow-ups (Fable review, 2026-11-27):
   - An unrestorable foreign pin now stays in a tomb marked `keep`, and the call returns `pin-owner-changed-unrestored`. Nothing yet surfaces or reclaims these tombs.
   - A pin restored as `<id>.r<n>` is not discoverable by its owner, so its refs are retained indefinitely.
