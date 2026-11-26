@@ -27,7 +27,7 @@ use os.crypto.poly1305.{poly1305_mac}
 use os.crypto.chacha20_poly1305.{
     chacha20_poly1305_encrypt, chacha20_poly1305_decrypt, Chacha20Poly1305Result
 }
-use test.system.os_crypto_ref_helpers.{hex_to_bytes, bytes_to_hex}
+use test.fixtures.system_support.os_crypto_ref_helpers.{hex_to_bytes, bytes_to_hex}
 
 val SEQ_KEY_HEX: text = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 val LADIES_PT_HEX: text = "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e"
@@ -114,3 +114,54 @@ describe "chacha_poly: RFC 8439 known-answer vectors":
         tag[15] = (tag[15].to_i64() ^ 0xff).to_u8()
         val bad = _decrypt_is_err(hex_to_bytes(AEAD_KEY_HEX), hex_to_bytes(AEAD_NONCE_HEX), split.0, hex_to_bytes(AEAD_AAD_HEX), tag)
         expect(bad).to_equal(true)
+
+# Ported from the retired legacy system-tree copy: pure-Simple encrypt/decrypt
+# round-trip over the 8 byte-shape inputs (empty, 1 byte, short ASCII, binary,
+# block-1 / block / block+1 for the 64-byte ChaCha block, 3 blocks rolling).
+fn _filled_bytes(n: u64, b: u8) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(b)
+        i = i + 1
+    out
+
+fn _rolling_bytes(n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push((i % 256).to_u8())
+        i = i + 1
+    out
+
+fn _roundtrip_matrix() -> [[u8]]:
+    var matrix: [[u8]] = []
+    matrix.push([])
+    matrix.push([0u8])
+    matrix.push([0x61u8, 0x62u8, 0x63u8])
+    matrix.push([0x00u8, 0xffu8, 0x55u8, 0xaau8])
+    matrix.push(_filled_bytes(64, 0x42u8))
+    matrix.push(_filled_bytes(65, 0x42u8))
+    matrix.push(_filled_bytes(63, 0x42u8))
+    matrix.push(_rolling_bytes(192))
+    matrix
+
+describe "chacha_poly: Simple encrypt/decrypt roundtrip over 8-input matrix":
+    it "every matrix input round-trips through pure-Simple encrypt+decrypt":
+        # @req REQ-SSPEC-SYSTEM
+        step("every matrix input round-trips through pure-Simple encrypt+decrypt")
+        val key = hex_to_bytes(AEAD_KEY_HEX)
+        val nonce = hex_to_bytes(AEAD_NONCE_HEX)
+        val aad = hex_to_bytes(AEAD_AAD_HEX)
+        val matrix = _roundtrip_matrix()
+        expect(matrix.len()).to_equal(8)
+        var i: u64 = 0
+        while i < matrix.len():
+            val plain = matrix[i]
+            val ct_tag = chacha20_poly1305_encrypt(key, nonce, plain, aad)
+            expect(ct_tag.len()).to_equal(plain.len() + 16)
+            val split = _split_ct_tag(ct_tag)
+            expect(_decrypt_is_err(key, nonce, split.0, aad, split.1)).to_equal(false)
+            val recovered = _decrypt_ok(key, nonce, split.0, aad, split.1)
+            expect(bytes_to_hex(recovered)).to_equal(bytes_to_hex(plain))
+            i = i + 1

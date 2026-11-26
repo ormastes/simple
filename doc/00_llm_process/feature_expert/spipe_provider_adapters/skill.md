@@ -22,7 +22,7 @@ No Kimi config key or event name is invented. Unblock: see `doc/08_tracking/bug/
 ## Callers updated (all)
 `src/app/spipe_process_harness/main.spl`; specs: `test/01_unit/lib/spipe_process_harness/`,
 `test/01_unit/app/spipe_process_harness/`, `test/03_system/app/spipe_process_harness/feature/`,
-`test/system/app/spipe_process_harness/feature/`. `test/02_integration/app/spipe_process_harness_log_modes_spec.spl`
+`test/03_system/app/spipe_process_harness/feature/`. `test/02_integration/app/spipe_process_harness_log_modes_spec.spl`
 and `src/app/cli/{command_registry,_CliMain/main_and_help}.spl` only reference the command name (unchanged).
 
 ## Not retyped (existing, out of slice)

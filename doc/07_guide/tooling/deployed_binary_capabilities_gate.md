@@ -62,7 +62,7 @@ No `test/01_unit/tooling/deployed_binary_capabilities_spec.spl` was added.
 This gate's entire value is exercising the real CLI entry point against a
 real deployed binary process — exactly what in-process specs cannot do (see
 `reference_in_process_specs_cannot_reach_jit.md`). Existing `*_gate_spec.spl`
-files in `test/system/` only grep source text for expected strings; they
+files in `test/03_system/` only grep source text for expected strings; they
 never spawn `bin/simple` as a subprocess against a real file, so that pattern
 would not add coverage here either — it would just assert this script's own
 text is present, which is vacuous. The gate script itself is the test.

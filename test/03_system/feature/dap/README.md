@@ -18,17 +18,17 @@ Comprehensive system-level SPipe tests for the Debug Adapter Protocol (DAP) inte
 ### Run All DAP Tests
 
 ```bash
-simple test test/system/dap/
+simple test test/03_system/tools/dap/
 ```
 
 ### Run Specific Test File
 
 ```bash
-simple test test/system/dap/breakpoint_management_spec.spl
-simple test test/system/dap/step_modes_spec.spl
-simple test test/system/dap/stack_trace_spec.spl
-simple test test/system/dap/debug_state_spec.spl
-simple test test/system/dap/integration_spec.spl
+simple test test/03_system/tools/dap/breakpoint_management_spec.spl
+simple test test/03_system/tools/dap/step_modes_spec.spl
+simple test test/03_system/tools/dap/stack_trace_spec.spl
+simple test test/03_system/tools/dap/debug_state_spec.spl
+simple test test/03_system/tools/dap/integration_spec.spl
 ```
 
 ### Run Tests With Tags
@@ -268,7 +268,7 @@ test-dap:
     - name: Build
       run: simple build
     - name: Test DAP
-      run: simple test test/system/dap/
+      run: simple test test/03_system/tools/dap/
 ```
 
 ## Contributing

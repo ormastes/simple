@@ -45,7 +45,7 @@ because the interpreter FFI `[u8]` wrapping bug causes `file_read_bytes()` to
 return `Option::Some([bytes])` instead of plain `[u8]`. Once this bug is fixed,
 tests should be updated to use real compiled fixtures via `gcc -shared`.
 
-Fixture builders are shared via `test.system.dynload.dynload_fixture_helpers`:
+Fixture builders are shared via `test.fixtures.system_support.dynload.dynload_fixture_helpers`:
 - `make_elf64_exec()` -- minimal valid ELF64 ET_EXEC with entry 0x400000
 - `make_elf64_with_dynsym()` -- ELF64 with .dynsym containing "hello" at 0xBEEF
 - `make_smf_wrapped_elf64_exec()` -- SMF container wrapping ELF64 as native stub
