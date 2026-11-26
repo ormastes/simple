@@ -46,6 +46,10 @@ Increment 1 implemented and verified: 6 specs / 60 examples green on the Windows
 
 Lane 0 (store API/format hardening, `work/container-inc2-hardening-20261126`) implemented items 1-7: counted root/pin docs, canonical integers, `immutable_store_v1_ingest_pinned`, pin owner check (`release_pin` now takes `owner`), aligned 4 MiB pin bound with `_ISV1_MAX_REFS` 16384, GC stem validation, and domain units in `object_record_v1`/`hash_policy_v1`. Existing stores written before the `count` field are rejected by decode (no non-spec consumers yet). Review fixes: pins are now append-only directories (`pins/<id>/owner`, `pins/<id>/refs/<key>`, no-replace publication, no lost updates or owner races); GC lists candidates before reading roots/pins and re-reads them after moving, restoring any key that became reachable (a reader may transiently see `missing`); root docs require a terminating newline and bare (unquoted) integers; pinned-ingest reuse paths republish if GC quarantined the object.
 
+## Status 2026-11-26 — Increment 2 Lane A
+
+Lane A (SCV adapter, `work/container-inc2-scv-adapter-20261126`): `scv_adapter_v1.spl` imports legacy `sha256_<hex>` chunks with identity preserved, projects them back, and `scv gc` pins reachable chunks (generation-based `scv-gc-<g>-<n>` pins, owner `scv`) when `<repo>/.scv/store` exists; repos without it are unchanged. Specs: `test/01_unit/lib/nogc_sync_mut/storage/scv_adapter_v1_spec.spl`.
+
 ## Review follow-ups (Fable review 2026-11-26)
 
 Fixed in increment 1: root CAS made atomic via no-replace `roots/<name>.g<N>.claim`
@@ -56,6 +60,7 @@ quarantine move is no-replace; launch qualification rejects an unavailable
 client authority.
 
 Open (P2, next increment):
+- SCV adapter: a digest-mismatched legacy blob is skipped, which drops the store pin for an already-imported good copy (quarantine-recoverable). Keep the old pin for keys already in the store.- Ownerless pin release can race a concurrent creator between `dir_create_all` and the owner publish (the creator fails loudly with `pin-write-failed`).
 - release_pin vs a same-owner concurrent ingest_pinned: ingest returns ok for a ref the release then deletes. Lanes must not release a pin they still ingest into.- release_pin is not atomic across owners (`dir_remove_all` order); rename the pin dir aside before deleting.- A GC move-then-restore can make `open` briefly return `missing` on a reused object; a GC that moves the winner mid-publish yields a spurious `publish-winner-unreadable`.- `_ISV1_MAX_REFS` is per call; total refs per pin are unbounded. Base-key refs from lost races over-retain.
 - Staged publishes do not fsync.
 - Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot.
@@ -63,3 +68,4 @@ Open (P2, next increment):
 - Pointer-cache write failures are ignored; an unrefreshable pointer bricks a root after 4096 generations (`root-claim-chain-too-long`).
 - Drop the `.value` condition reads on the new bool units once the seed bool-unit bug is fixed.
 - Specs: no gxhash known-answer vector through the policy; lost-race publish path not exercised.
+- SCV adapter generation race: concurrent `scv gc` runs can release each other's fresh `scv-gc-<g>-<n>` pins; the next import/pin run heals it (re-import is idempotent).
