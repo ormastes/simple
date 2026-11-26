@@ -77,6 +77,19 @@ and merge after gates 1 and 2 close, assuming the first pass exposes no
 substantial defect. Runner publication and fixture availability have no
 confirmed dates.
 
+## Linux acceptance order
+
+The Podman session smoke and signed Host startup can prepare independently.
+The inspected Linux host reports Podman 4.9.3. Rootless runtime usability,
+delegation and the required local images still need verification on the
+designated test host.
+
+| Run | Prerequisites | Evidence |
+| --- | --- | --- |
+| Signed contract and helper-expiry specs | Admitted LLVM AOT runner and a private journal fixture for the helper spec | Run first as soon as the runner is available. Capture exact-head receipts for the signature, association, currentness and reservation tests. |
+| Podman session smoke | Qualified self-hosted runtime, usable rootless Podman, local `busybox:1.36`, and the documented local entrypoint fixture image | Set `SIMPLE_PODMAN_SMOKE=1` and `SIMPLE_PODMAN_ENTRYPOINT_IMAGE` as described in the [smoke manual](../../06_spec/03_system/app/container/feature/podman_session_live_spec.md). Record command override, output, nonzero exit, timeout and cleanup with the opt-in active. Then qualify workspace-backed interactive execution through the shared provider. |
+| Signed provisioning and startup | Admitted runner, protected machine policy, approved systemd and Podman units, and six operator-provided `SIMPLE_LINUX_PROVISION_ACCEPTANCE_*` settings | Run the pinned startup spec from PR #11928. Retain issuance and exact-retry receipts, the startup evidence and any outstanding cleanup. |
+
 ## Remaining release acceptance
 
 The original release plan has 39 acceptance obligations. The latest source
