@@ -308,6 +308,25 @@ run_selftest() {
     tall_crop=$("$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl \
         --ref-viewport-rows 1 --pair "$st_dir/tall.chrome.ppm" "$st_dir/same.simple.ppm" 2>/dev/null)
     echo "$tall_crop" | grep -q 'mismatch_pct=0\.00' || { echo "selftest: --ref-viewport-rows 1 did not compare the top row only"; return 1; }
+    # Perf: a 1000x1000 pair (1 Mpx, ~1/11 of one 4x page) must stay on the
+    # JIT. One unresolvable import de-JITs the whole differ (rt_array_is_byte_packed
+    # after b52cbe7a2b7: a 4x catalog compare went from <90 s to >30 min, RSS
+    # 4 GB). SIMPLE_JIT_STRICT=1 turns that fallback into a fast error; the wall
+    # bound (measured 2026-11-26: JIT 0.43-0.50 s, interpreter 44 s) also catches a slow lane that
+    # never prints a fallback marker.
+    printf 'P6\n1000 1000\n255\n' > "$st_dir/big.chrome.ppm"
+    head -c 3000000 /dev/zero >> "$st_dir/big.chrome.ppm"
+    printf 'P6\n1000 1000\n255\n' > "$st_dir/big.simple.ppm"
+    head -c 3000000 /dev/zero | tr '\0' '\100' >> "$st_dir/big.simple.ppm"
+    big_t0=$(now_ms)
+    big_out=$(env -u SIMPLE_EXECUTION_MODE SIMPLE_JIT_STRICT=1 "$SIMPLE_BIN" run src/app/ui/chrome_showcase/pixel_diff.spl \
+        --pair "$st_dir/big.chrome.ppm" "$st_dir/big.simple.ppm" 2>"$st_dir/big.err")
+    big_rc=$?
+    big_ms=$(( $(now_ms) - big_t0 ))
+    [ "$big_rc" -eq 0 ] || { echo "selftest: 1 Mpx pair run failed (rc=$big_rc): $(grep -m1 '^error' "$st_dir/big.err")"; return 1; }
+    echo "$big_out" | grep -q 'mismatch_px=1000000 mismatch_pct=100\.00 max_delta=64' || { echo "selftest: 1 Mpx pair reported '$big_out'"; return 1; }
+    grep -q '\[jit-fallback\]' "$st_dir/big.err" && { echo "selftest: pixel differ fell back to the interpreter: $(grep -m1 'jit-fallback' "$st_dir/big.err")"; return 1; }
+    [ "$big_ms" -le 15000 ] || { echo "selftest: 1 Mpx pair took ${big_ms} ms (bound 15000)"; return 1; }
     # Ratchet: within tolerance passes, a regression and an unbaselined page are
     # both named. Without the negative fixtures the ratchet could accept anything.
     printf 'a 2.00\nb 5.00\n' > "$st_dir/base.txt"
@@ -337,7 +356,7 @@ if ! valid_device_scale "$DEVICE_SCALE"; then
     exit 2
 fi
 if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — 15 selftest fixture(s) checked, newest Playwright build by number, differ discriminates, viewport crop is explicit, zero-pixel-render is named, ratchet names regressions, device scale is validated and lane-separated"
+    echo "PASS — 16 selftest fixture(s) checked, newest Playwright build by number, differ discriminates and stays on the JIT within its 1 Mpx wall bound, viewport crop is explicit, zero-pixel-render is named, ratchet names regressions, device scale is validated and lane-separated"
     exit 0
 fi
 
