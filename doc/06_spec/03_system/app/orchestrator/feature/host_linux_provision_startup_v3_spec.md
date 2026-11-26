@@ -28,6 +28,9 @@ dedicated store and the required cgroup and native service topology to support
 provision, retry, and serving opens.
 
 1. Decode the fixture binding and derive the expected anchor and digest.
+   Check the five pinned fixture inputs before creating the credential.
+   A missing or mismatched file fails with its filename and leaves the
+   output store available for a corrected run.
 2. Run `host-linux-enrollment-issue` through the production dispatcher. Check
    the receipt against the actual protected credential file and confirm no
    outstanding cleanup. Repeat the command and require refusal with the same
@@ -57,7 +60,7 @@ use std.spec.{describe, it, expect, step, fail}
 use app.orchestrator.command.orchestrator_command_v1
 use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
 use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{
-    host_linux_service_enrollment_decode_v3, host_linux_service_enrollment_digest_v3}
+    HostLinuxServiceEnrollmentBindingV3, host_linux_service_enrollment_decode_v3, host_linux_service_enrollment_digest_v3}
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
@@ -73,6 +76,18 @@ use std.nogc_sync_mut.orchestration.host_service_domain_v3.{
 
 var provision_startup_pending_v3: Option<HostServiceCleanupV3> = None
 var provision_startup_issuer_pending_v3: Option<HostIdentityStoreV1> = None
+
+fn provision_startup_verify_input_pins_v3(input: text, binding: HostLinuxServiceEnrollmentBindingV3) -> Result<(), text>:
+    val fixture_pins = [("host-config.sdn", binding.config_digest),
+        ("engine-policy.sdn", binding.engine_policy_digest), ("broker-policy.sdn", binding.broker_policy_digest),
+        ("agent-helper-template.sdn", binding.agent_helper_template_digest),
+        ("remote-build-helper-template.sdn", binding.remote_build_template_digest)]
+    for pinned in fixture_pins:
+        val source = file_read_regular_no_follow_bounded(input + "/" + pinned.0, 1048576)
+        if source.is_err(): return Err("dedicated fixture file is unreadable:" + pinned.0)
+        if sha256_text(source.unwrap()) != pinned.1:
+            return Err("dedicated fixture file does not match enrollment pin:" + pinned.0)
+    Ok(())
 
 fn provision_startup_fields_v3(source: text, expected: Dict<text, SdnValue>) -> bool:
     val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384, max_depth: 4, max_nodes: 64))
@@ -193,6 +208,11 @@ describe "Signed Linux provisioning through installed Host startup":
             return
         val anchor = host_linux_service_root_path_v4(binding.unwrap()).unwrap()
         val digest = host_linux_service_enrollment_digest_v3(binding.unwrap()).unwrap()
+        step("Check every fixture input pin before issuing a one-use credential")
+        val pins = provision_startup_verify_input_pins_v3(input, binding.unwrap())
+        if pins.is_err():
+            fail(pins.unwrap_err())
+            return
         step("Issue an enrollment credential through the production controller and protected output store")
         val issued = provision_startup_issue_v3(input, digest)
         if issued.is_err():
