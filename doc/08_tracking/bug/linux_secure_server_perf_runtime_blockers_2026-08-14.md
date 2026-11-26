@@ -38,3 +38,12 @@ point with no statically visible defect. Classify as blocked-on-deploy.
 
 Reconfirmed blocked-on-deploy (needs a Stage-2 native build + running HTTP/DB
 servers, not available to this lane). No change made.
+
+## Verification 2026-11-26 (Linux x86_64, lane 4)
+
+- **HTTP static server (`test/05_perf/webserver/static_file_server.spl`):**
+  - `static_listener_publication_contract_spec.spl --mode=interpreter` PASS (2/2, outcome=OK).
+  - Stage-2 native build (`--entry-closure --entry test/05_perf/webserver/static_file_server.spl`) succeeded; live server bound `127.0.0.1:18999`, served 3/3 HTTP/1.1 `200 OK` responses (52,245 bytes each for `README.md`), and exited `RC=0` (`[simple-static-server-ready]` / `[simple-static-server-done] served=3`).
+- **PureDatabase CRUD driver (`test/05_perf/bench/db_crud_compare_driver.spl`):**
+  - Bootstrap seed interpreter exited `2` at `stage=insert` with `validation_failed=insert_present` (matching `dbrow_option_native_probe.spl` / `db_crud_native_probe.spl` where `row.?` renders `<invalid-heap:...>` in the seed interpreter).
+  - Stage-2 native build of `db_crud_compare_driver.spl` was deferred/cancelled during concurrent P3a bootstrap when host `MemAvailable` dipped to ~8 GiB. Host lacks `nginx`, `wrk`, `sqlite3`, and `psql`. Status stays OPEN (P2).
