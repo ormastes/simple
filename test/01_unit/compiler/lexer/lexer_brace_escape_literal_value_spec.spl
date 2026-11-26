@@ -1,0 +1,96 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# Bug: native_text_literal_brace_escape_unprocessed_2026-11-26.
+#
+# The self-hosted CoreLexer copied a whole `{...}` region verbatim, keeping
+# its escapes raw for the interpolation re-parse. When the region was not a
+# valid interpolation, nothing decoded them, so a native build of
+# `"a) {\n    b;\n}"` carried the two bytes `\` `n` after the brace. The seed
+# lexer (compiler_rust/parser/src/lexer/strings.rs) treats `{` followed by
+# an escape, like `{{`, as a literal brace and keeps scanning, so its
+# escapes are decoded.
+#
+# Each row lexes a SOURCE literal (a raw string, so escapes reach the lexer
+# undecoded) through the self-hosted pipeline: CoreLexer token text ->
+# parse_string_interpolation_regions -> decode_interpolation_brace_escapes.
+# That is the value a native build embeds. It must equal the value the seed
+# interpreter gives the same literal written in this file.
+
+use std.spec.step
+
+use compiler.frontend.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text}
+use compiler.frontend.core.string_interpolation_expand.{parse_string_interpolation_regions, decode_interpolation_brace_escapes}
+
+val Q = "\""
+val LB = "{{"
+val RB = "}}"
+
+# The self-hosted value of a literal whose source spelling is `body` (the
+# text between the quotes), or "<parts:N>" when it interpolates.
+fn native_value(body: text) -> text:
+    var lx: CoreLexer = make_core_lexer(Q + body + Q)
+    val r = core_lexer_next_token(lx)
+    lx = r.0
+    val (rewritten, parts) = parse_string_interpolation_regions(core_lexer_token_text(lx))
+    if parts.len() > 0:
+        return "<parts:" + parts.len().to_text() + ">"
+    decode_interpolation_brace_escapes(rewritten)
+
+describe "self-hosted literal value of a brace followed by an escape":
+    # @manual scenario evidence
+    it "decodes every escape after a brace that opens no interpolation":
+        # @req REQ-SSPEC-UNIT
+        step("PTX-shaped body: an open brace, then escapes")
+        expect(native_value(r"a) {\n    b;\n}\nc")).to_equal("a) {{\n    b;\n}}\nc")
+
+    it "decodes escapes between doubled braces":
+        # @req REQ-SSPEC-UNIT
+        step("a doubled brace is literal; the body after it is ordinary text")
+        expect(native_value(r"x {{\n\t}} y")).to_equal("x {{\n\t}} y")
+
+    it "keeps the processing CUDA PTX shape byte-identical":
+        # @req REQ-SSPEC-UNIT
+        step("same shape as cuda_fill_u32.spl _processing_cuda_ptx")
+        val body = r".entry k(\n    .param .u32 count\n) {\n    .reg .pred %p;\n    ld.param.u32 %r4, [count];\ndone:\n    ret;\n}\n"
+        val want = ".entry k(\n    .param .u32 count\n) {{\n    .reg .pred %p;\n    ld.param.u32 %r4, [count];\ndone:\n    ret;\n}}\n"
+        expect(native_value(body)).to_equal(want)
+
+    it "leaves an unaffected CSS block alone":
+        # @req REQ-SSPEC-UNIT
+        step("a CSS block keeps its seed value")
+        expect(native_value(r"p { color: red; }\n")).to_equal("p {{ color: red; }}\n")
+
+    it "still interpolates a valid hole with a nested escaped string":
+        # @req REQ-SSPEC-UNIT
+        step("a join call with a nested escaped string stays one hole")
+        expect(native_value(LB + "xs.join(" + Q + r"\n" + Q + ")" + RB)).to_equal("<parts:1>")
+        expect(native_value(r"n\n" + LB + "n" + RB + r"\t")).to_equal("<parts:1>")
+
+    it "decodes a backslash-escaped brace to the bare brace":
+        # @req REQ-SSPEC-UNIT
+        step("native_string_backslash_brace_escape_kept_2026-11-26: the seed gives the brace alone")
+        expect(native_value(r"SELECT \{name\} FROM users")).to_equal("SELECT \{name\} FROM users")
+        expect(native_value(r"a \{ b")).to_equal("a \{ b")
+
+    it "leaves single-quoted (non-interpolating) literals unchanged":
+        # @req REQ-SSPEC-UNIT
+        step("no doubled-brace escape is emitted where nothing decodes it")
+        var lx: CoreLexer = make_core_lexer(r"'a \{ b'")
+        val r = core_lexer_next_token(lx)
+        lx = r.0
+        expect(core_lexer_token_text(lx)).to_equal(r"a \{ b")
+
+    it "keeps an escaped backslash in front of a brace escape or a hole":
+        # @req REQ-SSPEC-UNIT
+        step("a sed BRE interval: an escaped backslash, then a doubled brace")
+        expect(native_value(r"x\\{{0,1\\}y")).to_equal("x\\{{0,1\\}y")
+        step("an escaped backslash, then a real hole (a Windows path join)")
+        expect(native_value(r"C:\\{lib}.dll")).to_equal("<parts:1>")
+
+    it "decodes nested JSON with doubled closing braces like the seed":
+        # @req REQ-SSPEC-UNIT
+        step("each closing-brace pair after an escaped quote is one brace")
+        val bs = "\\"
+        val body = LB + bs + Q + "a" + bs + Q + ": " + LB + bs + Q + "b" + bs + Q + ": 1" + RB + RB + RB + RB
+        expect(native_value(body)).to_equal("{\"a\": {\"b\": 1}}}}")
