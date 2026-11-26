@@ -8,9 +8,9 @@
 # closed with "unsupported-host".
 use std.common.crypto.sha256.{sha256_text}
 use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1, ContainerCapabilityReportV1, container_capability_report_v1_empty, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1, CONTAINER_CLIENT_AUTHORITY_USER_V1, CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1}
-use std.platform.{is_windows}
+use std.platform.{is_windows, host_arch}
 use std.nogc_sync_mut.io_runtime.{file_read, file_exists, file_delete, time_now_monotonic_ms, thread_sleep}
-use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, windows_process_start_with_memory_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_peak_memory_v1, windows_process_file_digest_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessLeaseV1, windows_process_start_with_memory_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_peak_memory_v1, windows_process_file_digest_v1}
 
 pub unit WindowsJobMemoryBytesV1: i64
 pub unit WindowsProbeExitCodeV1: i64
@@ -29,6 +29,7 @@ pub struct WindowsMemoryCapProbeRequestV1:
 # program is carried so the evidence digest names the measured binary.
 pub struct WindowsMemoryCapObservationV1:
     program: text
+    program_digest: text
     cap: WindowsJobMemoryBytesV1
     peak: WindowsJobMemoryBytesV1
     exit_code: WindowsProbeExitCodeV1
@@ -45,34 +46,56 @@ pub enum WindowsMemoryCapVerdictV1:
 fn _windows_probe_cleanup_v1(request: WindowsMemoryCapProbeRequestV1):
     if file_exists(request.stdout_path): file_delete(request.stdout_path)
     if file_exists(request.stderr_path): file_delete(request.stderr_path)
+# Cancel and collect a started child, then remove its output files, so no error
+# path leaks a job or process handle. Returns the message for the caller's Err.
+fn _windows_probe_abort_v1(lease: WindowsProcessLeaseV1, request: WindowsMemoryCapProbeRequestV1, message: text) -> text:
+    val _cancelled = windows_process_cancel_v1(lease)
+    var tries = 0
+    var done = false
+    while not done and tries < 250:
+        match windows_process_collect_v1(lease):
+            Ok(_receipt): done = true
+            Err(_reason): thread_sleep(20)
+        tries = tries + 1
+    _windows_probe_cleanup_v1(request)
+    if done: message else: message + "; cleanup unproven"
 
 # start -> poll to terminal (cancel on timeout) -> read peak BEFORE collect ->
-# collect. Ok only when the tree is empty and cleanup succeeded. readback_ok is
-# true because the owner fails start (Err) unless it read the limit back.
+# collect. Ok only when the tree is empty and cleanup succeeded. Every error
+# after start cancels and collects the child. readback_ok is true only for a
+# positive cap: the owner fails start unless it read that limit back, and cap 0
+# (no limit) has no readback.
 pub fn windows_memory_cap_probe_run_v1(request: WindowsMemoryCapProbeRequestV1) -> Result<WindowsMemoryCapObservationV1, text>:
     if not is_windows(): return Err("unsupported-host")
     if request.cap.value < 0: return Err("negative memory cap")
     _windows_probe_cleanup_v1(request)
-    val native = WindowsProcessRequestV1(request.program, windows_process_file_digest_v1(request.program),
+    val program_digest = windows_process_file_digest_v1(request.program)
+    val native = WindowsProcessRequestV1(request.program, program_digest,
         request.args, [], request.directory, [], request.stdout_path, request.stderr_path, request.timeout_ms.value)
     val lease = windows_process_start_with_memory_v1(native, request.cap.value)?
     val guard = time_now_monotonic_ms() + request.timeout_ms.value + 30000
-    var final_poll = windows_process_poll_v1(lease)?
-    while not final_poll.terminal:
-        if time_now_monotonic_ms() > guard:
-            val _killed = windows_process_cancel_v1(lease)
-            return Err("probe child did not reach a terminal state")
-        thread_sleep(20)
-        final_poll = windows_process_poll_v1(lease)?
-    val peak = windows_process_peak_memory_v1(lease)?
-    val collected = windows_process_collect_v1(lease)?
-    if not collected.tree_empty: return Err("probe tree not empty after collect")
+    var terminal = false
+    while not terminal:
+        match windows_process_poll_v1(lease):
+            Ok(observed): terminal = observed.terminal
+            Err(reason): return Err(_windows_probe_abort_v1(lease, request, reason))
+        if not terminal:
+            if time_now_monotonic_ms() > guard:
+                return Err(_windows_probe_abort_v1(lease, request, "probe child did not reach a terminal state"))
+            thread_sleep(20)
+    val peak = match windows_process_peak_memory_v1(lease):
+        Ok(value): value
+        Err(reason): return Err(_windows_probe_abort_v1(lease, request, reason))
+    val collected = match windows_process_collect_v1(lease):
+        Ok(value): value
+        Err(reason): return Err(_windows_probe_abort_v1(lease, request, reason))
     val output = file_read(request.stdout_path)
     _windows_probe_cleanup_v1(request)
-    Ok(WindowsMemoryCapObservationV1(program: request.program, cap: request.cap,
+    if not collected.tree_empty: return Err("probe tree not empty after collect")
+    Ok(WindowsMemoryCapObservationV1(program: request.program, program_digest: program_digest, cap: request.cap,
         peak: WindowsJobMemoryBytesV1(peak), exit_code: WindowsProbeExitCodeV1(collected.exit_code),
         tree_empty: WindowsProbeFlagV1(collected.tree_empty), timed_out: WindowsProbeFlagV1(collected.timed_out),
-        readback_ok: WindowsProbeFlagV1(true), stdout_text: output))
+        readback_ok: WindowsProbeFlagV1(request.cap.value > 0), stdout_text: output))
 
 fn _windows_probe_allocated_ok_v1(observed: WindowsMemoryCapObservationV1) -> bool:
     observed.exit_code.value == 0 and observed.stdout_text.contains("ALLOC_OK") and
@@ -113,20 +136,30 @@ pub fn windows_memory_cap_verdict_v1(under: WindowsMemoryCapObservationV1, over:
         return WindowsMemoryCapVerdictV1.NotEnforced("over-cap workload completed despite cap")
     if over.peak.value > over.cap.value + _windows_probe_denial_overshoot_v1():
         return WindowsMemoryCapVerdictV1.NotEnforced("over-cap peak exceeded cap by more than one allocation step")
+    # Lower bound: a denial that never reached the cap (or never exceeded the
+    # under-cap workload) is a crash, not an enforced limit.
+    if over.peak.value < over.cap.value or over.peak.value <= under.peak.value:
+        return WindowsMemoryCapVerdictV1.Inconclusive("over-cap run died before reaching the cap")
     WindowsMemoryCapVerdictV1.Enforced
 
-pub fn windows_container_capability_report_v1(verdict: WindowsMemoryCapVerdictV1, under: WindowsMemoryCapObservationV1,
-        over: WindowsMemoryCapObservationV1, provider_version: text) -> ContainerCapabilityReportV1:
+# The verdict is derived here from the three observations; it is never a
+# caller-supplied claim. Evidence digest binds all three runs, the over-cap
+# stdout and the sha256 of the measured binary's bytes.
+pub fn windows_container_capability_report_v1(under: WindowsMemoryCapObservationV1, over: WindowsMemoryCapObservationV1,
+        baseline: WindowsMemoryCapObservationV1, provider_version: text) -> ContainerCapabilityReportV1:
+    val verdict = windows_memory_cap_verdict_v1(under, over, baseline)
     var report = container_capability_report_v1_empty()
+    val arch = host_arch()
     report.host_os = "windows"
-    report.host_arch = "x86_64"
+    report.host_arch = if arch == "unknown": "" else: arch
     report.guest_abi = "windows"
     report.isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1
     report.client_authority = CONTAINER_CLIENT_AUTHORITY_USER_V1
     report.provider_version = provider_version
-    val digest = sha256_text(under.program + "|" + under.cap.value.to_string() + "|" +
-        under.peak.value.to_string() + "|" + over.peak.value.to_string() + "|" +
-        under.exit_code.value.to_string() + "|" + over.exit_code.value.to_string())
+    val digest = sha256_text(under.program + "|" + under.program_digest + "|" + under.cap.value.to_string() + "|" +
+        under.peak.value.to_string() + "|" + under.exit_code.value.to_string() + "|" +
+        over.peak.value.to_string() + "|" + over.exit_code.value.to_string() + "|" + over.stdout_text + "|" +
+        baseline.cap.value.to_string() + "|" + baseline.peak.value.to_string() + "|" + baseline.exit_code.value.to_string())
     # Non-empty evidence names what was observed even when nothing is affirmed,
     # so a rejected requirement reports the capability gap, not missing evidence.
     report.evidence_revision = "unaffirmed:" + digest
