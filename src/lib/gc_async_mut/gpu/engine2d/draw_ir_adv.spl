@@ -1904,7 +1904,7 @@ fn _engine2d_draw_ir_fresh_device_initializes_target(command: DrawIrCommand, ima
             _engine2d_draw_ir_image_is_opaque(images[image_index]))
     _engine2d_draw_ir_image_is_opaque(images[image_index])
 
-fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32, admit_translucent_root_rects: bool = false) -> text:
+fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> text:
     var first_command = true
     for batch in composition.batches:
         val embedding = batch.embedding
@@ -1927,10 +1927,10 @@ fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images:
             # the opaque full-target initializer, so it blends over an opaque
             # destination, which the device rect composite (blend_solid mode
             # 2) matches byte-for-byte with CPU. The themed WM chrome's
-            # command lane and taskbar are exactly this. Only the fresh-device
-            # composition entry opts in; the retained damage replay and tile
-            # wrappers execute under clips and keep the opaque-only rule.
-            val translucent_over_opaque_root = (admit_translucent_root_rects and fills_target and
+            # command lane and taskbar are exactly this. The retained damage
+            # replay and tile wrappers admit it too: a clipped replay repaints
+            # the opaque root under the clip before the rect blends over it.
+            val translucent_over_opaque_root = (fills_target and
                 not css_opacity_group_surface(embedding.surface_id) and
                 embedding.opacity_milli == 1000 and not first_command and
                 command.kind == DRAW_IR_COMMAND_RECT and command.computed_style.len() == 0)
@@ -3687,13 +3687,11 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     # filed for follow-up, not something fixable at this call site.
     # (c) A CSS group (incl. a backdrop root at opacity 100%) is an isolated
     # layer: its backdrop-filter descendants must sample only the group.
-    val needs_real_offscreen = embedding.opacity_milli < 1000 or eng.backend_name() == "vulkan" or eng.backend_name() == "metal" or css_opacity_group_surface(embedding.surface_id)
     # Opaque baremetal batches can render directly into the MMIO parent: the
     # command loop already applies embedding offsets, and no opacity surface
     # or device-shared target is needed. This avoids one full-frame software
     # allocation per desktop/chrome/taskbar batch on the bump-only OS heap.
-    val baremetal_direct = eng.backend_name() == "baremetal" and embedding.opacity_milli >= 1000
-    val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and not samples_parent and (needs_real_offscreen or (not embedding.clip and not baremetal_direct))
+    val use_embedded_surface = _engine2d_draw_ir_uses_embedded_surface(batch, eng, depth)
     # A translucent parent-sampling batch needs both facts at once: the source
     # image must be the already-painted parent framebuffer, while its final
     # contribution must still respect embedding.opacity_milli. Seed an
@@ -4011,7 +4009,7 @@ fn engine2d_draw_ir_adv_composition_window_present_with_images(engine: Engine2D,
 
 fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Render/read back an exhaustively preflighted fresh device composition."""
-    val reason = _engine2d_draw_ir_fresh_device_reason(composition, images, engine.width(), engine.height(), true)
+    val reason = _engine2d_draw_ir_fresh_device_reason(composition, images, engine.width(), engine.height())
     if reason != "":
         val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
         return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, reason, engine2d_readback([], "preflight_rejected"))
@@ -4988,6 +4986,35 @@ fn engine2d_draw_ir_render_prepared_damage_plan_with_images(
     _engine2d_draw_ir_render_prepared_damage_plan_with_images(
         engine, prepared, images, content_identity, readback_frame, false)
 
+fn _engine2d_draw_ir_uses_embedded_surface(batch: DrawIrBatch, eng: Engine2D, depth: i32) -> bool:
+    # The one rule for "this batch renders through its own offscreen layer",
+    # shared by the full frame (_engine2d_draw_ir_render_batch_embedded) and
+    # the retained replay, which must layer exactly the same batches or
+    # translucent pixels round differently. See the comments at the full
+    # frame's call site for each term.
+    val embedding = batch.embedding
+    val backend = eng.backend_name()
+    val css_group = css_opacity_group_surface(embedding.surface_id)
+    val fills_target_exactly = (embedding.x == 0 and embedding.y == 0 and
+        embedding.width == eng.width() and embedding.height == eng.height() and
+        embedding.opacity_milli >= 1000 and not css_group)
+    val needs_real_offscreen = (embedding.opacity_milli < 1000 or
+        backend == "vulkan" or backend == "metal" or css_group)
+    val baremetal_direct = backend == "baremetal" and embedding.opacity_milli >= 1000
+    (embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and
+        embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and
+        not _engine2d_draw_ir_batch_samples_parent(batch) and
+        (needs_real_offscreen or (not embedding.clip and not baremetal_direct)))
+
+fn _engine2d_draw_ir_retained_layer_batch(batch: DrawIrBatch, engine: Engine2D) -> bool:
+    # Replay layers what the full frame layers at depth 0, with the plain milli
+    # composite. CSS opacity groups restore with their own rule and keep the
+    # replay's direct path; Metal is unproven on this host and keeps it too
+    # (its sub-opaque batches are then rejected by the replay preflight).
+    (engine.backend_name() != "metal" and
+        not css_opacity_group_surface(batch.embedding.surface_id) and
+        _engine2d_draw_ir_uses_embedded_surface(batch, engine, 0))
+
 fn _engine2d_draw_ir_render_composition_damaged_with_images(
     engine: Engine2D,
     composition: DrawIrComposition,
@@ -5018,7 +5045,8 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
     for batch in composition.batches:
         val embedding = batch.embedding
         if (embedding.width <= 0 or embedding.height <= 0 or
-            embedding.opacity_milli != 1000 or
+            not (embedding.opacity_milli == 1000 or
+                 _engine2d_draw_ir_retained_layer_batch(batch, engine)) or
             _engine2d_draw_ir_batch_samples_parent(batch)):
             return Engine2dDrawIrTileOutcome(
                 engine: engine, tiles_total: 0, tiles_rendered: 0,
@@ -5044,73 +5072,109 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
     var unsupported = ""
     var css_background_pixel_work_remaining = (
         eng.width().to_i64() * eng.height().to_i64())
-    # Batch display lists are immutable for this retained replay. Cache each
-    # coalesced plan on its first damage intersection, then reuse it while
-    # keeping the original damage-major/batch-major execution order. Untouched
-    # batches incur no planning work.
-    var command_plans: [Engine2dDrawIrCommandPlan] = []
-    var command_plan_ready: [bool] = []
-    var spatial_indexes: [Engine2dDrawIrSpatialIndex] = []
-    var spatial_index_slots: [i32] = []
-    for batch in composition.batches:
-        command_plans.push(Engine2dDrawIrCommandPlan(
-            commands: [], logical_weights: []))
-        command_plan_ready.push(false)
-        spatial_index_slots.push(-1)
-    var i = 0
-    while i < damage_rects.len():
-        val damage = draw_ir_rect_bounds(
-            damage_rects[i].to_i32(), damage_rects[i + 1].to_i32(),
-            damage_rects[i + 2].to_i32(), damage_rects[i + 3].to_i32())
-        var batch_index = 0
-        while batch_index < composition.batches.len():
-            val batch = composition.batches[batch_index]
-            val embedding = batch.embedding
-            val bounds = draw_ir_rect_bounds(
-                embedding.x, embedding.y, embedding.width, embedding.height)
-            val clip = draw_ir_rect_intersection(damage, bounds)
+    # Damage rects are pairwise disjoint (_engine2d_draw_ir_damage_rects_valid),
+    # so batch-major order paints exactly what damage-major order paints. Each
+    # touched batch is planned once over the union of its damage clips; a
+    # layered batch (_engine2d_draw_ir_retained_layer_batch) renders that plan
+    # once into its own layer, acquired exactly as the full frame acquires it
+    # (the single-slot pool off device backends, which the non-reclaiming
+    # SimpleOS bump heap needs), and composites it under each clip.
+    var batch_index = 0
+    while batch_index < composition.batches.len():
+        val batch = composition.batches[batch_index]
+        val embedding = batch.embedding
+        val bounds = draw_ir_rect_bounds(
+            embedding.x, embedding.y, embedding.width, embedding.height)
+        var clips: [DrawIrRect] = []
+        var ux0: i32 = 0
+        var uy0: i32 = 0
+        var ux1: i32 = 0
+        var uy1: i32 = 0
+        var r = 0
+        while r < damage_rects.len():
+            val clip = draw_ir_rect_intersection(draw_ir_rect_bounds(
+                damage_rects[r].to_i32(), damage_rects[r + 1].to_i32(),
+                damage_rects[r + 2].to_i32(), damage_rects[r + 3].to_i32()), bounds)
             if clip.width > 0 and clip.height > 0:
-                if not command_plan_ready[batch_index]:
-                    command_plans[batch_index] = (
-                        engine2d_draw_ir_coalesce_plain_fills(batch.commands))
-                    command_plan_ready[batch_index] = true
-                if spatial_index_slots[batch_index] < 0:
-                    spatial_indexes.push(_engine2d_draw_ir_build_spatial_index(
-                        command_plans[batch_index], embedding.width,
-                        embedding.height))
-                    spatial_index_slots[batch_index] = (
-                        spatial_indexes.len().to_i32() - 1)
-                # Batch commands are local to their embedding. Selection uses
-                # that local clip, while the renderer retains the global clip
-                # and embedding offset for exact raster writes.
-                val local_clip = draw_ir_rect_bounds(
-                    clip.x - embedding.x, clip.y - embedding.y,
-                    clip.width, clip.height)
+                if clips.len() == 0 or clip.x < ux0: ux0 = clip.x
+                if clips.len() == 0 or clip.y < uy0: uy0 = clip.y
+                if clips.len() == 0 or clip.x + clip.width > ux1: ux1 = clip.x + clip.width
+                if clips.len() == 0 or clip.y + clip.height > uy1: uy1 = clip.y + clip.height
+                clips.push(clip)
+            r += 4
+        if clips.len() > 0:
+            val plan = engine2d_draw_ir_coalesce_plain_fills(batch.commands)
+            val index = _engine2d_draw_ir_build_spatial_index(
+                plan, embedding.width, embedding.height)
+            if _engine2d_draw_ir_retained_layer_batch(batch, eng):
                 val selection = _engine2d_draw_ir_select_damage_indexed(
-                    command_plans[batch_index],
-                    spatial_indexes[spatial_index_slots[batch_index]], local_clip)
-                eng.set_clip(clip.x, clip.y, clip.width, clip.height)
-                val outcome = _engine2d_draw_ir_render_command_plan(
-                    eng, selection.plan,
-                    embedding.x, embedding.y, images,
-                    true, false, clip,
-                    css_background_pixel_work_remaining)
-                eng = outcome.engine
-                eng.clear_clip()
-                if outcome.css_background_pixel_work_remaining >= 0:
-                    css_background_pixel_work_remaining = (
-                        outcome.css_background_pixel_work_remaining)
-                rendered += outcome.rendered
-                skipped += outcome.skipped + selection.culled_logical_count
-                ops_culled_by_damage += selection.culled_logical_count
-                commands_considered += selection.plan.commands.len().to_i32()
-                commands_culled_by_damage += selection.culled_command_count
-                if (outcome.unsupported_kinds != "" and
-                    outcome.unsupported_kinds != "none"):
-                    if unsupported != "": unsupported = unsupported + ","
-                    unsupported = unsupported + outcome.unsupported_kinds
-            batch_index += 1
-        i += 4
+                    plan, index, draw_ir_rect_bounds(ux0 - embedding.x,
+                        uy0 - embedding.y, ux1 - ux0, uy1 - uy0))
+                val pooled = eng.backend_name() != "vulkan"
+                val acquired = if pooled:
+                    _engine2d_embed_offscreen_acquire(eng, embedding.width, embedding.height)
+                else:
+                    eng.draw_ir_create_offscreen_engine(embedding.width, embedding.height)
+                match acquired:
+                    Err(reason):
+                        if unsupported != "": unsupported = unsupported + ","
+                        unsupported = unsupported + reason
+                    Ok(created):
+                        val inner = _engine2d_draw_ir_render_command_plan(
+                            created, selection.plan, 0, 0, images, true, false,
+                            draw_ir_no_rect(), css_background_pixel_work_remaining)
+                        var layer = inner.engine
+                        if inner.css_background_pixel_work_remaining >= 0:
+                            css_background_pixel_work_remaining = (
+                                inner.css_background_pixel_work_remaining)
+                        rendered += inner.rendered
+                        skipped += inner.skipped + selection.culled_logical_count
+                        ops_culled_by_damage += selection.culled_logical_count
+                        commands_considered += selection.plan.commands.len().to_i32()
+                        commands_culled_by_damage += selection.culled_command_count
+                        if (inner.unsupported_kinds != "" and
+                            inner.unsupported_kinds != "none"):
+                            if unsupported != "": unsupported = unsupported + ","
+                            unsupported = unsupported + inner.unsupported_kinds
+                        val child = layer.read_pixels_with_source()
+                        for clip in clips:
+                            eng.set_clip(clip.x, clip.y, clip.width, clip.height)
+                            if not eng.draw_ir_composite_readback(
+                                embedding.x, embedding.y, embedding.width,
+                                embedding.height, child, embedding.opacity_milli):
+                                if unsupported != "": unsupported = unsupported + ","
+                                unsupported = unsupported + "embedded-device-composite-not-proven"
+                            eng.clear_clip()
+                        if not pooled:
+                            layer.shutdown()
+            else:
+                for clip in clips:
+                    # Batch commands are local to their embedding. Selection
+                    # uses that local clip, while the renderer retains the
+                    # global clip and embedding offset for exact raster writes.
+                    val selection = _engine2d_draw_ir_select_damage_indexed(
+                        plan, index, draw_ir_rect_bounds(
+                            clip.x - embedding.x, clip.y - embedding.y,
+                            clip.width, clip.height))
+                    eng.set_clip(clip.x, clip.y, clip.width, clip.height)
+                    val outcome = _engine2d_draw_ir_render_command_plan(
+                        eng, selection.plan, embedding.x, embedding.y, images,
+                        true, false, clip, css_background_pixel_work_remaining)
+                    eng = outcome.engine
+                    eng.clear_clip()
+                    if outcome.css_background_pixel_work_remaining >= 0:
+                        css_background_pixel_work_remaining = (
+                            outcome.css_background_pixel_work_remaining)
+                    rendered += outcome.rendered
+                    skipped += outcome.skipped + selection.culled_logical_count
+                    ops_culled_by_damage += selection.culled_logical_count
+                    commands_considered += selection.plan.commands.len().to_i32()
+                    commands_culled_by_damage += selection.culled_command_count
+                    if (outcome.unsupported_kinds != "" and
+                        outcome.unsupported_kinds != "none"):
+                        if unsupported != "": unsupported = unsupported + ","
+                        unsupported = unsupported + outcome.unsupported_kinds
+        batch_index += 1
     if unsupported == "": unsupported = "none"
     eng.submit_batch()
     var readback = engine2d_readback([], "not_requested")

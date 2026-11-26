@@ -89,3 +89,43 @@ first each round): base 7.24/6.10/5.88 s/frame (mean 6.41), patched
 6.44/5.84/6.22 (mean 6.17). The spread (~10%) is run-order and host noise; the
 change adds one boolean test per command and no measurable cost. The themed
 stream's device time is a new capability (it was rejected before).
+
+## Follow-up 2026-11-26: retained damage replay of themed frames
+
+Hosted WM frames never use the fresh-device entry: damaged frames go through
+`engine2d_draw_ir_render_composition_damaged_with_images`
+(`compositor_engine2d.spl:1099`, `engine2d_wm_frame_executor.spl:440` local
+lane), which called the preflight without the opt-in, rejected every themed
+frame and repainted in full. The opt-in flag is removed: all three callers
+(fresh entry, prepared damage plan, damaged wrapper) admit a style-free
+translucent rect on the root after the opaque initializer. A clipped replay
+repaints the opaque root under the clip before the rect blends, so there is
+no double blend.
+
+Clip proof (`engine2d_themed_wm_fresh_device_spec.spl`, 8/8 on NVIDIA GB10 and
+llvmpipe; before: the four new examples red with
+`fresh-device-command-preflight-required`): frame A presented in full, frame
+B replayed under a damage rect that cuts the translucent rect, compared with
+"B inside the damage, A outside" built from two CPU full frames:
+- synthetic 16x8 root, damage x<6 across a 0x80 translucent lane: CPU replay
+  and device replay exact; same with an opaque rounded control rect;
+- themed fluid_light and aetheric_dark clock tick (damage 100,84 50x24 across
+  the translucent taskbar, 49 changed clock pixels): CPU replay exact; device
+  replay equals CPU inside the damage and its own first frame outside.
+
+Outside-damage pixels are compared with the device's first frame because the
+focused window's fresh-device corner AA differs from CPU by one LSB at 20
+pixels, before and after this change; filed as
+`engine2d_focused_window_corner_aa_device_differs_from_cpu_2026-11-26` with a
+red handover spec. Still not covered: scenes with an unfocused window, whose
+opacity-930 batch the damaged executor rejects separately
+(`engine2d_retained_damage_rejects_unfocused_window_opacity_2026-11-26`).
+
+Regression, before/after identical: draw_ir_adv_spec 69/70 (same failing
+example), draw_ir_damage_plan_rejection 7/7, wm_retained_damage_behavior 6/6,
+engine2d_embedded_surface 11/11, both ICDs.
+
+Perf (GB10, seed sha256 fb80903917d6d5f5, themed fluid_light focused window,
+160x120, 3 rounds): full fresh-device frame 17.57/11.77/15.14 s versus
+retained clock-tick replay 1.07/1.39/1.01 s (11 ops, 4 culled). Before this
+change the replay was rejected and the caller paid the full frame.

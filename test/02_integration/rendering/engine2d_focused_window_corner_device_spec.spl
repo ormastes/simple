@@ -1,0 +1,40 @@
+# @tag:in-development
+# Tracks: engine2d_focused_window_corner_aa_device_differs_from_cpu_2026-11-26
+"""
+Fresh-device composition of a focused themed WM window must equal the CPU
+composition. Today 20 corner/edge pixels of the focused window differ by
+one LSB on NVIDIA GB10 and llvmpipe (the unfocused window, opacity 930,
+matches exactly).
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU}
+use common.ui.taskbar_model.{empty_taskbar_model}
+use common.ui.window_scene.{simple_gui_internal_window, simple_gui_internal_window_scene}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition_with_content}
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme}
+
+describe "Engine2D focused themed WM window on the fresh device":
+    it "matches CPU pixels at the focused window corners":
+        step("Compose one focused fluid_light window on the device and on CPU")
+        apply_theme_render_snapshot_to_wm_chrome(fluid_light_theme_render_snapshot())
+        val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, true, 1)
+        val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, empty_taskbar_model(), [], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
+        var cpu = Engine2D.create_with_backend(160, 120, "cpu")
+        val expected = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [])
+        match Engine2D.create_requested_backend(160, 120, "vulkan"):
+            Err(reason):
+                expect(reason.len()).to_be_greater_than(0)
+            Ok(engine):
+                val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [])
+                expect(result.readback_source).to_equal("device_readback")
+                # (19,36) is a top-left corner AA pixel: device 0xFFFCFBFE vs CPU 0xFFFBFAFE today.
+                expect(result.pixels[36 * 160 + 19]).to_equal(expected.pixels[36 * 160 + 19])
+                expect(result.pixels).to_equal(expected.pixels)
+                engine.shutdown()
+        cpu.shutdown()
+        reset_wm_chrome_theme()

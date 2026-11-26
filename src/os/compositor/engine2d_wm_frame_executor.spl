@@ -34,6 +34,7 @@ use common.gpu.simpleos_host_gpu_stream_protocol.{
 }
 use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DrawIrBatch, DrawIrComposition, draw_ir_batch_with_source, draw_ir_composition}
 use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.wm_chrome_theme.{active_wm_theme_id, wm_chrome_colors_css_override, wm_chrome_theme}
 use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, wm_content_frame_web_provenance_valid}
 use common.ui.window_scene_draw_ir.{
     shared_wm_content_frame_for_window,
@@ -116,6 +117,49 @@ fn engine2d_wm_full_damage_plan(width: i64, height: i64) -> DamagePlan:
 fn engine2d_wm_background_key(scene: SharedWmScene) -> text:
     "{scene.background.kind}:{scene.background.color}:{scene.background.source}:{scene.background.fit}"
 
+fn engine2d_wm_clock_rect(composition: DrawIrComposition) -> [i64]:
+    # Screen boxes (x, y, w, h)* of every clock-label text the composition
+    # draws: the taskbar clock and the tray clock item label. Each is padded
+    # by 2px for glyph antialiasing; empty when no clock text is drawn.
+    var rects: [i64] = []
+    for batch in composition.batches:
+        for command in batch.commands:
+            val clock_text = command.component_id == "taskbar-clock" or command.component_id == "taskbar-tray-label-clock"
+            if clock_text and command.width > 0 and command.height > 0:
+                val x = batch.embedding.x.to_i64() + command.x.to_i64() - 2
+                val y = batch.embedding.y.to_i64() + command.y.to_i64() - 2
+                rects = rects + [if x > 0: x else: 0, if y > 0: y else: 0, command.width.to_i64() + 4, command.height.to_i64() + 4]
+    rects
+
+fn _engine2d_wm_key_field(value: text) -> text:
+    # Escape the layout key's separators so a title like "a|b" cannot alias
+    # two different taskbars to one key.
+    value.replace("%", "%25").replace("|", "%7C").replace(";", "%3B")
+
+fn engine2d_wm_taskbar_layout_key(taskbar: TaskbarModel) -> text:
+    # Everything the taskbar draws except the clock label (the tray clock
+    # item's label is the clock text itself; its id and icon still count).
+    var key = ""
+    for app in taskbar.pinned:
+        key = key + "p:{_engine2d_wm_key_field(app.app_id)}|{_engine2d_wm_key_field(app.display_name)}|{_engine2d_wm_key_field(app.icon)};"
+    for window in taskbar.running:
+        key = key + "r:{_engine2d_wm_key_field(window.window_id)}|{_engine2d_wm_key_field(window.app_id)}|{_engine2d_wm_key_field(window.title)}|{window.minimized};"
+    for item in taskbar.tray:
+        val label = if item.item_id == "clock": "" else: item.label
+        key = key + "t:{_engine2d_wm_key_field(item.item_id)}|{_engine2d_wm_key_field(item.icon)}|{_engine2d_wm_key_field(label)};"
+    key
+
+fn engine2d_wm_local_frame_key(scene: SharedWmScene, content_frames: [WmContentFrame], degraded_window_count: i32) -> text:
+    # Inputs a local retained replay depends on beyond the revisions: the
+    # lane, the active WM theme, and which windows' content resolved (ids: a
+    # content update damages its window rect, see retained_scene_damage_plan).
+    val theme_id = active_wm_theme_id()
+    val palette = wm_chrome_colors_css_override(wm_chrome_theme())
+    var key = "{engine2d_wm_background_key(scene)}|lane=local|theme={theme_id}:{palette}|degraded={degraded_window_count}"
+    for frame in content_frames:
+        key = key + "|{frame.window_id}"
+    key
+
 class Engine2dWmFrameExecutor:
     engine: Engine2D
     framebuffer: FramebufferDriver
@@ -160,6 +204,18 @@ class Engine2dWmFrameExecutor:
     # rather than replay a stale taskbar band (external review F4).
     last_successful_taskbar_revision: i64 = 0
     last_successful_clock_label: text = ""
+    # Taskbar clock text box (x, y, w, h) of the last presented frame; empty
+    # when unknown. Lets a clock-only tick replay just the old and new boxes.
+    last_successful_clock_rect: [i64] = []
+    # engine2d_wm_taskbar_layout_key of the last presented frame.
+    last_successful_taskbar_key: text = ""
+    # Which path presented the last frame: software, software-retained-damage
+    # or host-gpu.
+    last_present_path: text = ""
+    # Content URI per resolved window id of the last presented local frame;
+    # a changed URI damages only that window's rect.
+    last_successful_content_ids: [text] = []
+    last_successful_content_uris: [text] = []
     damage_tiles: DirtyTilePyramid
 
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
@@ -480,21 +536,35 @@ class Engine2dWmFrameExecutor:
     # marks BOTH the retained old window extents and the current extents
     # dirty so vacated pixels repaint without a full-frame fallback.
     # Anything unprovable returns the fail-closed full plan.
-    me retained_scene_damage_plan(scene: SharedWmScene, background_key: text, scene_revision: i64, taskbar_revision: i64 = 0, clock_label: text = "") -> DamagePlan:
+    me retained_scene_damage_plan(scene: SharedWmScene, background_key: text, scene_revision: i64, taskbar_revision: i64 = 0, clock_label: text = "", clock_rect: [i64] = [], taskbar_key: text = "", content_frames: [WmContentFrame] = []) -> DamagePlan:
         val width = if self.fb_w > 0: self.fb_w else: self.framebuffer.width.to_i64()
         val height = if self.fb_h > 0: self.fb_h else: self.framebuffer.height.to_i64()
         if not (self.last_successful_scene_revision > 0):
             return engine2d_wm_full_damage_plan(width, height)
         if background_key != self.last_successful_background_key:
             return engine2d_wm_full_damage_plan(width, height)
-        # The composition also consumes taskbar_revision and clock_label; a
-        # taskbar-only or clock-only change is not attributable to any window
-        # extent, so it fails closed to a full repaint (external review F4).
+        # A clock change is attributable when the presented and new clock
+        # text boxes are both known: repaint exactly those boxes.
+        val clock_changed = clock_label != self.last_successful_clock_label
+        # The composition also consumes taskbar_revision, which producers mix
+        # the clock into. A taskbar change is not attributable to any window
+        # extent, so it fails closed to a full repaint (external review F4)
+        # unless the clock-independent layout key proves only the clock moved.
         if taskbar_revision != self.last_successful_taskbar_revision:
-            return engine2d_wm_full_damage_plan(width, height)
-        if clock_label != self.last_successful_clock_label:
-            return engine2d_wm_full_damage_plan(width, height)
+            if not (clock_changed and taskbar_key != "" and taskbar_key == self.last_successful_taskbar_key):
+                return engine2d_wm_full_damage_plan(width, height)
+        if clock_changed:
+            val old_rects = self.last_successful_clock_rect
+            if (clock_rect.len() == 0 or clock_rect.len() % 4 != 0 or
+                old_rects.len() != clock_rect.len()):
+                return engine2d_wm_full_damage_plan(width, height)
         self.damage_tiles.begin_frame()
+        if clock_changed:
+            var r: i64 = 0
+            while r + 3 < clock_rect.len():
+                self.damage_tiles.mark_rect(self.last_successful_clock_rect[r], self.last_successful_clock_rect[r + 1], self.last_successful_clock_rect[r + 2], self.last_successful_clock_rect[r + 3])
+                self.damage_tiles.mark_rect(clock_rect[r], clock_rect[r + 1], clock_rect[r + 2], clock_rect[r + 3])
+                r = r + 4
         if scene_revision != self.last_successful_scene_revision:
             var old: i64 = 0
             while old + 4 < self.last_successful_window_rects.len():
@@ -514,11 +584,38 @@ class Engine2dWmFrameExecutor:
                     self.damage_tiles.mark_rect(
                         window.x.to_i64(), window.y.to_i64(),
                         window.width.to_i64(), window.height.to_i64())
+        # The frame key pins WHICH windows resolved content; an updated
+        # content frame (new content_revision or re-stamped URI) damages only
+        # its own window's full bounds.
+        for frame in content_frames:
+            val uri = shared_wm_content_frame_image_uri(frame)
+            var previous = ""
+            var p = 0
+            while p < self.last_successful_content_ids.len():
+                if self.last_successful_content_ids[p] == frame.window_id:
+                    previous = self.last_successful_content_uris[p]
+                p = p + 1
+            if uri != previous:
+                var marked = false
+                for window in scene.windows:
+                    if window.window_id == frame.window_id:
+                        self.damage_tiles.mark_rect(
+                            window.x.to_i64(), window.y.to_i64(),
+                            window.width.to_i64(), window.height.to_i64())
+                        marked = true
+                if not marked:
+                    return engine2d_wm_full_damage_plan(width, height)
         build_damage_plan(self.damage_tiles, 1, DamagePlanPolicy.create(64, 60))
 
     # Commit the retained extents only for a frame that actually presented.
     # Extents are the FULL window bounds (chrome included) — see F3 note above.
-    me record_successful_scene(scene: SharedWmScene, background_key: text, scene_revision: i64, taskbar_revision: i64 = 0, clock_label: text = ""):
+    # The host-gpu lane presents from shared memory and never paints
+    # self.engine, so its success must not seed a later local replay.
+    me record_host_lane_present():
+        self.last_successful_background_key = "lane=host-gpu"
+        self.last_present_path = "host-gpu"
+
+    me record_successful_scene(scene: SharedWmScene, background_key: text, scene_revision: i64, taskbar_revision: i64 = 0, clock_label: text = "", clock_rect: [i64] = [], taskbar_key: text = "", content_frames: [WmContentFrame] = []):
         var rects: [i64] = []
         for window in scene.windows:
             val valid = if window.minimized or window.width <= 0 or window.height <= 0: 0 else: 1
@@ -532,6 +629,15 @@ class Engine2dWmFrameExecutor:
         self.last_successful_scene_revision = scene_revision
         self.last_successful_taskbar_revision = taskbar_revision
         self.last_successful_clock_label = clock_label
+        self.last_successful_clock_rect = clock_rect
+        self.last_successful_taskbar_key = taskbar_key
+        var ids: [text] = []
+        var uris: [text] = []
+        for frame in content_frames:
+            ids.push(frame.window_id)
+            uris.push(shared_wm_content_frame_image_uri(frame))
+        self.last_successful_content_ids = ids
+        self.last_successful_content_uris = uris
 
     me render(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock_label: text) -> i64:
         if scene_revision <= 0 or taskbar_revision <= 0:
@@ -629,7 +735,8 @@ class Engine2dWmFrameExecutor:
                     _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=host-gpu scene_revision={scene_revision}")
                 for frame in good_content_frames:
                     _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=host-gpu window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
-                self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label)
+                self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label, engine2d_wm_clock_rect(composition))
+                self.record_host_lane_present()
                 return scene_revision
             if self.host_gpu_required:
                 _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=device-receipt-or-readback")
@@ -658,8 +765,10 @@ class Engine2dWmFrameExecutor:
         # only the damaged rects through the retained executor. Anything else
         # — FULL/NONE plans, empty rects, or a rejected/empty replay — falls
         # closed through to the unconditional full composition below.
-        val background_key = engine2d_wm_background_key(scene)
-        val retained_plan = self.retained_scene_damage_plan(scene, background_key, scene_revision, taskbar_revision, clock_label)
+        val background_key = engine2d_wm_local_frame_key(scene, good_content_frames, degraded_window_count)
+        val taskbar_key = engine2d_wm_taskbar_layout_key(taskbar)
+        val clock_rect = engine2d_wm_clock_rect(local_composition)
+        val retained_plan = self.retained_scene_damage_plan(scene, background_key, scene_revision, taskbar_revision, clock_label, clock_rect, taskbar_key, good_content_frames)
         if retained_plan.mode == DAMAGE_PLAN_LOCAL and retained_plan.rects.len() > 0:
             val outcome = engine2d_draw_ir_render_composition_damaged_with_images(self.engine, local_composition, images, retained_plan.rects, false)
             self.engine = outcome.engine
@@ -669,7 +778,8 @@ class Engine2dWmFrameExecutor:
                     _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={outcome.ops_skipped} rendered={outcome.ops_rendered} scene_revision={scene_revision} reason=retained-damage")
                 for frame in good_content_frames:
                     _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=software-retained-damage window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
-                self.record_successful_scene(scene, background_key, scene_revision, taskbar_revision, clock_label)
+                self.record_successful_scene(scene, background_key, scene_revision, taskbar_revision, clock_label, clock_rect, taskbar_key, good_content_frames)
+                self.last_present_path = "software-retained-damage"
                 return scene_revision
             # Fail closed: an unsupported or empty retained replay must not
             # be presented; repaint everything through the full lane instead.
@@ -690,5 +800,6 @@ class Engine2dWmFrameExecutor:
             _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} scene_revision={scene_revision} reason={result.fallback_reason}")
         for frame in good_content_frames:
             _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=software window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
-        self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label)
+        self.record_successful_scene(scene, background_key, scene_revision, taskbar_revision, clock_label, clock_rect, taskbar_key, good_content_frames)
+        self.last_present_path = "software"
         scene_revision

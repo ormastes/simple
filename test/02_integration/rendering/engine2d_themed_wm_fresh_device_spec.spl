@@ -3,14 +3,15 @@ Strict fresh-device composition of the themed WM window stream that both
 production WM bootstraps install (registry default fluid_light, and
 aetheric_dark). The themed chrome puts style-free translucent rects (command
 lane, taskbar) straight onto the root after the opaque desktop initializer;
-the fresh-device entry admits exactly that placement (the retained damage and
-tile wrappers do not) and the device must then match
+the fresh-device entry and the retained damage/tile wrappers admit exactly
+that placement, and the device must then match
 the CPU composition pixel for pixel.
 """
 
 use std.spec.{describe, it, expect, step}
+use std.io_runtime.{env_get}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{_engine2d_draw_ir_fresh_device_reason, engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_resolved_draw_ir_image}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{_engine2d_draw_ir_fresh_device_reason, engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_render_composition_damaged_with_images, engine2d_resolved_draw_ir_image}
 use std.gpu.engine2d.color.{rgb}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_image_command, draw_ir_rect, draw_ir_style_prop}
 use common.ui.taskbar_model.{empty_taskbar_model}
@@ -33,7 +34,7 @@ fn themed_window_device_matches_cpu(snapshot: ThemeRenderSnapshot):
         parent_window_id: "", offset_x: 0, offset_y: 0)
     val composition = shared_wm_scene_draw_ir_composition_with_content(scene, empty_taskbar_model(), [frame], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
     val image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), 112, 44, pixels)
-    expect(_engine2d_draw_ir_fresh_device_reason(composition, [image], 160, 120, true)).to_equal("")
+    expect(_engine2d_draw_ir_fresh_device_reason(composition, [image], 160, 120)).to_equal("")
     var cpu = Engine2D.create_with_backend(160, 120, "cpu")
     val expected = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [image])
     match Engine2D.create_requested_backend(160, 120, "vulkan"):
@@ -67,11 +68,9 @@ describe "Engine2D strict fresh-device themed WM window":
         themed_window_device_matches_cpu(aetheric_dark_theme_render_snapshot())
 
     it "admits a style-free translucent root rect only after the opaque initializer":
-        step("A plain translucent rect over the opaque root passes; a rounded one and the clipped callers stay rejected")
-        expect(_engine2d_draw_ir_fresh_device_reason(root_composition(""), [], 8, 8, true)).to_equal("")
-        expect(_engine2d_draw_ir_fresh_device_reason(root_composition("border-radius"), [], 8, 8, true)).to_equal("fresh-device-command-preflight-required")
-        # The retained damage replay and tile wrappers call without the opt-in.
-        expect(_engine2d_draw_ir_fresh_device_reason(root_composition(""), [], 8, 8)).to_equal("fresh-device-command-preflight-required")
+        step("A plain translucent rect over the opaque root passes; a rounded one stays rejected")
+        expect(_engine2d_draw_ir_fresh_device_reason(root_composition(""), [], 8, 8)).to_equal("")
+        expect(_engine2d_draw_ir_fresh_device_reason(root_composition("border-radius"), [], 8, 8)).to_equal("fresh-device-command-preflight-required")
 
     it "draws a translucent root rect over an opaque image on the device like CPU":
         step("Opaque image initializer plus a style-free translucent rect: device pixels equal CPU")
@@ -96,3 +95,198 @@ describe "Engine2D strict fresh-device themed WM window":
                 expect(result.pixels).to_equal(expected.pixels)
                 engine.shutdown()
         cpu.shutdown()
+
+fn damage_composition(overlay: u32, control_style: bool) -> DrawIrComposition:
+    # Opaque root initializer, a style-free translucent rect, and an opaque
+    # control rect (rounded when control_style) - the themed chrome shape.
+    val root = draw_ir_embedding_config("wm-chrome", "wm-chrome", 0, 0, 16, 8, 0, 1000, false)
+    val init = draw_ir_rect("init", 0, 0, 16, 8, 0xFF102030u32)
+    val lane = draw_ir_rect("lane", 2, 2, 10, 4, overlay)
+    var control = draw_ir_rect("control", 12, 1, 3, 3, 0xFF3060C0u32)
+    if control_style:
+        control.computed_style = [draw_ir_style_prop("border-radius", "1px")]
+    draw_ir_composition("dmg", "dmg", DRAW_IR_BACKEND_GPU, [draw_ir_batch("wm-chrome", DRAW_IR_BACKEND_GPU, root, [init, lane, control])])
+
+fn damage_replay_matches_split_full_frames(control_style: bool):
+    # Frame A is presented in full; frame B (different translucent colour) is
+    # replayed only inside damage x<6. A correct clipped replay repaints the
+    # root under the damage before blending, so the result must equal B
+    # inside the damage and A outside - no double blend, no leak past the clip.
+    val a = damage_composition(0x80FF0000u32, control_style)
+    val b = damage_composition(0x8000FF00u32, control_style)
+    val damage: [i64] = [0, 0, 6, 8]
+    var ca = Engine2D.create_with_backend(16, 8, "cpu")
+    val full_a = engine2d_draw_ir_adv_composition_with_images(ca, a, false, []).pixels
+    var cb = Engine2D.create_with_backend(16, 8, "cpu")
+    val full_b = engine2d_draw_ir_adv_composition_with_images(cb, b, false, []).pixels
+    var expected: [u32] = []
+    var i = 0
+    while i < 16 * 8:
+        expected.push(if i % 16 < 6: full_b[i] else: full_a[i])
+        i = i + 1
+    expect(full_a[3 * 16 + 3] == full_b[3 * 16 + 3]).to_be(false)  # oracle: the two frames differ under the lane
+    var cpu = Engine2D.create_with_backend(16, 8, "cpu")
+    val seeded = engine2d_draw_ir_adv_composition_with_images(cpu, a, false, [])
+    expect(seeded.pixels).to_equal(full_a)
+    val cpu_out = engine2d_draw_ir_render_composition_damaged_with_images(cpu, b, [], damage, true)
+    expect(cpu_out.unsupported_kinds).to_equal("none")
+    expect(cpu_out.readback.pixels).to_equal(expected)
+    match Engine2D.create_requested_backend(16, 8, "vulkan"):
+        Err(reason):
+            expect(reason.len()).to_be_greater_than(0)
+        Ok(engine):
+            val first = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, a, [])
+            expect(first.readback_source).to_equal("device_readback")
+            expect(first.pixels).to_equal(full_a)
+            val out = engine2d_draw_ir_render_composition_damaged_with_images(engine, b, [], damage, true)
+            expect(out.unsupported_kinds).to_equal("none")
+            expect(out.readback.source).to_equal("device_readback")
+            expect(out.readback.pixels).to_equal(expected)
+            out.engine.shutdown()
+    ca.shutdown()
+    cb.shutdown()
+    cpu_out.engine.shutdown()
+
+describe "Engine2D retained damage replay of themed translucent chrome":
+    it "replays a translucent root rect under a partial damage clip like a split full frame":
+        step("Damage x<6 crosses the translucent lane: device and CPU replay equal B inside, A outside")
+        damage_replay_matches_split_full_frames(false)
+
+    it "replays the same frame with an opaque rounded control rect":
+        step("Control: an opaque rounded rect beside the lane keeps the same clipped-replay result")
+        damage_replay_matches_split_full_frames(true)
+
+fn _fresh_full_device_pixels(engine: Engine2D) -> [u32]:
+    # A damaged replay refreshes the host mirror only inside the damage, so
+    # drop the mirror and download the whole device framebuffer; the
+    # poisoned canary pixel proves the read did not come from the mirror.
+    if val Some(vk) = engine.vulkan_backend:
+        # Canary: poison one mirror pixel; a real full download overwrites it.
+        if vk.host_buf.len() > 0: vk.host_buf[0] = 0x01020304u32
+        vk.host_mirror_valid = false
+        vk.dirty = true
+    # Prove the poison is visible through `engine` itself (the binding above
+    # must alias the engine's backend, not copy it), then read through it.
+    var poisoned = false
+    if val Some(seen) = engine.vulkan_backend:
+        poisoned = seen.host_buf.len() > 0 and seen.host_buf[0] == 0x01020304u32 and not seen.host_mirror_valid
+    expect(poisoned).to_be(true)
+    if poisoned:
+        val rb = engine.read_pixels_with_source()
+        expect(rb.source).to_equal("device_readback")
+        expect(rb.pixels[0] != 0x01020304u32).to_be(true)
+        return rb.pixels
+    expect("no-vulkan-backend").to_equal("vulkan-backend")
+    []
+
+fn _vulkan_unavailable(reason: text):
+    # A host that declares Vulkan mandatory must not pass on zero pixel checks.
+    expect(env_get("SIMPLE_2D_REQUIRE_VULKAN")).to_equal("")
+    expect(reason.len()).to_be_greater_than(0)
+
+fn themed_clock_composition(snapshot: ThemeRenderSnapshot, clock: text) -> DrawIrComposition:
+    apply_theme_render_snapshot_to_wm_chrome(snapshot)
+    val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, true, 1)
+    val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
+    shared_wm_scene_draw_ir_composition_with_content(scene, empty_taskbar_model(), [], DRAW_IR_BACKEND_GPU, 1000, clock, 0)
+
+fn themed_clock_tick_replays_like_split_frames(snapshot: ThemeRenderSnapshot):
+    # A hosted clock tick with a focused window (an unfocused window batch
+    # carries opacity 930, which the retained executor rejects separately).
+    # The damage covers the taskbar clock (108,90 36x12)
+    # and crosses the translucent taskbar, so the retained replay must blend
+    # it over a freshly repainted root inside the clip only.
+    val a = themed_clock_composition(snapshot, "09:41")
+    val b = themed_clock_composition(snapshot, "09:42")
+    val damage: [i64] = [100, 84, 50, 24]
+    var ca = Engine2D.create_with_backend(160, 120, "cpu")
+    val full_a = engine2d_draw_ir_adv_composition_with_images(ca, a, false, []).pixels
+    var cb = Engine2D.create_with_backend(160, 120, "cpu")
+    val full_b = engine2d_draw_ir_adv_composition_with_images(cb, b, false, []).pixels
+    var expected: [u32] = []
+    var changed = 0
+    var i = 0
+    while i < 160 * 120:
+        val x = i % 160
+        val y = i / 160
+        val inside = x >= 100 and x < 150 and y >= 84 and y < 108
+        if not inside:
+            expect(full_a[i]).to_equal(full_b[i])
+        if full_a[i] != full_b[i]:
+            changed = changed + 1
+        expected.push(if inside: full_b[i] else: full_a[i])
+        i = i + 1
+    expect(changed).to_be_greater_than(0)  # oracle: the clock glyphs really changed
+    var cpu = Engine2D.create_with_backend(160, 120, "cpu")
+    val seeded = engine2d_draw_ir_adv_composition_with_images(cpu, a, false, [])
+    expect(seeded.pixels).to_equal(full_a)
+    val cpu_out = engine2d_draw_ir_render_composition_damaged_with_images(cpu, b, [], damage, true)
+    expect(cpu_out.unsupported_kinds).to_equal("none")
+    expect(cpu_out.readback.pixels).to_equal(expected)
+    match Engine2D.create_requested_backend(160, 120, "vulkan"):
+        Err(reason):
+            _vulkan_unavailable(reason)
+        Ok(reference):
+            # The device layers the window like its own full frame, and its
+            # fresh window corners differ from CPU by 1 LSB (tracked:
+            # engine2d_focused_window_corner_aa_device_differs_from_cpu_2026-11-26),
+            # so the device oracle is the device's own full frames: B inside
+            # the damage, A outside.
+            val dev_b = engine2d_draw_ir_adv_fresh_device_composition_with_images(reference, b, []).pixels
+            reference.shutdown()
+            match Engine2D.create_requested_backend(160, 120, "vulkan"):
+                Err(reason):
+                    _vulkan_unavailable(reason)
+                Ok(engine):
+                    val first_pixels = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, a, []).pixels
+                    var expected_dev: [u32] = []
+                    var j = 0
+                    while j < 160 * 120:
+                        val jx = j % 160
+                        val jy = j / 160
+                        val jin = jx >= 100 and jx < 150 and jy >= 84 and jy < 108
+                        expected_dev.push(if jin: dev_b[j] else: first_pixels[j])
+                        j = j + 1
+                    val out = engine2d_draw_ir_render_composition_damaged_with_images(engine, b, [], damage, true)
+                    expect(out.unsupported_kinds).to_equal("none")
+                    expect(out.readback.source).to_equal("device_readback")
+                    expect(out.readback.pixels).to_equal(expected_dev)
+                    expect(_fresh_full_device_pixels(engine)).to_equal(expected_dev)
+                    # CPU parity inside the clock box: the replay equals the
+                    # CPU full frame of B wherever the device's own fresh full
+                    # frame does. The exceptions are the focused-window corner
+                    # AA pixels (1 LSB, tracked as
+                    # engine2d_focused_window_corner_aa_device_differs_from_cpu_2026-11-26),
+                    # where the replay must still equal the fresh device frame.
+                    var box_dev: [u32] = []
+                    var box_cpu: [u32] = []
+                    var corner_aa = 0
+                    var k = 0
+                    while k < 160 * 120:
+                        val kx = k % 160
+                        val ky = k / 160
+                        if kx >= 100 and kx < 150 and ky >= 84 and ky < 108:
+                            if dev_b[k] == full_b[k]:
+                                box_dev.push(out.readback.pixels[k])
+                                box_cpu.push(full_b[k])
+                            else:
+                                corner_aa = corner_aa + 1
+                                expect(out.readback.pixels[k]).to_equal(dev_b[k])
+                        k = k + 1
+                    expect(corner_aa).to_be_less_than(21)
+                    expect(box_dev.len() + corner_aa).to_equal(50 * 24)
+                    expect(box_dev).to_equal(box_cpu)
+                    engine.shutdown()
+    ca.shutdown()
+    cb.shutdown()
+    cpu_out.engine.shutdown()
+    reset_wm_chrome_theme()
+
+describe "Engine2D retained damage replay of a themed hosted clock tick":
+    it "replays the fluid_light clock tick on the device like split CPU frames":
+        step("fluid_light: damage over the translucent taskbar clock, device replay == CPU split frame")
+        themed_clock_tick_replays_like_split_frames(fluid_light_theme_render_snapshot())
+
+    it "replays the aetheric_dark clock tick on the device like split CPU frames":
+        step("aetheric_dark: same clock-tick replay")
+        themed_clock_tick_replays_like_split_frames(aetheric_dark_theme_render_snapshot())

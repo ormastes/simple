@@ -1,0 +1,135 @@
+"""
+Hosted local WM lane clock tick, driven in the production caller shape:
+the taskbar carries the tray clock item, and taskbar_revision comes from
+simpleos_runtime_taskbar_revision (which mixes the clock), exactly as the
+desktop shell passes it to Engine2dWmFrameExecutor.render. A clock-only
+tick replays the clock boxes; a taskbar, lane, late-content or theme change
+on the same tick still repaints the whole frame, while a window content
+update or a window move replays only the window rects.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.color.{rgb}
+use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem}
+use common.ui.window_scene.{SharedWmScene, WM_CONTENT_ORIGIN_PIXEL_SURFACE, WmContentFrame, simple_gui_internal_window, shared_wm_background_color, wm_content_frame_checksum}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme}
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor, engine2d_wm_background_key, engine2d_wm_taskbar_layout_key}
+use os.desktop.shell.{simpleos_runtime_taskbar_revision}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+
+val REV: i64 = 7
+
+fn _scene() -> SharedWmScene:
+    val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, true, 1)
+    SharedWmScene(width: 160, height: 120, backend: "cpu", windows: [window], background: shared_wm_background_color(0xff101010u32))
+
+fn _taskbar(clock: text, title: text) -> TaskbarModel:
+    TaskbarModel(
+        pinned: [AppRef(app_id: "terminal", display_name: "Terminal", icon: "term")],
+        running: [WindowRef(window_id: "win", app_id: "app", title: title, minimized: false)],
+        tray: [TrayItem(item_id: "clock", label: clock, icon: "clock")])
+
+fn _frames() -> [WmContentFrame]:
+    val pixels: [u32] = [rgb(0, 160, 0); 112 * 44]
+    [WmContentFrame(window_id: "win", scene_revision: REV, content_revision: 1,
+        origin_kind: WM_CONTENT_ORIGIN_PIXEL_SURFACE, width: 112, height: 44,
+        pixels: pixels, checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "", offset_x: 0, offset_y: 0)]
+
+fn _executor() -> Engine2dWmFrameExecutor:
+    Engine2dWmFrameExecutor.create(Engine2D.create_with_backend(160, 120, "cpu"), FramebufferDriver.empty(), 160, 120)
+
+fn _tick(executor: Engine2dWmFrameExecutor, clock: text, title: text, frames: [WmContentFrame]) -> i64:
+    var e = executor
+    val taskbar = _taskbar(clock, title)
+    e.render(_scene(), taskbar, frames, REV, simpleos_runtime_taskbar_revision(taskbar, clock), clock)
+
+describe "hosted local lane clock tick in the production caller shape":
+    it "replays only the clock boxes on a clock-only tick":
+        step("09:41 then 09:42 with the shell's clock-mixing taskbar revision")
+        var executor = _executor()
+        expect(_tick(executor, "09:41", "One", _frames())).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software")
+        expect(_tick(executor, "09:42", "One", _frames())).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software-retained-damage")
+
+    it "repaints the full frame when a running title changes on the same tick":
+        var executor = _executor()
+        _tick(executor, "09:41", "One", _frames())
+        expect(_tick(executor, "09:42", "Two", _frames())).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software")
+
+    it "repaints the full frame when window content arrives late at the same revision":
+        step("window degraded at the first frame (no content), content + tick at the next")
+        var executor = _executor()
+        _tick(executor, "09:41", "One", [])
+        expect(_tick(executor, "09:42", "One", _frames())).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software")
+
+    it "repaints the full frame when the theme changes on the same tick":
+        step("fluid_light frame, then the default theme with a tick: both replay-admissible themes")
+        var executor = _executor()
+        apply_theme_render_snapshot_to_wm_chrome(fluid_light_theme_render_snapshot())
+        _tick(executor, "09:41", "One", _frames())
+        reset_wm_chrome_theme()
+        expect(_tick(executor, "09:42", "One", _frames())).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software")
+
+    it "repaints the full frame after the host lane presented the previous frame":
+        step("the host-gpu lane never paints self.engine; its success must not seed a local replay")
+        var executor = _executor()
+        _tick(executor, "09:41", "One", _frames())
+        executor.record_host_lane_present()
+        expect(_tick(executor, "09:42", "One", _frames())).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software")
+
+fn _scene_at(x: i32) -> SharedWmScene:
+    # 80x60 on a 320x240 frame: the tile-aligned old+new window rects stay
+    # well under the damage planner's 60% full-frame threshold.
+    val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", x, 8, 80, 60, "", false, true, 1)
+    SharedWmScene(width: 320, height: 240, backend: "cpu", windows: [window], background: shared_wm_background_color(0xff101010u32))
+
+fn _frames_at(revision: i64, content_revision: i64, color: u32) -> [WmContentFrame]:
+    val pixels: [u32] = [color; 72 * 24]
+    [WmContentFrame(window_id: "win", scene_revision: revision, content_revision: content_revision,
+        origin_kind: WM_CONTENT_ORIGIN_PIXEL_SURFACE, width: 72, height: 24,
+        pixels: pixels, checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "", offset_x: 0, offset_y: 0)]
+
+fn _big_executor() -> Engine2dWmFrameExecutor:
+    Engine2dWmFrameExecutor.create(Engine2D.create_with_backend(320, 240, "cpu"), FramebufferDriver.empty(), 320, 240)
+
+fn _render(executor: Engine2dWmFrameExecutor, x: i32, revision: i64, frames: [WmContentFrame]) -> i64:
+    var e = executor
+    val taskbar = _taskbar("09:41", "One")
+    e.render(_scene_at(x), taskbar, frames, revision, simpleos_runtime_taskbar_revision(taskbar, "09:41"), "09:41")
+
+fn _fresh_pixels(x: i32, revision: i64, frames: [WmContentFrame]) -> [u32]:
+    var fresh = _big_executor()
+    _render(fresh, x, revision, frames)
+    fresh.engine.read_pixels_with_source().pixels
+
+describe "hosted local lane window updates through render()":
+    it "replays only the window rect on a content update":
+        step("same scene revision, content_revision 1 -> 2 with new pixels")
+        var executor = _big_executor()
+        _render(executor, 8, REV, _frames_at(REV, 1, rgb(0, 160, 0)))
+        val updated = _frames_at(REV, 2, rgb(0, 0, 200))
+        expect(_render(executor, 8, REV, updated)).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software-retained-damage")
+        expect(executor.engine.read_pixels_with_source().pixels).to_equal(_fresh_pixels(8, REV, updated))
+
+    it "replays only the old and new window rects on a move":
+        step("scene revision 7 -> 8, window x 8 -> 24, content re-stamped for 8")
+        var executor = _big_executor()
+        _render(executor, 8, REV, _frames_at(REV, 1, rgb(0, 160, 0)))
+        val moved = _frames_at(REV + 1, 1, rgb(0, 160, 0))
+        expect(_render(executor, 24, REV + 1, moved)).to_equal(REV + 1)
+        expect(executor.last_present_path).to_equal("software-retained-damage")
+        expect(executor.engine.read_pixels_with_source().pixels).to_equal(_fresh_pixels(24, REV + 1, moved))
+
+    it "escapes key separators in taskbar fields":
+        val key = engine2d_wm_taskbar_layout_key(_taskbar("09:41", "a|b;c"))
+        expect(key.contains("a%7Cb%3Bc")).to_be(true)
