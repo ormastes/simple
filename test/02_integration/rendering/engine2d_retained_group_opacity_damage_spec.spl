@@ -1,0 +1,139 @@
+"""
+Retained damage replay of an unfocused WM window (embedding opacity 930).
+A content change inside the window is replayed under a damage clip that
+crosses the window edge; the replay must equal the full frame of the new
+content inside the clip and the full frame of the old content outside it,
+on CPU and on the Vulkan device (NVIDIA GB10 and llvmpipe).
+Tracks: engine2d_retained_damage_rejects_unfocused_window_opacity_2026-11-26
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{env_get}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_render_composition_damaged_with_images, engine2d_resolved_draw_ir_image, Engine2dResolvedDrawIrImage}
+use std.gpu.engine2d.color.{rgb}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DrawIrComposition}
+use common.ui.taskbar_model.{empty_taskbar_model}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, simple_gui_internal_window, simple_gui_internal_window_scene, wm_content_frame_checksum}
+use common.ui.window_scene_draw_ir.{shared_wm_content_frame_image_uri, shared_wm_scene_draw_ir_composition_with_content}
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme}
+
+val DAMAGE: [i64] = [0, 40, 60, 40]
+
+fn _frame(color: u32) -> WmContentFrame:
+    val pixels: [u32] = [color; 112 * 44]
+    WmContentFrame(window_id: "win", scene_revision: 7, content_revision: 1,
+        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 112, height: 44,
+        pixels: pixels, checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "", offset_x: 0, offset_y: 0)
+
+fn _composition(frame: WmContentFrame) -> DrawIrComposition:
+    val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 120, 80, "", false, false, 1)
+    val scene = simple_gui_internal_window_scene(160, 120, DRAW_IR_BACKEND_GPU, [window])
+    shared_wm_scene_draw_ir_composition_with_content(scene, empty_taskbar_model(), [frame], DRAW_IR_BACKEND_GPU, 1000, "09:41", 0)
+
+fn _image(frame: WmContentFrame) -> Engine2dResolvedDrawIrImage:
+    engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), 112, 44, frame.pixels)
+
+fn _inside(i: i32) -> bool:
+    val x = i % 160
+    val y = i / 160
+    x >= 0 and x < 60 and y >= 40 and y < 80
+
+fn _split(a: [u32], b: [u32]) -> [u32]:
+    var out: [u32] = []
+    var i = 0
+    while i < 160 * 120:
+        out.push(if _inside(i): b[i] else: a[i])
+        i = i + 1
+    out
+
+fn _fresh_full_device_pixels(engine: Engine2D) -> [u32]:
+    # After a damaged replay the host mirror is refreshed only inside the
+    # staged damage rects. Drop the mirror so this read downloads the whole
+    # device framebuffer: outside-damage pixels are then real device pixels.
+    if val Some(vk) = engine.vulkan_backend:
+        # Canary: poison one mirror pixel; a real full download overwrites it.
+        if vk.host_buf.len() > 0: vk.host_buf[0] = 0x01020304u32
+        vk.host_mirror_valid = false
+        vk.dirty = true
+    # Prove the poison is visible through `engine` itself (the binding above
+    # must alias the engine's backend, not copy it), then read through it.
+    var poisoned = false
+    if val Some(seen) = engine.vulkan_backend:
+        poisoned = seen.host_buf.len() > 0 and seen.host_buf[0] == 0x01020304u32 and not seen.host_mirror_valid
+    expect(poisoned).to_be(true)
+    if poisoned:
+        val rb = engine.read_pixels_with_source()
+        expect(rb.source).to_equal("device_readback")
+        expect(rb.pixels[0] != 0x01020304u32).to_be(true)
+        return rb.pixels
+    expect("no-vulkan-backend").to_equal("vulkan-backend")
+    []
+
+fn _vulkan_unavailable(reason: text):
+    # A host that declares Vulkan mandatory must not pass on zero pixel checks.
+    expect(env_get("SIMPLE_2D_REQUIRE_VULKAN")).to_equal("")
+    expect(reason.len()).to_be_greater_than(0)
+
+fn unfocused_window_damage_replays_like_split_frames(snapshot: ThemeRenderSnapshot):
+    apply_theme_render_snapshot_to_wm_chrome(snapshot)
+    val fa = _frame(rgb(0, 255, 0))
+    val fb = _frame(rgb(0, 0, 255))
+    val a = _composition(fa)
+    val b = _composition(fb)
+    var ca = Engine2D.create_with_backend(160, 120, "cpu")
+    val full_a = engine2d_draw_ir_adv_composition_with_images(ca, a, false, [_image(fa)]).pixels
+    var cb = Engine2D.create_with_backend(160, 120, "cpu")
+    val full_b = engine2d_draw_ir_adv_composition_with_images(cb, b, false, [_image(fb)]).pixels
+    var changed_inside = 0
+    var changed_outside = 0
+    var i = 0
+    while i < 160 * 120:
+        if full_a[i] != full_b[i]:
+            if _inside(i): changed_inside = changed_inside + 1
+            else: changed_outside = changed_outside + 1
+        i = i + 1
+    expect(changed_inside).to_be_greater_than(0)  # oracle: the 930 window body really changed under the clip
+    expect(changed_outside).to_be_greater_than(0)  # oracle: the clip really cuts the window, so a whole-window composite would leak
+    step("CPU: seed with A, replay B under the clip")
+    var cpu = Engine2D.create_with_backend(160, 120, "cpu")
+    val seeded = engine2d_draw_ir_adv_composition_with_images(cpu, a, false, [_image(fa)])
+    expect(seeded.pixels).to_equal(full_a)
+    val cpu_out = engine2d_draw_ir_render_composition_damaged_with_images(cpu, b, [_image(fb)], DAMAGE, true)
+    expect(cpu_out.unsupported_kinds).to_equal("none")
+    expect(cpu_out.readback.pixels).to_equal(_split(full_a, full_b))
+    step("Vulkan: replay == the device's own full frames of A outside and B inside")
+    match Engine2D.create_requested_backend(160, 120, "vulkan"):
+        Err(reason):
+            _vulkan_unavailable(reason)
+        Ok(reference):
+            val dev_b = engine2d_draw_ir_adv_fresh_device_composition_with_images(reference, b, [_image(fb)]).pixels
+            reference.shutdown()
+            match Engine2D.create_requested_backend(160, 120, "vulkan"):
+                Err(reason):
+                    _vulkan_unavailable(reason)
+                Ok(engine):
+                    val first = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, a, [_image(fa)])
+                    val out = engine2d_draw_ir_render_composition_damaged_with_images(engine, b, [_image(fb)], DAMAGE, true)
+                    expect(out.unsupported_kinds).to_equal("none")
+                    expect(out.readback.source).to_equal("device_readback")
+                    expect(out.readback.pixels).to_equal(_split(first.pixels, dev_b))
+                    expect(_fresh_full_device_pixels(engine)).to_equal(_split(first.pixels, dev_b))
+                    engine.shutdown()
+    ca.shutdown()
+    cb.shutdown()
+    cpu_out.engine.shutdown()
+    reset_wm_chrome_theme()
+
+describe "Engine2D retained damage replay of an unfocused (opacity 930) window":
+    it "replays a fluid_light unfocused window content change under a clip like split full frames":
+        step("fluid_light, unfocused window, damage [0,40,60,40] crossing the window edge")
+        unfocused_window_damage_replays_like_split_frames(fluid_light_theme_render_snapshot())
+
+    it "replays an aetheric_dark unfocused window content change under a clip like split full frames":
+        step("aetheric_dark, same damage")
+        unfocused_window_damage_replays_like_split_frames(aetheric_dark_theme_render_snapshot())
