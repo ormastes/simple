@@ -219,14 +219,28 @@ pub(crate) fn transient_promote_share_forget(addr: usize) {
 /// block-local array is freed a few allocations after it was tracked.
 const TRANSIENT_UNTRACK_WINDOW: usize = 64;
 
-/// Erase an array that `rt_array_free` is about to free from this thread's
-/// open transient scope and session. Without this the stale entry survives
-/// the free; if the allocator then hands the same address to an object the
-/// scope/session does NOT own (allocated while paused, or adopted elsewhere),
-/// scope/session end would free that live object, because it frees by
-/// registry membership of the address
+/// Erase a heap object that is being freed from this thread's open transient
+/// scope and session. Without this the stale entry survives the free; if the
+/// allocator then hands the same address to an object the scope/session does
+/// NOT own (allocated while paused, or adopted elsewhere), scope/session end
+/// would free that live object, because it frees by registry membership of
+/// the address
 /// (doc/05_design/compiler/jit_memory/seed_jit_array_reclamation.md, Option A
 /// risk table). Entries are tombstoned to NIL, as promotion does.
+///
+/// Called from the single-object registry erase (`unregister_heap_ptr*`), so
+/// every free path is covered, not only `rt_array_free`. Bug:
+/// native_build_hir_sigsegv_under_20g_cgroup_cuda_port_closure_2026-11-22
+/// (an object freed mid-scope; its address went to the paused-born
+/// `join_point_attr_dirty_fn_names` header, which scope end then freed).
+#[inline]
+pub(crate) fn transient_untrack_freed_addr(addr: usize) {
+    transient_untrack_freed(RuntimeValue(addr as u64 | super::tags::TAG_HEAP));
+}
+
+/// Hot free path: one thread-local access per slot, inlined; the scope work
+/// runs out of line only when this thread has an open scope.
+#[inline]
 fn transient_untrack_freed(value: RuntimeValue) {
     let addr = value.as_heap_ptr() as usize;
     let _ = SESSION_HEAP.try_with(|slot| {
@@ -242,37 +256,46 @@ fn transient_untrack_freed(value: RuntimeValue) {
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return;
         };
-        let Some(scope) = slot.as_mut() else {
-            return;
-        };
-        let len = scope.objects.len();
-        let window_start = len.saturating_sub(TRANSIENT_UNTRACK_WINDOW);
-        let same = |object: &RuntimeValue| object.is_heap() && object.as_heap_ptr() as usize == addr;
-        for pos in (window_start..len).rev() {
+        if let Some(scope) = slot.as_mut() {
+            transient_untrack_in_scope(scope, value);
+        }
+    });
+}
+
+#[inline(never)]
+fn transient_untrack_in_scope(scope: &mut TransientHeapScope, value: RuntimeValue) {
+    let addr = value.as_heap_ptr() as usize;
+    let len = scope.objects.len();
+    let window_start = len.saturating_sub(TRANSIENT_UNTRACK_WINDOW);
+    let same = |object: &RuntimeValue| object.is_heap() && object.as_heap_ptr() as usize == addr;
+    for pos in (window_start..len).rev() {
+        if same(&scope.objects[pos]) {
+            scope.objects[pos] = RuntimeValue::NIL;
+        }
+    }
+    // Every entry for this address must go, not just the newest: an
+    // older duplicate left behind would be freed at scope end once
+    // `promoted` no longer filters it.
+    if window_start > 0 {
+        scope.sync_index();
+        if scope.index_ambiguous {
+            for object in scope.objects[..window_start].iter_mut() {
+                if same(object) {
+                    *object = RuntimeValue::NIL;
+                }
+            }
+            scope.by_ptr.remove(&addr);
+        } else if let Some(pos) = scope.by_ptr.remove(&addr) {
             if same(&scope.objects[pos]) {
                 scope.objects[pos] = RuntimeValue::NIL;
             }
         }
-        // Every entry for this address must go, not just the newest: an
-        // older duplicate left behind would be freed at scope end once
-        // `promoted` no longer filters it.
-        if window_start > 0 {
-            scope.sync_index();
-            if scope.index_ambiguous {
-                for object in scope.objects[..window_start].iter_mut() {
-                    if same(object) {
-                        *object = RuntimeValue::NIL;
-                    }
-                }
-            } else if let Some(pos) = scope.by_ptr.get(&addr).copied() {
-                if same(&scope.objects[pos]) {
-                    scope.objects[pos] = RuntimeValue::NIL;
-                }
-            }
-        }
+    } else if !scope.by_ptr.is_empty() {
         scope.by_ptr.remove(&addr);
+    }
+    if !scope.promoted.is_empty() {
         scope.promoted.remove(&value.0);
-    });
+    }
 }
 
 /// True when the calling thread holds a transient heap scope that is paused,
@@ -3885,7 +3908,6 @@ pub fn rt_array_create_from_slice(values: &[RuntimeValue]) -> RuntimeValue {
 #[allow(clippy::unused_unit)]
 pub extern "C" fn rt_array_free(array: RuntimeValue) {
     let ptr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, ());
-    transient_untrack_freed(array);
     if super::heap::array_free_quarantine_enabled() {
         // Diagnostic mode: unregister and poison, never return the memory, so
         // the address cannot be reused and every later use is a registry miss
@@ -10221,5 +10243,42 @@ mod string_to_int_single_char_fallback_tests {
         assert_eq!(rt_string_to_int(s("ab")), 0);
         assert_eq!(rt_string_to_int(s("")), 0);
         assert_eq!(rt_string_to_int(s("5a")), 0);
+    }
+}
+
+// Bug: native_build_hir_sigsegv_under_20g_cgroup_cuda_port_closure_2026-11-22.
+// An object freed mid-scope through a path other than `rt_array_free` left a
+// stale entry in the scope's object list. When the allocator handed that
+// address to an object born while the scope was PAUSED (untracked, meant to be
+// persistent), scope end freed the live object by registry membership.
+#[cfg(test)]
+mod transient_scope_stale_entry_tests {
+    use super::*;
+
+    /// Allocate with `alloc` while paused until an object lands on `addr`.
+    /// Fails rather than skips when the allocator never reuses the address.
+    fn alloc_at(addr: usize, alloc: impl Fn() -> RuntimeValue) -> RuntimeValue {
+        let mut keep = Vec::new();
+        for _ in 0..64 {
+            let value = alloc();
+            if value.as_heap_ptr() as usize == addr {
+                return value;
+            }
+            keep.push(value);
+        }
+        panic!("allocator never reused the freed address {addr:#x}; test cannot observe the stale entry");
+    }
+
+    #[test]
+    fn freed_string_address_reused_while_paused_survives_scope_end() {
+        let text = "stale-entry-probe";
+        assert!(rt_transient_array_scope_begin());
+        let doomed = rt_string_new(text.as_ptr(), text.len() as u64);
+        let addr = doomed.as_heap_ptr() as usize;
+        assert_eq!(rt_string_free(doomed), 1);
+        assert!(rt_transient_array_scope_pause());
+        let survivor = alloc_at(addr, || rt_string_new(text.as_ptr(), text.len() as u64));
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(survivor.heap_type(), Some(HeapObjectType::String), "persistent string freed by scope end");
     }
 }

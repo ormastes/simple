@@ -565,6 +565,7 @@ pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
             note_heap_free(kind, bytes);
             note_attr_free(ptr as usize, bytes);
             super::collections::transient_promote_share_forget(ptr as usize);
+            super::collections::transient_untrack_freed_addr(ptr as usize);
         }
     }
 }
@@ -599,6 +600,7 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
         note_heap_free(kind, bytes);
         note_attr_free(ptr as usize, bytes);
         super::collections::transient_promote_share_forget(ptr as usize);
+        super::collections::transient_untrack_freed_addr(ptr as usize);
     }
     removed
 }
