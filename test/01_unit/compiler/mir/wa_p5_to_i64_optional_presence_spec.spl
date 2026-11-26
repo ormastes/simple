@@ -1,0 +1,86 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: total `.to_i64()`/`.to_int()` scalar provenance vs `parse_i64()` Option<i64>
+
+Regression spec for `native_raw_integer_optional_presence_2026_10_26`
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`).
+Covers:
+1. Text `.to_i64() ?? -1` / `.to_int() ?? -1` keeps `rt_string_to_int_lenient` and plain
+   scalar fold (never treating raw 3 as NIL via `rt_is_some`).
+2. Raw `val x: i64 = s.to_i64()` stays untagged scalar (`rt_string_to_int_lenient`).
+3. Strict `.parse_i64() ?? -1` / `.parse_int() ?? -1` lowers to `rt_string_parse_int`
+   with `rt_is_some` optional presence check.
+4. Erased runtime-value (`rt_any_to_int`), dynamic (`rt_to_int_dynamic`), and numeric
+   cast (`to_i64` / `to_int` on `i32`/`f64`) receivers record `Int(64, true)` provenance
+   so `?? -1` folds safely without comparing raw 3 against the nil word.
+"""
+
+# @tag: unit, compiler, mir, builtins
+
+use std.spec.{describe, it, expect, step, assert_true, expect_not}
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_to_i64_mir(source: text, name: text) -> text:
+    val filename = "wa_p5_to_i64_" + name + ".spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    serialize_mir_module(mir)
+
+describe "MIR lowering of total to_i64/to_int vs optional parse_i64":
+    """Verifies total to_i64/to_int scalar provenance vs optional parse_i64 across MIR lowering."""
+    it "keeps raw text.to_i64() total without Option wrapping":
+        step("lower `val x: i64 = s.to_i64()`")
+        val mir = lower_to_i64_mir("fn raw_parse(s: text) -> i64:\n    val x: i64 = s.to_i64()\n    x\n", "raw_text")
+        expect(mir).to_contain("rt_string_to_int_lenient")
+        expect_not(mir.contains("rt_is_some"))
+
+    it "folds text.to_i64() ?? -1 and bound val n = s.to_i64(); n ?? -1 as plain scalar":
+        step("lower direct and let-bound text.to_i64() ?? -1")
+        val direct_mir = lower_to_i64_mir("fn parse_coalesce(s: text) -> i64:\n    s.to_i64() ?? -1\n", "direct_coalesce")
+        expect(direct_mir).to_contain("rt_string_to_int_lenient")
+        expect_not(direct_mir.contains("rt_is_some"))
+
+        val bound_mir = lower_to_i64_mir("fn parse_bound(s: text) -> i64:\n    val n = s.to_i64()\n    n ?? -1\n", "bound_coalesce")
+        expect(bound_mir).to_contain("rt_string_to_int_lenient")
+        expect_not(bound_mir.contains("rt_is_some"))
+
+    it "keeps strict parse_i64() ?? -1 optional via rt_string_parse_int and rt_is_some":
+        step("lower s.parse_i64() ?? -1")
+        val opt_mir = lower_to_i64_mir("fn parse_strict(s: text) -> i64:\n    s.parse_i64() ?? -1\n", "strict_parse")
+        expect(opt_mir).to_contain("rt_string_parse_int")
+        expect(opt_mir).to_contain("rt_is_some")
+
+    it "preserves scalar provenance on erased-any rt_any_to_int under ?? -1":
+        step("lower xs[0].to_i64() ?? -1 from an untyped parameter array")
+        val any_mir = lower_to_i64_mir("fn parse_any(xs) -> i64:\n    xs[0].to_i64() ?? -1\n", "any_elem")
+        expect(any_mir).to_contain("rt_any_to_int")
+        expect_not(any_mir.contains("rt_is_some"))
+
+    it "preserves scalar provenance on numeric casts and erased values under ?? -1":
+        step("lower numeric i32/f64 to_i64() ?? -1 and untyped v.to_i64() ?? -1 without rt_is_some")
+        val erased_mir = lower_to_i64_mir("fn parse_dyn(v) -> i64:\n    v.to_i64() ?? -1\n", "dyn_val")
+        assert_true(erased_mir.contains("rt_any_to_int") or erased_mir.contains("rt_to_int_dynamic"))
+        expect_not(erased_mir.contains("rt_is_some"))
+
+        val num_mir = lower_to_i64_mir("fn parse_num(n: i32) -> i64:\n    n.to_i64() ?? -1\n", "num_val")
+        expect_not(num_mir.contains("rt_is_some"))
+
+        val float_mir = lower_to_i64_mir("fn parse_float(x: f64) -> i64:\n    x.to_i64() ?? -1\n", "float_val")
+        expect_not(float_mir.contains("rt_is_some"))
+
+    it "keeps scv compile_source_inventory decimal workaround KEPT-WITH-REASON for strict wire grammar":
+        step("verify compile_source_inventory.spl preserves canonical decimal parser and KEPT-WITH-REASON tag")
+        val scv_src = file_read("src/lib/scv/compile_source_inventory.spl")
+        expect(scv_src).to_contain("@workaround bug=native_raw_integer_optional_presence_2026_10_26")
+        expect(scv_src).to_contain("rt_string_to_int_returns_raw_i64_so_bad_to_i64_yields_0_and_strict_wire_grammar_needed")
+        expect(scv_src).to_contain("fn compile_source_inventory_decimal_v1(")

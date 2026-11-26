@@ -1,0 +1,94 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Global pool generic inference and module constant binding in 30.types
+
+Regression spec for `phase3_global_pool_generic_inference_workaround_2026_10_10`
+(`src/compiler/30.types/type_infer/inference_control.spl`,
+`src/compiler/10.frontend/core/types.spl:1826`, and
+`test/fixtures/compiler/phase3_global_pool_typeargs_workaround_probe/`).
+"""
+
+# @tag: unit, compiler, types, frontend
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.core.ast.{ast_reset}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.types.type_infer.*
+use compiler.types.type_infer_types.{HmInferContext}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+
+fn infer_pool_module(source: text, name: text) -> HmInferContext:
+    ast_reset()
+    val filename = "testdata/" + name + ".spl"
+    val parsed = parse_full_frontend(source, filename, name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(filename)
+    val hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    var ctx = HmInferContext.with_builtins()
+    ctx.infer_module(hir)
+    ctx
+
+val GLOBAL_POOL_GENERIC_SRC = """
+extern fn rt_promote<T>(value: T) -> bool
+
+var pool_text: [text] = []
+var pool_i64: [i64] = []
+var pool_nested: [[i64]] = []
+var pool_inferred = [1, 2, 3]
+
+fn promote_root<T>(root: [T]) -> bool:
+    rt_promote(root)
+
+fn driver() -> bool:
+    var ok = true
+    ok = promote_root([pool_text]) and ok
+    ok = promote_root([pool_i64]) and ok
+    ok = promote_root([pool_nested]) and ok
+    ok = promote_root([pool_inferred]) and ok
+    ok = promote_root<[i64]>([pool_i64]) and ok
+    ok
+"""
+
+val GLOBAL_POOL_MISMATCH_SRC = """
+var pool_i64: [i64] = []
+
+fn promote_root<T>(root: [T]) -> bool:
+    root.len() == 1
+
+fn bad_driver() -> bool:
+    promote_root<[text]>([pool_i64])
+"""
+
+describe "30.types module-global constant inference for generic pool calls":
+    """Verifies HM module-global constant binding and generic pool promotion inference in 30.types."""
+    it "infers both unannotated and explicit generic calls over module-global arrays":
+        step("run HmInferContext.infer_module on phase3_global_pool_typeargs_workaround_probe shape")
+        val ctx = infer_pool_module(GLOBAL_POOL_GENERIC_SRC, "global_pool_ok")
+        expect(ctx.errors.len()).to_equal(0)
+
+    it "surfaces zero typecheck receipt errors through collect_module_typecheck_receipt_v1":
+        step("run collect_module_typecheck_receipt_v1 at Deny severity")
+        ast_reset()
+        val parsed = parse_full_frontend(GLOBAL_POOL_GENERIC_SRC, "testdata/global_pool_receipt.spl", "global_pool_receipt", Logger(level: 0))
+        var lowering = HirLowering.with_filename("testdata/global_pool_receipt.spl")
+        val hir = lowering.lower_module(parsed)
+        val receipt = collect_module_typecheck_receipt_v1("global_pool_receipt", hir, TypecheckPassSeverity.Deny)
+        expect(receipt.errors.len()).to_equal(0)
+
+    it "still rejects concrete element mismatches on explicit generic pool calls":
+        step("verify _type_pool_promote_root<[text]>([pool_i64]) produces an HM error")
+        val ctx = infer_pool_module(GLOBAL_POOL_MISMATCH_SRC, "global_pool_bad")
+        expect(ctx.errors.len()).to_be_greater_than(0)
+
+    it "marks concrete pool helpers in types.spl as ROOT-FIXED+STAGE2-GATED":
+        step("preserve Stage-2 gate metadata alongside 53afb8c62cb and bug id")
+        val types_src = file_read("src/compiler/10.frontend/core/types.spl")
+        expect(types_src).to_contain("bug=phase3_global_pool_generic_inference_workaround_2026_10_10")
+        expect(types_src).to_contain("status=ROOT-FIXED+STAGE2-GATED")
+        expect(types_src).to_contain("recover=28df8ceac42095edcc1d37c53c127271ea938bcb")
+        expect(types_src).to_contain("53afb8c62cb")

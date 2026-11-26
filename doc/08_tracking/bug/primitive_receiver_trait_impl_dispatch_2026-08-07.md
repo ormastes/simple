@@ -1151,3 +1151,11 @@ impl registered `text.probe`. `mir/lower/lowering_expr_method.rs` now prefers
 Regression: `src/compiler_rust/compiler/tests/primitive_text_trait_impl_jit.rs`.
 i64 impl already dispatched under JIT. Still OPEN: native (s3) crash on the
 b0_e probe, i32-collapses-to-i64 row.
+
+## WA-P5 Update (2026-11-26)
+
+- Root fix in Rust seed Cranelift codegen (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`):
+  - `compile_method_call_static` previously ran `prefer_builtin_first` (`try_compile_builtin_method_call`) for qualified `<text|str|String|string>.hash`, hitting `"hash" => "rt_hash_text"` before checking `ctx.func_ids`, `ctx.use_map`, or `ctx.import_map` (only numeric/bool `.hash` was exempted).
+  - Added `is_qualified_text_hash` gate on `prefer_builtin_first` and `resolve_declared_text_hash_func_id` / `resolve_declared_text_hash_import` alias resolution for `"str.hash"` -> `text`/`String`/`string`, so declared user/trait `impl ... for text { fn hash() -> i64 }` runs first, while standalone `.hash()` with no declared impl still falls back cleanly to `rt_hash_text`.
+- `src/lib/nogc_sync_mut/src/hash.spl`: its `@workaround` tag was retired upstream in PR `#11847`; left clean on `release/1.0.0`.
+- Verification: `cargo test -p simple-compiler --lib -j 4 closures_structs::tests` (12/12 passed, including `qualified_text_hash_prefers_declared_trait_impl_over_rt_hash_text` and `qualified_text_hash_falls_back_to_rt_hash_text_when_no_impl_declared`), `builtin_hash_method_does_not_replace_local_rt_hash_text_body_id` (1/1 passed), and `--test primitive_text_trait_impl_jit` (1/1 passed).
