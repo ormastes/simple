@@ -689,3 +689,4 @@ failures. Batches of at most 60 files per PR.
 
 Exit 1/2 = assertion or usage failure, 127 = missing tool (jq etc.), 70/77 = other. Wired in batches of 53: PR for batch 1 lists its rows in must_check_gates.sdn as push-unwired-*.
 - Batch 01 wired: 53 rows (push-unwired-*).
+- Batch 02 wired: 53 rows (push-unwired-*).
