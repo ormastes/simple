@@ -1,0 +1,132 @@
+# Canary probe for sosix_contain_qualify_v1 (architecture pure_simple_container 4.3).
+# Run as: <simple> run <this file> canary-probe <mode> <args...> under the contained
+# identity. One mode is one attempt; the outcome is printed as TARGET <allow|deny>
+# and, for a deny canary, CONTROL <allow|deny> from the same run on an allowed
+# target. The op decides pass or fail; the probe only reports. The file is pinned
+# by sha256 (SOSIX_CONTAIN_CANARY_PROBE_SHA256_V1): editing it needs the pin updated.
+use std.nogc_sync_mut.io_runtime.{get_args, file_write, file_exists, file_read_bytes, process_run, process_spawn_async, process_is_running, process_kill, thread_sleep, exit}
+
+@abi("system")
+@unsafe(reason: "opens a process handle by id to test access, closed immediately", capabilities: [ffi, raw_ptr])
+extern fn OpenProcess(access: u32, inherit: i32, pid: u32) -> i64
+@abi("system")
+@unsafe(reason: "closes a handle this probe opened", capabilities: [ffi, raw_ptr])
+extern fn CloseHandle(handle: i64) -> i32
+
+fn verdict(allowed: bool) -> text:
+    if allowed: "allow" else: "deny"
+
+fn parse_number(value: text) -> i64:
+    var total = 0
+    var index = 0
+    while index < value.byte_len():
+        val digit = value.char_code_at(index) - 48
+        if digit < 0 or digit > 9: return -1
+        total = total * 10 + digit
+        index = index + 1
+    total
+
+fn write_allowed(path: text) -> bool:
+    if path == "-": return false
+    val wrote = file_write(path, "sosix-canary")
+    wrote and file_exists(path)
+
+# PROCESS_TERMINATE, PROCESS_VM_READ, PROCESS_VM_WRITE.
+fn open_count(pid: i64) -> i64:
+    var opened = 0
+    for access in [1, 16, 32]:
+        val handle = OpenProcess(access as u32, 0, pid as u32)
+        if handle != 0:
+            opened = opened + 1
+            val _closed = CloseHandle(handle)
+    opened
+
+fn spawn_sleeper(command: text) -> i64:
+    val pid = process_spawn_async(command, ["-n", "40", "127.0.0.1"])
+    if pid <= 0: return -1
+    thread_sleep(400)
+    if process_is_running(pid): return pid
+    -1
+
+fn kill_all(pids: [i64]):
+    for pid in pids:
+        if pid > 0:
+            val _killed = process_kill(pid)
+
+fn mode_write(rest: [text]):
+    print("TARGET " + verdict(write_allowed(rest[0])))
+    if rest[1] != "-": print("CONTROL " + verdict(write_allowed(rest[1])))
+
+fn mode_read_exec(rest: [text]):
+    val readable = file_read_bytes(rest[0]).len() > 0
+    var executed = false
+    if readable:
+        val (_out, _err, code) = process_run(rest[0], ["/c", "exit", "0"])
+        executed = code == 0
+    print("TARGET " + verdict(readable and executed))
+
+fn mode_process_open(rest: [text]):
+    val pid = parse_number(rest[0])
+    print("TARGET " + verdict(pid > 0 and open_count(pid) > 0))
+    val own = spawn_sleeper(rest[1])
+    print("CONTROL " + verdict(own > 0 and open_count(own) == 3))
+    kill_all([own])
+
+fn mode_spawn(rest: [text]):
+    val count = parse_number(rest[0])
+    var pids: [i64] = []
+    var alive: [bool] = []
+    var index = 0
+    while index < count:
+        val pid = spawn_sleeper(rest[1])
+        alive = alive.push(pid > 0)
+        pids = pids.push(pid)
+        index = index + 1
+    var within = count > 1
+    index = 0
+    while index < count - 1:
+        if not alive[index]: within = false
+        index = index + 1
+    print("TARGET " + verdict(count > 0 and alive[count - 1]))
+    print("CONTROL " + verdict(within))
+    kill_all(pids)
+
+fn mode_sleep_spawn(rest: [text]):
+    val first = spawn_sleeper(rest[0])
+    val second = spawn_sleeper(rest[0])
+    print("READY " + (first > 0 and second > 0).to_string())
+    thread_sleep(60000)
+    kill_all([first, second])
+
+fn main():
+    val args = get_args()
+    var start = -1
+    var index = 0
+    while index < args.len():
+        if args[index] == "canary-probe": start = index + 1
+        index = index + 1
+    if start < 0 or start >= args.len():
+        print("PROBE-ERROR no-mode")
+        exit(2)
+        return
+    val mode = args[start]
+    val rest = args[start + 1:]
+    if mode == "exit":
+        exit(parse_number(rest[0]))
+    elif mode == "write":
+        mode_write(rest)
+    elif mode == "readexec":
+        mode_read_exec(rest)
+    elif mode == "procopen":
+        mode_process_open(rest)
+    elif mode == "spawn":
+        mode_spawn(rest)
+    elif mode == "sleepspawn":
+        mode_sleep_spawn(rest)
+    elif mode == "sleep":
+        thread_sleep(60000)
+    else:
+        print("PROBE-ERROR unknown-mode")
+        exit(2)
+
+main()

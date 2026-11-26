@@ -2,9 +2,9 @@
 # Ownership is represented by a nonreused slot, not an OS PID. Copied leases
 # refer to the same slot, so collecting one invalidates every copy before handles
 # can be recycled. This owner is single-threaded and bounded to 100000 starts.
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GlobalMemoryStatusEx, HeapFree, rt_host_memory_headroom_bytes_v1, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GlobalMemoryStatusEx, HeapFree, rt_host_memory_headroom_bytes_v1, CreateProcessW, CreateProcessAsUserW, GetTokenInformation, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
-use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_pointer_bytes, windows_abi_size_t_max, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_handle_is_invalid, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_update_proc_thread_attribute, windows_abi_security_attributes_size, windows_abi_security_attributes_inherit_offset, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_process_info_pid_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_memory_limit_offset, windows_abi_job_peak_memory_offset, windows_abi_job_basic_accounting_size, windows_abi_file_attribute_tag_info_size}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_pointer_bytes, windows_abi_pointer_bits, windows_abi_size_t_max, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_handle_is_invalid, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_update_proc_thread_attribute, windows_abi_security_attributes_size, windows_abi_security_attributes_inherit_offset, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_process_info_pid_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_active_limit_offset, windows_abi_job_memory_limit_offset, windows_abi_job_peak_memory_offset, windows_abi_job_basic_accounting_size, windows_abi_file_attribute_tag_info_size}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
 use std.nogc_sync_mut.io.windows_process_text.{windows_process_wide_linear_v1, windows_process_quote_arg_linear_v1}
 
@@ -33,6 +33,12 @@ struct WindowsProcessPollV1:
     cancelled: bool
     pid: i64 = 0
     process_generation: i64 = 0
+
+# token: 0 = caller token. active_process_limit: 0 = none. cpu_rate: 0 = none.
+struct WindowsProcessContainExtrasV1:
+    token: i64
+    active_process_limit: i64
+    cpu_rate: i64
 
 class WindowsProcessLeaseV1:
     slot: i64
@@ -272,6 +278,46 @@ fn _windows_process_failed_child_v1(job: i64, process: i64, accounting: i64) -> 
     val empty = _windows_process_empty_v1(job, accounting, 10000u64)
     reaped and empty
 
+# Root process of a contained launch gets an explicit security descriptor equal to the
+# token default DACL ({scope SID, user, SYSTEM}), so a sibling scope cannot open it even
+# when the creator default DACL would have allowed it. Returns [attributes, descriptor,
+# token buffer, size slot] (heap allocations the caller frees), or [] on any failure.
+@unsafe(reason: "copies the token default DACL pointer into an absolute Win64 security descriptor", capabilities: [ffi, raw_ptr])
+fn _windows_process_token_security_v1(heap: i64, token: i64) -> [i64]:
+    if windows_abi_pointer_bits() != 64: return []
+    val size_slot = windows_abi_heap_alloc(heap, 8)
+    if size_slot == 0: return []
+    # TokenDefaultDacl = 6.
+    val _sized = GetTokenInformation(token, 6, 0, 0u32, size_slot)
+    val need = volatile_read_u32(size_slot)
+    var info: i64 = 0
+    var descriptor: i64 = 0
+    var attributes: i64 = 0
+    var valid = need >= 8 and need <= 65536
+    if valid:
+        info = windows_abi_heap_alloc(heap, need)
+        descriptor = windows_abi_heap_alloc(heap, 40)
+        attributes = windows_abi_heap_alloc(heap, 24)
+        valid = info != 0 and descriptor != 0 and attributes != 0
+    if valid and GetTokenInformation(token, 6, info, need as u32, size_slot) == 0: valid = false
+    var dacl: i64 = 0
+    if valid:
+        dacl = windows_abi_read_ptr(info)
+        valid = dacl != 0
+    if valid:
+        # SECURITY_DESCRIPTOR: Revision 1, Control SE_DACL_PRESENT (4), Dacl at +32.
+        volatile_write_u16(descriptor, 1)
+        volatile_write_u16(descriptor + 2, 4)
+        windows_abi_write_ptr(descriptor + 32, dacl)
+        # SECURITY_ATTRIBUTES: nLength 24, lpSecurityDescriptor at +8, bInheritHandle 0.
+        volatile_write_u32(attributes, 24)
+        windows_abi_write_ptr(attributes + 8, descriptor)
+        return [attributes, descriptor, info, size_slot]
+    for allocation in [attributes, descriptor, info, size_slot]:
+        if allocation != 0:
+            val _free = windows_abi_heap_free(heap, allocation)
+    []
+
 @unsafe(reason: "single-threaded owner admits exact environment and suspended child into an owned JobObject", capabilities: [ffi, raw_ptr])
 fn windows_process_start_v1(request: WindowsProcessRequestV1) -> Result<WindowsProcessLeaseV1, text>:
     windows_process_start_with_memory_v1(request, 0)
@@ -291,6 +337,25 @@ fn windows_process_admit_v1(request: WindowsProcessRequestV1, memory_limit_bytes
 @unsafe(reason: "checks current physical headroom after input pins and before child creation", capabilities: [ffi, raw_ptr])
 fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memory_limit_bytes: i64,
         required_available_bytes: i64) -> WindowsProcessAdmissionV1:
+    _windows_process_admit_core_v1(request, memory_limit_bytes, required_available_bytes,
+        WindowsProcessContainExtrasV1(token: 0, active_process_limit: 0, cpu_rate: 0))
+
+# Contained admission: the same single create sequence with an optional primary
+# token (0 = the caller token, CreateProcessW), a live-process cap and a hard CPU
+# rate cap (1..10000, 1/100 percent of the machine; 0 = none). Each limit is read
+# back before the suspended child is created. The caller keeps ownership of the
+# token handle and may close it as soon as this returns.
+@unsafe(reason: "admits a suspended child under an owned token into a JobObject with memory, process and CPU caps", capabilities: [ffi, raw_ptr])
+fn windows_process_admit_contained_v1(request: WindowsProcessRequestV1, memory_limit_bytes: i64,
+        extras: WindowsProcessContainExtrasV1) -> WindowsProcessAdmissionV1:
+    _windows_process_admit_core_v1(request, memory_limit_bytes, 0, extras)
+
+@unsafe(reason: "single create sequence shared by plain and contained admission", capabilities: [ffi, raw_ptr])
+fn _windows_process_admit_core_v1(request: WindowsProcessRequestV1, memory_limit_bytes: i64,
+        required_available_bytes: i64, extras: WindowsProcessContainExtrasV1) -> WindowsProcessAdmissionV1:
+    if extras.token < 0 or extras.active_process_limit < 0 or extras.active_process_limit > 1048576 or
+            extras.cpu_rate < 0 or extras.cpu_rate > 10000:
+        return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows contained extras out of range")
     if memory_limit_bytes < 0 or memory_limit_bytes > 1125899906842624:
         return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows job memory limit exceeds bound")
     if required_available_bytes < 0 or required_available_bytes > 1125899906842624 or
@@ -342,7 +407,8 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
     val allowed_handles = windows_abi_heap_alloc(heap, windows_abi_pointer_bytes() * 3)
     val accounting = windows_abi_heap_alloc(heap, windows_abi_job_basic_accounting_size())
     val exit_slot = windows_abi_heap_alloc(heap, 8)
-    allocations = [app, argv, cwd, env, startup, process_info, limits, security, size_slot, allowed_handles]
+    val cpu_info = windows_abi_heap_alloc(heap, 8)
+    allocations = [app, argv, cwd, env, startup, process_info, limits, security, size_slot, allowed_handles, cpu_info]
     for allocation in allocations:
         if allocation == 0: error = "Windows process request allocation failed"
     if accounting == 0 or exit_slot == 0: error = "Windows process observation allocation failed"
@@ -396,27 +462,53 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
     if error == "" and memory_limit_bytes > windows_abi_size_t_max():
         error = "JobObject memory limit exceeds target pointer width"
     if error == "":
-        volatile_write_u32(limits + windows_abi_job_limit_flags_offset(), 8192)
+        # KILL_ON_JOB_CLOSE (0x2000), plus JOB_MEMORY (0x200) and ACTIVE_PROCESS (0x8) when capped.
+        var expected_flags = 8192
+        if memory_limit_bytes > 0: expected_flags = expected_flags + 512
+        if extras.active_process_limit > 0: expected_flags = expected_flags + 8
+        volatile_write_u32(limits + windows_abi_job_limit_flags_offset(), expected_flags)
         if memory_limit_bytes > 0:
-            # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY.
-            volatile_write_u32(limits + windows_abi_job_limit_flags_offset(), 8704)
             windows_abi_write_ptr(limits + windows_abi_job_memory_limit_offset(), memory_limit_bytes)
+        if extras.active_process_limit > 0:
+            volatile_write_u32(limits + windows_abi_job_active_limit_offset(), extras.active_process_limit)
         job = CreateJobObjectW(0, 0) as i64
         if job == 0 or SetInformationJobObject(job, 9, limits, limits_bytes as u32) == 0:
             error = "JobObject admission failed"
         elif QueryInformationJobObject(job, 9, limits, limits_bytes as u32, 0) == 0:
             error = "JobObject limit readback failed"
-        elif memory_limit_bytes > 0 and
-                (volatile_read_u32(limits + windows_abi_job_limit_flags_offset()) != 8704u32 or
-                 windows_abi_read_ptr(limits + windows_abi_job_memory_limit_offset()) != memory_limit_bytes):
+        elif volatile_read_u32(limits + windows_abi_job_limit_flags_offset()) != expected_flags:
+            error = if extras.active_process_limit > 0: "JobObject process limit policy readback differs" elif memory_limit_bytes > 0: "JobObject memory limit readback differs" else: "JobObject monitor policy readback differs"
+        elif memory_limit_bytes > 0 and windows_abi_read_ptr(limits + windows_abi_job_memory_limit_offset()) != memory_limit_bytes:
             error = "JobObject memory limit readback differs"
-        elif memory_limit_bytes == 0 and volatile_read_u32(limits + windows_abi_job_limit_flags_offset()) != 8192u32:
-            error = "JobObject monitor policy readback differs"
+        elif extras.active_process_limit > 0 and volatile_read_u32(limits + windows_abi_job_active_limit_offset()) != extras.active_process_limit:
+            error = "JobObject process limit readback differs"
+        elif extras.cpu_rate > 0:
+            # JobObjectCpuRateControlInformation (15): ControlFlags ENABLE|HARD_CAP, CpuRate.
+            volatile_write_u32(cpu_info, 5)
+            volatile_write_u32(cpu_info + 4, extras.cpu_rate)
+            if SetInformationJobObject(job, 15, cpu_info, 8u32) == 0:
+                error = "JobObject CPU rate admission failed"
+            else:
+                volatile_write_u32(cpu_info, 0)
+                volatile_write_u32(cpu_info + 4, 0)
+                if QueryInformationJobObject(job, 15, cpu_info, 8u32, 0) == 0:
+                    error = "JobObject CPU rate readback failed"
+                elif volatile_read_u32(cpu_info) != 5u32 or volatile_read_u32(cpu_info + 4) != extras.cpu_rate:
+                    error = "JobObject CPU rate readback differs"
+    var process_security: i64 = 0
+    if error == "" and extras.token != 0:
+        val token_security = _windows_process_token_security_v1(heap, extras.token)
+        if token_security.len() == 0:
+            error = "contained process security descriptor unavailable"
+        else:
+            process_security = token_security[0]
+            for allocation in token_security: allocations = allocations.push(allocation)
     if error == "":
         # CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_NO_WINDOW.
         creation_attempted = true
-        if CreateProcessW(app, argv, 0, 0, 1, 134743044u32, env, cwd, startup, process_info) == 0:
-            error = "CreateProcessW failed: " + str(GetLastError())
+        val created = if extras.token != 0: CreateProcessAsUserW(extras.token, app, argv, process_security, 0, 1, 134743044u32, env, cwd, startup, process_info) else: CreateProcessW(app, argv, 0, 0, 1, 134743044u32, env, cwd, startup, process_info)
+        if created == 0:
+            error = (if extras.token != 0: "CreateProcessAsUserW failed: " else: "CreateProcessW failed: ") + str(GetLastError())
         else:
             process = windows_abi_read_ptr(process_info + windows_abi_process_info_process_offset())
             thread = windows_abi_read_ptr(process_info + windows_abi_process_info_thread_offset())
@@ -561,3 +653,4 @@ fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, t
 export windows_process_start_with_memory_v1, windows_process_peak_memory_v1
 export WindowsProcessAdmissionV1, windows_process_admit_v1, windows_process_admit_with_reserve_v1
 export windows_available_memory_headroom_v1, windows_capacity_headroom_v1, windows_headroom_from_snapshot_v1
+export WindowsProcessContainExtrasV1, windows_process_admit_contained_v1

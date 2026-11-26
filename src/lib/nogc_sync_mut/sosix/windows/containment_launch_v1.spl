@@ -1,0 +1,199 @@
+# Windows containment launch core (architecture pure_simple_container 4.2): maps one
+# SosixContainRequestV1 onto the existing windows_process_owner admit core (job with
+# memory, process and CPU caps plus kill-on-close, restricted token from the identity
+# module, child created suspended, assigned, resumed). Internal to sosix/windows/*;
+# the public surface is windows/containment_v1. Helpers stay non-pub.
+use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainSupportV1, SosixContainAdmissionV1, SosixContainLeaseV1, SosixContainPollV1, SosixContainFlagV1, SosixContainMillisV1, SosixContainBytesV1, SosixContainCountV1, SosixContainExitCodeV1, SosixContainSlotV1, SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1, sosix_contain_request_reason_v1}
+use std.common.contracts.container.capability_report_v1.{CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessLeaseV1, WindowsProcessPollV1, WindowsProcessAdmissionV1, WindowsProcessContainExtrasV1, windows_process_admit_contained_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_peak_memory_v1, windows_process_path_valid_v1}
+use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms, thread_sleep}
+use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{SosixWindowsTokenV1, sosix_windows_restricted_token_open_v1, sosix_windows_restricted_token_close_v1}
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_wide_v1, sec_read_ptr_v1, sec_get_dacl_v1, sec_label_rid_v1, SEC_LOW_INTEGRITY_RID_V1, sec_sid_from_text_v1, sec_sid_equal_v1, sec_u8_v1, sec_u16_v1, sec_u32_v1}
+use std.nogc_sync_mut.io.dir_ops.{is_dir}
+use std.nogc_sync_mut.sosix.containment_types_v1.{SOSIX_CONTAIN_REASON_WRITABLE_NOT_GRANTED_V1, SOSIX_CONTAIN_REASON_READONLY_LOW_LABEL_V1, SOSIX_CONTAIN_REASON_READONLY_NOT_GRANTED_V1}
+use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{sosix_windows_reader_sid_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{CreateFileW, GetFileInformationByHandleEx, CloseHandle, windows_abi_handle_is_invalid}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u64}
+
+const _GRACE_MS = 15000
+
+fn _support_v1() -> SosixContainSupportV1:
+    val yes = SosixContainFlagV1(true)
+    val no = SosixContainFlagV1(false)
+    SosixContainSupportV1(mechanism: "windows-job+restricted-token",
+        memory_accounting: CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1,
+        memory_hard_limit: yes, process_limit: yes, cpu_rate_limit: yes,
+        kill_all_descendants: yes, write_confinement: yes, read_confinement: no,
+        network_isolation: no, pid_isolation: no, root_remap: no, unprivileged: yes)
+
+# Persistent ACLs are probed by behaviour, not by a volume flag: a path whose DACL cannot be
+# read, or reads as absent (a NULL DACL grants everyone), cannot carry the grants this
+# mechanism depends on, so the request is refused. Untested on a FAT/exFAT volume here.
+fn _path_has_dacl_v1(path: text) -> bool:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return false
+    val descriptor = sec_get_dacl_v1(path.replace("/", "\\"), slot)
+    val present = descriptor != 0 and sec_read_ptr_v1(slot) != 0
+    sec_local_free_v1(descriptor)
+    sec_free_v1(slot)
+    present
+
+# ponytail: arch 4.2 names FILE_PERSISTENT_ACLS (0x8 from GetVolumeInformationW) as the check.
+# Measured on this seed: declaring and calling GetVolumeInformationW works under `run` of a
+# script with fn main (JIT) but fails under `test` and any interpreted run with
+# "semantic: ... unknown extern function: GetVolumeInformationW" (it is not in the seed
+# windows_abi NAMES list), and an unknown extern aborts the whole spec, so it is not called.
+# Fallback kept: DACL readable and non-NULL for every dir. Writable dirs also need the low
+# label their grant writes; readonly dirs must carry the reader ACE (so a FAT or no-ACL dir,
+# where the read grant cannot have been written, is refused at admit) and must not be low.
+
+# FILE_GENERIC_READ|FILE_GENERIC_EXECUTE: what the read grant writes for the reader SID.
+const _READ_EXEC_MASK = 0x1200A9
+
+# True when the path DACL holds an allow ACE for the reader SID carrying the read bits.
+fn _has_reader_ace_v1(path: text) -> bool:
+    val reader = sec_sid_from_text_v1(sosix_windows_reader_sid_v1())
+    val slot = sec_alloc_v1(8)
+    var found = false
+    if reader != 0 and slot != 0:
+        val descriptor = sec_get_dacl_v1(path.replace("/", "\\"), slot)
+        val dacl = sec_read_ptr_v1(slot)
+        if descriptor != 0 and dacl != 0:
+            val count = sec_u16_v1(dacl + 4)
+            var ace = dacl + 8
+            var index = 0
+            while index < count and index < 4096:
+                val size = sec_u16_v1(ace + 2)
+                if size < 8: break
+                if sec_u8_v1(ace) == 0 and (sec_u32_v1(ace + 4) & _READ_EXEC_MASK) == _READ_EXEC_MASK and sec_sid_equal_v1(ace + 8, reader):
+                    found = true
+                    break
+                ace = ace + size
+                index = index + 1
+        sec_local_free_v1(descriptor)
+    sec_free_v1(slot)
+    sec_local_free_v1(reader)
+    found
+
+# "" when every directory is a real directory on a volume that carries ACLs, every writable
+# directory reads back the low label its grant writes, and every readonly directory is
+# NOT low-labelled (low integrity is the only write barrier, so a low-labelled dir is
+# writable) and holds the reader ACE its read grant adds.
+fn _acl_refusal_v1(readonly_dirs: [text], writable_dirs: [text]) -> text:
+    for dir in readonly_dirs + writable_dirs:
+        if not windows_process_path_valid_v1(dir) or not is_dir(dir): return "containment-request-invalid"
+        if not _path_has_dacl_v1(dir): return "containment-volume-no-acl"
+    for dir in writable_dirs:
+        if sec_label_rid_v1(dir.replace("/", "\\")) != SEC_LOW_INTEGRITY_RID_V1: return SOSIX_CONTAIN_REASON_WRITABLE_NOT_GRANTED_V1
+    for dir in readonly_dirs:
+        if sec_label_rid_v1(dir.replace("/", "\\")) == SEC_LOW_INTEGRITY_RID_V1: return SOSIX_CONTAIN_REASON_READONLY_LOW_LABEL_V1
+        if not _has_reader_ace_v1(dir): return SOSIX_CONTAIN_REASON_READONLY_NOT_GRANTED_V1
+    ""
+
+# Volume serial of the volume holding a directory (FILE_ID_INFO.VolumeSerialNumber), hex.
+fn _volume_serial_v1(path: text) -> Result<text, text>:
+    if not windows_process_path_valid_v1(path): return Err("containment-request-invalid")
+    val wide = sec_wide_v1(path.replace("/", "\\"))
+    val info = sec_alloc_v1(32)
+    var result: Result<text, text> = Err("containment-volume-unreadable")
+    if wide != 0 and info != 0:
+        # FILE_READ_ATTRIBUTES, share all, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS.
+        val handle = CreateFileW(wide, 128u32, 7u32, 0, 3u32, 33554432u32, 0)
+        if not windows_abi_handle_is_invalid(handle) and handle != 0:
+            # FileIdInfo = 18.
+            if GetFileInformationByHandleEx(handle, 18, info, 24u32) != 0:
+                result = Ok(volatile_read_u64(info).to_string())
+            val _closed = CloseHandle(handle)
+    sec_free_v1(info)
+    sec_free_v1(wide)
+    result
+
+fn _lease_of_v1(lease: SosixContainLeaseV1) -> WindowsProcessLeaseV1:
+    WindowsProcessLeaseV1(slot: lease.slot.value)
+
+fn _to_lease_v1(lease: WindowsProcessLeaseV1) -> SosixContainLeaseV1:
+    SosixContainLeaseV1(slot: SosixContainSlotV1(lease.slot))
+
+fn _to_poll_v1(native: WindowsProcessPollV1, peak: i64) -> SosixContainPollV1:
+    SosixContainPollV1(terminal: SosixContainFlagV1(native.terminal), tree_empty: SosixContainFlagV1(native.tree_empty),
+        timed_out: SosixContainFlagV1(native.timed_out), cancelled: SosixContainFlagV1(native.cancelled),
+        exit_code: SosixContainExitCodeV1(native.exit_code), active_processes: SosixContainCountV1(native.active_processes),
+        peak_memory: SosixContainBytesV1(peak))
+
+# Cancel, wait for an empty tree, collect. True only when the slot is released.
+fn _reap_v1(lease: WindowsProcessLeaseV1) -> SosixContainFlagV1:
+    val _cancelled = windows_process_cancel_v1(lease)
+    val deadline = time_now_monotonic_ms() + _GRACE_MS
+    while time_now_monotonic_ms() < deadline:
+        match windows_process_collect_v1(lease):
+            Ok(_receipt): return SosixContainFlagV1(true)
+            Err(_reason): thread_sleep(20)
+    SosixContainFlagV1(false)
+
+fn _admit_v1(request: SosixContainRequestV1) -> SosixContainAdmissionV1:
+    val reason = sosix_contain_request_reason_v1(request, _support_v1())
+    if reason != "": return SosixContainAdmissionV1.RejectedBeforeStart(reason)
+    val acl = _acl_refusal_v1(request.readonly_dirs, request.writable_dirs)
+    if acl != "": return SosixContainAdmissionV1.RejectedBeforeStart(acl)
+    var token = 0
+    if request.identity == SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1:
+        match sosix_windows_restricted_token_open_v1(request.scope):
+            Ok(opened): token = opened.value
+            Err(why): return SosixContainAdmissionV1.RejectedBeforeStart("containment-token-" + why)
+    val native = WindowsProcessRequestV1(program: request.program, producer_digest: request.program_digest,
+        args: request.args, environment: request.environment, directory: request.directory, inputs: [],
+        stdout_path: request.stdout_path, stderr_path: request.stderr_path, timeout_ms: request.limits.wall.value)
+    val extras = WindowsProcessContainExtrasV1(token: token, active_process_limit: request.limits.processes.value,
+        cpu_rate: request.limits.cpu_rate.value)
+    val admitted = windows_process_admit_contained_v1(native, request.limits.memory.value, extras)
+    # The token is only needed by CreateProcessAsUserW; close it on every path.
+    var closed = true
+    if token != 0:
+        closed = sosix_windows_restricted_token_close_v1(SosixWindowsTokenV1(token)).value
+    match admitted:
+        WindowsProcessAdmissionV1.Started(lease):
+            if closed: return SosixContainAdmissionV1.Started(_to_lease_v1(lease))
+            if _reap_v1(lease).value: return SosixContainAdmissionV1.FailedAfterCleanup("containment-token-close-failed")
+            SosixContainAdmissionV1.Unknown("containment-token-close-failed; cleanup unproven")
+        WindowsProcessAdmissionV1.RejectedBeforeStart(why):
+            if closed: return SosixContainAdmissionV1.RejectedBeforeStart(why)
+            SosixContainAdmissionV1.Unknown(why + "; token close failed")
+        WindowsProcessAdmissionV1.FailedAfterCleanup(why):
+            if closed: return SosixContainAdmissionV1.FailedAfterCleanup(why)
+            SosixContainAdmissionV1.Unknown(why + "; token close failed")
+        WindowsProcessAdmissionV1.Unknown(why): SosixContainAdmissionV1.Unknown(why)
+
+fn _poll_v1(lease: SosixContainLeaseV1) -> Result<SosixContainPollV1, text>:
+    val native = _lease_of_v1(lease)
+    val observed = windows_process_poll_v1(native)?
+    val peak = windows_process_peak_memory_v1(native)?
+    Ok(_to_poll_v1(observed, peak))
+
+fn _cancel_v1(lease: SosixContainLeaseV1) -> Result<SosixContainFlagV1, text>:
+    val done = windows_process_cancel_v1(_lease_of_v1(lease))?
+    Ok(SosixContainFlagV1(done))
+
+# The lifetime peak is read before collect: collect releases the job.
+fn _collect_v1(lease: SosixContainLeaseV1) -> Result<SosixContainPollV1, text>:
+    val native = _lease_of_v1(lease)
+    val peak = windows_process_peak_memory_v1(native)?
+    val receipt = windows_process_collect_v1(native)?
+    Ok(_to_poll_v1(receipt, peak))
+
+# Poll to a terminal state within budget_ms (+ grace); on budget exhaustion the tree
+# is cancelled and reaped before Err returns, so no slot outlives this call.
+fn _run_to_end_v1(lease: WindowsProcessLeaseV1, budget: SosixContainMillisV1) -> Result<WindowsProcessPollV1, text>:
+    val deadline = time_now_monotonic_ms() + budget.value + _GRACE_MS
+    while time_now_monotonic_ms() < deadline:
+        match windows_process_poll_v1(lease):
+            Ok(observed):
+                if observed.terminal: return windows_process_collect_v1(lease)
+            Err(reason):
+                val _reaped = _reap_v1(lease)
+                return Err(reason)
+        thread_sleep(20)
+    if _reap_v1(lease).value: return Err("containment-run-timeout")
+    Err("containment-run-timeout; cleanup unproven")
+
+export _support_v1, _volume_serial_v1, _acl_refusal_v1, _lease_of_v1, _to_lease_v1, _reap_v1
+export _admit_v1, _poll_v1, _cancel_v1, _collect_v1, _run_to_end_v1

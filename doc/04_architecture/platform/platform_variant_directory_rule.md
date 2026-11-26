@@ -106,7 +106,7 @@ variant falls back to the OS-common level, never to the 32-bit variant.
 1. **No ad-hoc platform conditionals in common code** when a variant dir exists:
    `if os == "windows"`, `@cfg(os=...)` in level-0 files, or `#ifdef _WIN32` in
    a level-0 C file are violations once a matching `<os>/` variant exists. Move
-   the branch into the variant.
+   the branch into the variant. Exception: a body-free level-0 facade that is one `@when(os=...)` import switch over the per-OS variant files (e.g. `sosix/containment_v1.spl`, `sosix/contained_write_v1.spl`) is allowed; it holds no other host test.
 2. **Full API per variant.** Each variant implements every public name of its
    common contract or stubs it explicitly with a `TODO` comment plus a failing
    `assert` (fail-fast, never a silent no-op).
