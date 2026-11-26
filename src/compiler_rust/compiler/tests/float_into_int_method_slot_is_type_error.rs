@@ -11,14 +11,14 @@ const LIB: &str = "pub class Acc:\n    total: i64\n    fn add(k: i64) -> i64:\n 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("float-int-method-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    std::fs::write(dir.join("lib.spl"), LIB).expect("write lib");
+    std::fs::write(dir.join("accmod.spl"), LIB).expect("write accmod");
     dir
 }
 
-/// Lower `main_src` (importing `lib`) on the per-file lane, which resolves the
-/// imported class through `lower_with_context` (native-build / JIT HIR lane).
-/// The flattened `load_module_with_imports` + `hir::lower` unit is not used:
-/// it rejects even the valid program with `Unknown variable: Acc`.
+/// Lower `main_src` (importing `accmod`) on the per-file lane, which resolves
+/// the imported class through `lower_with_context` (native-build / JIT HIR
+/// lane). The module must not be named `lib`/`std`/`std_lib`: those are
+/// reserved stdlib roots (see `reserved_stdlib_root_sibling_module.rs`).
 fn lower_cross(tag: &str, main_src: &str) -> Result<(), String> {
     let dir = scratch(tag);
     let main_path = dir.join("main.spl");
@@ -58,8 +58,8 @@ fn accepted(label: &str, r: &Result<(), String>) -> Option<String> {
 fn float_into_int_slot_of_cross_module_method_is_rejected() {
     let mut bad = Vec::new();
     for (tag, src) in [
-        ("inst", "use lib.{Acc}\n\nfn main() -> i64:\n    val a = Acc(total: 1)\n    return a.add(1.5)\n"),
-        ("stat", "use lib.{Acc}\n\nfn main() -> i64:\n    val a = Acc.make(2.5)\n    return a.total\n"),
+        ("inst", "use accmod.{Acc}\n\nfn main() -> i64:\n    val a = Acc(total: 1)\n    return a.add(1.5)\n"),
+        ("stat", "use accmod.{Acc}\n\nfn main() -> i64:\n    val a = Acc.make(2.5)\n    return a.total\n"),
     ] {
         bad.extend(rejected(&format!("cross-module {tag}"), &lower_cross(tag, src)));
     }
@@ -97,7 +97,7 @@ fn int_and_explicit_casts_into_method_slots_still_compile() {
         "cross-module ok",
         &lower_cross(
             "ok",
-            "use lib.{Acc}\n\nfn main() -> i64:\n    val a = Acc.make(3)\n    val s = a.scale(2)\n    return a.add(2) + a.add(1.5 as i64) + s.to_i64()\n",
+            "use accmod.{Acc}\n\nfn main() -> i64:\n    val a = Acc.make(3)\n    val s = a.scale(2)\n    return a.add(2) + a.add(1.5 as i64) + s.to_i64()\n",
         ),
     ));
     for (label, src) in [
