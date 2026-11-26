@@ -37,3 +37,12 @@ With all files parsing under the default `--source hir`, on the fresh seed (inte
 - `robust boundaries test/01_unit/compiler/lint`: did NOT finish within 1700 s.
 - `simple test test/01_unit/compiler/lint/bound_origin_facts_spec.spl`: child-timeout at the 900 s budget, twice, with no verdict.
 Todo: TODO(perf, P2): make the HIR walk of `test/01_unit/compiler/lint` fit the 900 s spec budget (profile `_robust_hir_facts` / `parse_full_frontend` + lowering per file, or narrow the spec to a small fixture dir); verify on a pure-Simple binary, since the seed is interpreted.
+
+## Root causes and fix (added 2026-11-26)
+- Bug A: `convert_flat_expr` in `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl` had no case for EXPR_FOR / EXPR_WHILE (tags 16 / 17), so module-scope loops were reported as unhandled.
+- Bug B: module-level `parse_val_decl` in `src/compiler/10.frontend/core/parser_decls_use.spl` rejected the `_` token (kind 169).
+- Fix: PR #12041, `71e6065cf88`, status verification-pending (not natively verified).
+- The `fn main()` wrap in the 8 scripts is kept as defensive code (reverting would need re-verifying all 8 scripts).
+
+## Open gap / todo
+TODO(parser, P3): module-scope tuple destructuring `val (a, _) = ...` is not supported; add support and a spec.
