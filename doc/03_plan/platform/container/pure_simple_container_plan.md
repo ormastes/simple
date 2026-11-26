@@ -413,5 +413,5 @@ Each default is what the lanes assume. Default, owner may override.
   and claim no capability.
 - Open: N4 SimpleOS (QEMU real-firmware lane, then board); Docker through `api_v2`
   needs a native host identity (seed refuses); N1 holds no cgroup parent (likely
-  `ENOTSUP`); W2 hardcodes `C:Windows`; `storage.*` still imports `io.*` directly;
+  `ENOTSUP`); W2 hardcodes the Windows directory instead of reading `SystemRoot`; `storage.*` still imports `io.*` directly;
   seed `export use ... as` alias bug.
