@@ -53,46 +53,133 @@ if [ ! -s "$WORK/roots.txt" ]; then
     exit 2
 fi
 
-# `ugrep` is the default grep here; every scan below pins /usr/bin/grep.
+# `ugrep` is the default grep here; every scan below pins /usr/bin/grep when present.
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
 : > "$WORK/files.txt"
 while IFS= read -r root; do
     find "$root" -name '*.spl' -type f 2>/dev/null >> "$WORK/files.txt"
 done < "$WORK/roots.txt"
 # Vendored trees are never in scope.
-/usr/bin/grep -v -E '/vendor/' "$WORK/files.txt" | sort > "$WORK/scan.txt"
+"$GREP" -v -E '/vendor/' "$WORK/files.txt" | LC_ALL=C sort -u > "$WORK/scan.txt"
 
-FILE_COUNT=$(/usr/bin/grep -c '\.spl$' "$WORK/scan.txt")
+FILE_COUNT=$("$GREP" -c '\.spl$' "$WORK/scan.txt")
 if [ "$FILE_COUNT" -lt 100 ]; then
     echo "ERROR — nothing was checked: only $FILE_COUNT lane file(s) found (expected >=100)"
     exit 2
 fi
 
+WRITE_BASELINE=0
 if [ "${1:-}" = "--write-baseline" ]; then
-    MODE="--write-baseline=$BASELINE"
+    WRITE_BASELINE=1
 else
     [ -f "$BASELINE" ] || { echo "ERROR — nothing was checked: $BASELINE is missing"; exit 2; }
-    MODE="--baseline=$BASELINE"
 fi
+
+# Split the file list into <=20 KiB batches so Windows/MSYS CreateProcessW
+# (32,767-char argv limit) never fails with E2BIG ("Argument list too long").
+# Run each batch against an empty baseline to collect all active violations,
+# then compare once against $BASELINE so fixed-entry counts and PASS/FAIL
+# verdicts reflect the whole scan rather than a single shard.
+EMPTY_BASELINE="$WORK/empty_baseline.txt"
+: > "$EMPTY_BASELINE"
+: > "$WORK/out.log"
+: > "$WORK/found.txt"
+
+awk -v dir="$WORK" -v limit=20000 '
+    BEGIN { idx = 0; cur = 0; fn = sprintf("%s/batch.%03d", dir, idx) }
+    {
+        gsub(/\r$/, "")
+        if ($0 == "") next
+        len = length($0) + 1
+        if (cur > 0 && cur + len > limit) {
+            close(fn)
+            idx++
+            cur = 0
+            fn = sprintf("%s/batch.%03d", dir, idx)
+        }
+        print $0 > fn
+        cur += len
+    }
+    END { if (cur > 0) close(fn) }
+' "$WORK/scan.txt"
 
 # Capture to a FILE. `simple` emits hundreds of lines of unrelated deprecation
 # and symbol-collision warnings; a verdict read off the tail of a live pipe is
 # how a real failure gets reported as "no output".
-# shellcheck disable=SC2046
-"$SIMPLE" run "$CHECKER" "$MODE" $(cat "$WORK/scan.txt") > "$WORK/out.log" 2>&1
-RC=$?
+BATCH_COUNT=0
+for BATCH_FILE in "$WORK"/batch.*; do
+    [ -f "$BATCH_FILE" ] || continue
+    BATCH_COUNT=$((BATCH_COUNT + 1))
+    # shellcheck disable=SC2046
+    "$SIMPLE" run "$CHECKER" --baseline="$EMPTY_BASELINE" $(cat "$BATCH_FILE") > "$WORK/batch.log" 2>&1
+    RC=$?
+    cat "$WORK/batch.log" >> "$WORK/out.log"
+    _b_verdict=$("$GREP" -E '^(PASS|FAIL|ERROR) ' "$WORK/batch.log" | tr -d '\r' | tail -1)
+    case "$RC:$_b_verdict" in
+        0:PASS*|1:FAIL*)
+            "$GREP" -E '^NEW VIOLATION ' "$WORK/batch.log" | tr -d '\r' | sed 's/^NEW VIOLATION //' >> "$WORK/found.txt"
+            ;;
+        *)
+            echo "ERROR — nothing was checked: checker produced no valid verdict on batch $BATCH_COUNT (rc=$RC), see $WORK/out.log"
+            cp "$WORK/out.log" "$REPO_ROOT/wm_lane_boundary_check_failure.log" 2>/dev/null
+            exit 2
+            ;;
+    esac
+done
 
-/usr/bin/grep -E '^NEW VIOLATION ' "$WORK/out.log"
-VERDICT=$(/usr/bin/grep -E '^(PASS|FAIL|ERROR) ' "$WORK/out.log" | tail -1)
-
-if [ -z "$VERDICT" ]; then
-    echo "ERROR — nothing was checked: checker produced no verdict line (rc=$RC), see $WORK/out.log"
-    cp "$WORK/out.log" "$REPO_ROOT/wm_lane_boundary_check_failure.log" 2>/dev/null
+if [ "$BATCH_COUNT" -eq 0 ]; then
+    echo "ERROR — nothing was checked: no scan batches generated"
     exit 2
 fi
 
-echo "$VERDICT"
-case "$VERDICT" in
-    PASS*)  exit 0 ;;
-    FAIL*)  exit 1 ;;
-    *)      exit 2 ;;
-esac
+FOUND_COUNT=$(wc -l < "$WORK/found.txt" | tr -d ' ')
+
+if [ "$WRITE_BASELINE" -eq 1 ]; then
+    {
+        echo "# WM/GUI/web/2D portable-lane violation baseline (path:line:code)."
+        echo "# Regenerate: scripts/check/check-wm-lane-boundary.shs --write-baseline"
+        echo "# This list may only SHRINK. See wm_lane_boundary_lints.spl."
+        cat "$WORK/found.txt"
+    } > "$BASELINE" || {
+        echo "ERROR — nothing was checked: could not write $BASELINE"
+        exit 2
+    }
+    echo "PASS — baseline written: $FOUND_COUNT violation(s) over $FILE_COUNT file(s)"
+    exit 0
+fi
+
+awk -v counts_out="$WORK/counts.txt" '
+    { gsub(/\r$/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
+    FNR == NR {
+        if ($0 != "" && substr($0, 1, 1) != "#") {
+            base[$0] = 1
+        }
+        next
+    }
+    {
+        if ($0 == "") next
+        found_n++
+        found[$0] = 1
+        if (!($0 in base)) {
+            added_n++
+            print "NEW VIOLATION " $0
+        }
+    }
+    END {
+        for (b in base) {
+            if (!(b in found)) removed_n++
+        }
+        printf "%d %d %d\n", found_n + 0, added_n + 0, removed_n + 0 > counts_out
+    }
+' "$BASELINE" "$WORK/found.txt"
+
+read -r FOUND_COUNT ADDED_COUNT REMOVED_COUNT < "$WORK/counts.txt"
+if [ "$ADDED_COUNT" -gt 0 ]; then
+    echo "FAIL — $ADDED_COUNT NEW portable-lane violation(s); $FOUND_COUNT total over $FILE_COUNT file(s) scanned"
+    exit 1
+fi
+
+echo "PASS — $FILE_COUNT file(s) scanned, $FOUND_COUNT violation(s), all in baseline ($REMOVED_COUNT baseline entr(y/ies) now fixed)"
+exit 0
