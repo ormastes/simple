@@ -1580,7 +1580,7 @@ impl Lowerer {
     }
 
     /// `Kind` / `Kind?` -> `Some("Kind")`; every other shape -> `None`.
-    fn simple_param_type_name(ty: Option<&simple_parser::ast::Type>) -> Option<String> {
+    pub(crate) fn simple_param_type_name(ty: Option<&simple_parser::ast::Type>) -> Option<String> {
         use simple_parser::ast::Type;
         match ty? {
             Type::Simple(name) => Some(name.clone()),
@@ -1594,7 +1594,13 @@ impl Lowerer {
 
     /// Record `Owner.method` declared parameter type names (`self` already
     /// excluded by the caller); variadic methods get an empty row.
-    fn record_method_param_type_names(&mut self, owner: &str, method: &str, user_params: &[simple_parser::ast::Parameter]) {
+    pub(crate) fn record_method_param_type_names(
+        &mut self,
+        owner: &str,
+        method: &str,
+        user_params: &[simple_parser::ast::Parameter],
+        is_static: bool,
+    ) {
         let row = if user_params.iter().any(|p| p.variadic) {
             Vec::new()
         } else {
@@ -1604,6 +1610,9 @@ impl Lowerer {
         // unit: a disagreeing second row makes the entry empty (unchecked)
         // instead of last-write-wins.
         let key = format!("{owner}.{method}");
+        if is_static {
+            self.static_method_names.insert(key.clone());
+        }
         let row = match self.method_param_type_names.get(&key) {
             Some(existing) if *existing != row => Vec::new(),
             _ => row,
@@ -1661,6 +1670,7 @@ impl Lowerer {
                         let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                             &method.params[1..]
                         } else { &method.params[..] };
+                        self.record_method_param_type_names(owner, &method.name, user_params, method.is_static);
                         if user_params.iter().any(|p| p.default.is_some()) {
                             self.fn_param_defaults.insert(
                                 format!("{}.{}", owner, method.name),
@@ -1677,7 +1687,7 @@ impl Lowerer {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                         &method.params[1..]
                     } else { &method.params[..] };
-                    self.record_method_param_type_names(&class.name, &method.name, user_params);
+                    self.record_method_param_type_names(&class.name, &method.name, user_params, method.is_static);
                     if user_params.iter().any(|p| p.default.is_some()) {
                         self.fn_param_defaults.insert(
                             format!("{}.{}", class.name, method.name),
@@ -1693,7 +1703,7 @@ impl Lowerer {
                     let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
                         &method.params[1..]
                     } else { &method.params[..] };
-                    self.record_method_param_type_names(&struct_.name, &method.name, user_params);
+                    self.record_method_param_type_names(&struct_.name, &method.name, user_params, method.is_static);
                     if user_params.iter().any(|p| p.default.is_some()) {
                         self.fn_param_defaults.insert(
                             format!("{}.{}", struct_.name, method.name),

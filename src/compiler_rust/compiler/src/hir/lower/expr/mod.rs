@@ -1505,13 +1505,15 @@ impl Lowerer {
         // receiver whose class/struct is declared in this file, so the
         // recorded `Owner.method` row is the one the author wrote.
         if args.iter().all(|a| a.name.is_none() && !matches!(a.value, Expr::Spread(_))) {
+            // The float-into-int check can only reject a float argument.
+            let has_float_arg = hir_args.iter().any(|a| matches!(a.ty, TypeId::F32 | TypeId::F64));
             if let Some(HirType::Struct { name: owner, .. }) = self.module.types.get(receiver_hir.ty) {
                 let bare_owner = owner.rsplit('.').next().unwrap_or(owner).to_string();
                 let declared_here = self
                     .struct_decl_files
                     .get(&bare_owner)
                     .is_some_and(|decl_file| *decl_file == self.current_file);
-                if declared_here {
+                if declared_here || has_float_arg {
                     let slot_types: Vec<Option<TypeId>> = self
                         .method_param_type_names
                         .get(&format!("{bare_owner}.{method}"))
@@ -1519,16 +1521,40 @@ impl Lowerer {
                         .unwrap_or_default();
                     for (i, (arg, pty)) in hir_args.iter().zip(slot_types.iter()).enumerate() {
                         if let Some(pty) = pty {
-                            self.reject_callable_for_enum_slot(
-                                *pty,
-                                arg,
-                                &format!("argument {} of `{bare_owner}.{method}`", i + 1),
-                            )?;
-                            self.reject_float_for_int_slot(
-                                *pty,
-                                arg,
-                                &format!("argument {} of `{bare_owner}.{method}`", i + 1),
-                            )?;
+                            let slot = format!("argument {} of `{bare_owner}.{method}`", i + 1);
+                            if declared_here {
+                                self.reject_callable_for_enum_slot(*pty, arg, &slot)?;
+                            }
+                            // Float-into-int needs only a primitive slot type,
+                            // so it also holds for an imported owner.
+                            self.reject_float_for_int_slot(*pty, arg, &slot)?;
+                        }
+                    }
+                }
+            }
+            // A trait-typed receiver is erased to ANY. A `val x: Trait` local
+            // carries the exact declaring TraitDef; a parameter keeps only its
+            // declared type name, resolved the same way.
+            if let (true, HirExprKind::Local(idx)) = (has_float_arg, &receiver_hir.kind) {
+                let idx = *idx;
+                let trait_slots: Option<(String, Vec<Option<String>>)> = ctx
+                    .locals
+                    .get(idx)
+                    .and_then(|l| {
+                        l.trait_dispatch_owner.clone().or_else(|| {
+                            l.type_name_hint.as_deref().and_then(|n| self.trait_declaration_for_current_owner(n))
+                        })
+                    })
+                    .and_then(|d| {
+                        let m = d.declaration.methods.iter().find(|m| m.name == method)?;
+                        let user = if m.params.first().is_some_and(|p| p.name == "self") { &m.params[1..] } else { &m.params[..] };
+                        (!user.iter().any(|p| p.variadic))
+                            .then(|| (d.declaration.name.clone(), user.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect()))
+                    });
+                if let Some((trait_name, names)) = trait_slots {
+                    for (i, (arg, name)) in hir_args.iter().zip(names.iter()).enumerate() {
+                        if let Some(pty) = name.as_deref().and_then(|n| self.module.types.lookup(n)) {
+                            self.reject_float_for_int_slot(pty, arg, &format!("argument {} of `{trait_name}.{method}`", i + 1))?;
                         }
                     }
                 }

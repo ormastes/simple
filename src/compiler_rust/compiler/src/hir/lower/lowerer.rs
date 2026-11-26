@@ -192,10 +192,15 @@ pub struct Lowerer {
     /// (`reject_callable_for_enum_slot`) see a callee whose HIR value type is
     /// not yet a `Function` (declared after the caller).
     pub(super) fn_param_type_names: HashMap<String, Vec<Option<String>>>,
-    /// Same as `fn_param_type_names` for class/struct methods, keyed
-    /// `Owner.method`, `self` excluded. Consumed only for a receiver whose
-    /// type is declared in the file being lowered.
+    /// Same as `fn_param_type_names` for class/struct/impl/trait methods
+    /// (including imported ones), keyed `Owner.method`, `self` excluded. The
+    /// enum-slot check consumes it only for a receiver declared in the file
+    /// being lowered; the float-into-int check consumes every row.
     pub(super) method_param_type_names: HashMap<String, Vec<Option<String>>>,
+    /// `Owner.method` keys of `method_param_type_names` declared `static`:
+    /// only these rows are checked at a `Type.method(args)` call, so an
+    /// instance method called with an explicit receiver never shifts slots.
+    pub(super) static_method_names: HashSet<String>,
     /// Whole-program map of free-function name -> declared return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
@@ -478,6 +483,7 @@ impl Lowerer {
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
             method_param_type_names: HashMap::new(),
+            static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -581,6 +587,7 @@ impl Lowerer {
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
             method_param_type_names: HashMap::new(),
+            static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -707,6 +714,7 @@ impl Lowerer {
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
             method_param_type_names: HashMap::new(),
+            static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,

@@ -113,3 +113,16 @@ error. The interpreter does not lower to HIR, so the program still runs there.
   - Plain `run` prints the type error, then `[jit-fallback]` drops the module to the interpreter and exits 0. This fallback policy existed before this change and is unchanged.
   - HIR/native compile paths (`native-build`, the cargo AOT tests) fail hard.
 - **Web pages:** 8 pages at 1x and 4x give JIT == interpreter, byte-identical to base, with 0 jit-fallbacks.
+
+## Follow-up 2026-11-26 — methods on another module, static methods, trait methods
+
+- **Before (probe, seed1126):** with `SIMPLE_JIT_STRICT=1`, `B.make(2.5)` into a `static fn make(k: i64)` and `t.take(4.5)` into a trait method `take(k: i64)` (on a concrete or trait-typed receiver) both lowered without an error. Each printed the f64's raw bits as an i64 (`4612811918334230528`). Cross-module instance and static calls lowered without an error too. Only free functions (`free_take(3.5)`) were rejected.
+- **Fix:**
+  - Imported class/impl methods and impl-block methods now record parameter rows.
+  - The instance-call float check no longer needs the receiver declared in the current file. The enum-slot check still does.
+  - `Type.method(args)` checks only methods declared `static`.
+  - A trait-typed receiver (erased to `ANY`) reads its slot types from its local's declaring `TraitDef`, or from a parameter's declared trait name.
+  - Every new lookup runs only when an argument is `f32`/`f64`.
+- **Spec:** `compiler/tests/float_into_int_method_slot_is_type_error.rs` failed 2 of 3 on base and passes 3/3 after the fix. Its must-still-compile cases cover int arguments, int→f64 widening and explicit casts.
+- **Sweep:** per-file lowering of 48,483 files under `src/` and `test/` found 1 new rejection: `test/fixtures/native_call_abi_refusal_module_error/abi_feeder.spl`. That fixture is *meant* to be refused ("an f64 value crosses a module boundary into a declared i64 param"), so the seed now matches its stated intent.
+- **Limit:** the flattened `load_module_with_imports` + `hir::lower` unit rejects even valid cross-module class code (`Unknown variable: Acc`). JIT `run` of a cross-module class method also fails on valid input (`Function 'Acc.add' not found`). Both are separate from this checker.

@@ -328,6 +328,26 @@ impl Lowerer {
         let qualified_name = format!("{}.{}", class_name, method);
 
         let mut args_hir = self.lower_call_args(args, ctx)?;
+        // Float-into-int admission for a declared-`static` method (owner
+        // decision 2026-11-24); positional, unspread calls only.
+        let bare_key = args_hir
+            .iter()
+            .any(|a| matches!(a.ty, TypeId::F32 | TypeId::F64))
+            .then(|| format!("{}.{}", class_name.rsplit('.').next().unwrap_or(class_name), method))
+            .filter(|key| self.static_method_names.contains(key))
+            .filter(|_| args.iter().all(|a| a.name.is_none() && !matches!(a.value, ast::Expr::Spread(_))));
+        if let Some(bare_key) = bare_key {
+            let slot_types: Vec<Option<TypeId>> = self
+                .method_param_type_names
+                .get(&bare_key)
+                .map(|names| names.iter().map(|n| n.as_deref().and_then(|n| self.module.types.lookup(n))).collect())
+                .unwrap_or_default();
+            for (i, (arg, pty)) in args_hir.iter().zip(slot_types.iter()).enumerate() {
+                if let Some(pty) = pty {
+                    self.reject_float_for_int_slot(*pty, arg, &format!("argument {} of `{bare_key}`", i + 1))?;
+                }
+            }
+        }
         if args.iter().all(|arg| arg.name.is_none()) {
             if let Some(params) = self.fn_param_defaults.get(&qualified_name)
                 .or_else(|| self.global_method_param_defaults.as_ref().and_then(|defs| defs.get(&qualified_name)))
