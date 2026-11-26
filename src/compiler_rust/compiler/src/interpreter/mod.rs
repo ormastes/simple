@@ -164,7 +164,7 @@ pub(crate) use interpreter_helpers::{
     eval_dict_for_each, eval_dict_map_values, eval_option_and_then, eval_option_filter, eval_option_map,
     eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else,
     find_and_exec_method, handle_functional_update, handle_method_call_with_self_update, iter_to_vec, message_to_value,
-    normalize_index, slice_collection, spawn_actor_with_expr, spawn_future_with_callable,
+    normalize_index, slice_collection, slice_collection_by, spawn_actor_with_expr, spawn_future_with_callable,
     spawn_future_with_callable_and_env, spawn_future_with_expr, try_method_missing, with_effect_context,
 };
 

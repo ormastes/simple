@@ -37,14 +37,20 @@ pub(crate) fn normalize_index(idx: i64, len: i64) -> i64 {
 
 /// Slice a collection with Python-style semantics
 pub(crate) fn slice_collection<T: Clone>(items: &[T], start: i64, end: i64, step: i64) -> Vec<T> {
-    let len = items.len() as i64;
+    slice_collection_by(items.len(), |i| items[i].clone(), start, end, step)
+}
+
+/// `slice_collection` over an element accessor, so a packed array is sliced
+/// element by element instead of through its boxed `Deref` view.
+pub(crate) fn slice_collection_by<T>(n: usize, get: impl Fn(usize) -> T, start: i64, end: i64, step: i64) -> Vec<T> {
+    let len = n as i64;
 
     if step > 0 {
         let mut result = Vec::new();
         let mut i = start;
         while i < end && i < len {
             if i >= 0 {
-                result.push(items[i as usize].clone());
+                result.push(get(i as usize));
             }
             i += step;
         }
@@ -56,8 +62,8 @@ pub(crate) fn slice_collection<T: Clone>(items: &[T], start: i64, end: i64, step
         let actual_end = if end == len { -1 } else { end };
         let mut i = actual_start;
         while i > actual_end && i >= 0 {
-            if (i as usize) < items.len() {
-                result.push(items[i as usize].clone());
+            if (i as usize) < n {
+                result.push(get(i as usize));
             }
             i += step;
         }

@@ -5349,3 +5349,45 @@ spread 2.30..2.59 on both sides), rerun 7 rounds head-first-on-odd: 2.359 / 2.37
   `_hstem_knots`, hoisting `val`s to `var`s, `Array.fill_span` for blitFull, a glyph-id memo.
 - **Open.** `engine_lcd_text_paint_small_spec` passes
   its 4.6 s budget on a quiet host and failed it once under load 20+.
+
+## 2026-11-26 — seed: packed arrays no longer expanded by slices / read-only extern args
+
+- **Cause of the u32 font-upload RSS (+6..18%):** `ArrayData` stores big
+  in-domain word arrays PACKED (`Vec<u32>`), but its `Deref` builds and KEEPS a
+  boxed `Vec<Value>` view (~80 B/element). `a[i:j]` (`slice_collection(&arr)`)
+  and the gpu extern readers `strict_i64_values` / `strict_owned_bytes`
+  (`items.as_slice()`) went through `Deref`, so the first call expanded the
+  whole 1M-word atlas: +80 MB peak.
+- **Fix (Rust seed):** slice via `slice_collection_by(len, get_value)`; extern
+  readers iterate `values_iter()`. Read-only, owned results -- no change for
+  externs that mutate or retain an array. Test:
+  `compiler/tests/packed_array_extern_and_slice_no_materialize.rs`
+  (`ARRAY_MATERIALIZE_ELEMS` delta: 2,097,152 -> exactly 0 for each program,
+  and a store + slice after the extern call).
+- **Probe (1M words):** extern call +80 MB -> +12.7 MB (the transient
+  `Vec<i64>` + bytes); 64K slices +71 -> +4.5 MB. Per-call cost on repeat calls
+  rises ~4 ms per 1M words (no cached view any more).
+- **Vulkan A/B on the fixed seed (interpreter, 1x, median rounds 2-4, all
+  cpu-identical):** u32 RSS now BELOW the byte path -- css-paint -2.0%,
+  forms-media -12.6%, html -5.3%, overview -12.6%; wall still ~2x faster
+  (load 25-35 during the run, so wall numbers are noisy).
+- **Base vs fix seed A/B** (same build command, `--features vulkan`; base =
+  touched files at `7035e24b267`, 84,815,608 B; fix = `7c21fdde199`,
+  85,201,400 B; interpreter, 1x, rounds 2-4, alternating; frames identical
+  across seeds in every config): Vulkan u32 RSS css-paint 1222 -> 1046 MB,
+  forms-media 1120 -> 921 MB; Vulkan bytes and CPU RSS flat. CPU time
+  (user+sys, medians) CPU css-paint 18.32 -> 18.41 s, forms-media 10.10 ->
+  11.87 s (pairs +1.8/+5.4/-4.6 s: noise); Vulkan bytes css-paint 40.31 ->
+  38.07 s, forms-media 31.92 -> 31.22 s. Load 15-45 from other sessions, run
+  spread up to +-30%, so a 2% wall claim cannot be certified on this host.
+- **Still per call:** the extern copies ~8 MB (`Vec<i64>`) + 4 MB (bytes)
+  transiently per 1M words; the retained 80 MB view is what is gone.
+- **Remaining `Deref` readers** in `interpreter_extern/` (14 sites, 10 files):
+  `simd.rs` `unpack_u32_array` / `unpack_u64_array`, `sffi_array.rs:163`,
+  `dynamic_sffi.rs`, `arm_loader.rs`, `net_tls_client.rs`,
+  `process_owned_v3.rs`, `wsffi.rs`, `sdn.rs`, `file_io.rs`, `torch.rs`.
+- **Trap:** `SIMPLE_MEM_TRACE` / `ARRAY_MATERIALIZE_ELEMS` names any other hot
+  path that is not packed-aware; a framebuffer-sized count is the signature.
+- Pre-existing lib failures, identical on base `7035e24b267`:
+  `value::tests::shared_text_unicode_index_and_slice`,
+  `object_cache_slice_tests::reused_objects_are_byte_identical_to_a_cold_build_of_the_same_world`.

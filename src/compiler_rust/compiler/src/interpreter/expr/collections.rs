@@ -9,7 +9,7 @@ use crate::value::Value;
 
 use super::super::{
     comprehension_for_each, create_range_object_opt, normalize_index, shared_text_is_ascii, slice_collection,
-    ClassDef, Enums, Env, FunctionDef, ImplMethods,
+    slice_collection_by, ClassDef, Enums, Env, FunctionDef, ImplMethods,
 };
 
 /// Compute slice indices from start, end, length, and inclusive flag.
@@ -1011,7 +1011,13 @@ pub(super) fn eval_collection_expr(
             }
 
             let result = match recv_val {
-                Value::Array(arr) => Ok(Value::array(slice_collection(&arr, start_idx, end_idx, step_val))),
+                Value::Array(arr) => Ok(Value::array(slice_collection_by(
+                    arr.len(),
+                    |i| arr.get_value(i).expect("slice index below len"),
+                    start_idx,
+                    end_idx,
+                    step_val,
+                ))),
                 Value::ByteArray(bytes) => Ok(Value::byte_array(slice_collection(
                     &bytes, start_idx, end_idx, step_val,
                 ))),

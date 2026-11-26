@@ -643,9 +643,11 @@ fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize)
     if let Some(bytes) = value.byte_array_view() {
         return Ok(bytes.to_vec().into_boxed_slice());
     }
-    let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
-        Value::FixedSizeArray { data, .. } => data.as_slice(),
+    // Element by element, so a packed array keeps no boxed view (see
+    // `strict_i64_values`).
+    let (count, items): (usize, Box<dyn Iterator<Item = Value> + '_>) = match value {
+        Value::Array(items) | Value::FrozenArray(items) => (items.len(), Box::new(items.values_iter())),
+        Value::FixedSizeArray { data, .. } => (data.len(), Box::new(data.iter().cloned())),
         other => {
             return Err(CompileError::semantic(format!(
                 "{name} argument {index} must be [u8], got {}",
@@ -653,7 +655,7 @@ fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize)
             )))
         }
     };
-    let mut bytes = Vec::with_capacity(items.len());
+    let mut bytes = Vec::with_capacity(count);
     for item in items {
         let raw = item.as_int()?;
         bytes.push(
@@ -687,7 +689,11 @@ fn strict_i64_values(args: &[Value], index: usize, name: &str, expected: usize) 
         .get(index)
         .ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
     let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
+        // Element by element: `as_slice()` would build (and keep) the boxed
+        // view of a packed array -- ~80 MB for a 1M-word font atlas.
+        Value::Array(items) | Value::FrozenArray(items) => {
+            return items.values_iter().map(|v| v.as_int()).collect();
+        }
         Value::FixedSizeArray { data, .. } => data.as_slice(),
         other => {
             return Err(CompileError::semantic(format!(
