@@ -332,6 +332,197 @@ fn mark_skip_in_example() -> bool {
     true
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SpecDslCallSnapshot {
+    owners: Vec<Arc<str>>,
+    current_test_errors_len: usize,
+    test_errors_len: usize,
+    test_failed: i64,
+    bdd_failed_total: i64,
+    saved_case_depth: Option<(Option<Arc<str>>, Value)>,
+}
+
+fn spec_dsl_owners(name: &str, functions: &HashMap<String, Arc<FunctionDef>>) -> Vec<Arc<str>> {
+    use crate::interpreter::{FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS};
+    let mut owners: Vec<Arc<str>> = Vec::new();
+    let mut push_fn_owner = |f: &Arc<FunctionDef>| {
+        let ptr = Arc::as_ptr(f) as usize;
+        let owner = FUNCTION_MODULE_OWNER.with(|cell| cell.borrow().get(&ptr).cloned());
+        if let Some(o) = owner {
+            if !owners.iter().any(|existing| Arc::ptr_eq(existing, &o) || existing.as_ref() == o.as_ref()) {
+                owners.push(o);
+            }
+        }
+    };
+    if let Some(f) = functions.get(name) {
+        push_fn_owner(f);
+    }
+    FUNCTION_OVERLOADS.with(|cell| {
+        if let Some(list) = cell.borrow().get(name) {
+            for f in list {
+                push_fn_owner(f);
+            }
+        }
+    });
+    owners
+}
+
+fn read_spec_global_with_owner(owners: &[Arc<str>], key: &str) -> Option<(Option<Arc<str>>, Value)> {
+    for owner in owners {
+        if let Some(val) = crate::interpreter::owned_global(owner, key) {
+            return Some((Some(Arc::clone(owner)), val));
+        }
+    }
+    crate::interpreter::MODULE_GLOBALS
+        .with(|cell| cell.borrow().get(key).cloned())
+        .map(|val| (None, val))
+}
+
+fn read_spec_global(owners: &[Arc<str>], key: &str) -> Option<Value> {
+    read_spec_global_with_owner(owners, key).map(|(_, v)| v)
+}
+
+fn write_spec_global(owner: Option<&Arc<str>>, key: &str, value: Value) {
+    if let Some(owner) = owner {
+        crate::interpreter::set_owned_global(owner, key, value.clone(), false);
+    }
+    crate::interpreter::MODULE_GLOBALS.with(|cell| {
+        cell.borrow_mut().insert(key.to_owned(), value);
+    });
+}
+
+fn read_spec_array_info(owners: &[Arc<str>], key: &str) -> (usize, Option<String>) {
+    match read_spec_global(owners, key) {
+        Some(Value::Array(arr)) => {
+            let last = arr.last().map(|v| v.to_display_string());
+            (arr.len(), last)
+        }
+        _ => (0, None),
+    }
+}
+
+fn read_spec_int(owners: &[Arc<str>], key: &str) -> i64 {
+    match read_spec_global(owners, key) {
+        Some(Value::Int(n)) => n,
+        _ => 0,
+    }
+}
+
+fn is_spec_outcome_dsl(name: &str) -> bool {
+    matches!(name, "pending" | "pending_it" | "skip" | "skip_it" | "skip_context")
+}
+
+/// Snapshot the Simple spec library's error/failure counters before dispatching
+/// to `.spl` implementations of `pending`/`skip`/`skip_it`/`skip_context`.
+pub(crate) fn begin_spec_dsl_call(
+    name: &str,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Option<SpecDslCallSnapshot> {
+    if !is_spec_outcome_dsl(name) || !functions.contains_key(name) {
+        return None;
+    }
+    let owners = spec_dsl_owners(name, functions);
+    let (current_test_errors_len, _) = read_spec_array_info(&owners, "current_test_errors");
+    let (test_errors_len, _) = read_spec_array_info(&owners, "test_errors");
+    let test_failed = read_spec_int(&owners, "test_failed");
+    let bdd_failed_total = BDD_TOTALS.with(|cell| cell.borrow().1);
+    let saved_case_depth = if name == "skip" && BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+        if let Some((owner, prev @ Value::Array(_))) = read_spec_global_with_owner(&owners, "_case_depth") {
+            if let Value::Array(ref arr) = prev {
+                if arr.is_empty() {
+                    write_spec_global(owner.as_ref(), "_case_depth", Value::array(vec![Value::Int(1)]));
+                    Some((owner, prev))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Some(SpecDslCallSnapshot {
+        owners,
+        current_test_errors_len,
+        test_errors_len,
+        test_failed,
+        bdd_failed_total,
+        saved_case_depth,
+    })
+}
+
+/// Reconcile the Rust BDD harness bookkeeping with the actual `.spl` DSL
+/// execution outcome. If the `.spl` body rejected the call (or returned an error),
+/// report a failure instead of marking the example pending or skipped.
+pub(crate) fn finish_spec_dsl_call(
+    name: &str,
+    args: &[Argument],
+    _functions: &HashMap<String, Arc<FunctionDef>>,
+    before: SpecDslCallSnapshot,
+    call_res: Result<Value, CompileError>,
+) -> Result<Value, CompileError> {
+    if let Some((owner, prev_depth)) = before.saved_case_depth {
+        write_spec_global(owner.as_ref(), "_case_depth", prev_depth);
+    }
+    let val = call_res?;
+    let (after_case_errs, last_case_err) = read_spec_array_info(&before.owners, "current_test_errors");
+    let (after_suite_errs, last_suite_err) = read_spec_array_info(&before.owners, "test_errors");
+    let after_test_failed = read_spec_int(&before.owners, "test_failed");
+    let after_bdd_failed_total = BDD_TOTALS.with(|cell| cell.borrow().1);
+
+    let rejected = after_case_errs > before.current_test_errors_len
+        || after_suite_errs > before.test_errors_len
+        || after_test_failed > before.test_failed
+        || after_bdd_failed_total > before.bdd_failed_total;
+
+    if rejected {
+        let msg = if after_case_errs > before.current_test_errors_len {
+            last_case_err
+        } else if after_suite_errs > before.test_errors_len {
+            last_suite_err
+        } else {
+            None
+        }
+        .unwrap_or_else(|| format!("{name} rejected by active safety profile"));
+
+        if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+            BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+            push_bdd_failure(msg);
+        } else if BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
+            let desc_path = get_current_describe_path();
+            let name_str = extract_desc_str(args, "unnamed");
+            let indent = BDD_INDENT.with(|cell| *cell.borrow());
+            let indent_str = "  ".repeat(indent);
+            println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
+            println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
+            BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+            if after_bdd_failed_total == before.bdd_failed_total {
+                BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
+            }
+            record_test_result(desc_path, name_str, false, false);
+        }
+        return Ok(val);
+    }
+
+    if matches!(name, "pending" | "pending_it") {
+        if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+            BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = true);
+            if extract_desc_str(args, "").trim_start().starts_with("BLOCKED:") {
+                BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = true);
+            }
+        } else if BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
+            record_describe_level_skip(extract_desc_str(args, "unnamed"));
+        }
+    } else if !mark_skip_in_example() && BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
+        record_describe_level_skip(extract_desc_str(args, "unnamed"));
+    }
+
+    Ok(val)
+}
+
 /// Record an example executed OUTSIDE the tree-walk interpreter (a spec run
 /// on the JIT through the rt_bdd_* runtime), so the file verdict and the
 /// `SIMPLE_TEST_RESULT_FILE` evidence count it exactly like an interpreted one.
@@ -1364,32 +1555,25 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "pending" | "pending_it" => {
-            // The BDD table is consulted before regular function dispatch.  Keep
+            // The BDD table is consulted before regular function dispatch. Keep
             // the historical standalone marker only when no Simple definition
-            // owns this name; otherwise a user or stdlib DSL implementation
-            // would be silently bypassed and the enclosing example could pass
-            // without running its body.
+            // owns this name; otherwise let the Simple DSL body run and reconcile
+            // its outcome in `begin_spec_dsl_call` / `finish_spec_dsl_call` so
+            // governance rejections (e.g. SIMPLE_SAFETY_PROFILE=critical) fail
+            // instead of silently passing/skipping.
             if functions.contains_key(name) {
-                // The Simple definition runs (validation, its own "... pending"
-                // line, its counter). What it cannot do is reach this table's
-                // bookkeeping, so mirror the outcome here before deferring:
-                //  * inside an `it`, flag the example so the `it` arm reports it
-                //    as pending instead of a pass (spec.spl `_execute_it` rule);
-                //  * at describe level, record one skipped example so the SPEC
-                //    FILE VERDICT agrees with the runner's `Results:` line, which
-                //    counts the "... pending" marker the Simple body prints.
-                if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
-                    BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = true);
-                    if extract_desc_str(args, "").trim_start().starts_with("BLOCKED:") {
-                        BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = true);
-                    }
-                } else if BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
-                    record_describe_level_skip(extract_desc_str(args, "unnamed"));
-                }
                 return Ok(None);
             }
 
             let name_str = extract_desc_str(args, "unnamed");
+
+            if BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+                BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = true);
+                if name_str.trim_start().starts_with("BLOCKED:") {
+                    BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = true);
+                }
+                return Ok(Some(Value::Nil));
+            }
 
             let indent = BDD_INDENT.with(|cell| *cell.borrow());
             let indent_str = "  ".repeat(indent);
@@ -1404,21 +1588,9 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "skip" | "skip_it" | "skip_context" => {
-            // Owned by the Simple spec library (src/lib/nogc_sync_mut/spec.spl):
-            // it validates the skip, prints "... skipped (<reason>)" /
-            // "context skipped: <reason>" and bumps its own counter, which the
-            // test runner's `Results:` line counts from the output. Nothing
-            // reached this table, so the SPEC FILE VERDICT said `skipped=0` for
-            // the same run. Record the skipped example here, then defer to the
-            // Simple body unchanged (a rejected skip under a critical assurance
-            // profile still prints its FAILED line from there). At describe level
-            // it is one skipped example. Inside an `it` body it marks THAT
-            // example skipped (the `it` arm reports it, skip wins); before this
-            // the call was left alone and the example reported a pass. Outside
-            // any describe it is left alone.
-            if functions.contains_key(name) && !mark_skip_in_example() && BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
-                record_describe_level_skip(extract_desc_str(args, "unnamed"));
-            }
+            // Let the Simple spec library body run first via `begin_spec_dsl_call` /
+            // `finish_spec_dsl_call`; only valid non-rejected skips mark the example
+            // or describe skipped.
             Ok(None)
         }
         "expect" => {

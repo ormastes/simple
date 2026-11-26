@@ -336,3 +336,17 @@ regression spec `test/01_unit/compiler/95.interp/interpreter/bool_param_literal_
 call-argument checker (as this doc's 2026-08-10 re-investigation concluded);
 native (compile --native) gate shares the HIR lowering path but awaits an
 admitted producer for end-to-end proof. Seed-smoke evidence only.
+
+## 2026-11-26 BF-4 (work/bf-4-rust-interp-semantics-20261126, release/1.0.0) — FIXED (all literal call paths enforced)
+
+Remaining gaps found and fixed in the Rust seed interpreter (`src/compiler_rust/compiler/src/`):
+
+- `interpreter_call/core/arg_binding.rs`: `bind_args_with_values_named` (used by overloaded calls `FUNCTION_OVERLOADS`, owned-receiver methods, and write-back calls) previously omitted `reject_bool_literal_args`, so overloaded calls (`ov(42)`) accepted integer literals silently. Now enforced on both the positional fast path and the general named/default binding path, plus exported `reject_bool_literal_args_for_slice`.
+- `interpreter_call/mod.rs`, `interpreter_method/mod.rs` (`try_exec_ufcs_method` and `Map.new` static overload), `interpreter_method/special/objects.rs` (`exec_static_method_candidates`), and `interpreter_helpers/{method_dispatch,patterns}.rs` (`call_method_on_value_with_args`): enforced `reject_bool_literal_args_for_slice` on pre-evaluated static class methods (`Gate.make(42)`), direct UFCS (`t.ufcs_check(42)`), and chained statement UFCS (`make_tag().ufcs_check(42)`).
+
+Verified with targeted debug cargo tests:
+- `cargo test -j 2 -p simple-compiler --test bf4_interpreter_bugs` (`bug1_rejects_literal_non_bool_across_all_call_paths` 9/9 call shapes + `bug1_preserves_bool_and_presence_query_contract`: ok)
+- `cargo test -j 2 -p simple-compiler --test bool_parameter_literal_admission` (4/4 ok)
+- `cargo test -j 2 -p simple-compiler --lib interpreter_call::` (50/50 ok) and `--lib interpreter_method::` (30/30 ok)
+
+Note on remaining scope: `val x: i64 = 42; takes_bool(x)` (typed non-bool local/param identifiers) intentionally remains outside the runtime tree-walk interpreter because `opt.?` still passes payload values via `present_value_as_bool_arg` and `Env` does not enforce static variable types (`bool_param_rejects_non_bool_spec.spl` 7/7 covers the HM checker).

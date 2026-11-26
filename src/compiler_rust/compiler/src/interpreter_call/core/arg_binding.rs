@@ -117,7 +117,7 @@ fn reject_bool_literal_arg(expr: &Expr, param: &Parameter) -> Option<CompileErro
 /// parameter is rejected BEFORE any argument is evaluated. Spreads fan out per
 /// element with a statically unknown count, so a call containing one keeps the
 /// pure runtime contract; variadic callees are excluded by the caller.
-fn reject_bool_literal_args(
+pub(crate) fn reject_bool_literal_args(
     args: &[Argument],
     params_to_bind: &[&Parameter],
     named_params: &std::collections::HashSet<&str>,
@@ -148,6 +148,17 @@ fn reject_bool_literal_args(
         admission_idx += 1;
     }
     Ok(())
+}
+
+/// Convenience wrapper for pre-evaluated / static / UFCS call sites that have
+/// a raw `Parameter` slice and AST `Argument` slice without prebuilt lookup sets.
+pub(crate) fn reject_bool_literal_args_for_slice(params: &[Parameter], args: &[Argument]) -> Result<(), CompileError> {
+    if args.is_empty() || params.iter().any(|p| p.variadic) || args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+        return Ok(());
+    }
+    let params_to_bind: Vec<&Parameter> = params.iter().collect();
+    let named_params: std::collections::HashSet<&str> = args.iter().filter_map(|a| a.name.as_deref()).collect();
+    reject_bool_literal_args(args, &params_to_bind, &named_params)
 }
 
 // Value-type (struct) arguments are passed by copy. Until 2026-08-21 every
@@ -846,6 +857,16 @@ pub(crate) fn bind_args_with_values_named(
     // the one value sitting at its index, so the identity this fast path rests
     // on does not hold for it (`c.addall(7)` must bind `(7,)`, not `7`).
     if variadic_idx.is_none() && args.len() == bindable_len && arg_exprs.iter().all(|arg| arg.name.is_none()) {
+        if !arg_exprs.is_empty()
+            && arg_exprs.len() == args.len()
+            && !arg_exprs.iter().any(|a| matches!(a.value, Expr::Spread(_)))
+        {
+            for (param, arg) in params.iter().filter(is_bindable).zip(arg_exprs.iter()) {
+                if let Some(err) = reject_bool_literal_arg(&arg.value, param) {
+                    return Err(err);
+                }
+            }
+        }
         for (param, value) in params.iter().filter(is_bindable).zip(args.iter()) {
             let value = await_value(value.clone())?;
             let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
@@ -872,6 +893,9 @@ pub(crate) fn bind_args_with_values_named(
     {
         let named_params: std::collections::HashSet<&str> =
             arg_exprs.iter().filter_map(|a| a.name.as_deref()).collect();
+        if variadic_idx.is_none() && !arg_exprs.is_empty() && arg_exprs.len() == args.len() {
+            reject_bool_literal_args(arg_exprs, &params_to_bind, &named_params)?;
+        }
         let mut positional_idx = 0usize;
         for (idx, value) in args.iter().enumerate() {
             let slot = match arg_exprs.get(idx).and_then(|a| a.name.as_deref()) {

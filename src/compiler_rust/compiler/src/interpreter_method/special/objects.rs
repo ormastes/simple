@@ -245,6 +245,7 @@ fn exec_static_method_candidates(
     method: &str,
     candidates: &[&FunctionDef],
     generic_params: &[String],
+    args: &[Argument],
     positional_values: &[Value],
     evaluated_args: Vec<(Option<String>, Value)>,
     env: &mut Env,
@@ -279,6 +280,9 @@ fn exec_static_method_candidates(
     }) else {
         return Ok(None);
     };
+
+    crate::interpreter::interpreter_call::reject_bool_literal_args_for_slice(&method_def.params, args)
+        .map_err(|e| crate::interpreter::interpreter_call::name_callee(e, method_def))?;
 
     let mut local_env: Env = Env::new();
     let mut positional_idx = 0;
@@ -366,6 +370,7 @@ pub fn handle_constructor_methods(
             method,
             &candidates,
             &class_def.generic_params,
+            args,
             &positional_values,
             evaluated_args,
             env,
@@ -524,6 +529,7 @@ pub fn handle_constructor_methods(
             method,
             &static_candidates,
             &[],
+            args,
             &positional_values,
             evaluated_args,
             env,

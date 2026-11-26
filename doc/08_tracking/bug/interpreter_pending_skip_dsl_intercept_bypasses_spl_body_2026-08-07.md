@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (P2)
+- Status: RESOLVED (2026-11-26 — BF-4 fix reconciles Rust BDD outcome with `.spl` body instead of pre-marking pending/skip)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - Found: 2026-08-07, while landing WP-9 (skip governance,
   `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`)
@@ -140,3 +140,15 @@ stands: delete the arm once the self-hosted binary is the default tool.
 Not executable on this lane; resumes if/when the seed is next rebuilt for
 another reason and an owner picks option (a) or (b) from the 2026-08-07
 "Suggested owner" section.
+
+## 2026-11-26 BF-4 (work/bf-4-rust-interp-semantics-20261126, release/1.0.0) — RESOLVED
+
+On `release/1.0.0`, `interpreter_call/bdd.rs` already deferred `pending` / `pending_it` / `skip` / `skip_it` / `skip_context` when `functions.contains_key(name)` (`return Ok(None)`), **however** a correctness bug remained:
+1. `bdd.rs` still set `BDD_PENDING_IN_IT`, `BDD_SKIP_IN_IT`, or `record_describe_level_skip` *before* the `.spl` body ran (and `it` checked `BDD_SKIP_IN_IT` before `result: Err`), so under `SIMPLE_SAFETY_PROFILE=critical`, rejected `pending`/`skip`/`skip_it` calls (and arity/runtime errors) were still silently reported as skipped/passed (`0 failures`) instead of failing.
+2. `spec.spl::skip` checked `_case_depth.len() > 0` to distinguish in-case skips from `_run_test("skipped")`-gated describe skips, which missed Rust `bdd.rs` `it` blocks.
+
+Fix in `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` (`begin_spec_dsl_call` / `finish_spec_dsl_call`) and `src/compiler_rust/compiler/src/interpreter_call/mod.rs`:
+- Remove pre-execution pending/skip bookkeeping when `functions.contains_key(name)`.
+- Temporarily supply `_case_depth` during in-`it` `skip(...)` calls, snapshot `spec.spl` globals (`current_test_errors`, `test_errors`, `test_failed`, `BDD_TOTALS.1`), run the real `.spl` DSL function, and reconcile the verdict afterward: `.spl` errors propagate, governance rejections fail the `it`/describe (`BDD_EXPECT_FAILED` or `record_test_result(..., false, false)`), and only non-rejected calls record pending/skip.
+
+Verified via `cargo test -j 2 -p simple-compiler --test bf4_interpreter_bugs bug2_pending_and_skip_execute_spl_body_and_honor_governance` (ok: `pending_inside_it_not_pass_spec.spl`, `pending_runtime_accounting_spec.spl`, `skip_governance_probe_spec.spl` 4/4, `skip_governance_spec.spl` 23/23, `SIMPLE_SAFETY_PROFILE=critical` rejections for `pending`, in-`it` `skip`, `skip_context`, and `SIMPLE_TEST_FILTER=skipped` `skip_it`/`skip`, plus `moderate` valid skips) and `--lib interpreter_call::` (50/50 ok).

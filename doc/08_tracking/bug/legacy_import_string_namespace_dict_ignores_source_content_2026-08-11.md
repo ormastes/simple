@@ -213,3 +213,10 @@ two-line reproducer (`import string` + `string.char_at("hello", 1)` via
 `SIMPLE_LIB=src bin/simple.exe run`) now prints `char_at=e` — previously the
 stale 8-`bm_*`-key dict error. The original stale-dict symptom is closed on
 the deployed binary; status set to FIXED.
+
+## 2026-11-26 BF-4 (work/bf-4-rust-interp-semantics-20261126, release/1.0.0) — Re-verified FIXED
+
+Re-verified directly on `release/1.0.0` via `cargo test -j 2 -p simple-compiler --test bf4_interpreter_bugs bug6_legacy_import_string_and_namespace_specs` (ok) and `--lib interpreter_module::path_resolution` (18/18 ok):
+- `import string; string.char_at("hello", 1)` returns `"e"` (`Ok(0)`).
+- `test/01_unit/compiler/interpreter/full_module_source_namespace_spec.spl`: 4/4 passed (`Ok(0)`).
+- `test/02_integration/compiler/interpreter/legacy_string_source_namespace_spec.spl`: 2/2 passed (`Ok(0)`), including `transform(7) == -93`.
