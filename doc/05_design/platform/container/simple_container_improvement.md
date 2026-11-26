@@ -197,3 +197,33 @@ Increment 1 designed; implementation lanes A–D dispatched per `doc/03_plan/pla
 ## Status 2026-11-26
 
 Increment 1 implemented and verified: 6 specs / 60 examples green on the Windows host. `immutable_store_v1` moved to `src/lib/nogc_sync_mut/storage/` (it does file I/O; `common/` is pure). Docs moved under `doc/<phase>/platform/container/`. Spec mirror generated. Lands via PR to `release/1.0.0`.
+
+## 2026-11-26 Increment 2 scope
+
+Increment 1 landed (PR #11818). Increment 2 has three lanes. Lane 0 lands first, alone. It changes the store's API and on-disk format while the store still has no non-spec consumers.
+
+### Lane 0 — store API/format hardening (`work/container-inc2-hardening-20261126`)
+
+1. **Counted docs.** Root and pin docs carry a `count: <n>` header field equal to the number of key lines. Decode rejects a missing, non-canonical or mismatched count, so a document truncated at a line boundary can no longer decode as valid.
+2. **Canonical integers.** Every decoded integer (`format_version`, `generation`, `count`, collision suffix `_c<n>`) must be canonical decimal: no leading `0` except `0` itself, no sign, no spaces. `_c01` and `generation: 007` are rejected.
+3. **Pinned ingest.**
+   ```
+   pub fn immutable_store_v1_ingest_pinned(root: text, bytes: [u8], policy: text,
+           pin_id: text, owner: text) -> StoreIngestV1
+   ```
+   The key is added to pin `pin_id` (creating it for `owner`) **before** the object becomes visible under that key. That covers the collision-disambiguated key too, so GC can never collect an ingested-but-unrooted object between ingest and root publication. The pin is an existing record, extended with the key appended only if absent. The plain `immutable_store_v1_ingest` remains for callers that pin explicitly.
+4. **Pin owner check.** Updating an existing pin whose `owner` differs returns `pin-owner-mismatch`; it never replaces another owner's refs. `immutable_store_v1_release_pin` gains an `owner` parameter and enforces the same check.
+5. **Aligned bounds.** The pin read bound equals the root read bound (4 MiB), and `_ISV1_MAX_REFS` is lowered to 16384. Any pin the API accepts must also fit under the read bound.
+6. **GC name validation.** GC applies `_isv1_name_valid` to every root and pin file stem. A stem that fails validation rejects the run, failing closed.
+7. **Domain units.** `ObjectRecordV1.format_version/logical_length/generation` and `HashDigestV1.byte_len`, plus the bool returns of `object_record_v1_valid` and `hash_policy_v1_supported`, use exported `unit`s in place of `@allow(primitive_api)`. Conditions read `.value`, because of the seed bug recorded in `doc/08_tracking/bug/seed_bool_unit_always_truthy_in_condition_2026-11-26.md`.
+
+**Named gap, not fixed here:** no synchronous SOSIX filesystem owner exists (`std.nogc_sync_mut.sosix` covers env, process and temp only). The store and SCV both use the typed std `io.file_ops` owner, with no direct `rt_*`. Moving them to SOSIX needs a sync SOSIX fs surface first.
+
+### Lane A — SCV adapter (after Lane 0)
+This lane closes the architecture Phase 1 exit evidence: SCV references store objects through a read-only adapter, legacy `sha256_<hex>` objects import with their identity preserved, and two clients share one published object. Its signatures are fixed in a later revision of this section before dispatch.
+
+### Lane B — Phase 2 storage view on the host (after Lane 0)
+This lane provides an immutable base with a private upper layer over store objects, plus filesystem save/load and reference clone, all proven with real temp directories on this Windows host. Its signatures are fixed before dispatch.
+
+### Blocked on this host (honest stopping line)
+Phase 2 native memory/confinement providers (Docker on Windows per owner engine mapping, Podman, Jail, Seatbelt), Phase 3 SimpleOS shared pages/PMM, Phase 4 non-Windows provider qualification, and Phase 5 benchmarks at scale produce no evidence on this host. Each needs its target host or the QEMU/board lanes (`.claude/rules/board-runnable.md`).

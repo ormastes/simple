@@ -42,6 +42,10 @@ Final merge review by the coordinating session at highest capability before PR.
 
 Increment 1 implemented and verified: 6 specs / 60 examples green on the Windows host. `immutable_store_v1` moved to `src/lib/nogc_sync_mut/storage/` (it does file I/O; `common/` is pure). Docs moved under `doc/<phase>/platform/container/`. Spec mirror generated. Lands via PR to `release/1.0.0`.
 
+## Status 2026-11-26 — Increment 2 Lane 0
+
+Lane 0 (store API/format hardening, `work/container-inc2-hardening-20261126`) implemented items 1-7: counted root/pin docs, canonical integers, `immutable_store_v1_ingest_pinned`, pin owner check (`release_pin` now takes `owner`), aligned 4 MiB pin bound with `_ISV1_MAX_REFS` 16384, GC stem validation, and domain units in `object_record_v1`/`hash_policy_v1`. Existing stores written before the `count` field are rejected by decode (no non-spec consumers yet). Review fixes: pins are now append-only directories (`pins/<id>/owner`, `pins/<id>/refs/<key>`, no-replace publication, no lost updates or owner races); GC lists candidates before reading roots/pins and re-reads them after moving, restoring any key that became reachable (a reader may transiently see `missing`); root docs require a terminating newline and bare (unquoted) integers; pinned-ingest reuse paths republish if GC quarantined the object.
+
 ## Review follow-ups (Fable review 2026-11-26)
 
 Fixed in increment 1: root CAS made atomic via no-replace `roots/<name>.g<N>.claim`
@@ -52,13 +56,10 @@ quarantine move is no-replace; launch qualification rejects an unavailable
 client authority.
 
 Open (P2, next increment):
-- Pin refs bound (65,536) exceeds the 1 MiB pin read bound; align the limits.
-- Root/pin doc decode has no count/terminator, so line-boundary truncation decodes as valid; staged publishes do not fsync.
-- Pin overwrite ignores owner and is read-then-write; ingest takes no pin, so a `reused: true` key can be collected before it is rooted.
-- Non-canonical integers (`_c01`, `generation: 007`) are accepted.
+- release_pin vs a same-owner concurrent ingest_pinned: ingest returns ok for a ref the release then deletes. Lanes must not release a pin they still ingest into.- release_pin is not atomic across owners (`dir_remove_all` order); rename the pin dir aside before deleting.- A GC move-then-restore can make `open` briefly return `missing` on a reused object; a GC that moves the winner mid-publish yields a spurious `publish-winner-unreadable`.- `_ISV1_MAX_REFS` is per call; total refs per pin are unbounded. Base-key refs from lost races over-retain.
+- Staged publishes do not fsync.
 - Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot.
 - `substring(..., byte_len())` on non-ASCII hostile lines in doc/record decode: confirm `substring` clamps (fail-closed) or reject non-ASCII first.
 - Pointer-cache write failures are ignored; an unrefreshable pointer bricks a root after 4096 generations (`root-claim-chain-too-long`).
-- GC derives the root name from the filename without `_isv1_name_valid`.
-- Replace `@allow(primitive_api)` in `object_record_v1`/`hash_policy_v1` with domain units; drop `.value` condition reads once the seed bool-unit bug is fixed.
+- Drop the `.value` condition reads on the new bool units once the seed bool-unit bug is fixed.
 - Specs: no gxhash known-answer vector through the policy; lost-race publish path not exercised.
