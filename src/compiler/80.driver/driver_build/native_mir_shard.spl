@@ -23,11 +23,11 @@
 # the schedule largest-first (native_mir_shard_lpt_order_v1).
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
-use std.io_runtime.{file_exists, file_read, file_size_raw}
+use std.io_runtime.{file_exists, file_read, file_size_raw, dir_exists, dir_list_or_empty}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_atomic_write_bytes}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_hash_sha256_or_empty}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1, disk_bound_cap_bytes}
 use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_sweep_with_lease}
 
 # Native cache scope retention (driver_aot_native_output.spl) removes scope
@@ -587,10 +587,81 @@ pub fn native_mir_shard_ledger_scope_dirs_v1(ledger: text) -> [text]:
 # `keep` - 1 scopes survive beyond the idle window and the build's own scope
 # takes the last slot when a child creates it. Returns directories removed.
 # reason: cache directory path, ledger paths and retention count in, removed-directory count out
+pub const NATIVE_CACHE_SCOPES_KEEP_DEFAULT_V1: i64 = 6
+pub const NATIVE_CACHE_SCOPES_KEEP_HEADROOM_V1: i64 = 2
+
+fn _append_unique_nonempty_v1(items: [text], candidate: text) -> [text]:
+    val trimmed = candidate.trim()
+    if trimmed == "" or items.contains(trimmed):
+        return items
+    var out = items
+    out.push(trimmed)
+    out
+
+fn _append_root_shard_ledgers_v1(items: [text], root: text) -> [text]:
+    var out = items
+    val dir = root.trim()
+    if dir == "" or not dir_exists(dir):
+        return out
+    val latest = "{dir}/mir-run-latest"
+    if file_exists(latest) or dir_exists(latest):
+        out = _append_unique_nonempty_v1(out, latest)
+    for entry in dir_list_or_empty(dir):
+        if entry.starts_with("mir-queue-"):
+            val qdir = "{dir}/{entry}"
+            if dir_exists(qdir):
+                out = _append_unique_nonempty_v1(out, qdir)
+    out
+
+# Default scope retention floor for sharded native builds: preserve at least 6
+# scopes, and raise the default to `mir_shard_count + 2` when sharding so
+# early shards (e.g., Shard 0/8, 1/8) are not evicted before late shards finish.
+@allow(primitive_api)
+pub fn native_cache_scopes_keep_default_v1(mir_shard_count_raw: text) -> i64:
+    val parsed = mir_shard_count_raw.trim().to_i64() ?? 0
+    val sharded_floor = if parsed > 0: parsed + NATIVE_CACHE_SCOPES_KEEP_HEADROOM_V1 else: NATIVE_CACHE_SCOPES_KEEP_DEFAULT_V1
+    if sharded_floor > NATIVE_CACHE_SCOPES_KEEP_DEFAULT_V1: sharded_floor else: NATIVE_CACHE_SCOPES_KEEP_DEFAULT_V1
+
+@allow(primitive_api)
+pub fn native_cache_scopes_keep_for_v1(explicit_keep_raw: text, mir_shard_count_raw: text) -> i64:
+    val fallback = native_cache_scopes_keep_default_v1(mir_shard_count_raw)
+    val parsed = explicit_keep_raw.trim().to_i64() ?? 0
+    if parsed > 0: parsed else: fallback
+
+pub fn native_mir_shard_active_ledger_paths_v1(cache_root: text, hir_cache_dir: text,
+        mir_queue: text, mir_link: text) -> [text]:
+    var out: [text] = []
+    out = _append_unique_nonempty_v1(out, mir_queue)
+    out = _append_unique_nonempty_v1(out, mir_link)
+    out = _append_root_shard_ledgers_v1(out, cache_root)
+    out = _append_root_shard_ledgers_v1(out, hir_cache_dir)
+    out
+
+@allow(primitive_api)
+pub fn native_cache_protect_active_shard_ledgers_v1(ledgers: [text]) -> i64:
+    var seen_scopes: [text] = []
+    var marked: i64 = 0
+    for ledger in ledgers:
+        for scope in native_mir_shard_ledger_scope_dirs_v1(ledger):
+            if not seen_scopes.contains(scope):
+                seen_scopes.push(scope)
+                if disk_bound_mark_dir_used(scope):
+                    marked = marked + 1
+    marked
+
 @allow(primitive_api)
 pub fn native_cache_scope_start_retention_v1(lease: NativeCacheLease, prior_ledgers: [text],
         keep: i64) -> i64:
-    for ledger in prior_ledgers:
-        for scope in native_mir_shard_ledger_scope_dirs_v1(ledger):
-            val _marked = disk_bound_mark_dir_used(scope)
+    val _marked = native_cache_protect_active_shard_ledgers_v1(prior_ledgers)
     native_cache_sweep_with_lease(lease, "", keep, NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1)
+
+@allow(primitive_api)
+pub fn native_cache_scope_midbuild_sweep_v1(lease: NativeCacheLease, current: text,
+        hir_cache_dir: text, mir_queue: text, mir_link: text,
+        mir_shard_count_raw: text, min_age_s: i64 = NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1) -> i64:
+    val active_ledgers = native_mir_shard_active_ledger_paths_v1(
+        lease.cache_root, hir_cache_dir, mir_queue, mir_link)
+    val _marked = native_cache_protect_active_shard_ledgers_v1(active_ledgers)
+    val default_keep = native_cache_scopes_keep_default_v1(mir_shard_count_raw)
+    val keep = disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", default_keep)
+    native_cache_sweep_with_lease(lease, current, keep, min_age_s)

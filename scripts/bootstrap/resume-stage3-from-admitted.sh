@@ -925,7 +925,13 @@ if [ -n "${SIMPLE_STAGE3_DIRECT_THREADS:-}" ] && [ "$stage3_threads" -gt 1 ]; th
   # The nested compiler watchdog has a separate tree cap. Admit its actual
   # policy, not just the outer process limit, before allowing fanout.
   case "$platform" in
-    *-apple-darwin*) : "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:=11534336}"; export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB ;;
+    *-apple-darwin*)
+      if [ -z "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$(bootstrap_stage3_memory_darwin_default_cap_kib 2>/dev/null || printf '11534336\n')
+      fi
+      : "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:=11534336}"
+      export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      ;;
   esac
   . "$root/scripts/bootstrap/lib/tree-rss-policy.shs"
   bootstrap_tree_rss_resolve "$stage3_threads" "$root" ||
@@ -1200,8 +1206,11 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # The watchdog must honor a Stage 3 process cap configured below the tree
   # cap, while retaining the stricter existing tree cap by default.
   # Stage 3 compiles the whole compiler in one process; 6-7 GB tripped in HIR on
-  # macOS. Default macOS Stage 3 to 11 GiB (11534336 KiB). Export it so the
-  # transcribed-run watchdog inside the worker applies the same tree cap.
+  # macOS. Default macOS Stage 3 to max(11 GiB, host_kib / 3) capped at 20 GiB.
+  # Export it so the transcribed-run watchdog inside the worker applies the same tree cap.
+  if [ -z "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$(bootstrap_stage3_memory_darwin_default_cap_kib 2>/dev/null || printf '11534336\n')
+  fi
   : "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:=11534336}"
   export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
   stage3_darwin_rss_cap_kib=$(bootstrap_stage3_memory_darwin_rss_cap_kib \

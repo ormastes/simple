@@ -1,0 +1,41 @@
+"""
+Regression coverage for mir_shard_worker_budget_16gb_serializes_mir_2026-10-19.
+Verifies closure-scaled MIR pricing admits >= 2 MIR workers below a 26.7 GB
+tree budget on small/medium closures while bounding full closures at measured
+SHARD_MIR_WORKER_KB_V1 (26424115 KiB) and honoring overrides.
+"""
+# @cover src/app/cli/file_worker_pool_refusal.spl
+# @cover src/app/cli/shard_mem_clamp.spl
+# @req REQ-SSPEC-CLI
+
+use std.spec.*
+use app.io.env_ops.{env_get, env_set, env_unset}
+use app.cli.file_worker_pool_refusal.{file_worker_pool_mir_budget_kb_v1,
+    file_worker_pool_mir_price_kb_v1}
+use app.cli.shard_mem_clamp.{SHARD_MIR_WORKER_KB_V1, SHARD_MIR_WORKER_FLOOR_KB_V1,
+    shard_threads_tree_cap_for, shard_threads_parent_cap_for}
+
+describe "MIR shard closure-scaled worker admission":
+    it "admits >= 2 MIR workers under 32 GiB where flat 16 GB previously serialized to 1":
+        step("Compare closure-scaled MIR price for 300-module closure vs flat 16 GB")
+        val old_mir = env_get("SIMPLE_MIR_SHARD_WORKER_KB") ?? ""
+        val _u = env_unset("SIMPLE_MIR_SHARD_WORKER_KB")
+        val price_300 = file_worker_pool_mir_price_kb_v1(300)
+        expect(price_300 >= SHARD_MIR_WORKER_FLOOR_KB_V1).to_equal(true)
+        expect(price_300 < 16000000).to_equal(true)
+        # Under a 32 GiB tree cap (60% usable = 20.1M KiB), closure-scaled 9M admits 2 while flat 16M serialized to 1.
+        val admitted_tree = shard_threads_tree_cap_for(8, price_300, 64000000, 33554432, true)
+        val serialized_at_16g = shard_threads_tree_cap_for(8, 16000000, 64000000, 33554432, true)
+        val _r = if old_mir == "": env_unset("SIMPLE_MIR_SHARD_WORKER_KB") else: env_set("SIMPLE_MIR_SHARD_WORKER_KB", old_mir)
+        expect(admitted_tree >= 2).to_equal(true)
+        expect(serialized_at_16g).to_equal(1)
+
+    it "bounds full-closure MIR shards at measured SHARD_MIR_WORKER_KB_V1 and honors overrides":
+        step("Check full closure ceiling and explicit SIMPLE_MIR_SHARD_WORKER_KB override")
+        expect(file_worker_pool_mir_price_kb_v1(2000)).to_equal(SHARD_MIR_WORKER_KB_V1)
+        val old_mir = env_get("SIMPLE_MIR_SHARD_WORKER_KB") ?? ""
+        val _s = env_set("SIMPLE_MIR_SHARD_WORKER_KB", "10000000")
+        val override_budget = file_worker_pool_mir_budget_kb_v1(2000, false)
+        val _r = if old_mir == "": env_unset("SIMPLE_MIR_SHARD_WORKER_KB") else: env_set("SIMPLE_MIR_SHARD_WORKER_KB", old_mir)
+        expect(override_budget).to_equal(10000000)
+        expect(shard_threads_tree_cap_for(8, override_budget, 64000000, 35000000, true)).to_equal(2)
