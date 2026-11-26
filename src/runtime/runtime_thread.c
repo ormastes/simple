@@ -47,6 +47,10 @@
     #if defined(__APPLE__) || defined(__MACH__)
         #include <sys/sysctl.h>
     #endif
+    #if defined(__APPLE__)
+        #include <mach/mach.h>
+        #include <mach/mach_vm.h>
+    #endif
 #endif
 
 /* XRay thread-context integration is opt-in for the source-built Linux GNU
@@ -694,11 +698,12 @@ static int spl_exec_segment_probe(struct dl_phdr_info* info, size_t size, void* 
 }
 #endif
 
-/* True only when raw_addr lies inside an executable PT_LOAD segment of a
- * loaded object. dladdr() alone is not evidence: it also resolves DATA
- * addresses (a static closure record in .data/.bss), and treating such a
- * record as code jumps into it. A TBI/MTE top-byte tag is stripped before
- * the range test. */
+/* True only when raw_addr lies inside an executable region/segment (Windows
+ * VirtualQuery, ELF dl_iterate_phdr PT_LOAD+PF_X, or Darwin
+ * mach_vm_region_recurse VM_PROT_EXECUTE). dladdr() alone is not evidence: it
+ * also resolves DATA addresses (a static closure record in .data/.bss/__DATA),
+ * and treating such a record as code jumps into it. A TBI/MTE top-byte tag is
+ * stripped before the range test. */
 static int rt_native_address_is_code(int64_t raw_addr) {
 #if defined(_WIN32) || defined(_WIN64)
     MEMORY_BASIC_INFORMATION region;
@@ -715,6 +720,38 @@ static int rt_native_address_is_code(int64_t raw_addr) {
     probe.found = 0;
     dl_iterate_phdr(spl_exec_segment_probe, &probe);
     return probe.found;
+#elif defined(__APPLE__)
+    uint64_t target = (uint64_t)raw_addr & ~RT_NATIVE_PTR_TAG_BITS;
+    if (target < 4096ULL) {
+        return 0;
+    }
+    natural_t depth = 0;
+    for (natural_t iter = 0; iter < 16; iter++) {
+        mach_vm_address_t addr = (mach_vm_address_t)target;
+        mach_vm_size_t size = 0;
+        vm_region_submap_short_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+        kern_return_t kr = mach_vm_region_recurse(
+            mach_task_self(),
+            &addr,
+            &size,
+            &depth,
+            (vm_region_recurse_info_t)&info,
+            &count
+        );
+        if (kr != KERN_SUCCESS || size == 0) {
+            return 0;
+        }
+        if (target < (uint64_t)addr || (target - (uint64_t)addr) >= (uint64_t)size) {
+            return 0;
+        }
+        if (info.is_submap) {
+            depth++;
+            continue;
+        }
+        return (info.protection & VM_PROT_EXECUTE) != 0;
+    }
+    return 0;
 #else
     Dl_info info;
     memset(&info, 0, sizeof(info));
