@@ -16,4 +16,4 @@ Changed-input synthetic regression passed once: full failed-tool selection inclu
 
 ## Resolution (2026-11-03)
 
-Fixed in source: bootstrap_verification_module_limit (scripts/bootstrap/bootstrap-campaign*.shs) resolves keep-going full runs to limit 0; pinned by scripts/bootstrap/tests/full-inventory-selection-test.py. Closed on source evidence.
+Fixed in source: bootstrap_verification_module_limit (scripts/bootstrap/bootstrap-campaign*.shs) resolves keep-going full runs to limit 0; pinned by scripts/bootstrap/tests/full-inventory-selection-test.py [deleted 2026-11-26]. Closed on source evidence.

@@ -211,7 +211,7 @@ change with its own evidence, not an environment default.
    consumers are unverified under the new scope.
 8. Nothing here was executed: no compiler binary is deployed in the worktree
    and builds are forbidden this session. The unit spec addition is marked
-   UNEXECUTED; `scripts/bootstrap/tests/stage3-invocation-consistency-test.py`
+   UNEXECUTED; `scripts/bootstrap/tests/stage3-invocation-consistency-test.py [deleted 2026-11-26]`
    passes (shell stubs); `stage3-focused-provenance-test.py` fails identically
    at baseline (exit 90 precondition), so it is not a signal either way.
 9. Managed Stage 3 requests batching but the actual unconditional bootstrap-flat

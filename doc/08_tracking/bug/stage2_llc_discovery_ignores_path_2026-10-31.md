@@ -36,6 +36,6 @@ is removed. That covers `inherited_build_settings` no longer keeping `SIMPLE_LLV
 `test/01_unit/compiler/95.interp/interpreter/llvm/tool_discovery_path_spec.spl` puts a fixture
 tool on PATH and asserts that `_find_tool_discover` returns its absolute, existing path. Red
 before the fix (it returned the bare name), green after. `test/01_unit/compiler/backend/llvm_tool_resolution_spec.spl`
-and `scripts/bootstrap/tests/hello-sanity-matrix-env-test.py` still pass. End-to-end Stage 2
+and `scripts/bootstrap/tests/hello-sanity-matrix-env-test.py [deleted 2026-11-26]` still pass. End-to-end Stage 2
 `native-build` re-verification without `SIMPLE_LLVM_BIN` is still pending a Stage 2 rebuild that
 includes this fix.

@@ -22,7 +22,7 @@ source-policy tail. RSS and ABI checks, and source-before/source-after guards
 remain in place. No ambient manifest selects replacement roots.
 
 Six source-only controls in
-`scripts/bootstrap/tests/stage3-source-policy-test.py` passed after the final
+`scripts/bootstrap/tests/stage3-source-policy-test.py [deleted 2026-11-26]` passed after the final
 worker ABI update: exact
 order/optional closure, malformed refusal, production reconstruction,
 production digest/worker argv equality, all four launch branches, and
@@ -69,6 +69,6 @@ completed. Database registration is owned by the final composition lane.
 ## Status 2026-11-03: fix-implemented-verification-pending
 
 Source repair landed in 5990e2b0eb6 (`scripts/bootstrap/lib/stage3-source-policy.shs`, wired at
-resume-stage3-from-admitted.sh:607). Repro: `python scripts/bootstrap/tests/stage3-source-policy-test.py`
+resume-stage3-from-admitted.sh:607). Repro: `python scripts/bootstrap/tests/stage3-source-policy-test.py [deleted 2026-11-26]`
 on Linux (5/6 pass on Windows; `test_all_four_launches...` differs only in tmp/path env fields), then a
 stage3 resume run showing identical `--source` order in digest and worker argv.
