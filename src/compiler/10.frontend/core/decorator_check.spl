@@ -1,0 +1,287 @@
+# Unknown-decorator diagnostics (compiler_unknown_decorator).
+#
+# An `@name` decorator the compiler does not recognise used to be silently
+# preserved as inert metadata: the module-body arm's fall-through in
+# _ParserDecls/enum_module_body.spl, the member arm in the same file, and the
+# nested-decl arm in parser_stmts.spl all consumed-and-dropped unknown
+# spellings, so a typo like `@representaion_boundary` compiled clean and did
+# nothing. The Rust seed reports the same situation as a hard semantic error
+# ("unknown decorator `@name` on function `f`", compiler_rust/compiler/src/
+# decorator_apply.rs); the two lanes now share one contract:
+#
+#   default                     -> WARNING naming the tag and the function,
+#                                  compile continues, no semantic effect
+#   SIMPLE_STRICT_DECORATORS=1  -> hard parse error (seed's historical behaviour)
+#
+# Scope: module-level FUNCTION decorators only (seed parity -- the seed's
+# strict path runs only there); enum/struct/field/member/nested positions
+# stay silent metadata. See the gate comment on parser_check_decorator_name.
+#
+# There is no shared warnings-as-errors mechanism in the pure compiler (the
+# lint CLI's allow/warn/deny levels are a separate tool), so the env knob is
+# the whole mechanism, read once and memoised exactly like
+# SIMPLE_STRICT_FIELD_FORWARDING in
+# 20.hir/hir_lowering/_Expressions/accessor_forwarding.spl, with the same
+# `*_reset()` test hook. Value semantics follow the seed: unset and "0"
+# warn; any other SET value (including "") errors.
+#
+# "Known" below is the union of every spelling a compiler pass, the
+# preprocessor, the seed's directive/effect lists, or an in-tree tool
+# actually consumes; each group cites its consumer. A name missing from the
+# list is precisely the defect this check exists to surface -- do not add a
+# spelling here without a consumer, or the warning goes blind to real typos.
+# AOP `attr(...)` bare markers are user-defined and unregistrable; under this
+# compiler they are inert metadata, so they warn like any other unknown name
+# (the warning text says exactly that).
+
+use compiler.core.types.{int_to_str}
+use compiler.core.ast.{module_get_path}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, parser_error, parser_warn}
+use compiler.core.parser.{parser_advance, parser_skip_newlines_and_semicolons}
+use compiler.core.parser.{parser_tok_save, parser_tok_restore}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_rollback}
+
+# Direct runtime extern (cache_dir_evict.spl / eval_tables.spl precedent in
+# this package) instead of a std.io_runtime import: the std wrapper modules
+# carry `@representation_boundary` ffi metadata that older bootstrap seeds
+# reject in their own semantic phase, which would poison every closure that
+# includes this file.
+extern fn rt_env_get(key: text) -> text?
+
+# 0 = unread, 1 = strict (error), 2 = default (warn).
+var _strict_decorators_state: i64 = 0
+
+pub fn strict_decorators_enabled() -> bool:
+    if _strict_decorators_state == 0:
+        # Seed parity (decorator_apply.rs strict_decorators_enabled):
+        # `var_os(...).is_some_and(|v| v != "0")` -- unset and "0" warn, any
+        # other SET value (including "") errors. rt_env_get's nil distinguishes
+        # unset from set-but-empty.
+        val raw = rt_env_get("SIMPLE_STRICT_DECORATORS")
+        _strict_decorators_state = if raw != nil and (raw ?? "") != "0": 1 else: 2
+    _strict_decorators_state == 1
+
+# Test hook: forget the cached flag so the next read re-queries the environment.
+pub fn strict_decorators_reset():
+    _strict_decorators_state = 0
+
+# True when `name` (the spelling without the leading `@`) is consumed by some
+# compiler pass, the preprocessor, or an in-tree tool. Grouped by consumer;
+# keep the groups -- a bare alphabetical list is how vocabularies drift.
+pub fn parser_is_known_decorator(name: text) -> bool:
+    match name:
+        # 10.frontend module-body dispatch (enum_module_body.spl parse_module_body)
+        # plus the lock-level attribute family (lock_level_parser.spl).
+        case "lock_level" | "lock_level_exception" | "lock_order_exception" | "lock_order_exempt": true
+        case "representation_boundary" | "step" | "layer" | "layer_eq" | "advice": true
+        case "copy_budget" | "bounded_loop" | "derive" | "gpu" | "gpu_kernel": true
+        case "clocked" | "generic" | "sffi" | "unsafe" | "danger" | "hardware": true
+        case "flatten_struct_output" | "no_gc" | "required_init" | "rt": true
+        case "readonly" | "noalloc" | "bounded_time" | "simd" | "packed": true
+        # Conditional-compilation preprocessor (core/parser_preprocessor.spl);
+        # consumed before parse, listed so a surviving spelling never warns.
+        case "when" | "elif" | "else" | "end" | "cfg": true
+        # Asm placement / linkage (parser_pending_asm_placement +
+        # 00.common/_Attributes/decl_attrs.spl).
+        case "naked" | "section" | "align" | "global" | "noreturn" | "entry": true
+        case "interrupt" | "export" | "inline" | "always_inline" | "force_inline": true
+        case "no_mangle" | "boot" | "extern": true
+        # Kernel-loop and VHDL backend hints (parser_apply_pending_kernel_attrs,
+        # driver_compile_vhdl_*).
+        case "unroll" | "pipeline" | "memory": true
+        # Enum contract sections (35.semantics/enum_contract/attribute_source.spl
+        # and condition_check.spl).
+        case "closed" | "evolving" | "condition": true
+        # HIR attribute consumers (00.common/_Attributes/decl_attrs.spl and
+        # layout_attrs.spl: layout/platform/task/repr families).
+        case "volatile" | "volatile_read" | "volatile_write" | "nonvolatile": true
+        case "address" | "addr" | "must" | "prefer" | "error_not" | "warn_not": true
+        case "driver" | "native_lib" | "embed" | "support_async_immutable" | "must_use" | "no_reorder": true
+        case "alloc" | "no_alloc" | "fast_math" | "task" | "platform" | "layout": true
+        case "repr" | "preserve_order" | "compactq": true
+        # Member/field-position attributes (fn_struct_decls.spl).
+        case "layer_field" | "collection_algorithm" | "bits": true
+        # Effect and GPU directive spellings shared with the seed
+        # (decorator_apply.rs is_directive_decorator + parser effect diversion).
+        case "pure" | "io" | "net" | "fs" | "async": true
+        case "verify" | "trusted" | "ghost" | "auto_lean" | "bounds": true
+        case "gpu_device" | "gpu_shared" | "gpu_intrinsic": true
+        case "deterministic" | "name_checked" | "variant" | "immutable": true
+        # Test-runner / spec attributes (read off ParserFunction.attributes by
+        # the test runners; real usage in test/01_unit/compiler/async/).
+        case "test" | "property_test" | "snapshot_test" | "bench" | "ignore": true
+        case "skip" | "only" | "timeout" | "retry": true
+        # Lint / policy metadata (90.tools lint+fix, raw_rt_access opt-out).
+        case "allow" | "warn" | "deny" | "default" | "concurrency_mode": true
+        case "lint_profile" | "runtime_intrinsics": true
+        # Deprecation / provenance metadata.
+        case "deprecated" | "generated_by" | "generated" | "snapshot": true
+        case "bypass" | "skip_todo": true
+        # Framework and tool metadata with in-tree consumers: DI (@Lib/@inject),
+        # portal routing, extern ABI, gc-mode module tags, generated AST views,
+        # file-level @tag, RT context tags (90.tools/verify/
+        # forbidden_io_context_scan.spl), layer forwarding.
+        case "Lib" | "inject" | "sys_inject" | "public" | "requires_auth": true
+        case "abi" | "gc" | "node_tree" | "tag" | "realtime": true
+        # Compile-time introspection builtins (expression position,
+        # _ParserPrimary/primary_expr.spl); statement position drops them as
+        # metadata, which must not warn.
+        case "traits" | "file" | "line" | "function" | "column": true
+        case _: false
+
+# Recorded warnings, one per (path, line, name), for specs and tools.
+var _unknown_decorator_seen: [text] = []
+var _unknown_decorator_warnings: [text] = []
+
+pub fn unknown_decorator_warnings_get() -> [text]:
+    _unknown_decorator_warnings
+
+# Test hook: clear the dedup set and the recorded warnings.
+pub fn unknown_decorator_check_reset():
+    _unknown_decorator_seen = []
+    _unknown_decorator_warnings = []
+
+# Skip one balanced `(...)` group at the current token; bounded and EOF-safe.
+# Only ever entered where a `(` cannot start a declaration (decorator argument
+# lists), and the caller rolls the token stream back afterwards.
+fn parser_peek_skip_arg_group():
+    if par_kind_get() != 140:
+        return
+    var depth = 0
+    var guard = 0
+    var args_open = true
+    while args_open and guard < 256:
+        guard = guard + 1
+        val ak = par_kind_get()
+        if ak == 190:
+            args_open = false
+        else:
+            if ak == 140:
+                depth = depth + 1
+            elif ak == 141:
+                depth = depth - 1
+            parser_advance()
+            if depth == 0:
+                args_open = false
+
+# Best-effort, non-consuming description of the declaration the current
+# decorator stack annotates ("function `foo`", "enum `E`", ...), for the
+# unknown-decorator diagnostic. The capture points run BEFORE the decorated
+# declaration is parsed, so the item name is recovered by a bounded lookahead
+# over stacked `@...` spellings, an optional unconsumed argument list, and an
+# optional visibility modifier; anything unexpected keeps the generic
+# "declaration". Always rolls the token stream back.
+pub fn parser_peek_decorated_item() -> text:
+    val peek_snap = lex_snapshot_save()
+    val (peek_tok_nums, peek_tok_text) = parser_tok_save()
+    var item = "declaration"
+    var hops = 0
+    var scanning = true
+    while scanning and hops < 32:
+        hops = hops + 1
+        parser_skip_newlines_and_semicolons()
+        val k = par_kind_get()
+        if k == 171:
+            # Stacked decorator: skip `@`, its one-token name, and balanced args.
+            parser_advance()
+            val nk = par_kind_get()
+            if nk != 140 and nk != 190 and nk != 180:
+                parser_advance()
+            parser_peek_skip_arg_group()
+        elif k == 140:
+            # The capture point runs before the caller consumed the decorator's
+            # own argument list; skip it to reach the declaration.
+            parser_peek_skip_arg_group()
+        elif k == 29 or (k == 6 and par_text_get() == "pri"):
+            # Visibility modifier; the declaration keyword follows.
+            parser_advance()
+        elif k == 30 or k == 25 or k == 188:
+            # `static ...` / `extern ...` / `const ...` — the payload decides
+            # on the next pass (`const fn` names a function, a const binding
+            # falls through to the generic "declaration").
+            parser_advance()
+        elif k == 53:
+            parser_advance()
+            if par_kind_get() == 20:
+                parser_advance()
+            if par_kind_get() == 6:
+                item = "function `" + par_text_get() + "`"
+            scanning = false
+        elif k == 20 or k == 34:
+            parser_advance()
+            if par_kind_get() == 6:
+                item = "function `" + par_text_get() + "`"
+            scanning = false
+        elif k == 23 or k == 24 or k == 31 or k == 33:
+            var word = "trait"
+            if k == 23:
+                word = "struct"
+            elif k == 24:
+                word = "enum"
+            elif k == 31:
+                word = "class"
+            parser_advance()
+            if par_kind_get() == 6:
+                item = word + " `" + par_text_get() + "`"
+            scanning = false
+        elif k == 21 or k == 22:
+            var word = "var"
+            if k == 21:
+                word = "val"
+            parser_advance()
+            if par_kind_get() == 6:
+                item = word + " `" + par_text_get() + "`"
+            scanning = false
+        else:
+            scanning = false
+    lex_snapshot_rollback(peek_snap)
+    parser_tok_restore(peek_tok_nums, peek_tok_text)
+    item
+
+# Check ONE decorator spelling at a capture point, with `item` naming the
+# decorated declaration (pass parser_peek_decorated_item() at the capture
+# point; "" degrades to the generic "declaration"). Empty and known names are
+# no-ops, and so is every item that is not a module-level function (scope
+# gate below). Unknown names warn once per (path, line, name) -- re-parses of
+# the same module must not double-report -- or hard-error under
+# SIMPLE_STRICT_DECORATORS=1. The warning is printed with the seed's
+# `warning: ` prefix (parser_warn alone is invisible outside trace mode) and
+# also recorded through parser_warn so it travels with the parser state.
+pub fn parser_check_decorator_name(name: text, item: text):
+    if name == "":
+        return
+    if parser_is_known_decorator(name):
+        return
+    var item_text = item
+    if item_text == "":
+        item_text = "declaration"
+    # Scope: MODULE-LEVEL FUNCTION decorators only, in parity with the seed,
+    # whose strict path runs solely in module-level runtime-decorator
+    # application (decorator_apply.rs apply_runtime_decorators strict=true;
+    # its block-level path is strict=false, i.e. silent metadata). Enum,
+    # struct/class, field, member-position and nested-declaration attributes
+    # belong to vocabularies owned by other lanes (unsafe/danger, lock_level
+    # + its exception attributes, representation_boundary, layer_field,
+    # VHDL hardware/clocked, closed/evolving/complete/dyn,
+    # volatile/bits/fixed_address, AOP aspects); an incomplete known-set
+    # there would spam false warnings (AOP `attr(...)` markers are
+    # user-defined), so anything that is not a module-level function stays
+    # silent preserved metadata.
+    if not item_text.starts_with("function `"):
+        return
+    val path = module_get_path()
+    val line = par_line_get()
+    val key = path + "|" + int_to_str(line) + "|" + name
+    if _unknown_decorator_seen.contains(key):
+        return
+    _unknown_decorator_seen.push(key)
+    if strict_decorators_enabled():
+        # Same message core as the seed's semantic error.
+        parser_error("unknown decorator `@" + name + "` on " + item_text + " [compiler_unknown_decorator]")
+        return
+    # Contract text shared with the seed (decorator_apply.rs); the printed
+    # line carries the same leading `warning: ` the seed emits on stderr.
+    val msg = "unknown decorator `@" + name + "` on " + item_text + " -- treating it as metadata with no semantic effect (set SIMPLE_STRICT_DECORATORS=1 to make this an error) [compiler_unknown_decorator]"
+    _unknown_decorator_warnings.push(msg)
+    parser_warn(msg)
+    print "warning: {msg}"

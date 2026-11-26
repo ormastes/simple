@@ -1,0 +1,206 @@
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl 30%
+"""
+## Purpose and audience
+Executable contract for the unknown-decorator diagnostic
+(doc/03_plan/agent_tasks/unknown_decorator_warning.md): a module-level
+`@name` outside the known decorator vocabulary is a recorded parser WARNING
+naming the tag and the item (`[compiler_unknown_decorator]`), compilation
+continues with the spelling preserved as inert metadata, and
+SIMPLE_STRICT_DECORATORS=1 restores the hard error. Mirrors the Rust seed's
+decorator_apply.rs behavior so newer source stays usable on older toolchains.
+## Operator workflow
+bin/simple test test/01_unit/compiler/frontend/unknown_decorator_warning_spec.spl
+## Compatibility and limitations
+Drives the pure-Simple parser directly (parser_init_with_path +
+parse_module_body); it does not run the seed parser. Scope is module-level
+FUNCTION decorators only, in parity with the seed (decorator_apply.rs
+apply_runtime_decorators strict=true runs only there; its block-level path
+is strict=false silent metadata). Enum/struct/field/member/nested positions
+stay silent: those vocabularies (unsafe/danger, lock_level + its exception
+attributes, representation_boundary, layer_field, VHDL hardware/clocked,
+closed/evolving/complete/dyn, volatile/bits/fixed_address, AOP attr markers)
+are owned by other lanes and an incomplete known-set there would false-warn.
+## Verification guidance and troubleshooting
+A missing [compiler_unknown_decorator] warning means the fall-through check
+in the module-body decorator arm regressed; a hard error without
+SIMPLE_STRICT_DECORATORS=1 means the default flipped; executed=0 means the
+spec itself failed to load.
+"""
+
+use std.spec
+use compiler.core.types.{reset_all_pools}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.decorator_check.{strict_decorators_reset, unknown_decorator_check_reset}
+use compiler.frontend.core.decorator_check.{unknown_decorator_warnings_get}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn spec_parse(source: text, path: text):
+    reset_all_pools()
+    parser_init_with_path(source, path)
+    # The strict knob is memoised and the warn-once dedup set is global;
+    # forget both so every scenario observes the current environment.
+    strict_decorators_reset()
+    unknown_decorator_check_reset()
+    parse_module_body()
+
+fn spec_warning_count_with(code: text) -> i64:
+    var n = 0
+    for w in unknown_decorator_warnings_get():
+        if w.contains(code):
+            n = n + 1
+    n
+
+fn spec_first_warning_with(code: text) -> text:
+    for w in unknown_decorator_warnings_get():
+        if w.contains(code):
+            return w
+    ""
+
+fn strict_decorators_save() -> text:
+    rt_env_get("SIMPLE_STRICT_DECORATORS") ?? ""
+
+fn strict_decorators_restore(saved: text):
+    # Set-but-empty is STRICT under the seed-parity knob semantics; "0" is
+    # the explicit warn spelling of the default when nothing was set before.
+    if saved == "":
+        rt_env_set("SIMPLE_STRICT_DECORATORS", "0")
+    else:
+        rt_env_set("SIMPLE_STRICT_DECORATORS", saved)
+
+# @manual_section: unknown decorator warning
+describe "Unknown module-level decorator diagnostic":
+    describe "default mode warns and compiles":
+        it "warns once for an unknown decorator on a function and names tag and item":
+            # @capture(statistics): warning count and message content for @totally_unknown_tag on fn foo
+            step("parse a function carrying an invented decorator")
+            spec_parse("@totally_unknown_tag\nfn foo() -> i64:\n    1\n", "unknown_dec_fn.spl")
+            step("the parse still succeeds")
+            expect(parser_has_errors()).to_equal(false)
+            step("exactly one unknown-decorator warning was recorded")
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(1)
+            val w = spec_first_warning_with("compiler_unknown_decorator")
+            step("the warning names the decorator, the item, and the strict knob")
+            assert_true(w.contains("@totally_unknown_tag"))
+            assert_true(w.contains("function `foo`"))
+            assert_true(w.contains("SIMPLE_STRICT_DECORATORS=1"))
+
+        it "warns for an unknown decorator with arguments":
+            # @capture(statistics): warning count for an argument-carrying unknown decorator
+            step("parse a function carrying @totally_unknown_tag(repr:u16,unknown:Unknown)")
+            spec_parse("@totally_unknown_tag(repr:u16,unknown:Unknown)\nfn bar() -> i64:\n    2\n", "unknown_dec_args.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(1)
+            assert_true(spec_first_warning_with("compiler_unknown_decorator").contains("function `bar`"))
+
+        it "stays silent when the decorated item is an enum or a struct":
+            # @capture(statistics): zero warnings for enum/struct-position unknown tags
+            step("parse an enum carrying an invented decorator: no warning, no error")
+            spec_parse("@totally_unknown_tag\nenum Color:\n    Red\n    Blue\n", "unknown_dec_enum.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(0)
+            step("parse a struct carrying an invented decorator: no warning, no error")
+            spec_parse("@totally_unknown_tag\nstruct Point:\n    x: i64\n    y: i64\n", "unknown_dec_struct.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(0)
+
+        it "warns once per unknown tag across stacked known and unknown decorators":
+            # @capture(statistics): warning counts for both stacking orders
+            step("unknown tag stacked above a known one still names the function")
+            spec_parse("@totally_unknown_tag\n@inline\nfn baz() -> i64:\n    3\n", "unknown_dec_stack1.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(1)
+            assert_true(spec_first_warning_with("compiler_unknown_decorator").contains("function `baz`"))
+            step("known tag stacked above the unknown one warns only for the unknown one")
+            spec_parse("@inline\n@totally_unknown_tag\nfn qux() -> i64:\n    4\n", "unknown_dec_stack2.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(1)
+            assert_true(spec_first_warning_with("compiler_unknown_decorator").contains("function `qux`"))
+
+        it "stays silent when no function follows the decorator":
+            # @capture(statistics): trailing-decorator scope guard
+            step("parse a module whose last line is an unknown decorator: nothing to attach to, no warning")
+            spec_parse("fn lead() -> i64:\n    1\n\n@totally_unknown_tag\n", "unknown_dec_trailing.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(0)
+
+        it "keeps known fall-through decorators silent":
+            # @capture(statistics): zero unknown-decorator warnings across the known vocabulary
+            step("parse known annotations from every fall-through family")
+            val src = "@allow(star_import)\n@no_gc\n@inline\nfn quiet() -> i64:\n    5\n\n" +
+                "@export(\"C\")\nfn exported() -> i64:\n    6\n\n" +
+                "@unsafe(reason: \"raw pointer work\", capabilities: [raw_ptr])\nfn risky() -> i64:\n    8\n\n" +
+                "@representation_boundary\nfn boundary() -> i64:\n    9\n\n" +
+                "@closed\nenum Sealed:\n    A\n\n" +
+                "@evolving(repr:u16,unknown:Unknown)\nenum Open:\n    B\n"
+            spec_parse(src, "known_decorators.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(0)
+
+        it "stays silent at member position (other lanes own member vocabularies)":
+            # @capture(statistics): member-position scope guard
+            step("parse a class whose method carries an invented decorator: no warning, no error")
+            spec_parse("class ProbeC:\n    @mystery_member_tag\n    me m() -> i64:\n        1\n", "unknown_dec_member.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(0)
+
+        it "stays silent at nested-declaration position (seed block-level parity)":
+            # @capture(statistics): nested-position scope guard
+            step("parse a fn whose nested fn carries an invented decorator: no warning, no error")
+            spec_parse("fn outer() -> i64:\n    @mystery_nested_tag\n    fn inner() -> i64:\n        2\n    inner()\n", "unknown_dec_nested.spl")
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(0)
+
+        it "reports one warning per site across re-parses of the same module":
+            # @capture(statistics): warn-once dedup across a re-parse of the same path
+            step("parse the same module twice without clearing the warn-once registry")
+            strict_decorators_reset()
+            unknown_decorator_check_reset()
+            val src = "@totally_unknown_tag\nfn probe_fn() -> i64:\n    7\n"
+            reset_all_pools()
+            parser_init_with_path(src, "unknown_dec_dedup.spl")
+            parse_module_body()
+            reset_all_pools()
+            parser_init_with_path(src, "unknown_dec_dedup.spl")
+            parse_module_body()
+            step("the registry still holds exactly one entry for the site")
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(1)
+
+    describe "SIMPLE_STRICT_DECORATORS knob":
+        it "restores the hard error under SIMPLE_STRICT_DECORATORS=1":
+            # @capture(statistics): strict-mode error text and absence of a warning
+            step("enable the strict knob and parse the same invented decorator")
+            val saved = strict_decorators_save()
+            rt_env_set("SIMPLE_STRICT_DECORATORS", "1")
+            spec_parse("@totally_unknown_tag\nfn foo() -> i64:\n    1\n", "unknown_dec_strict.spl")
+            strict_decorators_restore(saved)
+            step("the parse fails with the original-style message")
+            expect(parser_has_errors()).to_equal(true)
+            val errs = parser_get_errors().join("\n")
+            assert_true(errs.contains("unknown decorator `@totally_unknown_tag` on function `foo`"))
+            assert_true(errs.contains("compiler_unknown_decorator"))
+            step("no warning is recorded on the strict path")
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(0)
+
+        it "keeps the warning under SIMPLE_STRICT_DECORATORS=0 (seed knob parity)":
+            # @capture(statistics): knob=0 behaves as default
+            step("set the knob to 0 and parse the invented decorator")
+            val saved = strict_decorators_save()
+            rt_env_set("SIMPLE_STRICT_DECORATORS", "0")
+            spec_parse("@totally_unknown_tag\nfn foo() -> i64:\n    1\n", "unknown_dec_strict0.spl")
+            strict_decorators_restore(saved)
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(1)
+
+        it "still compiles known decorators silently under SIMPLE_STRICT_DECORATORS=1":
+            # @capture(statistics): strict mode does not flag the known vocabulary
+            step("enable the strict knob and parse known annotations")
+            val saved = strict_decorators_save()
+            rt_env_set("SIMPLE_STRICT_DECORATORS", "1")
+            spec_parse("@inline\n@allow(star_import)\nfn quiet() -> i64:\n    7\n", "known_decorators_strict.spl")
+            strict_decorators_restore(saved)
+            expect(parser_has_errors()).to_equal(false)
+            expect(spec_warning_count_with("compiler_unknown_decorator")).to_equal(0)
