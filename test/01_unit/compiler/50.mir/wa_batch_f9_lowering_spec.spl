@@ -1,0 +1,68 @@
+use std.spec.*
+
+val WA_F9_BASE_FLAGS: [text] = ["--json", "--jq"]
+val WA_F9_EXT_FLAGS: [text] = WA_F9_BASE_FLAGS + ["--title", "--head"]
+
+struct WaF9Ty:
+    tag: text
+
+struct WaF9Param:
+    name: text
+    ty: WaF9Ty
+
+enum WaF9Sig:
+    FnSig(params: [WaF9Ty], ret: WaF9Ty)
+
+fn slice_u8_values(raw_bytes: [u8], start: i64, end: i64) -> [u8]:
+    raw_bytes[start:end]
+
+fn map_param_types(ps: [WaF9Param]) -> [WaF9Ty]:
+    ps.map(\p: p.ty)
+
+fn opt_array_len(items_opt: [WaF9Ty]?) -> i64:
+    match items_opt:
+        case Some(items): items.len()
+        case None: -1
+
+fn comp_capture_in_lambda(base: i64, min_v: i64) -> [i64]:
+    val xs: [i64] = [1, 2, 3, 4, 5]
+    val f = \offset: [for x in xs if x > min_v: x + base + offset]
+    f(10)
+
+describe "wa_batch_f9 lowering regressions":
+    it "slices [u8] ranges directly with start:end":
+        val raw_bytes: [u8] = [10u8, 20u8, 30u8, 40u8, 50u8]
+        val sub = slice_u8_values(raw_bytes, 1, 4)
+        expect(sub.len()).to_equal(3)
+        expect(sub[0] as i64).to_equal(20)
+        expect(sub[2] as i64).to_equal(40)
+        val empty_sub = slice_u8_values(raw_bytes, 2, 2)
+        expect(empty_sub.len()).to_equal(0)
+
+    it "preserves typed .map projection into enum payloads":
+        val ps: [WaF9Param] = [
+            WaF9Param(name: "a", ty: WaF9Ty(tag: "x")),
+            WaF9Param(name: "b", ty: WaF9Ty(tag: "y"))
+        ]
+        val mapped: [WaF9Ty] = map_param_types(ps)
+        val sig = WaF9Sig.FnSig(params: mapped, ret: WaF9Ty(tag: "r"))
+        val param_cnt = match sig:
+            case WaF9Sig.FnSig(p_list, _): p_list.len()
+        expect(param_cnt).to_equal(2)
+
+    it "initializes module-static concatenated arrays":
+        expect(WA_F9_EXT_FLAGS.len()).to_equal(4)
+        expect(WA_F9_EXT_FLAGS[0]).to_equal("--json")
+        expect(WA_F9_EXT_FLAGS[3]).to_equal("--head")
+
+    it "retains array receiver metadata after Option match":
+        expect(opt_array_len(Some([WaF9Ty(tag: "i64"), WaF9Ty(tag: "text")]))).to_equal(2)
+        expect(opt_array_len(None)).to_equal(-1)
+
+    it "captures outer locals inside Comprehension nested in a lambda":
+        val out = comp_capture_in_lambda(100, 2)
+        var sum = 0
+        for v in out:
+            sum = sum + v
+        expect(out.len()).to_equal(3)
+        expect(sum).to_equal(342)
