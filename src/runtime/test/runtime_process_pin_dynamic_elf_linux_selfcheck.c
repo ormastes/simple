@@ -89,6 +89,12 @@ int64_t rt_array_bytes_validate(int64_t value) { (void)value; return -1; }
 int64_t rt_array_bytes_copy_checked(int64_t value, uint8_t* out, int64_t cap) {
     (void)value; (void)out; (void)cap; return -1; }
 int64_t rt_proc_start_time(int64_t pid) { (void)pid; return -1; }
+/* Link-only: runtime_process.c gained the Linux PTY owner (a306d5d1505) and a
+ * fork CPU-time reader; the pin checks never reach either. */
+int64_t rt_fork_parent_user_cpu_micros(void) { return 0; }
+int64_t rt_fork_parent_system_cpu_micros(void) { return 0; }
+int64_t rt_value_bool(int64_t value) { return value ? 1 : 0; }
+int64_t rt_array_get_text(SplArray* array, int64_t idx) { (void)array; (void)idx; return 0; }
 
 /* runtime_process.c keeps the raw-fd close/spawn; the pin itself (raw,
  * owned, acquire, digest) lives in runtime_process_owned.c, the TU the Rust
