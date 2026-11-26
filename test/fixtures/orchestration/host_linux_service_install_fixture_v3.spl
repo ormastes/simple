@@ -4,7 +4,8 @@ use std.nogc_sync_mut.orchestration.host_linux_service_install_v3.*
 use std.nogc_sync_mut.io.linux_protected_root_reader_v1.*
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.*
 use std.common.task_runner.distributed_operation_owner_health_v2.OperationHealthLinuxInstallCleanupV1
-use std.common.crypto.sha256.sha256_text
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_digest_v3
+use std.nogc_sync_mut.io.host_linux_service_records_v4.host_linux_service_claim_name_v4
 
 pub struct HostLinuxServiceInstallFixtureTurnV3:
     parent: LinuxProtectedRootReaderV1
@@ -15,47 +16,65 @@ pub struct HostLinuxServiceInstallFixtureTurnV3:
 
 # A partial owner close leaves a carrier; drain it with bounded retries and
 # return any survivor instead of dropping it.
-fn install_fixture_drain_v3(pending: Option<OperationHealthLinuxInstallCleanupV1>) -> Option<OperationHealthLinuxInstallCleanupV1>:
-    var latest = pending
+fn install_fixture_drain_v3(turn: HostLinuxServiceInstallTurnV3) -> (Option<OperationHealthLinuxInstallCleanupV1>, text):
+    var latest = turn.cleanup
+    var error = turn.close_error
     var count: i64 = 0
     while latest.is_some() and count < 300:
-        latest = host_linux_service_install_close_v3(latest.unwrap()).cleanup
+        val closed = host_linux_service_install_close_v3(latest.unwrap())
+        latest = closed.cleanup
+        if error == "" and closed.error != "":
+            error = closed.error
+        if error == "" and latest.is_none() and not closed.closed:
+            error = "installer-cleanup-release-unconfirmed"
         count = count + 1
-    latest
+    if latest.is_some() and error == "": error = "installer-cleanup-pending"
+    (latest, error)
 
 pub fn host_linux_service_install_duplicate_fixture_v3(parent: LinuxProtectedRootReaderV1,
         native: LinuxServiceNativeIdentityBorrowV3, request: HostLinuxServiceInstallRequestV3) -> HostLinuxServiceInstallFixtureTurnV3:
-    val name = "linux-service-claim-" + sha256_text(request.binding.native_machine_id) + ".sdn"
+    val name = host_linux_service_claim_name_v4(request.binding)
     val absent = linux_protected_root_reader_read_v1(parent, name, 16384)
     if absent.is_err() or absent.unwrap().is_some():
         return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false, "fixture-absent-claim-required")
     val first = host_linux_service_install_v3(parent, native, request)
-    val first_left = install_fixture_drain_v3(first.cleanup)
-    if first_left.is_some(): return HostLinuxServiceInstallFixtureTurnV3(parent, native, first_left, false, "fixture-first-cleanup-pending")
+    val first_close = install_fixture_drain_v3(first)
+    if first_close.1 != "":
+        return HostLinuxServiceInstallFixtureTurnV3(parent, native, first_close.0, false, "fixture-first-cleanup:" + first_close.1)
     if not first.installed or first.duplicate or first.error != "":
         return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false, "fixture-fresh-install-required:" + first.error)
     val saved = linux_protected_root_reader_read_v1(parent, name, 16384)
     if saved.is_err() or saved.unwrap().is_none():
         return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false, "fixture-installed-claim-unreadable")
+    val digest = host_linux_service_enrollment_digest_v3(request.binding)
+    if digest.is_err():
+        return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false, "fixture-installed-binding-digest")
+    val manifest = "host-root-" + digest.unwrap() + "/linux-service-root-v3.sdn"
+    val saved_manifest = linux_protected_root_reader_read_v1(parent, manifest, 16384)
+    if saved_manifest.is_err() or saved_manifest.unwrap().is_none():
+        return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false, "fixture-installed-manifest-unreadable")
     # The owner drained the first writer, so a second actual open succeeds and
     # must observe the exact existing association instead of republishing.
     val duplicate = host_linux_service_install_v3(parent, native, request)
-    val duplicate_left = install_fixture_drain_v3(duplicate.cleanup)
-    if duplicate_left.is_some():
-        return HostLinuxServiceInstallFixtureTurnV3(parent, native, duplicate_left, false, "fixture-duplicate-cleanup-pending")
+    val duplicate_close = install_fixture_drain_v3(duplicate)
+    if duplicate_close.1 != "":
+        return HostLinuxServiceInstallFixtureTurnV3(parent, native, duplicate_close.0, false, "fixture-duplicate-cleanup:" + duplicate_close.1)
     if not duplicate.installed or not duplicate.duplicate or duplicate.error != "":
         return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false,
             "fixture-exact-duplicate-not-observed:" + duplicate.error)
     val after = linux_protected_root_reader_read_v1(parent, name, 16384)
     if after.is_err() or after.unwrap().is_none() or after.unwrap().unwrap() != saved.unwrap().unwrap():
         return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false, "fixture-duplicate-renewed-claim")
+    val after_manifest = linux_protected_root_reader_read_v1(parent, manifest, 16384)
+    if after_manifest.is_err() or after_manifest.unwrap().is_none() or after_manifest.unwrap().unwrap() != saved_manifest.unwrap().unwrap():
+        return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false, "fixture-duplicate-changed-manifest")
     HostLinuxServiceInstallFixtureTurnV3(parent, native, None, true, "")
 
 pub fn host_linux_service_install_signature_fixture_v3(parent: LinuxProtectedRootReaderV1,
         native: LinuxServiceNativeIdentityBorrowV3, original: HostLinuxServiceInstallRequestV3) -> HostLinuxServiceInstallFixtureTurnV3:
     if original.credential.approval.signature.len() == 0:
         return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false, "fixture-real-signed-credential-required")
-    val name = "linux-service-claim-" + sha256_text(original.binding.native_machine_id) + ".sdn"
+    val name = host_linux_service_claim_name_v4(original.binding)
     val before = linux_protected_root_reader_read_v1(parent, name, 16384)
     if before.is_err() or before.unwrap().is_some():
         return HostLinuxServiceInstallFixtureTurnV3(parent, native, None, false, "fixture-absent-claim-required")
@@ -67,7 +86,7 @@ pub fn host_linux_service_install_signature_fixture_v3(parent: LinuxProtectedRoo
     request.credential.approval.signature = changed_signature
     # Refused by the verifier before the owner entry can open any writer.
     val denied = host_linux_service_install_v3(parent, native, request)
-    if denied.installed or denied.cleanup.is_some() or denied.residue.is_some() or denied.error != "APPROVAL_SIGNATURE_INVALID":
+    if denied.installed or denied.close_error != "" or denied.cleanup.is_some() or denied.residue.is_some() or denied.error != "APPROVAL_SIGNATURE_INVALID":
         return HostLinuxServiceInstallFixtureTurnV3(parent, native, denied.cleanup, false, "fixture-signature-not-refused:" + denied.error)
     val after = linux_protected_root_reader_read_v1(parent, name, 16384)
     if after.is_err() or after.unwrap().is_some():
