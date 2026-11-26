@@ -25,8 +25,9 @@ that will handle the test's attach and read requests.
    retained receipt.
 3. Request `agent-runtime-inspect` through the retained Controller with the
    same operation ID and exact invoke frame. The reply is the first retained
-   running observation for this runtime. Use it to pin the native ID and
-   provider identity in the attach plan.
+   running observation for the workload's native epoch scope. Use it to pin
+   the native ID, execution plan and provider identity in the attach plan.
+   The authenticated status still identifies the service's separate scope.
 4. Construct the canonical pane binding with the receipt's session, window and
    pane IDs, Host continuity ID and native epoch generation. The receipt's
    `serviceIncarnation` names the Host continuity ID. The authenticated

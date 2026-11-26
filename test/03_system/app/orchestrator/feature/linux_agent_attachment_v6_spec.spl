@@ -5,7 +5,8 @@ use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
-use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2,
+    container_scope_fence_id_v2}
 use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, host_agent_pane_binding_decode_v4,
     container_primary_attach_plan_decode_v1}
 use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneStreamRequestV6, HostAgentPaneStreamReceiptV6,
@@ -196,7 +197,13 @@ fn attachment_trial_v6(fixture: LinuxAgentControlFixtureV6) -> Result<bool, text
     val native = host_execution_observation_decode_v2(observed.payload)?
     val attach = host_agent_attach_request_decode_v4(fixture.attach)?
     val plan = container_primary_attach_plan_decode_v1(attach.plan)?
-    if (native.scope != status.scope or native.operation_id != operation or native.runtime != plan.runtime or
+    val workload = plan.workload
+    val signed_scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id, service_scope_id: workload.service_scope_id,
+        boot_id: workload.boot_id, provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    if (native.scope == status.scope or native.scope.physical_host_id != status.scope.physical_host_id or
+            container_host_scope_bytes_v2(native.scope)? != container_host_scope_bytes_v2(signed_scope)? or
+            native.operation_id != operation or native.runtime != plan.runtime or
             native.request_digest != plan.workload.request_digest or native.provider_identity_digest != plan.provider_identity_digest or
             native.phase != "running" or native.inspect_status != "ok"):
         return Err("Linux V6 retained runtime differs from its signed attach plan")
