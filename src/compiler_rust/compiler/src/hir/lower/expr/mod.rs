@@ -842,6 +842,18 @@ impl Lowerer {
         if let Some(HirType::Function { ret, .. }) = self.module.types.get(fallback) {
             return *ret;
         }
+        // A callee still typed `(fn(..) -> R)?` or `Option<fn(..) -> R>`: `if val f = self.cb` does not
+        // narrow a class-field `Option<fn>`, so `f` keeps the optional type.
+        // Calling it can only call the function, so the result is `R`, not
+        // the callee's own optional type.
+        let optional_callee_payload = match self.module.types.get(fallback) {
+            Some(HirType::Pointer { inner, .. }) => Some(*inner),
+            Some(HirType::Enum { name, type_bindings, .. }) if name == "Option" => type_bindings.get("T").copied(),
+            _ => None,
+        };
+        if let Some(HirType::Function { ret, .. }) = optional_callee_payload.and_then(|p| self.module.types.get(p)) {
+            return *ret;
+        }
         match callee {
             Expr::Identifier(name) => self.named_callable_return_type(name).unwrap_or(fallback),
             Expr::Path(segments) if segments.len() == 2 => self
@@ -1627,7 +1639,10 @@ impl Lowerer {
 
         // Look up return type from module functions
         let recv_ty = receiver_hir.ty;
-        let mut return_ty = tuple_get_return_ty.unwrap_or_else(|| self.lookup_method_return_type(recv_ty, method));
+        let mut return_ty = match tuple_get_return_ty {
+            Some(ty) => ty,
+            None => self.method_return_type_marking_guess(recv_ty, method),
+        };
         if let Some(&first_generic) = resolved_generic_args.first() {
             if first_generic != TypeId::ANY
                 && (method == "collect" || (return_ty == TypeId::ANY && self.method_returns_generic_param(method)))
@@ -1650,8 +1665,30 @@ impl Lowerer {
         })
     }
 
+    /// `lookup_method_return_type`, except that a suffix-search guess which
+    /// is an Option (`T?` or `Option<T>`) gets its own type id, recorded in
+    /// `suffix_guessed_return_types`. The Option->scalar return rule skips
+    /// exactly that guess without also skipping a real `A.join() -> text?`
+    /// that shares the declared id.
+    pub(in crate::hir::lower) fn method_return_type_marking_guess(&mut self, recv_ty: TypeId, method: &str) -> TypeId {
+        let ty = self.lookup_method_return_type(recv_ty, method);
+        if !self.last_method_return_guessed.get() || !self.is_option_type(ty) {
+            return ty;
+        }
+        let fresh = match self.module.types.optional_inner(ty) {
+            Some(inner) => self.module.types.register_optional(inner),
+            None => match self.module.types.get(ty).cloned() {
+                Some(option_enum) => self.module.types.register(option_enum),
+                None => return ty,
+            },
+        };
+        self.suffix_guessed_return_types.insert(fresh);
+        fresh
+    }
+
     /// Look up the return type of a method from pre-registered signatures.
     fn lookup_method_return_type(&self, recv_ty: TypeId, method: &str) -> TypeId {
+        self.last_method_return_guessed.set(false);
         let ret = self.lookup_method_return_type_inner(recv_ty, method);
         if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
             eprintln!(
@@ -1883,6 +1920,11 @@ impl Lowerer {
             .filter(|(name, _)| name.ends_with(&suffix) && owner_applies(name))
             .min_by_key(|(name, _)| name.len())
         {
+            // A guess borrowed from some same-named method (`xs.join(",")` on an
+            // untyped `xs` typed as an imported `A.join() -> text?`): flag it so
+            // the caller can give it a private type id the Option->scalar
+            // return rule skips.
+            self.last_method_return_guessed.set(true);
             return ret_ty;
         }
         // Builtin string methods that return a RAW native i64 (a code point /
@@ -2872,7 +2914,11 @@ impl Lowerer {
                 // all return a NEW array of the same element type as the
                 // receiver — same shape as `take`/`skip`/`drop`/`insert`
                 // above (see the MIR expansion in lowering_expr_method.rs).
-                "copy" | "clone" | "unique" | "sorted" | "reversed" => Some(receiver.ty),
+                // `sort` also returns a NEW sorted array (interpreter_method
+                // collections.rs). Untyped, a chained `xs.sort().join(",")` fell
+                // to the by-name `.join` suffix search and was typed as an
+                // unrelated user method returning `text?`.
+                "copy" | "clone" | "unique" | "sorted" | "sort" | "reversed" => Some(receiver.ty),
                 // `sort_desc` (lane BATCH3) is the interpreter's non-mutating
                 // "return a NEW descending-sorted array" sibling — same
                 // shape as `sorted`/`reversed` just above. The MIR lowering

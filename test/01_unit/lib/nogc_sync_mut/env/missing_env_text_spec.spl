@@ -1,0 +1,77 @@
+"""`-> text` wrappers over a `text?` source return text, never the Option.
+
+These wrappers once returned a `text?` value through a `-> text` signature
+(`if v == nil: "" else: v`). In compiled Simple `None == nil` is false, so a
+missing variable handed the caller the Option itself. They now unwrap with `?? ""`.
+Tracks: optional_return_into_scalar_fn_accepted_2026-11-26
+"""
+use std.spec
+use std.io_runtime.{env_get as io_env_get}
+use std.nogc_sync_mut.env.variables.{env_get as var_env_get}
+use std.nogc_sync_mut.env.platform.{get_home_dir, get_hostname}
+use std.nogc_sync_mut.spec.dir_prevention.{dir_prevention_env_value}
+
+val MISSING = "SIMPLE_SPEC_SURELY_UNSET_VAR_7F3A"
+
+describe "missing env var through a -> text wrapper":
+    it "io_runtime.env_get returns empty text":
+        val v = io_env_get(MISSING)
+        expect(v).to_equal("")
+        expect(v.len()).to_equal(0)
+        expect("[{v}]").to_equal("[]")
+
+    it "env.variables.env_get returns empty text":
+        val v = var_env_get(MISSING)
+        expect(v).to_equal("")
+        expect("[{v}]").to_equal("[]")
+
+    it "home dir and hostname are real text":
+        val home = get_home_dir()
+        val host = get_hostname()
+        expect("[{home}]").to_equal("[" + home + "]")
+        expect("[{host}]").to_equal("[" + host + "]")
+        expect(host.len() > 0).to_equal(true)
+
+    it "dir_prevention cache hit returns the cached text":
+        # Dict.get yields V?; a miss is None, and `hit != nil` used to
+        # return that Option through `-> text` on the SECOND (cached) call.
+        val first = dir_prevention_env_value("/nonexistent_optret_dir/a_spec.spl")
+        val second = dir_prevention_env_value("/nonexistent_optret_dir/b_spec.spl")
+        expect("[{second}]").to_equal("[{first}]")
+        expect(second).to_equal(first)
+
+# The in-runner cases above go through the interpreter, which hides the
+# Option leak. `simple run` lowers through the JIT, where the old
+# `hit != nil` cache path printed a blank line for the second call.
+# The runner exports SIMPLE_EXECUTION_MODE=interpret; the probe unsets it.
+use std.io_runtime.{process_run_timeout, env_get, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+val DPREV_PROBE = """use std.nogc_sync_mut.spec.dir_prevention.{dir_prevention_env_value, dir_prevention_cache_misses}
+
+fn main() -> i64:
+    val a = dir_prevention_env_value("/nonexistent_optret_dir/a_spec.spl")
+    print "first=[{a}] misses={dir_prevention_cache_misses()}"
+    val b = dir_prevention_env_value("/nonexistent_optret_dir/b_spec.spl")
+    print "second=[{b}] misses={dir_prevention_cache_misses()}"
+    0
+"""
+
+fn simple_binary() -> text:
+    val from_env = env_get("SIMPLE_BINARY")
+    if from_env != "": return from_env
+    "bin/simple"
+
+describe "dir_prevention cache hit under simple run":
+    it "prints the cached text on the second call":
+        val dir = secure_temp_dir(get_temp_dir(), "simple-missing-env-text-").unwrap()
+        val path = dir + "/probe.spl"
+        expect(file_write(path, DPREV_PROBE)).to_equal(true)
+        val (stdout, stderr, code) = process_run_timeout("/usr/bin/env", ["-u", "SIMPLE_EXECUTION_MODE", "-u", "SIMPLE_RUNTIME_MODE", simple_binary(), "run", path], 120000)
+        # Guarded: only ever remove the private dir this probe created.
+        if dir != "" and dir.contains("simple-missing-env-text-"):
+            dir_remove_all(dir)
+        expect(code).to_equal(0)
+        expect(stdout.contains("first=[] misses=1")).to_equal(true)
+        expect(stdout.contains("second=[] misses=1")).to_equal(true)
