@@ -72,6 +72,7 @@ use compiler.core.ast.{macro_fact_def_push}
 # Re-export use/export/binding/impl declarations (extracted to parser_decls_use.spl)
 use compiler.frontend.core.parser_decls_use.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.frontend.core.decorator_check.{parser_check_decorator_name, parser_peek_decorated_item}
 
 # Import CLI parser
 use compiler.core.parser_cli.{parse_cli_decl}
@@ -1260,6 +1261,11 @@ pub fn parser_parse_member_attribute() -> bool:
         parser_error("expected attribute name after `@` in class body")
         return true
     parser_advance()
+    # Member-position attributes deliberately do NOT run the unknown-decorator
+    # check (core/decorator_check.spl): the warning is scoped to module-level
+    # function decorators (seed parity), and member vocabularies (unsafe/
+    # danger, lock_level, layer_field, AOP attr markers, ...) are owned by
+    # other lanes -- unknown spellings here stay silent preserved metadata.
     if attr_name == "lock_level" or lock_level_is_exception_attribute(attr_name):
         lock_level_parse_attribute(attr_name)
         parser_skip_newlines_and_semicolons()
@@ -1955,6 +1961,12 @@ pub fn parse_module_body():
                 # Capture its text and consume it so we don't mis-dispatch to AOP parser
                 decorator_name = par_text_get()
                 parser_advance()
+            # Warn (or error under SIMPLE_STRICT_DECORATORS=1) on a spelling no
+            # pass consumes; known names are a no-op. The check gates itself to
+            # stacks whose decorated item is a module-level FUNCTION (seed
+            # parity); enum/struct/val stacks stay silent. See
+            # core/decorator_check.spl.
+            parser_check_decorator_name(decorator_name, parser_peek_decorated_item())
             if decorator_name == "lock_level" or lock_level_is_exception_attribute(decorator_name):
                 lock_level_parse_attribute(decorator_name)
                 parser_skip_newlines_and_semicolons()
@@ -2442,11 +2454,16 @@ pub fn parse_module_body():
                     generate_derive_impls(d, derive_traits)
                     parser_reset_pending_vhdl_decorators()
             else:
-                # Unknown annotation (e.g. @allow(...), @inline, @no_gc, @bounds(...), etc.)
-                # The annotation tokens have already been consumed above (@ + name + args).
-                # The following declaration is handled by the next outer loop iteration,
-                # which dispatches via the full elif chain (fn, use, struct, val, etc.).
-                # Multiple stacked annotations also work: each loop iteration consumes one @.
+                # Fall-through annotation (e.g. @allow(...), @inline, @no_gc,
+                # @bounds(...), or a genuinely unknown tag). The annotation
+                # tokens have already been consumed above (@ + name + args).
+                # The following declaration is handled by the next outer loop
+                # iteration, which dispatches via the full elif chain (fn, use,
+                # struct, val, etc.). Multiple stacked annotations also work:
+                # each loop iteration consumes one @. Unknown names were
+                # already warned about (or hard-errored under
+                # SIMPLE_STRICT_DECORATORS=1) at the top of this arm; the
+                # spelling still rides PENDING_DECL_ATTRS as inert metadata.
                 pass_dn
         elif par_kind_get() == 6 and par_text_get() == "unit" and current_ident_is_unit_decl():
             parse_unit_decl_after_keyword_v1()
