@@ -1,6 +1,6 @@
 # SOSIX app sandbox: Windows variant (architecture pure_simple_container 4.2, lane W2).
-# One synchronous run of one child inside a per-scope AppContainer. The profile is created
-# (or a stale one of the same scope replaced) through userenv, the child is launched with
+# One synchronous run of one child inside a per-run AppContainer. A profile named for this run
+# alone (scope + pid + time, hashed) is created through userenv, never reused or replaced, and the child is launched with
 # SECURITY_CAPABILITIES carrying that SID and ZERO capabilities (so no network, and no file
 # access beyond what the container SID is granted), the container SID is granted only on the
 # dirs the request lists, and every grant and the profile are removed at teardown. Fails
@@ -9,11 +9,12 @@ use std.common.contracts.sosix.containment_v1.{SosixContainExitCodeV1, SosixCont
 use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_is_real_no_follow}
 use std.nogc_sync_mut.io.windows_process_owner.{windows_process_quote_arg_v1, windows_process_path_valid_v1}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CreateFileW, InitializeProcThreadAttributeList, DeleteProcThreadAttributeList, GetLastError, GetExitCodeProcess, windows_abi_update_proc_thread_attribute, windows_abi_handle_is_invalid, windows_abi_pointer_bytes, windows_abi_security_attributes_size, windows_abi_security_attributes_inherit_offset, windows_abi_startupinfoex_size, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset}
-use std.nogc_sync_mut.io.windows_appcontainer_abi.{CreateAppContainerProfile, DeleteAppContainerProfile, FreeSid}
-use std.nogc_sync_mut.io_runtime.file_exists
+use std.nogc_sync_mut.io.windows_appcontainer_abi.{CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName, DeleteAppContainerProfile, FreeSid}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io_runtime.{file_exists, getpid, time_now_monotonic_ms}
 use std.nogc_sync_mut.sosix.app_container_types_v1.{SosixAppSandboxRequestV1, SosixAppSandboxResultV1, SOSIX_APP_SANDBOX_IDENTITY_V1}
 use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.sosix_windows_scope_sid_v1
-use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_is_win64_v1, sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_close_handle_v1, sec_read_ptr_v1, sec_write_ptr_v1, sec_u32_v1, sec_put_u32_v1, sec_wide_v1, sec_get_dacl_v1, sec_set_entries_v1, sec_set_dacl_v1, sec_access_entry_v1}
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_is_win64_v1, sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_close_handle_v1, sec_read_ptr_v1, sec_write_ptr_v1, sec_u32_v1, sec_put_u32_v1, sec_wide_v1, sec_get_dacl_v1, sec_set_entries_v1, sec_set_dacl_v1, sec_access_entry_v1, sec_sid_equal_v1}
 
 
 # FILE_GENERIC_READ|FILE_GENERIC_EXECUTE and modify (read, write, execute, delete).
@@ -90,25 +91,45 @@ fn _request_reason(request: SosixAppSandboxRequestV1) -> text:
     if not windows_process_path_valid_v1(request.directory): return "app-sandbox-request-invalid"
     _dirs_reason(request.readonly_dirs, request.writable_dirs, request.directory)
 
-# A fresh profile for this scope: a stale one left by a crashed run is deleted first, so the
-# profile this run uses and later deletes is always its own.
+# Per-run profile name: the AppContainer SID derives from the name, so a name unique to this run
+# means a grant leaked by a crashed run can never be valid for a later one. 24 hex digits of
+# sha256(scope, pid, monotonic ms) keep it far inside the 64-character profile limit.
+fn _profile_name(scope: text) -> text:
+    val digest = sha256_text("sosix-app-sandbox-v1:{scope}:{getpid()}:{time_now_monotonic_ms()}")
+    "sosix-" + digest[0:24]
+
+# Creates this run's own profile. An existing profile of that name is refused, never deleted: it
+# belongs to someone else. The SID Create returned must equal the one derived from the name.
 fn _open_profile(name_wide: i64) -> ProfileV1:
     val slot = sec_alloc_v1(8)
-    if slot == 0: return ProfileV1(sid: 0, created: false, reason: "app-sandbox-alloc-failed")
-    var hr = CreateAppContainerProfile(name_wide, name_wide, name_wide, 0, 0u32, slot)
-    if hr == _HR_ALREADY_EXISTS:
-        val _stale = DeleteAppContainerProfile(name_wide)
-        hr = CreateAppContainerProfile(name_wide, name_wide, name_wide, 0, 0u32, slot)
+    val derived_slot = sec_alloc_v1(8)
+    if slot == 0 or derived_slot == 0:
+        sec_free_v1(slot)
+        sec_free_v1(derived_slot)
+        return ProfileV1(sid: 0, created: false, reason: "app-sandbox-alloc-failed")
+    val hr = CreateAppContainerProfile(name_wide, name_wide, name_wide, 0, 0u32, slot)
     var sid = 0
     var reason = ""
     if hr == 0:
         sid = sec_read_ptr_v1(slot)
-        if sid == 0: reason = "app-sandbox-profile-sid-missing"
+        if sid == 0:
+            reason = "app-sandbox-profile-sid-missing"
+        elif DeriveAppContainerSidFromAppContainerName(name_wide, derived_slot) != 0:
+            reason = "app-sandbox-profile-sid-underivable"
+        else:
+            val derived = sec_read_ptr_v1(derived_slot)
+            if derived == 0 or not sec_sid_equal_v1(sid, derived): reason = "app-sandbox-profile-sid-mismatch"
+            if derived != 0:
+                val _freed = FreeSid(derived)
+    elif hr == _HR_ALREADY_EXISTS:
+        reason = "app-sandbox-profile-exists"
     else:
         reason = "app-sandbox-profile-create-failed-" + hr.to_string()
+    sec_free_v1(derived_slot)
     sec_free_v1(slot)
     ProfileV1(sid: sid, created: hr == 0, reason: reason)
 
+# ponytail: read denial holds only for files without an ALL APPLICATION PACKAGES (S-1-15-2-1) ACE; system dirs readable by AAP stay readable to the child, by design.
 # Merge one ACE for the container SID into the DACL of path (grant or revoke); "" on success.
 fn _set_ace(path: text, sid: i64, mode: i64, mask: i64) -> text:
     val slot = sec_alloc_v1(8)
@@ -164,6 +185,13 @@ fn _job_with_kill_on_close(limits: i64) -> i64:
         return 0
     job
 
+# Explicit minimal environment (sorted, NUL-separated; the wide copy adds the closing NUL):
+# nothing of the parent's environment reaches the child, and its temp dir is the granted work dir.
+fn _environment_block(directory: text) -> text:
+    val work = _native(directory)
+    val system_root = "C:\\Windows"
+    "APPDATA=" + work + "\0LOCALAPPDATA=" + work + "\0PATH=" + system_root + "\\System32\0SystemDrive=C:\0SystemRoot=" + system_root + "\0TEMP=" + work + "\0TMP=" + work + "\0USERPROFILE=" + work + "\0windir=" + system_root + "\0"
+
 fn _launch(request: SosixAppSandboxRequestV1, sid: i64) -> LaunchV1:
     var command = windows_process_quote_arg_v1(request.program)
     for arg in request.args: command = command + " " + windows_process_quote_arg_v1(arg)
@@ -171,6 +199,7 @@ fn _launch(request: SosixAppSandboxRequestV1, sid: i64) -> LaunchV1:
     val argv = sec_wide_v1(command)
     val cwd = sec_wide_v1(_native(request.directory))
     val nul = sec_wide_v1("NUL")
+    val env_wide = sec_wide_v1(_environment_block(request.directory))
     val out_wide = sec_wide_v1(_native(request.stdout_path))
     val err_wide = sec_wide_v1(_native(request.stderr_path))
     val startup = sec_alloc_v1(windows_abi_startupinfoex_size())
@@ -181,7 +210,7 @@ fn _launch(request: SosixAppSandboxRequestV1, sid: i64) -> LaunchV1:
     val capabilities = sec_alloc_v1(24)
     val limits = sec_alloc_v1(windows_abi_job_extended_limit_size())
     val exit_slot = sec_alloc_v1(8)
-    val live = [app, argv, cwd, nul, out_wide, err_wide, startup, process_info, security, size_slot, handle_list, capabilities, limits, exit_slot]
+    val live = [app, argv, cwd, nul, env_wide, out_wide, err_wide, startup, process_info, security, size_slot, handle_list, capabilities, limits, exit_slot]
     var reason = ""
     for pointer in live:
         if pointer == 0: reason = "app-sandbox-alloc-failed"
@@ -240,8 +269,10 @@ fn _launch(request: SosixAppSandboxRequestV1, sid: i64) -> LaunchV1:
                     reason = "app-sandbox-handle-list-attribute-failed"
                 sec_write_ptr_v1(startup + windows_abi_startupinfoex_attr_list_offset(), attributes)
     if reason == "":
-        if CreateProcessW(app, argv, 0, 0, 1, _CREATE_FLAGS as u32, 0, cwd, startup, process_info) == 0:
-            reason = "app-sandbox-create-process-failed-" + GetLastError().to_string()
+        val spawned = CreateProcessW(app, argv, 0, 0, 1, _CREATE_FLAGS as u32, env_wide, cwd, startup, process_info)
+        val spawn_error = GetLastError()
+        if spawned == 0:
+            reason = "app-sandbox-create-process-failed-" + spawn_error.to_string()
         else:
             created = true
             process = sec_read_ptr_v1(process_info + windows_abi_process_info_process_offset())
@@ -274,18 +305,19 @@ fn _launch(request: SosixAppSandboxRequestV1, sid: i64) -> LaunchV1:
     if not released: reason = reason + "; app-sandbox-handle-release-failed"
     LaunchV1(reason: reason, exit_code: exit_code, timed_out: timed_out)
 
-# Grants the container SID on every listed dir; every dir attempted is returned so a failed
-# grant is still revoked. reason is the first failure.
+# Grants the container SID on every listed dir and returns the dirs actually granted (a failed
+# grant is one atomic DACL write and left nothing), so exactly those are revoked at teardown.
+# reason is the first failure.
 fn _grant_all(request: SosixAppSandboxRequestV1, sid: i64) -> GrantsV1:
     var attempted: [text] = []
     for dir in request.readonly_dirs:
-        attempted = attempted.push(dir)
         val why = _set_ace(dir, sid, _MODE_GRANT, _READ_EXEC_MASK)
         if why != "": return GrantsV1(attempted: attempted, reason: why)
-    for dir in request.writable_dirs:
         attempted = attempted.push(dir)
+    for dir in request.writable_dirs:
         val why = _set_ace(dir, sid, _MODE_GRANT, _MODIFY_MASK)
         if why != "": return GrantsV1(attempted: attempted, reason: why)
+        attempted = attempted.push(dir)
     GrantsV1(attempted: attempted, reason: "")
 
 # "app-sandbox-revoke-failed" when any revoke cannot be proven; never hidden.
@@ -299,7 +331,7 @@ fn _revoke_all(attempted: [text], sid: i64) -> text:
 fn _run(request: SosixAppSandboxRequestV1) -> SosixAppSandboxResultV1:
     val refused = _request_reason(request)
     if refused != "": return _refusal(refused)
-    val name_wide = sec_wide_v1("sosix-" + request.scope)
+    val name_wide = sec_wide_v1(_profile_name(request.scope))
     if name_wide == 0: return _refusal("app-sandbox-alloc-failed")
     val profile = _open_profile(name_wide)
     var reason = profile.reason
