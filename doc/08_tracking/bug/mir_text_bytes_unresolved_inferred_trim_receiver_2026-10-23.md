@@ -1,6 +1,11 @@
 # MIR: text `.bytes()` unresolved when receiver type is inferred from `trim()`
 
-Status: open (compiler fix INSUFFICIENT — stage1-built stage2 still miscompiles the inferred form; workaround reinstated 2026-11-27)
+Status: open (compiler fix applied; workaround annotation reinstated 2026-11-27 —
+but NOTE: lane v7d proved the annotation does NOT fix the test_runner_build
+packaging failure, which was re-root-caused to
+stage1_file_read_truncates_at_2048_2026-11-27.md. The annotation stays as
+cheap insurance for the original .bytes() MIR issue; this doc's compiler fix
+remains verification-pending.)
 
 ## 2026-11-27 verification result (lane v7c, pin 06ba866385d5)
 
