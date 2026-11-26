@@ -5285,3 +5285,67 @@ byte-identical to base 16/16. Perf css-layout (load < 8, warmups discarded), bas
 6 rounds k=1 3126 / 3207 ms, k=4 3190 / 3209 ms; RSS k=1 read 2.41 / 2.48 GB (per-run
 spread 2.30..2.59 on both sides), rerun 7 rounds head-first-on-odd: 2.359 / 2.375 GB
 (+0.7%), 3026 / 3057 ms.
+## 2026-11-24 — 1x LCD round glyphs: Skia analytic AA scan converter (lcdround lane)
+
+- **Root cause.** Chrome 159 rasterises a hinted LCD glyph by scaling its path 4x in x
+  into an A8 mask of width 4W-8 (`x' = 4(x*scale + phase) - 4(x0+1)`) and filling it with
+  `SkScan_AAAPath` (analytic AA, 16.16 fixed point, quarter-row strips, per-strip alpha
+  truncation, real-blitter writes for whole rows, saturating SafeRLE runs for partial
+  rows). The engine used an exact-area float accumulator over the same chords: straight
+  stems matched, every curved glyph was a step heavy at the crest. Measured on 16 px Sans:
+  328 mismatching px with the engine, 117 with the same outline through real Skia (the
+  residual is the hinter: 46 with FreeType's light autohint outline through Skia).
+- **Fix.** `src/lib/common/encoding/sfnt_glyf.spl` section "Skia analytic AA LCD mask":
+  a port of setLine/setQuadratic (quick inverse `4194304/x`), chopQuadAtYExtrema,
+  combineVertical, the non-convex walker (SafeRLE, or the mask plane when
+  `irw<=32 && align4(irw)*irh<=1024`), the convex walker and `blitFatAntiRect`. All
+  float steps go through f32 (`((v as f32) as f64)`). Byte-exact against libskia on
+  Sans 16, Serif 12/13.333, Mono 11, Bold 44, all four quarter phases.
+- **Phase shift-invariance.** mask(q) == mask(0) shifted by `q - 4(x0_q - x0_0)` samples
+  (verified on 1320 glyph-phase cases). `_lcd_aaa_phase0` memoises the phase-0 mask per
+  outline; `sfnt_lcd_outline_raster` reads the mask row in place (rows padded by 16 zero
+  samples each side) through the pack4xHToMask FIR. Gray path untouched (hash identical).
+- **Interpreter cost trap.** In the interpreter a statement / array index costs ~0.5 us
+  and a call ~2.4 us, so the walker had to be inlined (put/span/update_quad/f32 casts)
+  to keep `engine_lcd_text_paint_small_spec` under its 4.6 s budget: 3.10 s -> 1.74 s
+  for 248 glyph-phases; spec 4.24-4.27 s at load 2 (4 runs, base 3.5 s), 4.5 s at load 17,
+  and it failed the budget once inside the lane-gates run (load ~19).
+- **Hinter residual (AC-1), fixed.** FreeType's light autohint merges same-direction
+  segments closer than `min(stdw/5, 16/64 px)` into one EDGE at the position of the first
+  segment in outline order (`af_latin_hints_compute_edges`): an `r`/`n` arch crest on the
+  x-height overshoot joins the flat stem top on the x-height reference. `_hstem_knots` now
+  builds the same edges (`reps`), pairs stems through them, and pins a merged segment's own
+  points with spike knots. `fractional_glyph_raster_chrome159_spec` AC-1 back to 2/2.
+- **Devanagari: font-level gate.** FreeType hints Noto Sans Devanagari in its `deva_dflt`
+  style (blue zones 896 / 622 headline / 0 / -268, x-height scale 1.02400 -> 1.02882); for
+  gid 34 (u-matra) its edges carry no blue edge and the stem lands at -2.92/-4.08, while
+  the Latin-only hinter puts the bottom at -4.19, so the AAA mask inks one row below Chrome.
+  The exact-area mask stayed under the ink threshold there. A font that maps U+0915 keeps
+  the exact-area mask (`slo_area`, `_lcd_area_font`, memoised per font: an uncached cmap
+  lookup costs ~3.5 ms per outline). The cmap lookup only runs when OS/2 `ulUnicodeRange1`
+  bit 15 (Devanagari) is set; Liberation and DejaVu skip it. Upgrade path: deva-style knots, then drop the gate.
+  `devanagari_mark_position_chrome159_spec` (in-development) 8/9 = base 8/9 (AC-9 fails on
+  both).
+- **Mask memo key.** `_lcd_aaa_phase0` is keyed by `slo_key` (font identity as in the hint
+  cache, glyph id, size, x size, gray): the old content key looped over every command and
+  formatted eight floats per raster call.
+- **Numbers (2026-11-26, base 44e0bdc201f, seed fb80903917d6 both sides).** Lane specs
+  equal base, `lcd_round_glyph_aaa_chrome159_spec` 4/4 (absent on base), combo matrix 79
+  mismatching both sides. 1x catalog base -> head: overview 0.39 -> 0.24, html 0.71 -> 0.38,
+  css-layout 1.01 -> 0.63, css-paint 0.95 -> 0.45, forms-media 0.84 -> 0.41, animation
+  0.90 -> 0.42, evidence 0.32 -> 0.18, tab-bar 0.24 -> 0.23. 4x catalog passes at or under
+  every baseline row (gray path). Perf (interpreter, 1x, 6 alternated pairs, load 5-12,
+  medians): forms-media 7561 -> 7815 ms (+2.2 % wall, +2.3 % CPU; pairs -0.2..+4.0),
+  css-layout +1.9 % (clean pairs -0.7..+1.9); RSS flat (866 -> 868 MB). Pipe bench (186
+  outlines, 372 rasters): outline 1.136 -> 1.19 s, raster 1.348 -> 1.414 s.
+- **Perf pass (same day, byte-identical: 8/8 page PPMs, pipe hash, gates, both catalogs).**
+  The stem width `stdw` was looked up through an uncached cmap on every hint-cache miss
+  (~3.5 ms per font+size); it is now memoised per font (`_lcd_stdw`). Walker: edge-build
+  helpers inlined into `_aaa_push_line` / `_aaa_set_quad`, a dedicated mask-plane block in
+  `_aaa_trap_row`, the raster scan limited to the path sample bounds, the bbox via native
+  `min`/`max`. After: forms-media +1.33 % wall (+1.39 % CPU), css-layout +1.12 % (+1.14 %),
+  8 alternated pairs after a discarded warmup, load <= 6; RSS 867 -> 871 MB. Pipe raster
+  1.414 -> 1.33 s (base 1.348). Tried, no gain, not kept: a no-merge fast path in
+  `_hstem_knots`, hoisting `val`s to `var`s, `Array.fill_span` for blitFull, a glyph-id memo.
+- **Open.** `engine_lcd_text_paint_small_spec` passes
+  its 4.6 s budget on a quiet host and failed it once under load 20+.

@@ -3,13 +3,13 @@
 #
 # The LCD raster tracks the inked extent of each A8 row at coverage changes
 # and slides the 12-tap window by 4 samples. The oracle is the row loop it
-# replaced (sfnt_glyf.spl before 2026-11-23), unchanged, over the same area
-# cells: every gray and RGB byte must match for several glyphs, sizes and
-# all four quarter phases.
+# replaced (sfnt_glyf.spl before 2026-11-23), unchanged, over the same A8
+# mask (Skia AAA since 2026-11-24): every gray and RGB byte must match for
+# several glyphs, sizes and all four quarter phases.
 
 use std.spec.*
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, sfnt_lcd_glyph_outline,
-    sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, SfntLcdOutline, _lcd_area_cells, _floor_glyf}
+    sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, SfntLcdOutline, _lcd_aaa_mask}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
 val FONT_PATH: text = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
@@ -22,22 +22,18 @@ fn reference_rgb_gray(outline: SfntLcdOutline, phase_q: i64) -> [u8]:
     val phase = phase_q as f64 / 4.0
     val subpixels = width * 3
     val samples = width * 4
-    val stride = samples + 2
-    val cells = _lcd_area_cells(outline.slo_commands, outline.slo_scale, x0 as f64 - phase, outline.slo_raster_top, stride, height)
+    val aw = samples - 8
+    val mask = _lcd_aaa_mask(outline.slo_commands, outline.slo_scale, phase, x0, 0.0 - outline.slo_raster_top, aw, height)
     var gray: [u8] = [0u8; width * height]
     var rgb: [u8] = [0u8; width * height * 3]
     var a8: [i64] = [0; samples + 8]
     var y: i64 = 0
     while y < height:
-        var acc = 0.0
         var first: i64 = samples
         var last: i64 = 0
         var s: i64 = 0
         while s < samples:
-            acc = acc + cells[y * stride + s]
-            var cov = if acc < 0.0: 0.0 - acc else: acc
-            if cov > 1.0: cov = 1.0
-            val v = _floor_glyf(cov * 255.0 + 0.5)
+            val v = if s >= 4 and s < aw + 4: mask[mask[7] + y * (aw + 32) + s - 4] else: 0
             a8[s + 4] = v
             if v > 0:
                 if s < first: first = s

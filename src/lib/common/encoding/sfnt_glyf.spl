@@ -1385,11 +1385,6 @@ fn _lcd_area_quad_mono(mut a: [f64], stride: i64, height: i64, ax: f64, ay: f64,
         i = i + 1
 
 
-# Signed area / cover cells of `commands` (font units) in the A8 sample grid:
-# x' = (x * scale - left) * 4, y' = -y * scale - top.
-fn _lcd_area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, stride: i64, height: i64) -> [f64]:
-    _area_cells(commands, scale, left, top, stride, height, _SFNT_LCD_A8_PER_PX)
-
 # Signed area cells at `per_px` samples per pixel horizontally (4 = the LCD
 # A8 row, 1 = whole-pixel exact area for gray glyphs).
 fn _area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, stride: i64, height: i64, per_px: i64) -> [f64]:
@@ -1475,7 +1470,7 @@ fn _hint_zone_knots(ref_y: f64, shoot_y: f64, is_top: bool, scale: f64) -> [f64]
     else if is_top: [ref_y, fit, shoot_y, shoot_fit]
     else: [shoot_y, shoot_fit, ref_y, fit]
 
-fn _lcd_hint_knots(font: OtFont, units_per_em: i64, size_px: i64, size_milli: i64) -> [f64]:
+fn _lcd_hint_knots(font: OtFont, units_per_em: i64, size_px: i64, size_milli: i64, stdw: f64) -> [f64]:
     # FreeType scales at the float size; only the 6..14 ppem x-height rule
     # reads the whole ppem (`size_px`).
     val size_f = size_milli as f64 / 1000.0
@@ -1551,8 +1546,8 @@ fn _lcd_hint_knots(font: OtFont, units_per_em: i64, size_px: i64, size_milli: i6
         else if fy > clean[m - 2] and ty >= clean[m - 1]:
             clean = clean + [fy, ty]
         k = k + 1
-    # last element carries the adjusted scale for extrapolation
-    clean + [scale, 0.0]
+    # last element carries the adjusted scale for extrapolation and stdw
+    clean + [scale, stdw]
 
 # Font y (units) -> hinted pixel y (y up, baseline 0).
 fn _hint_map_y(knots: [f64], y: f64) -> f64:
@@ -1570,11 +1565,48 @@ fn _hint_map_y(knots: [f64], y: f64) -> f64:
     val t1 = knots[(j + 1) * 2 + 1]
     t0 + (y - f0) * (t1 - t0) / (f1 - f0)
 
-fn _lcd_hint_knots_cached(font: OtFont, head_offset: i64, units_per_em: i64, size_px: i64, size_milli: i64) -> [f64]:
-    val key = "{font.blob.len()}|{blob_u32(font.blob, head_offset + 8)}|{size_px}|{size_milli}"
+var _lcd_area_font_memo: Dict<text, bool> = {}
+var _lcd_stdw_memo: Dict<text, f64> = {}
+
+# FreeType's standard horizontal-stem width (`axis->widths[0]`) of font `fid`:
+# the thinnest stem of the standard character `o`, in font units;
+# AF_LATIN_CONSTANT(50) without one. It sizes the edge-merge distance. Per
+# font: the cmap lookup behind it costs ~3.5 ms.
+fn _lcd_stdw(font: OtFont, fid: text, units_per_em: i64) -> f64:
+    if val Some(hit) = _lcd_stdw_memo.get(fid):
+        return hit
+    var stdw = 50.0 * units_per_em as f64 / 2048.0
+    val o_gid = sfnt_cmap_glyph_id(font, 111)
+    if o_gid != 0:
+        if val Some(o_outline) = _sfnt_outline_memo(font, o_gid):
+            val o_pairs = _hstem_pairs(_hstem_segments(o_outline.commands) + _hstem_round_extrema(o_outline.commands), units_per_em as f64)
+            var p: i64 = 0
+            var thinnest = 0.0
+            while p < o_pairs.len() / 2:
+                val w = o_pairs[p * 2 + 1] - o_pairs[p * 2]
+                if w > 0.0 and (thinnest == 0.0 or w < thinnest): thinnest = w
+                p = p + 1
+            if thinnest > 0.0: stdw = thinnest
+    _lcd_stdw_memo[fid] = stdw
+    stdw
+
+fn _lcd_area_font(font: OtFont, key: text) -> bool:
+    if val Some(hit) = _lcd_area_font_memo.get(key):
+        return hit
+    # OS/2 ulUnicodeRange1 bit 15 (Devanagari) first: a font that does not
+    # declare the block skips the ~3.5 ms cmap parse.
+    var area = false
+    if val Some(os2) = find_table(font, 1330851634):
+        if os2.length >= 46 and ((blob_u32(font.blob, os2.offset as i64 + 42) >> 15) & 1) == 1:
+            area = sfnt_cmap_glyph_id(font, 2325) != 0
+    _lcd_area_font_memo[key] = area
+    area
+
+fn _lcd_hint_knots_cached(font: OtFont, fid: text, units_per_em: i64, size_px: i64, size_milli: i64) -> [f64]:
+    val key = "{fid}|{size_px}|{size_milli}"
     if val Some(hit) = _lcd_hint_cache.get(key):
         return hit
-    val knots = _lcd_hint_knots(font, units_per_em, size_px, size_milli)
+    val knots = _lcd_hint_knots(font, units_per_em, size_px, size_milli, _lcd_stdw(font, fid, units_per_em))
     _lcd_hint_cache[key] = knots
     knots
 
@@ -1602,14 +1634,17 @@ fn _hs_round64(v: i64) -> i64:
     q * 64
 
 # Near-horizontal line runs (|dy| * 14 <= |dx|, FreeType's direction test) as
-# [y, x_min, x_max, dir] quads; y is the run's mean, dir +1 travels +x.
+# [y, x_min, x_max, dir, key] rows; y is the run's mean, dir +1 travels +x,
+# key is the command index (outline order, FreeType's segment order).
 fn _hstem_segments(commands: [SfntGlyfCommand]) -> [f64]:
     var segs: [f64] = []
     var px = 0.0
     var py = 0.0
     var mx = 0.0
     var my = 0.0
+    var ci = 0.0
     for c in commands:
+        ci = ci + 1.0
         var ex = px
         var ey = py
         var line = false
@@ -1637,43 +1672,43 @@ fn _hstem_segments(commands: [SfntGlyfCommand]) -> [f64]:
             if adx > 0.0 and ady * 14.0 <= adx:
                 val lo = if dx < 0.0: ex else: px
                 val hi = if dx < 0.0: px else: ex
-                segs = segs + [(py + ey) / 2.0, lo, hi, if dx < 0.0: -1.0 else: 1.0]
+                segs = segs + [(py + ey) / 2.0, lo, hi, if dx < 0.0: -1.0 else: 1.0, ci]
             px = ex
             py = ey
     segs
 
-# Round edges of one contour, as the same [y, x_min, x_max, dir] quads as
-# _hstem_segments. `pts` are the contour's points in order as [x, y, on]
-# triples (on = 1.0 for an on-curve point). A round edge is an on-curve point
+# Round edges of one contour, as the same [y, x_min, x_max, dir, key] rows as
+# _hstem_segments. `pts` are the contour's points in order as [x, y, on, key]
+# (on = 1.0 for an on-curve point; key = command index, the outline order). A round edge is an on-curve point
 # with at least one off-curve neighbour whose two neighbours both lie on its
 # near-horizontal tangent (FreeType's 1:14 direction test) and continue in the
 # same x direction: the top or bottom of an arc. FreeType builds the same
 # segment from the control-point / extremum / control-point run.
 fn _hstem_round_contour(pts: [f64]) -> [f64]:
     var segs: [f64] = []
-    var n = pts.len() / 3
-    if n >= 2 and pts[(n - 1) * 3] == pts[0] and pts[(n - 1) * 3 + 1] == pts[1]:
+    var n = pts.len() / 4
+    if n >= 2 and pts[(n - 1) * 4] == pts[0] and pts[(n - 1) * 4 + 1] == pts[1]:
         n = n - 1
     if n < 3: return segs
     var i: i64 = 0
     while i < n:
         val p = (i + n - 1) % n
         val q = (i + 1) % n
-        if pts[i * 3 + 2] > 0.5 and (pts[p * 3 + 2] < 0.5 or pts[q * 3 + 2] < 0.5):
-            val x = pts[i * 3]
-            val y = pts[i * 3 + 1]
-            val dxp = x - pts[p * 3]
-            val dxn = pts[q * 3] - x
-            var dyp = y - pts[p * 3 + 1]
-            var dyn = pts[q * 3 + 1] - y
+        if pts[i * 4 + 2] > 0.5 and (pts[p * 4 + 2] < 0.5 or pts[q * 4 + 2] < 0.5):
+            val x = pts[i * 4]
+            val y = pts[i * 4 + 1]
+            val dxp = x - pts[p * 4]
+            val dxn = pts[q * 4] - x
+            var dyp = y - pts[p * 4 + 1]
+            var dyn = pts[q * 4 + 1] - y
             if dyp < 0.0: dyp = 0.0 - dyp
             if dyn < 0.0: dyn = 0.0 - dyn
             val adxp = if dxp < 0.0: 0.0 - dxp else: dxp
             val adxn = if dxn < 0.0: 0.0 - dxn else: dxn
             if dxp * dxn > 0.0 and dyp * 14.0 <= adxp and dyn * 14.0 <= adxn:
-                val lo = if dxp < 0.0: pts[q * 3] else: pts[p * 3]
-                val hi = if dxp < 0.0: pts[p * 3] else: pts[q * 3]
-                segs = segs + [y, lo, hi, if dxp < 0.0: -1.0 else: 1.0]
+                val lo = if dxp < 0.0: pts[q * 4] else: pts[p * 4]
+                val hi = if dxp < 0.0: pts[p * 4] else: pts[q * 4]
+                segs = segs + [y, lo, hi, if dxp < 0.0: -1.0 else: 1.0, pts[i * 4 + 3]]
         i = i + 1
     segs
 
@@ -1681,14 +1716,16 @@ fn _hstem_round_contour(pts: [f64]) -> [f64]:
 fn _hstem_round_extrema(commands: [SfntGlyfCommand]) -> [f64]:
     var segs: [f64] = []
     var pts: [f64] = []
+    var ci = 0.0
     for c in commands:
+        ci = ci + 1.0
         if c.verb == SFNT_GLYF_MOVE:
             segs = segs + _hstem_round_contour(pts)
-            pts = [c.x1, c.y1, 1.0]
+            pts = [c.x1, c.y1, 1.0, ci]
         elif c.verb == SFNT_GLYF_LINE:
-            pts = pts + [c.x1, c.y1, 1.0]
+            pts = pts + [c.x1, c.y1, 1.0, ci]
         elif c.verb == SFNT_GLYF_QUAD:
-            pts = pts + [c.x1, c.y1, 0.0, c.x2, c.y2, 1.0]
+            pts = pts + [c.x1, c.y1, 0.0, ci, c.x2, c.y2, 1.0, ci]
     segs + _hstem_round_contour(pts)
 
 # Index of the best partner of run `i`: the nearest opposite-direction run on
@@ -1696,13 +1733,13 @@ fn _hstem_round_extrema(commands: [SfntGlyfCommand]) -> [f64]:
 fn _hstem_partner(segs: [f64], i: i64, upem: f64) -> i64:
     var best = -1
     var best_d = upem / 5.0
-    val want = 0.0 - segs[i * 4 + 3]
+    val want = 0.0 - segs[i * 5 + 3]
     var j: i64 = 0
-    while j < segs.len() / 4:
-        if segs[j * 4 + 3] == want:
-            val d = if segs[i * 4 + 3] < 0.0: segs[j * 4] - segs[i * 4] else: segs[i * 4] - segs[j * 4]
-            val lo_x = if segs[i * 4 + 1] > segs[j * 4 + 1]: segs[i * 4 + 1] else: segs[j * 4 + 1]
-            val hi_x = if segs[i * 4 + 2] < segs[j * 4 + 2]: segs[i * 4 + 2] else: segs[j * 4 + 2]
+    while j < segs.len() / 5:
+        if segs[j * 5 + 3] == want:
+            val d = if segs[i * 5 + 3] < 0.0: segs[j * 5] - segs[i * 5] else: segs[i * 5] - segs[j * 5]
+            val lo_x = if segs[i * 5 + 1] > segs[j * 5 + 1]: segs[i * 5 + 1] else: segs[j * 5 + 1]
+            val hi_x = if segs[i * 5 + 2] < segs[j * 5 + 2]: segs[i * 5 + 2] else: segs[j * 5 + 2]
             if d > 0.0 and d <= best_d and hi_x - lo_x >= upem / 256.0:
                 best = j
                 best_d = d
@@ -1713,12 +1750,12 @@ fn _hstem_partner(segs: [f64], i: i64, upem: f64) -> i64:
 fn _hstem_pairs(segs: [f64], upem: f64) -> [f64]:
     var pairs: [f64] = []
     var i: i64 = 0
-    while i < segs.len() / 4:
-        if segs[i * 4 + 3] < 0.0:
+    while i < segs.len() / 5:
+        if segs[i * 5 + 3] < 0.0:
             val j = _hstem_partner(segs, i, upem)
             if j >= 0 and _hstem_partner(segs, j, upem) == i:
-                val lo = segs[i * 4]
-                val hi = segs[j * 4]
+                val lo = segs[i * 5]
+                val hi = segs[j * 5]
                 var dup = false
                 var k: i64 = 0
                 while k < pairs.len() / 2:
@@ -1787,8 +1824,55 @@ fn _hstem_knots(commands: [SfntGlyfCommand], knots: [f64], upem: f64) -> [f64]:
     val m = knots.len()
     if m < 4: return knots
     val scale = knots[m - 2]
-    val segs = _hstem_segments(commands) + _hstem_round_extrema(commands)
-    val pairs = _hstem_pairs(segs, upem)
+    val lsegs = _hstem_segments(commands)
+    val segs = lsegs + _hstem_round_extrema(commands)
+    val raw_pairs = _hstem_pairs(segs, upem)
+    # FreeType merges same-direction segments closer than
+    # min(stdw / 5, 0.25 px) into one EDGE at its first segment's position
+    # (af_latin_hints_compute_edges): an `r`/`n` arch crest (round, on the
+    # x-height overshoot) joins the flat stem top on the x-height reference,
+    # so the arch's inner arc pairs with the REFERENCE edge, and a point
+    # between the two follows that edge. reps[i] is segment i's edge position.
+    val scale64 = knots[m - 2] * 64.0
+    var thr64 = _hs_h64(_floor_glyf(knots[m - 1] / 5.0) as f64 * knots[m - 2])
+    if thr64 > 16: thr64 = 16
+    val thr = thr64 as f64 / scale64
+    val ns = segs.len() / 5
+    # Line runs and round extrema are each in outline order: merge the two.
+    val nl = lsegs.len() / 5
+    var order: [i64] = []
+    var li: i64 = 0
+    var ri: i64 = nl
+    while li < nl or ri < ns:
+        if ri >= ns or (li < nl and segs[li * 5 + 4] <= segs[ri * 5 + 4]):
+            order = order.push(li)
+            li = li + 1
+        else:
+            order = order.push(ri)
+            ri = ri + 1
+    var reps: [f64] = [0.0; ns]
+    var edges: [i64] = []
+    var oi: i64 = 0
+    while oi < ns:
+        val i = order[oi]
+        reps[i] = segs[i * 5]
+        val yi = segs[i * 5]
+        val di = segs[i * 5 + 3]
+        var found = false
+        for e in edges:
+            if segs[e * 5 + 3] == di:
+                val d = yi - segs[e * 5]
+                if d < thr and d > 0.0 - thr:
+                    reps[i] = segs[e * 5]
+                    found = true
+                    break
+        if not found: edges = edges.push(i)
+        oi = oi + 1
+    var pairs: [f64] = []
+    var pi: i64 = 0
+    while pi < raw_pairs.len():
+        pairs = pairs.push(_hstem_rep(segs, reps, raw_pairs[pi]))
+        pi = pi + 1
     val bounds = match _outline_bounds(commands):
         Some(value): value
         None: return knots
@@ -1805,11 +1889,11 @@ fn _hstem_knots(commands: [SfntGlyfCommand], knots: [f64], upem: f64) -> [f64]:
     # an `o` has no edge on the flat baseline reference, and a knot there would
     # squash the arc between the collapsed overshoot and the inner edge.
     var cur: [f64] = []
-    cur = _hstem_edge_knot(cur, zones, n, bounds.top, tol)
-    cur = _hstem_edge_knot(cur, zones, n, bounds.bottom, tol)
+    cur = _hstem_edge_knot(cur, zones, n, _hstem_rep(segs, reps, bounds.top), tol)
+    cur = _hstem_edge_knot(cur, zones, n, _hstem_rep(segs, reps, bounds.bottom), tol)
     var e: i64 = 0
-    while e < segs.len() / 4:
-        cur = _hstem_edge_knot(cur, zones, n, segs[e * 4], tol)
+    while e < segs.len() / 5:
+        cur = _hstem_edge_knot(cur, zones, n, reps[e], tol)
         e = e + 1
     # The lowest blue extremum anchors the glyph: unanchored stems are placed
     # relative to the shift it receives from its zone fit.
@@ -1867,7 +1951,57 @@ fn _hstem_knots(commands: [SfntGlyfCommand], knots: [f64], upem: f64) -> [f64]:
                 if b.len() > 0:
                     cur = b
         s = s + 1
-    cur + [scale, 0.0]
+    # A merged segment's own points take its edge's position; every other
+    # point keeps following the edges: a spike knot at the segment's y.
+    var spikes: [f64] = []
+    var t: i64 = 0
+    while t < segs.len() / 5:
+        val y = segs[t * 5]
+        if reps[t] != y:
+            val tail = cur + [scale, 0.0]
+            spikes = spikes + [y - 0.5, _hint_map_y(tail, y - 0.5), y, _hint_map_y(tail, reps[t]), y + 0.5, _hint_map_y(tail, y + 0.5)]
+        t = t + 1
+    if spikes.len() == 0: return cur + [scale, 0.0]
+    var all: [f64] = []
+    var c: i64 = 0
+    while c < cur.len() / 2:
+        var near = false
+        var k: i64 = 0
+        while k < spikes.len() / 2:
+            val d = spikes[k * 2] - cur[c * 2]
+            if d < 0.5 and d > -0.5: near = true
+            k = k + 1
+        if not near: all = _hstem_put(all, cur[c * 2], cur[c * 2 + 1])
+        c = c + 1
+    var k2: i64 = 0
+    while k2 < spikes.len() / 2:
+        all = _hstem_put(all, spikes[k2 * 2], spikes[k2 * 2 + 1])
+        k2 = k2 + 1
+    all + [scale, 0.0]
+
+# Edge position (see _hstem_knots) of font y `y`: the rep of the segment at
+# `y`, or `y` itself when no segment sits there.
+fn _hstem_rep(segs: [f64], reps: [f64], y: f64) -> f64:
+    var i: i64 = 0
+    while i < reps.len():
+        if segs[i * 5] == y: return reps[i]
+        i = i + 1
+    y
+
+# (fy, ty) inserted in ascending fy; a knot already at fy is kept.
+fn _hstem_put(base: [f64], fy: f64, ty: f64) -> [f64]:
+    var out: [f64] = []
+    var placed = false
+    var i: i64 = 0
+    while i < base.len() / 2:
+        if base[i * 2] == fy: return base
+        if not placed and fy < base[i * 2]:
+            out = out + [fy, ty]
+            placed = true
+        out = out + [base[i * 2], base[i * 2 + 1]]
+        i = i + 1
+    if not placed: out = out + [fy, ty]
+    out
 
 fn _scale_commands_x(commands: [SfntGlyfCommand], ratio: f64) -> [SfntGlyfCommand]:
     var out: [SfntGlyfCommand] = []
@@ -1946,6 +2080,10 @@ class SfntLcdOutline:
     slo_raster_top: f64
     slo_bearing_y: i64
     slo_advance: i64
+    # Exact-area mask instead of the Skia AAA port (see _lcd_area_outline_raster).
+    slo_area: bool
+    # Identity of the outline (font, glyph, size): the phase-0 mask memo key.
+    slo_key: text
 
 # reason: SFNT selector/size scalars are the font-table domain; consumed by
 # text_layout/font_renderer.spl, so it must be public.
@@ -2016,9 +2154,18 @@ fn _glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: 
         height = frame.height
         raster_top = 0.0 - frame.top
         bearing_y = frame.bearing_y
+    # Font identity (blob length, head checkSumAdjustment): the key of the
+    # per-font hint, stem-width and gate memos.
+    val fid = "{font.blob.len()}|{blob_u32(font.blob, head_table.offset as i64 + 8)}"
     var knots: [f64] = []
     if not gray:
-        knots = _lcd_hint_knots_cached(font, head_table.offset as i64, units_per_em, size_px, if x_frac: x_milli else: size_px * 1000)
+        knots = _lcd_hint_knots_cached(font, fid, units_per_em, size_px, if x_frac: x_milli else: size_px * 1000)
+    # ponytail: font-level gate. FreeType hints Devanagari glyphs in its
+    # deva style (headline x-height, deva blue zones); this hinter only has
+    # the Latin style, so a Devanagari font keeps the exact-area mask, which
+    # matches Chrome on its marks (devanagari_mark_position_chrome159_spec).
+    # Upgrade: deva-style knots, then drop the gate.
+    val area = not gray and _lcd_area_font(font, fid)
     if knots.len() > 0:
         draw_commands = _hint_commands(commands, _hstem_knots(commands, knots, units_per_em as f64), scale)
         val hinted = match _outline_bounds(draw_commands):
@@ -2033,7 +2180,1362 @@ fn _glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: 
         slo_commands: draw_commands, slo_scale: scale,
         slo_left: bounds.left, slo_right: bounds.right,
         slo_height: height, slo_raster_top: raster_top, slo_bearing_y: bearing_y,
-        slo_advance: _round_glyf_metric(horizontal[0] as f64 * scale * x_ratio)))
+        slo_advance: _round_glyf_metric(horizontal[0] as f64 * scale * x_ratio), slo_area: area,
+        slo_key: "{fid}|{glyph_id}|{size_px}|{x_milli}|{gray}"))
+
+# --- Skia analytic AA LCD mask (SkScan_AAAPath) ---------------------------------
+# Chrome 159 renders an LCD glyph (SkScalerContext::GenerateImageFromPath) by
+# scaling the hinted path 4x in x into an A8 mask of 4W-8 samples and filling
+# it with Skia's analytic AA scan converter: 16.16 fixed point, quarter-row
+# snapped line ends, forward-differenced quad chords, per-strip alpha
+# truncation, src-over writes for whole-row strips and saturating accumulation
+# for partial ones. An exact-area accumulator over the same outline is a
+# different raster (measured: 328 mismatching px on 27 round glyphs at 16 px
+# vs 117 for Skia's own rasteriser on the same hinted outline). This is a port
+# of that algorithm: non-convex walker (SafeRLE / mask blitter), convex walker
+# (RunBased / mask), fat-rect fast path. Byte-exact against libskia's
+# SkDrawBase + SkA8Blitter on Liberation Sans/Serif/Mono 11..44 px at all four
+# quarter phases (2026-11-24, lcd_round_glyph_aaa_chrome159_spec).
+#
+# Edge record: one flat [i64], 24 slots per edge, addressed by base offset;
+# base 0 = head sentinel, 24 = tail sentinel, -1 = none.
+#   0 x  1 dx  2 upper_x  3 y  4 upper_y  5 lower_y  6 dy  7 curve_count
+#   8 curve_shift  9 winding  10 qx  11 qy  12 qdx  13 qdy  14 qddx  15 qddy
+#   16 qlast_x  17 qlast_y  18 snapped_x  19 snapped_y  20 prev  21 next
+#   22 kind (0 line, 1 quad)
+# Blitter state `o`: [0] width [1] height [2] mask? [3] saturating? [4] ir_left
+# [5] ir_right [6] accumulated row (-1 none) [7] offset of sample (0, 0) of
+# the result plane; then the accumulated row (width), the A8 plane and the
+# mask plane (mask only). Plane rows have 16 zero samples each side (stride
+# width + 32), so the LCD filter reads a shifted row in place.
+
+# Skia gQuickInverseTable: trunc(2^22 / x) for 0 < |x| <= 1024.
+fn _aaa_quick_div(a: i64, b: i64) -> i64:
+    if (if b < 0: 0 - b else: b) >= 8 and (if b < 0: 0 - b else: b) < 1024 and (if a < 0: 0 - a else: a) < 4096:
+        return (a * (if b == 0: 0 else: 4194304 / b)) >> 6
+    if a >= -32768 and a <= 32767:
+        return (a * 65536) / b
+    var r = (a * 65536) / b
+    if r > 2147483647: r = 2147483647
+    if r < -2147483648: r = -2147483648
+    r
+
+fn _aaa_ceil_fixed(v: i64) -> i64:
+    ((v + 65535) >> 16) << 16
+
+fn _aaa_alpha(v: i64) -> i64:
+    (255 * v + 32768) >> 16
+
+fn _aaa_min(a: i64, b: i64) -> i64:
+    if a < b: a else: b
+
+fn _aaa_max(a: i64, b: i64) -> i64:
+    if a > b: a else: b
+
+fn _aaa_update_quad(e: [i64], b: i64) -> bool:
+    var success = false
+    var count = e[b + 7]
+    var oldx = e[b + 10]
+    var oldy = e[b + 11]
+    var dx = e[b + 12]
+    var dy = e[b + 13]
+    val shift = e[b + 8]
+    val last_y = e[b + 17]
+    val sx = e[b + 18]
+    val sy = e[b + 19]
+    var newx = 0
+    var newy = 0
+    var nsx = 0
+    var nsy = 0
+    var going = true
+    while going:
+        var slope = 2147483647
+        count = count - 1
+        var num = 0
+        var den = 0
+        var steep = false
+        if count > 0:
+            val step_y = dy >> shift
+            newx = oldx + (dx >> shift)
+            newy = oldy + step_y
+            val ady = if step_y < 0: 0 - step_y else: step_y
+            if ady >= 131072 and (if dy < 0: 0 - dy else: dy) * 64 > (if dx < 0: 0 - dx else: dx):
+                steep = true
+                nsy = ((newy + 32768) >> 16) << 16
+                if last_y < nsy: nsy = last_y
+                den = (newy - sy) >> 10
+            else:
+                nsy = ((newy + 8192) >> 14) << 14
+                if last_y < nsy: nsy = last_y
+                den = (nsy - sy) >> 10
+            num = (newx - sx) >> 10
+            dx = dx + e[b + 14]
+            dy = dy + e[b + 15]
+        else:
+            newx = e[b + 16]
+            newy = last_y
+            nsy = newy
+            num = (newx - sx) >> 10
+            den = (newy - sy) >> 10
+        if den != 0:
+            # QuickSkFDot6Div, fast path inline
+            val an = if num < 0: 0 - num else: num
+            val ad = if den < 0: 0 - den else: den
+            slope = if ad >= 8 and ad < 1024 and an < 4096: (num * (4194304 / den)) >> 6 else: _aaa_quick_div(num, den)
+        nsx = if steep: newx - ((slope * (newy - nsy)) >> 16) else: newx
+        if slope < 2147483647:
+            # SkAnalyticEdge::updateLine (the chord sx,sy -> nsx,nsy), inline.
+            var ux0 = sx
+            var uy0 = sy
+            var uy1 = nsy
+            var udx = (nsx - sx) >> 10
+            if sy > nsy:
+                e[b + 9] = 0 - e[b + 9]
+                ux0 = nsx
+                uy0 = nsy
+                uy1 = sy
+                udx = (sx - nsx) >> 10
+            val udy = (uy1 - uy0) >> 10
+            if udy != 0:
+                val us = slope >> 10
+                val uabs = if us < 0: 0 - us else: us
+                e[b] = ux0
+                e[b + 1] = slope
+                e[b + 2] = ux0
+                e[b + 3] = uy0
+                e[b + 4] = uy0
+                e[b + 5] = uy1
+                if udx == 0 or slope == 0:
+                    e[b + 6] = 2147483647
+                elif uabs < 1024:
+                    e[b + 6] = if uabs == 0: 0 else: 4194304 / uabs
+                else:
+                    val q = _aaa_quick_div(udy, udx)
+                    e[b + 6] = if q < 0: 0 - q else: q
+                success = true
+        oldx = newx
+        oldy = newy
+        going = count > 0 and not success
+    e[b + 10] = newx
+    e[b + 11] = newy
+    e[b + 12] = dx
+    e[b + 13] = dy
+    e[b + 18] = nsx
+    e[b + 19] = nsy
+    e[b + 7] = count
+    success
+
+fn _aaa_set_quad(e: [i64], b: i64, p0x: f64, p0y: f64, p1x: f64, p1y: f64, p2x: f64, p2y: f64) -> bool:
+    var x0 = ((((p0x * 256.0) as f32) as f64)) as i64
+    var y0 = ((((p0y * 256.0) as f32) as f64)) as i64
+    val x1 = ((((p1x * 256.0) as f32) as f64)) as i64
+    val y1 = ((((p1y * 256.0) as f32) as f64)) as i64
+    var x2 = ((((p2x * 256.0) as f32) as f64)) as i64
+    var y2 = ((((p2y * 256.0) as f32) as f64)) as i64
+    var w = 1
+    if y0 > y2:
+        val tx = x0
+        x0 = x2
+        x2 = tx
+        val ty = y0
+        y0 = y2
+        y2 = ty
+        w = -1
+    if ((y0 + 32) >> 6) == ((y2 + 32) >> 6): return false
+    # SkFDot6 diff_to_shift, inline.
+    val sdx = (x1 * 2 - x0 - x2) >> 2
+    val sdy = (y1 * 2 - y0 - y2) >> 2
+    val sax = if sdx < 0: 0 - sdx else: sdx
+    val say = if sdy < 0: 0 - sdy else: sdy
+    var dist = ((if sax > say: sax + (say >> 1) else: say + (sax >> 1)) + 16) >> 5
+    var bits = 0
+    while dist > 0:
+        dist = dist >> 1
+        bits = bits + 1
+    var shift = bits >> 1
+    if shift == 0: shift = 1
+    elif shift > 6: shift = 6
+    val ax = (x0 - x1 - x1 + x2) * 512
+    val ay = (y0 - y1 - y1 + y2) * 512
+    e[b + 7] = 1 << shift
+    e[b + 8] = shift - 1
+    e[b + 9] = w
+    e[b + 10] = (x0 * 1024) >> 2
+    e[b + 11] = ((((y0 * 1024) >> 2) + 8192) >> 14) << 14
+    e[b + 12] = ((x1 - x0) * 1024 + (ax >> shift)) >> 2
+    e[b + 13] = ((y1 - y0) * 1024 + (ay >> shift)) >> 2
+    e[b + 14] = (ax >> (shift - 1)) >> 2
+    e[b + 15] = (ay >> (shift - 1)) >> 2
+    e[b + 16] = (x2 * 1024) >> 2
+    e[b + 17] = ((((y2 * 1024) >> 2) + 8192) >> 14) << 14
+    e[b + 18] = e[b + 10]
+    e[b + 19] = e[b + 11]
+    e[b + 22] = 1
+    _aaa_update_quad(e, b)
+
+# SkEdgeBuilder::combineVertical: 0 keep the new edge, 1 merged into `l`,
+# 2 the two cancel (drop both).
+fn _aaa_combine_vertical(e: [i64], n: i64, l: i64) -> i64:
+    if e[l + 22] != 0 or e[l + 1] != 0 or e[n] != e[l]: return 0
+    if e[n + 9] == e[l + 9]:
+        if e[n + 5] == e[l + 4]:
+            e[l + 4] = e[n + 4]
+            e[l + 3] = e[l + 4]
+            return 1
+        if (if (e[n + 4] - e[l + 5]) < 0: 0 - (e[n + 4] - e[l + 5]) else: (e[n + 4] - e[l + 5])) < 256:
+            e[l + 5] = e[n + 5]
+            return 1
+        return 0
+    if (if (e[n + 4] - e[l + 4]) < 0: 0 - (e[n + 4] - e[l + 4]) else: (e[n + 4] - e[l + 4])) < 256:
+        if (if (e[n + 5] - e[l + 5]) < 0: 0 - (e[n + 5] - e[l + 5]) else: (e[n + 5] - e[l + 5])) < 256: return 2
+        if e[n + 5] < e[l + 5]:
+            e[l + 4] = e[n + 5]
+            e[l + 3] = e[l + 4]
+            return 1
+        e[l + 4] = e[l + 5]
+        e[l + 3] = e[l + 4]
+        e[l + 5] = e[n + 5]
+        e[l + 9] = e[n + 9]
+        return 1
+    if (if (e[n + 5] - e[l + 5]) < 0: 0 - (e[n + 5] - e[l + 5]) else: (e[n + 5] - e[l + 5])) < 256:
+        if e[n + 4] > e[l + 4]:
+            e[l + 5] = e[n + 4]
+            return 1
+        e[l + 5] = e[l + 4]
+        e[l + 4] = e[n + 4]
+        e[l + 3] = e[l + 4]
+        e[l + 9] = e[n + 9]
+        return 1
+    0
+
+# Edge count after adding the line a->b (edges live at slots 2..).
+fn _aaa_push_line(e: [i64], n: i64, ax: f64, ay: f64, bx: f64, by: f64) -> i64:
+    # SkAnalyticEdge::setLine into slot n + 2, inline.
+    val b = (n + 2) * 24
+    var x0 = ((((((ax * 4.0) as f32) as f64) * 64.0) as i64)) * 256
+    var y0 = (((((((((ay * 4.0) as f32) as f64) * 64.0) as i64)) * 256) + 8192) >> 14) << 14
+    var x1 = ((((((bx * 4.0) as f32) as f64) * 64.0) as i64)) * 256
+    var y1 = (((((((((by * 4.0) as f32) as f64) * 64.0) as i64)) * 256) + 8192) >> 14) << 14
+    var w = 1
+    if y0 > y1:
+        val tx = x0
+        x0 = x1
+        x1 = tx
+        val ty = y0
+        y0 = y1
+        y1 = ty
+        w = -1
+    val dy = (y1 - y0) >> 10
+    if dy == 0: return n
+    val dx = (x1 - x0) >> 10
+    # QuickSkFDot6Div (dy > 0), fast path inline; then SkAnalyticEdge fields.
+    val adx = if dx < 0: 0 - dx else: dx
+    val slope = if dy >= 8 and dy < 1024 and adx < 4096: (dx * (4194304 / dy)) >> 6 else: _aaa_quick_div(dx, dy)
+    val abs_slope = if slope < 0: 0 - slope else: slope
+    e[b] = x0
+    e[b + 1] = slope
+    e[b + 2] = x0
+    e[b + 3] = y0
+    e[b + 4] = y0
+    e[b + 5] = y1
+    if dx == 0 or slope == 0:
+        e[b + 6] = 2147483647
+    elif abs_slope < 1024:
+        e[b + 6] = if abs_slope == 0: 0 else: 4194304 / abs_slope
+    else:
+        val q = _aaa_quick_div(dy, dx)
+        e[b + 6] = if q < 0: 0 - q else: q
+    e[b + 7] = 0
+    e[b + 8] = 0
+    e[b + 9] = w
+    e[b + 22] = 0
+    if slope == 0 and n > 0:
+        val c = _aaa_combine_vertical(e, b, b - 24)
+        if c == 2: return n - 1
+        if c == 1: return n
+    n + 1
+
+# SkChopQuadAtYExtrema (f32), then one edge per monotonic piece.
+fn _aaa_push_quad(e: [i64], n: i64, p0x: f64, p0y: f64, p1x: f64, p1y: f64, p2x: f64, p2y: f64) -> i64:
+    val ab = (((p0y - p1y) as f32) as f64)
+    var bc = (((p1y - p2y) as f32) as f64)
+    if ab < 0.0: bc = 0.0 - bc
+    if not (ab == 0.0 or bc < 0.0):
+        return if _aaa_set_quad(e, (n + 2) * 24, p0x, p0y, p1x, p1y, p2x, p2y): n + 1 else: n
+    var numer = ab
+    var denom = ((((((ab - p1y) as f32) as f64) + p2y) as f32) as f64)
+    if numer < 0.0:
+        numer = 0.0 - numer
+        denom = 0.0 - denom
+    if not (denom == 0.0 or numer == 0.0 or numer >= denom):
+        val t = (((numer / denom) as f32) as f64)
+        if t != 0.0:
+            val ax = ((((p0x + ((((((p1x - p0x) as f32) as f64) * t) as f32) as f64)) as f32) as f64))
+            val ay = ((((p0y + ((((((p1y - p0y) as f32) as f64) * t) as f32) as f64)) as f32) as f64))
+            val cx = ((((p1x + ((((((p2x - p1x) as f32) as f64) * t) as f32) as f64)) as f32) as f64))
+            val cy = ((((p1y + ((((((p2y - p1y) as f32) as f64) * t) as f32) as f64)) as f32) as f64))
+            val mx = ((((ax + ((((((cx - ax) as f32) as f64) * t) as f32) as f64)) as f32) as f64))
+            val my = ((((ay + ((((((cy - ay) as f32) as f64) * t) as f32) as f64)) as f32) as f64))
+            val n1 = if _aaa_set_quad(e, (n + 2) * 24, p0x, p0y, ax, my, mx, my): n + 1 else: n
+            return if _aaa_set_quad(e, (n1 + 2) * 24, mx, my, cx, my, p2x, p2y): n1 + 1 else: n1
+    var fa = (((p0y - p1y) as f32) as f64)
+    var fb = (((p1y - p2y) as f32) as f64)
+    if fa < 0.0: fa = 0.0 - fa
+    if fb < 0.0: fb = 0.0 - fb
+    if _aaa_set_quad(e, (n + 2) * 24, p0x, p0y, p1x, if fa < fb: p0y else: p2y, p2x, p2y): n + 1 else: n
+
+# --- blitter -----------------------------------------------------------------
+
+fn _aaa_so(o: [i64], i: i64, aa: i64):
+    if aa == 0: return
+    if aa == 255:
+        o[i] = 255
+        return
+    val p = (255 - aa) * o[i]
+    o[i] = aa + (((p + 128) * 257) >> 16)
+
+fn _aaa_real(o: [i64], x: i64, y: i64, aa: i64):
+    val w = o[0]
+    if x >= 0 and x < w and y >= 0 and y < o[1]:
+        _aaa_so(o, 24 + w + y * (w + 32) + x, aa)
+
+fn _aaa_flush(o: [i64]):
+    val y = o[6]
+    if y < 0: return
+    val w = o[0]
+    val row = 24 + w + y * (w + 32)
+    var x = 0
+    while x < w:
+        var a = o[8 + x]
+        if a != 0:
+            if a > 247: a = 255
+            if a == 255:
+                o[row + x] = 255
+            elif a >= 8:
+                o[row + x] = a + (((((255 - a) * o[row + x]) + 128) * 257) >> 16)
+            o[8 + x] = 0
+        x = x + 1
+    o[6] = -1
+
+fn _aaa_check_y(o: [i64], y: i64):
+    if y != o[6]:
+        _aaa_flush(o)
+        o[6] = y
+
+fn _aaa_acc(o: [i64], x: i64, a: i64):
+    val t = o[8 + x] + a
+    o[8 + x] = if o[3] == 1: _aaa_min(255, t) else: (t - (t >> 8)) & 255
+
+fn _aaa_add_safe_n(o: [i64], x: i64, y: i64, n: i64, a: i64):
+    _aaa_check_y(o, y)
+    if x >= o[4] and x + n <= o[5]:
+        var i = 0
+        while i < n:
+            _aaa_acc(o, x + i, a)
+            i = i + 1
+
+fn _aaa_mask_at(o: [i64], x: i64, y: i64) -> i64:
+    val w = o[0]
+    24 + w + (w + 32) * (o[1] + y) + x
+
+fn _aaa_madd(o: [i64], x: i64, y: i64, a: i64):
+    val i = _aaa_mask_at(o, x, y)
+    val t = o[i] + a
+    o[i] = (t - (t >> 8)) & 255
+
+fn _aaa_add_n(o: [i64], x: i64, y: i64, n: i64, a: i64):
+    if y < 0 or y >= o[1]: return
+    if o[2] == 1:
+        var i = 0
+        while i < n:
+            _aaa_madd(o, x + i, y, a)
+            i = i + 1
+    else:
+        _aaa_add_safe_n(o, x, y, n, a)
+
+fn _aaa_real_v(o: [i64], x: i64, y: i64, h: i64, a: i64):
+    var i = 0
+    while i < h:
+        if o[2] == 1:
+            if a != 0 and y + i >= 0 and y + i < o[1]: o[_aaa_mask_at(o, x, y + i)] = a
+        else:
+            _aaa_real(o, x, y + i, a)
+        i = i + 1
+
+fn _aaa_real_anti_rect(o: [i64], x: i64, y: i64, w: i64, h: i64, la: i64, ra: i64):
+    if la > 0: _aaa_real_v(o, x, y, h, la)
+    var i = 0
+    while i < w:
+        _aaa_real_v(o, x + 1 + i, y, h, 255)
+        i = i + 1
+    if ra > 0: _aaa_real_v(o, x + 1 + w, y, h, ra)
+
+
+# One coverage write of an already-scaled alpha. `real`: a whole-row strip
+# whose neighbours are not too close (Skia's real blitter write, src-over);
+# otherwise accumulated (mask plane: saturating; RLE row: saturating, or
+# overflow-catching on a convex path). `assign`: the mask blitter's
+# blitSingle stores instead of adding. Leaf helpers are inlined here and in
+# the walkers: a call costs ~4x a statement on the interpreter lane.
+fn _aaa_put(o: [i64], y: i64, x: i64, a: i64, real: bool, assign: bool):
+    val w = o[0]
+    if o[2] == 1:
+        val i = 24 + w + (w + 32) * (o[1] + y) + x
+        if real and assign:
+            o[i] = a
+        else:
+            val t = o[i] + a
+            o[i] = if t > 255: 255 else: t
+    elif real:
+        if a != 0 and x >= 0 and x < w:
+            val i = 24 + w + y * (w + 32) + x
+            if a == 255:
+                o[i] = 255
+            else:
+                o[i] = a + (((((255 - a) * o[i]) + 128) * 257) >> 16)
+    else:
+        if y != o[6]:
+            _aaa_flush(o)
+            o[6] = y
+        if x >= o[4] and x < o[5]:
+            val t = o[8 + x] + a
+            if o[3] == 1:
+                o[8 + x] = if t > 255: 255 else: t
+            else:
+                o[8 + x] = (t - (t >> 8)) & 255
+
+fn _aaa_alpha_above(al: [i64], off: i64, l: i64, r: i64, dy: i64, full: i64):
+    val rr = ((r + 65535) >> 16)
+    if rr == 0: return
+    if rr == 1:
+        al[off] = (((((rr << 17) - l - r) >> 9) * full) >> 8) & 255
+        return
+    val first = 65536 - l
+    val last = r - ((rr - 1) << 16)
+    val first_h = ((first * dy) >> 16)
+    al[off] = (((first * first_h) >> 16) >> 9) & 255
+    var a16 = (if (first_h + (dy >> 1)) > 2147483647: 2147483647 else: (if (first_h + (dy >> 1)) < -2147483648: -2147483648 else: (first_h + (dy >> 1))))
+    var i = 1
+    while i < rr - 1:
+        al[off + i] = (a16 >> 8) & 255
+        a16 = (if (a16 + dy) > 2147483647: 2147483647 else: (if (a16 + dy) < -2147483648: -2147483648 else: (a16 + dy)))
+        i = i + 1
+    al[off + rr - 1] = (full - ((((last >> 11) * (last >> 11) * (dy >> 11)) >> 8) & 255)) & 255
+
+fn _aaa_alpha_below(al: [i64], off: i64, l: i64, r: i64, dy: i64, full: i64):
+    val rr = ((r + 65535) >> 16)
+    if rr == 0: return
+    if rr == 1:
+        al[off] = ((((((l + r) / 2) >> 8) & 255) * full) >> 8) & 255
+        return
+    val first = 65536 - l
+    val last = r - ((rr - 1) << 16)
+    val last_h = ((last * dy) >> 16)
+    al[off + rr - 1] = (((last * last_h) >> 16) >> 9) & 255
+    var a16 = (if (last_h + (dy >> 1)) > 2147483647: 2147483647 else: (if (last_h + (dy >> 1)) < -2147483648: -2147483648 else: (last_h + (dy >> 1))))
+    var i = rr - 2
+    while i > 0:
+        al[off + i] = (a16 >> 8) & 255
+        a16 = (if (a16 + dy) > 2147483647: 2147483647 else: (if (a16 + dy) < -2147483648: -2147483648 else: (a16 + dy)))
+        i = i - 1
+    al[off] = (full - ((((first >> 11) * (first >> 11) * (dy >> 11)) >> 8) & 255)) & 255
+
+fn _aaa_trap_row_general(o: [i64], y: i64, ul: i64, ur: i64, ll: i64, lr: i64, ldy: i64, rdy: i64, full: i64, nrb: bool):
+    val left = ul >> 16
+    val len = ((lr + 65535) >> 16) - left
+    val real = full == 255 and not nrb
+    if len == 1:
+        val a = (((ur - ul + lr - ll) / 2) >> 8) & 255
+        _aaa_put(o, y, left, if real: a else: (a * full) >> 8, real, true)
+        return
+    # Skia keeps alpha = full and subtracts the coverage outside each edge,
+    # clamped at 0; `cut` holds the subtracted amount (clamped at full), so
+    # the row starts as a zero fill and alpha is full - cut.
+    var cut: [i64] = [0; len + 1]
+    var tmp: [i64] = [0; len + 1]
+    val ul_i = ul >> 16
+    val ll_i = (ll + 65535) >> 16
+    if ul_i + 2 == ll_i:
+        val first = (ul_i << 16) + 65536 - ul
+        val a1 = (full - ((((first >> 11) * (first >> 11) * (ldy >> 11)) >> 8) & 255)) & 255
+        val a2 = (((((ll - ul - first) >> 11) * ((ll - ul - first) >> 11) * (ldy >> 11)) >> 8) & 255)
+        cut[0] = if a1 < full: a1 else: full
+        cut[1] = if a2 < full: a2 else: full
+    elif ll_i > ul_i:
+        _aaa_alpha_below(tmp, ul_i - left, ul - (ul_i << 16), ll - (ul_i << 16), ldy, full)
+        var k = ul_i - left
+        val stop = ll_i - left
+        while k < stop:
+            cut[k] = if tmp[k] < full: tmp[k] else: full
+            k = k + 1
+    val ur_i = ur >> 16
+    val lr_i = (lr + 65535) >> 16
+    if ur_i + 2 == lr_i:
+        val first = (ur_i << 16) + 65536 - ur
+        val c1 = cut[len - 2] + ((((first >> 11) * (first >> 11) * (rdy >> 11)) >> 8) & 255)
+        val c2 = cut[len - 1] + ((full - (((((lr - ur - first) >> 11) * ((lr - ur - first) >> 11) * (rdy >> 11)) >> 8) & 255)) & 255)
+        cut[len - 2] = if c1 < full: c1 else: full
+        cut[len - 1] = if c2 < full: c2 else: full
+    elif lr_i > ur_i:
+        _aaa_alpha_above(tmp, ur_i - left, ur - (ur_i << 16), lr - (ur_i << 16), rdy, full)
+        var k = ur_i - left
+        val stop = lr_i - left
+        while k < stop:
+            val c = cut[k] + tmp[k]
+            cut[k] = if c < full: c else: full
+            k = k + 1
+    val w = o[0]
+    if o[2] == 1:
+        var i = 0
+        var m = 24 + w + (w + 32) * (o[1] + y) + left
+        while i < len:
+            val t = o[m] + full - cut[i]
+            o[m] = if t > 255: 255 else: t
+            m = m + 1
+            i = i + 1
+    elif real:
+        var i = if left < 0: 0 - left else: 0
+        val stop = if left + len > w: w - left else: len
+        var m = 24 + w + y * (w + 32) + left + i
+        while i < stop:
+            val a = 255 - cut[i]
+            if a == 255:
+                o[m] = 255
+            elif a != 0:
+                o[m] = a + (((((255 - a) * o[m]) + 128) * 257) >> 16)
+            m = m + 1
+            i = i + 1
+    else:
+        # SafeRLE addAntiH: clipped to the path's ir, one row check.
+        if y != o[6]:
+            _aaa_flush(o)
+            o[6] = y
+        var i = if o[4] - left > 0: o[4] - left else: 0
+        val stop = if o[5] - left < len: o[5] - left else: len
+        val sat = o[3] == 1
+        while i < stop:
+            val t = o[8 + left + i] + full - cut[i]
+            if sat:
+                o[8 + left + i] = if t > 255: 255 else: t
+            else:
+                o[8 + left + i] = (t - (t >> 8)) & 255
+            i = i + 1
+
+fn _aaa_trap_row(o: [i64], y: i64, ul0: i64, ur0: i64, ll0: i64, lr0: i64, ldy: i64, rdy: i64, full: i64, nrb: bool):
+    if y < 0 or y >= o[1] or ul0 > ur0: return
+    var ul = ul0
+    var ur = ur0
+    var ll = ll0
+    var lr = lr0
+    if ll > lr:
+        # approximate intersection of the crossing edges
+        var a = ul
+        var b = ll
+        if a > b:
+            a = ll
+            b = ul
+        var c = ur
+        var d = lr
+        if c > d:
+            c = lr
+            d = ur
+        if c > a: a = c
+        if d < b: b = d
+        ll = (a + b) / 2
+        lr = ll
+    if ul == ur and ll == lr: return
+    if ul > ll:
+        val t = ul
+        ul = ll
+        ll = t
+    if ur > lr:
+        val t = ur
+        ur = lr
+        lr = t
+    val jl = ((ll + 65535) >> 16) << 16
+    val jr = (ur >> 16) << 16
+    if jl > jr:
+        _aaa_trap_row_general(o, y, ul, ur, ll, lr, ldy, rdy, full, nrb)
+        return
+    if o[2] == 1:
+        # Mask plane: every write is a saturating add (blitSingle assigns).
+        val mb = 24 + o[0] + (o[0] + 32) * (o[1] + y)
+        if ul < jl:
+            val ln = (jl - ul + 65535) >> 16
+            if ln == 1:
+                val a = (((jl - ul + jl - ll) / 2) >> 8) & 255
+                val i1 = mb + (ul >> 16)
+                if full == 255 and not nrb:
+                    o[i1] = a
+                else:
+                    val t1 = o[i1] + ((a * full) >> 8)
+                    o[i1] = if t1 > 255: 255 else: t1
+            elif ln == 2:
+                val f = jl - 65536 - ul
+                val i2 = mb + (ul >> 16)
+                val t2 = o[i2] + ((((f >> 11) * (f >> 11) * (ldy >> 11)) >> 8) & 255)
+                o[i2] = if t2 > 255: 255 else: t2
+                val g = ll - ul - f
+                val t3 = o[i2 + 1] + ((full - ((((g >> 11) * (g >> 11) * (ldy >> 11)) >> 8) & 255)) & 255)
+                o[i2 + 1] = if t3 > 255: 255 else: t3
+            else:
+                _aaa_trap_row_general(o, y, ul, jl, ll, jl, ldy, 2147483647, full, nrb)
+        if jl < jr:
+            var si = mb + (jl >> 16)
+            val stop = mb + (jr >> 16)
+            while si < stop:
+                val st = o[si] + full
+                o[si] = if st > 255: 255 else: st
+                si = si + 1
+        if lr > jr:
+            val rn = (lr - jr + 65535) >> 16
+            if rn == 1:
+                val a = (((ur - jr + lr - jr) / 2) >> 8) & 255
+                val i4 = mb + (jr >> 16)
+                if full == 255 and not nrb:
+                    o[i4] = a
+                else:
+                    val t4 = o[i4] + ((a * full) >> 8)
+                    o[i4] = if t4 > 255: 255 else: t4
+            elif rn == 2:
+                val f = jr + 65536 - ur
+                val i5 = mb + (jr >> 16)
+                val t5 = o[i5] + ((full - ((((f >> 11) * (f >> 11) * (rdy >> 11)) >> 8) & 255)) & 255)
+                o[i5] = if t5 > 255: 255 else: t5
+                val g = lr - ur - f
+                val t6 = o[i5 + 1] + ((((g >> 11) * (g >> 11) * (rdy >> 11)) >> 8) & 255)
+                o[i5 + 1] = if t6 > 255: 255 else: t6
+            else:
+                _aaa_trap_row_general(o, y, jr, ur, jr, lr, 2147483647, rdy, full, nrb)
+        return
+    val real = full == 255 and not nrb
+    val w = o[0]
+    val rbase = 24 + w + y * (w + 32)
+    if ul < jl:
+        val len = (jl - ul + 65535) >> 16
+        if len == 1:
+            val a = (((jl - ul + jl - ll) / 2) >> 8) & 255
+            val px1 = ul >> 16
+            val pa1 = if real: a else: (a * full) >> 8
+            if real:
+                if pa1 != 0 and px1 >= 0 and px1 < w:
+                    val pi1 = rbase + px1
+                    if pa1 == 255:
+                        o[pi1] = 255
+                    else:
+                        o[pi1] = pa1 + (((((255 - pa1) * o[pi1]) + 128) * 257) >> 16)
+            else:
+                if y != o[6]:
+                    _aaa_flush(o)
+                    o[6] = y
+                if px1 >= o[4] and px1 < o[5]:
+                    val pt1 = o[8 + px1] + pa1
+                    if o[3] == 1:
+                        o[8 + px1] = if pt1 > 255: 255 else: pt1
+                    else:
+                        o[8 + px1] = (pt1 - (pt1 >> 8)) & 255
+        elif len == 2:
+            val first = jl - 65536 - ul
+            val px2 = ul >> 16
+            val pa2 = ((((first >> 11) * (first >> 11) * (ldy >> 11)) >> 8) & 255)
+            if real:
+                if pa2 != 0 and px2 >= 0 and px2 < w:
+                    val pi2 = rbase + px2
+                    if pa2 == 255:
+                        o[pi2] = 255
+                    else:
+                        o[pi2] = pa2 + (((((255 - pa2) * o[pi2]) + 128) * 257) >> 16)
+            else:
+                if y != o[6]:
+                    _aaa_flush(o)
+                    o[6] = y
+                if px2 >= o[4] and px2 < o[5]:
+                    val pt2 = o[8 + px2] + pa2
+                    if o[3] == 1:
+                        o[8 + px2] = if pt2 > 255: 255 else: pt2
+                    else:
+                        o[8 + px2] = (pt2 - (pt2 >> 8)) & 255
+            val px3 = (ul >> 16) + 1
+            val pa3 = (full - (((((ll - ul - first) >> 11) * ((ll - ul - first) >> 11) * (ldy >> 11)) >> 8) & 255)) & 255
+            if real:
+                if pa3 != 0 and px3 >= 0 and px3 < w:
+                    val pi3 = rbase + px3
+                    if pa3 == 255:
+                        o[pi3] = 255
+                    else:
+                        o[pi3] = pa3 + (((((255 - pa3) * o[pi3]) + 128) * 257) >> 16)
+            else:
+                if y != o[6]:
+                    _aaa_flush(o)
+                    o[6] = y
+                if px3 >= o[4] and px3 < o[5]:
+                    val pt3 = o[8 + px3] + pa3
+                    if o[3] == 1:
+                        o[8 + px3] = if pt3 > 255: 255 else: pt3
+                    else:
+                        o[8 + px3] = (pt3 - (pt3 >> 8)) & 255
+        else:
+            _aaa_trap_row_general(o, y, ul, jl, ll, jl, ldy, 2147483647, full, nrb)
+    if jl < jr:
+        # blitFull: whole pixels of strip alpha `full`.
+        val sx = jl >> 16
+        val sn = (jr - jl) >> 16
+        if real:
+            var si = rbase + sx
+            val stop = si + sn
+            while si < stop:
+                o[si] = 255
+                si = si + 1
+        else:
+            if y != o[6]:
+                _aaa_flush(o)
+                o[6] = y
+            if sx >= o[4] and sx + sn <= o[5]:
+                var si = 8 + sx
+                val stop = si + sn
+                val sat = o[3] == 1
+                while si < stop:
+                    val st = o[si] + full
+                    o[si] = if sat: (if st > 255: 255 else: st) else: (st - (st >> 8)) & 255
+                    si = si + 1
+    if lr > jr:
+        val len = (lr - jr + 65535) >> 16
+        if len == 1:
+            val a = (((ur - jr + lr - jr) / 2) >> 8) & 255
+            val px4 = jr >> 16
+            val pa4 = if real: a else: (a * full) >> 8
+            if real:
+                if pa4 != 0 and px4 >= 0 and px4 < w:
+                    val pi4 = rbase + px4
+                    if pa4 == 255:
+                        o[pi4] = 255
+                    else:
+                        o[pi4] = pa4 + (((((255 - pa4) * o[pi4]) + 128) * 257) >> 16)
+            else:
+                if y != o[6]:
+                    _aaa_flush(o)
+                    o[6] = y
+                if px4 >= o[4] and px4 < o[5]:
+                    val pt4 = o[8 + px4] + pa4
+                    if o[3] == 1:
+                        o[8 + px4] = if pt4 > 255: 255 else: pt4
+                    else:
+                        o[8 + px4] = (pt4 - (pt4 >> 8)) & 255
+        elif len == 2:
+            val first = jr + 65536 - ur
+            val px5 = jr >> 16
+            val pa5 = (full - ((((first >> 11) * (first >> 11) * (rdy >> 11)) >> 8) & 255)) & 255
+            if real:
+                if pa5 != 0 and px5 >= 0 and px5 < w:
+                    val pi5 = rbase + px5
+                    if pa5 == 255:
+                        o[pi5] = 255
+                    else:
+                        o[pi5] = pa5 + (((((255 - pa5) * o[pi5]) + 128) * 257) >> 16)
+            else:
+                if y != o[6]:
+                    _aaa_flush(o)
+                    o[6] = y
+                if px5 >= o[4] and px5 < o[5]:
+                    val pt5 = o[8 + px5] + pa5
+                    if o[3] == 1:
+                        o[8 + px5] = if pt5 > 255: 255 else: pt5
+                    else:
+                        o[8 + px5] = (pt5 - (pt5 >> 8)) & 255
+            val px6 = (jr >> 16) + 1
+            val pa6 = (((((lr - ur - first) >> 11) * ((lr - ur - first) >> 11) * (rdy >> 11)) >> 8) & 255)
+            if real:
+                if pa6 != 0 and px6 >= 0 and px6 < w:
+                    val pi6 = rbase + px6
+                    if pa6 == 255:
+                        o[pi6] = 255
+                    else:
+                        o[pi6] = pa6 + (((((255 - pa6) * o[pi6]) + 128) * 257) >> 16)
+            else:
+                if y != o[6]:
+                    _aaa_flush(o)
+                    o[6] = y
+                if px6 >= o[4] and px6 < o[5]:
+                    val pt6 = o[8 + px6] + pa6
+                    if o[3] == 1:
+                        o[8 + px6] = if pt6 > 255: 255 else: pt6
+                    else:
+                        o[8 + px6] = (pt6 - (pt6 >> 8)) & 255
+        else:
+            _aaa_trap_row_general(o, y, jr, ur, jr, lr, 2147483647, rdy, full, nrb)
+
+
+# --- edge list -----------------------------------------------------------------
+
+fn _aaa_insert_after(e: [i64], c: i64, after: i64):
+    val n = e[after + 21]
+    e[c + 20] = after
+    e[c + 21] = n
+    e[n + 20] = c
+    e[after + 21] = c
+
+fn _aaa_back_start(e: [i64], p0: i64, x: i64) -> i64:
+    var p = p0
+    while e[p + 20] >= 0 and e[p] > x:
+        p = e[p + 20]
+    p
+
+fn _aaa_go_y(e: [i64], c: i64, y: i64):
+    if y == e[c + 3] + 65536:
+        e[c] = e[c] + e[c + 1]
+        e[c + 3] = y
+    elif y != e[c + 3]:
+        e[c] = e[c + 2] + (((e[c + 1]) * (y - e[c + 4])) >> 16)
+        e[c + 3] = y
+
+# Next strip ends early where `c` crosses its left (or, `fwd`, right) neighbour.
+fn _aaa_cross(e: [i64], c: i64, ny: i64, nn: i64, fwd: bool) -> i64:
+    val a = if fwd: c else: e[c + 20]
+    val b = if fwd: e[c + 21] else: c
+    val guard = if fwd: e[b + 21] else: e[a + 20]
+    if guard >= 0 and e[a] + e[a + 1] > e[b] + e[b + 1]: ny + 16384 else: nn
+
+# aaa_walk_edges (non-convex, nonzero winding).
+fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, right_clip: i64, skip_cross: bool):
+    e[0] = left_clip
+    e[2] = left_clip
+    e[24] = right_clip
+    e[26] = right_clip
+    var y = e[e[21] + 4]
+    if y < (start_y << 16): y = start_y << 16
+    var nn = 2147483647
+    var c = e[21]
+    while e[c + 4] <= y:
+        _aaa_go_y(e, c, y)
+        nn = (if (e[c + 5]) > y and (e[c + 5]) < nn: (e[c + 5]) else: nn)
+        c = e[c + 21]
+    nn = (if (e[c + 4]) > y and (e[c + 4]) < nn: (e[c + 4]) else: nn)
+    val stop_fixed = stop_y << 16
+    while true:
+        var w = 0
+        var inside = false
+        var prev_x = e[0]
+        var next_y = ((y + 65536) >> 16) << 16
+        if nn < next_y: next_y = nn
+        var curr = e[21]
+        var left_e = 0
+        var left = left_clip
+        var left_dy = 0
+        var prev_rite = left_clip >> 16
+        nn = 2147483647
+        var ys = 0
+        if ((next_y - y) & 16384) != 0:
+            ys = 2
+            next_y = y + 16384
+        elif ((next_y - y) & 32768) != 0:
+            ys = 1
+        val full = (255 * (next_y - y) + 32768) >> 16
+        val ry = y >> 16
+        while e[curr + 4] <= y:
+            w = w + e[curr + 9]
+            val was_in = inside
+            inside = w != 0
+            val cx = e[curr]
+            val nx_x = cx + (e[curr + 1] >> ys)
+            e[curr + 3] = next_y
+            e[curr] = nx_x
+            if was_in and not inside:
+                val rite = if cx < right_clip: cx else: right_clip
+                val lx = e[left_e]
+                val next_left = if lx > left_clip: lx else: left_clip
+                val next_rite = if nx_x < right_clip: nx_x else: right_clip
+                var nrb = false
+                if full == 255:
+                    nrb = prev_rite > (left >> 16) or prev_rite > (lx >> 16)
+                    if not nrb:
+                        val n = e[curr + 21]
+                        if e[n + 4] < next_y:
+                            val ndx = if e[n + 1] < 0: 0 - e[n + 1] else: e[n + 1]
+                            nrb = nx_x + 65536 >= e[n] - ndx
+                _aaa_trap_row(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
+                prev_rite = if rite > nx_x: (rite + 65535) >> 16 else: (nx_x + 65535) >> 16
+            elif inside and not was_in:
+                left = if cx > left_clip: cx else: left_clip
+                left_dy = e[curr + 6]
+                left_e = curr
+            val nxt = e[curr + 21]
+            var more = e[curr + 5] <= next_y and e[curr + 7] > 0
+            while more:
+                e[curr + 18] = e[curr]
+                e[curr + 19] = e[curr + 3]
+                more = _aaa_update_quad(e, curr) and e[curr + 5] <= next_y and e[curr + 7] > 0
+            val lo = e[curr + 5]
+            if lo <= next_y:
+                val rp1 = e[curr + 20]
+                val rn1 = e[curr + 21]
+                e[rp1 + 21] = rn1
+                e[rn1 + 20] = rp1
+            else:
+                if lo < nn: nn = lo
+                val new_x = e[curr]
+                if new_x < prev_x:
+                    val p = _aaa_back_start(e, e[curr + 20], new_x)
+                    if e[p + 21] != curr:
+                        val rp2 = e[curr + 20]
+                        val rn2 = e[curr + 21]
+                        e[rp2 + 21] = rn2
+                        e[rn2 + 20] = rp2
+                        _aaa_insert_after(e, curr, p)
+                else:
+                    prev_x = new_x
+                if not skip_cross:
+                    val p = e[curr + 20]
+                    if e[p + 20] >= 0 and e[p] + e[p + 1] > new_x + e[curr + 1]: nn = next_y + 16384
+            curr = nxt
+        if inside:
+            val lx = e[left_e]
+            var nrb = false
+            if full == 255:
+                val p = e[left_e + 20]
+                if p >= 0 and e[left_e + 4] < next_y:
+                    val ldx = if e[left_e + 1] < 0: 0 - e[left_e + 1] else: e[left_e + 1]
+                    nrb = e[p] + 65536 >= lx - ldx
+            _aaa_trap_row(o, ry, left, right_clip, if lx > left_clip: lx else: left_clip, right_clip, left_dy, 0, full, nrb)
+        y = next_y
+        if y >= stop_fixed: break
+        var ne = curr
+        if e[ne + 4] > y:
+            nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
+        elif e[e[ne + 20]] <= e[ne]:
+            while e[ne + 4] <= y:
+                nn = _aaa_cross(e, ne, y, nn, false)
+                nn = (if (e[ne + 5]) > y and (e[ne + 5]) < nn: (e[ne + 5]) else: nn)
+                ne = e[ne + 21]
+            nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
+        else:
+            var start = _aaa_back_start(e, e[ne + 20], e[ne])
+            var again = true
+            while again:
+                val nx = e[ne + 21]
+                var moved = true
+                var scanning = true
+                while scanning:
+                    val after = e[start + 21]
+                    if after == ne:
+                        moved = false
+                        scanning = false
+                    elif e[after] >= e[ne]:
+                        scanning = false
+                    else:
+                        start = after
+                if moved:
+                    val rp3 = e[ne + 20]
+                    val rn3 = e[ne + 21]
+                    e[rp3 + 21] = rn3
+                    e[rn3 + 20] = rp3
+                    _aaa_insert_after(e, ne, start)
+                nn = _aaa_cross(e, ne, y, nn, false)
+                nn = _aaa_cross(e, ne, y, nn, true)
+                nn = (if (e[ne + 5]) > y and (e[ne + 5]) < nn: (e[ne + 5]) else: nn)
+                start = ne
+                ne = nx
+                again = e[ne + 4] <= y
+            nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
+
+
+# Advance a convex-walker edge past `y`; false = the edge is exhausted.
+fn _aaa_advance(e: [i64], c: i64) -> bool:
+    e[c + 7] > 0 and _aaa_update_quad(e, c)
+
+fn _aaa_smooth1(e: [i64], t: i64, n: i64) -> bool:
+    if e[t + 7] > 0:
+        return ((if (e[t + 12]) < 0: 0 - (e[t + 12]) else: (e[t + 12])) >> 1) >= (if (e[t + 14]) < 0: 0 - (e[t + 14]) else: (e[t + 14])) and ((if (e[t + 13]) < 0: 0 - (e[t + 13]) else: (e[t + 13])) >> 1) >= (if (e[t + 15]) < 0: 0 - (e[t + 15]) else: (e[t + 15])) and ((e[t + 13] - e[t + 15]) >> e[t + 8]) >= 65536
+    (if ((if (e[n + 1] - e[t + 1]) > 2147483647: 2147483647 else: (if (e[n + 1] - e[t + 1]) < -2147483648: -2147483648 else: (e[n + 1] - e[t + 1])))) < 0: 0 - ((if (e[n + 1] - e[t + 1]) > 2147483647: 2147483647 else: (if (e[n + 1] - e[t + 1]) < -2147483648: -2147483648 else: (e[n + 1] - e[t + 1])))) else: ((if (e[n + 1] - e[t + 1]) > 2147483647: 2147483647 else: (if (e[n + 1] - e[t + 1]) < -2147483648: -2147483648 else: (e[n + 1] - e[t + 1]))))) <= 65536 and e[n + 5] - e[n + 4] >= 65536
+
+fn _aaa_smooth(e: [i64], l: i64, r: i64, c: i64, stop_y: i64) -> bool:
+    if e[c + 4] >= stop_y * 65536: return false
+    if e[l + 5] + 65536 < e[r + 5]: return _aaa_smooth1(e, l, c)
+    if e[l + 5] > e[r + 5] + 65536: return _aaa_smooth1(e, r, c)
+    var a = c
+    var b = e[c + 21]
+    if e[b + 4] >= stop_y * 65536: return false
+    if e[b + 2] < e[a + 2]:
+        val t = a
+        a = b
+        b = t
+    _aaa_smooth1(e, l, a) and _aaa_smooth1(e, r, b)
+
+# aaa_walk_convex_edges (RunBased blitter or mask, overflow-catching adds).
+fn _aaa_walk_convex(e: [i64], o: [i64], stop_y: i64, left_bound: i64, rite_bound: i64):
+    var le = e[21]
+    var re = e[le + 21]
+    var ce = e[re + 21]
+    var y = _aaa_max(e[le + 4], e[re + 4])
+    while true:
+        while e[le + 5] <= y:
+            if not _aaa_advance(e, le):
+                if (e[ce + 4] >> 16) >= stop_y: return
+                le = ce
+                ce = e[ce + 21]
+        while e[re + 5] <= y:
+            if not _aaa_advance(e, re):
+                if (e[ce + 4] >> 16) >= stop_y: return
+                re = ce
+                ce = e[ce + 21]
+        if (y >> 16) >= stop_y: return
+        _aaa_go_y(e, le, y)
+        _aaa_go_y(e, re, y)
+        if e[le] > e[re] or (e[le] == e[re] and e[le + 1] > e[re + 1]):
+            val t = le
+            le = re
+            re = t
+        var lbf = _aaa_min(e[le + 5], e[re + 5])
+        if _aaa_smooth(e, le, re, ce, stop_y): lbf = _aaa_ceil_fixed(lbf)
+        lbf = _aaa_min(lbf, stop_y << 16)
+        var left = _aaa_max(left_bound, e[le])
+        val d_left = e[le + 1]
+        var rite = _aaa_min(rite_bound, e[re])
+        val d_rite = e[re + 1]
+        if d_left == 0 and d_rite == 0:
+            val full_left = ((left + 65535) >> 16)
+            val full_rite = rite >> 16
+            val partial_left = (full_left << 16) - left
+            val partial_rite = rite - (full_rite << 16)
+            val full_top = ((y + 65535) >> 16)
+            val full_bot = lbf >> 16
+            var partial_top = (full_top << 16) - y
+            var partial_bot = lbf - (full_bot << 16)
+            if full_top > full_bot:
+                partial_top = partial_top - (65536 - partial_bot)
+                partial_bot = 0
+            if full_rite >= full_left:
+                if partial_top > 0:
+                    if partial_left > 0: _aaa_add_n(o, full_left - 1, full_top - 1, 1, _aaa_alpha(((partial_top * partial_left) >> 16)))
+                    _aaa_add_n(o, full_left, full_top - 1, full_rite - full_left, _aaa_alpha(partial_top))
+                    if partial_rite > 0: _aaa_add_n(o, full_rite, full_top - 1, 1, _aaa_alpha(((partial_top * partial_rite) >> 16)))
+                if full_bot > full_top and (full_rite > full_left or _aaa_alpha(partial_left) > 0 or _aaa_alpha(partial_rite) > 0):
+                    _aaa_real_anti_rect(o, full_left - 1, full_top, full_rite - full_left, full_bot - full_top, _aaa_alpha(partial_left), _aaa_alpha(partial_rite))
+                if partial_bot > 0:
+                    if partial_left > 0: _aaa_add_n(o, full_left - 1, full_bot, 1, _aaa_alpha(((partial_bot * partial_left) >> 16)))
+                    _aaa_add_n(o, full_left, full_bot, full_rite - full_left, _aaa_alpha(partial_bot))
+                    if partial_rite > 0: _aaa_add_n(o, full_rite, full_bot, 1, _aaa_alpha(((partial_bot * partial_rite) >> 16)))
+            else:
+                val width = rite - left
+                if width > 0:
+                    if partial_top > 0: _aaa_add_n(o, full_left - 1, full_top - 1, 1, _aaa_alpha(((partial_top * width) >> 16)))
+                    if full_bot > full_top: _aaa_real_v(o, full_left - 1, full_top, full_bot - full_top, _aaa_alpha(width))
+                    if partial_bot > 0: _aaa_add_n(o, full_left - 1, full_bot, 1, _aaa_alpha(((partial_bot * width) >> 16)))
+            y = lbf
+        else:
+            # kSnapDigit = 1/16 px: snapped trapezoid rows.
+            val snap = 0 - 4096
+            left = left + 2048
+            rite = rite + 2048
+            var count = ((lbf + 65535) >> 16) - (y >> 16)
+            if count > 1:
+                if (y & (0 - 65536)) != y:
+                    count = count - 1
+                    val ny = _aaa_ceil_fixed(y + 1)
+                    val dy = ny - y
+                    val nl = left + ((d_left * dy) >> 16)
+                    val nr = rite + ((d_rite * dy) >> 16)
+                    _aaa_trap_row(o, y >> 16, left & snap, rite & snap, nl & snap, nr & snap, e[le + 6], e[re + 6], _aaa_alpha(dy), false)
+                    left = nl
+                    rite = nr
+                    y = ny
+                while count > 1:
+                    count = count - 1
+                    val nl = left + d_left
+                    val nr = rite + d_rite
+                    _aaa_trap_row(o, y >> 16, left & snap, rite & snap, nl & snap, nr & snap, e[le + 6], e[re + 6], 255, false)
+                    left = nl
+                    rite = nr
+                    y = y + 65536
+            val dy = lbf - y
+            val nl = _aaa_max(left + ((d_left * dy) >> 16), left_bound + 2048)
+            val nr = _aaa_min(rite + ((d_rite * dy) >> 16), rite_bound + 2048)
+            _aaa_trap_row(o, y >> 16, left & snap, rite & snap, nl & snap, nr & snap, e[le + 6], e[re + 6], _aaa_alpha(dy), false)
+            left = nl - 2048
+            rite = nr - 2048
+            y = lbf
+        e[le] = left
+        e[re] = rite
+        e[le + 3] = y
+        e[re + 3] = y
+
+# --- path shape tests (f32, as SkPath) ------------------------------------------
+
+# Convexicator::addVec on state st = [last_x, last_y, lvx, lvy, fvx, fvy, dir, reversals].
+fn _aaa_cvx_vec(st: [f64], vx: f64, vy: f64) -> bool:
+    val cross = ((((((st[2] * vy) as f32) as f64) - (((st[3] * vx) as f32) as f64)) as f32) as f64)
+    if cross == 0.0:
+        if st[2] * vx + st[3] * vy < 0.0:
+            st[2] = vx
+            st[3] = vy
+            st[7] = st[7] + 1.0
+            return st[7] < 3.0
+        return true
+    val d = if cross > 0.0: 1.0 else: -1.0
+    if st[6] == 0.0:
+        st[6] = d
+    elif d != st[6]:
+        return false
+    st[2] = vx
+    st[3] = vy
+    true
+
+fn _aaa_cvx_pt(st: [f64], fx: f64, fy: f64, x: f64, y: f64) -> bool:
+    if x == st[0] and y == st[1]: return true
+    val vx = (((x - st[0]) as f32) as f64)
+    val vy = (((y - st[1]) as f32) as f64)
+    if fx == st[0] and fy == st[1] and st[6] == 0.0 and st[2] == 0.0 and st[3] == 0.0:
+        st[2] = vx
+        st[3] = vy
+        st[4] = vx
+        st[5] = vy
+    elif not _aaa_cvx_vec(st, vx, vy):
+        return false
+    st[0] = x
+    st[1] = y
+    true
+
+# SkPath::computeConvexity for one contour of `np` points.
+fn _aaa_convex(px: [f64], py: [f64], np: i64) -> bool:
+    if np > 3:
+        var cx = px[0]
+        var cy = py[0]
+        var dxes = 0
+        var dyes = 0
+        var lsx = 2
+        var lsy = 2
+        var k = 1
+        while k <= np:
+            val j = if k == np: 0 else: k
+            val vx = (((px[j] - cx) as f32) as f64)
+            val vy = (((py[j] - cy) as f32) as f64)
+            if vx != 0.0 or vy != 0.0:
+                val sx = if vx < 0.0: 1 else: 0
+                val sy = if vy < 0.0: 1 else: 0
+                if sx != lsx: dxes = dxes + 1
+                if sy != lsy: dyes = dyes + 1
+                if dxes > 3 or dyes > 3: return false
+                lsx = sx
+                lsy = sy
+            cx = px[j]
+            cy = py[j]
+            k = k + 1
+    var st: [f64] = [px[0], py[0], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var k = 1
+    while k < np:
+        if not _aaa_cvx_pt(st, px[0], py[0], px[k], py[k]): return false
+        k = k + 1
+    _aaa_cvx_pt(st, px[0], py[0], px[0], py[0]) and _aaa_cvx_vec(st, st[4], st[5])
+
+# Axis-aligned rectangle contour of lines only: [l, t, r, b], else [].
+fn _aaa_rect(pv: [i64], px: [f64], py: [f64], np: i64) -> [f64]:
+    var xs: [f64] = []
+    var ys: [f64] = []
+    var k = 0
+    while k < np:
+        if pv[k] == 2: return []
+        val m = xs.len()
+        if m == 0 or xs[m - 1] != px[k] or ys[m - 1] != py[k]:
+            xs.push(px[k])
+            ys.push(py[k])
+        k = k + 1
+    var m = xs.len()
+    if m > 1 and xs[0] == xs[m - 1] and ys[0] == ys[m - 1]: m = m - 1
+    if m != 4: return []
+    var i = 0
+    while i < 4:
+        val a = i
+        val b = (i + 1) % 4
+        val d = (i + 2) % 4
+        val h1 = ys[a] == ys[b]
+        val v1 = xs[a] == xs[b]
+        val h2 = ys[b] == ys[d]
+        val v2 = xs[b] == xs[d]
+        if not ((h1 and v2 and not v1) or (v1 and h2 and not h1)): return []
+        i = i + 1
+    var l = xs[0]
+    var r = xs[0]
+    var t = ys[0]
+    var bt = ys[0]
+    i = 1
+    while i < 4:
+        if xs[i] < l: l = xs[i]
+        if xs[i] > r: r = xs[i]
+        if ys[i] < t: t = ys[i]
+        if ys[i] > bt: bt = ys[i]
+        i = i + 1
+    [l, t, r, bt]
+
+fn _aaa_scalar_alpha(a: f64) -> i64:
+    val v = (((((a * 255.0) as f32) as f64)) as i64) & 255
+    if v > 247: return 255
+    if v < 8: return 0
+    v
+
+# SkBlitter::blitFatAntiRect into the empty A8 plane.
+fn _aaa_fat_rect(o: [i64], r: [f64]):
+    val l = _floor_glyf(r[0])
+    val t = _floor_glyf(r[1])
+    val rr = _ceil_glyf(r[2])
+    val b = _ceil_glyf(r[3])
+    val bh = b - t
+    if bh == 0: return
+    val pl = ((((l + 1) as f64 - r[0]) as f32) as f64)
+    val pr = (((r[2] - (rr - 1) as f64) as f32) as f64)
+    var pt = ((((t + 1) as f64 - r[1]) as f32) as f64)
+    val pb = (((r[3] - (b - 1) as f64) as f32) as f64)
+    if bh == 1: pt = (((r[3] - r[1]) as f32) as f64)
+    _aaa_fat_row(o, l, rr, t, pl, pr, pt)
+    if bh > 2: _aaa_real_anti_rect(o, l, t + 1, rr - l - 2, bh - 2, _aaa_scalar_alpha(pl), _aaa_scalar_alpha(pr))
+    if bh > 1: _aaa_fat_row(o, l, rr, b - 1, pl, pr, pb)
+
+fn _aaa_fat_row(o: [i64], l: i64, r: i64, y: i64, pl: f64, pr: f64, pv: f64):
+    _aaa_real(o, l, y, _aaa_scalar_alpha((((pl * pv) as f32) as f64)))
+    val mid = _aaa_scalar_alpha(pv)
+    var x = l + 1
+    while x < r - 1:
+        _aaa_real(o, x, y, mid)
+        x = x + 1
+    _aaa_real(o, r - 1, y, _aaa_scalar_alpha((((pr * pv) as f32) as f64)))
+
+# Skia AAA fill of `commands` (font units, y up) into an A8 mask of `aw` x `h`
+# samples: x' = 4 (x*scale + phase) - 4 (x0 + 1), y' = top - y*scale, every
+# step in f32 as SkScalerContext (`((v as f32) as f64)` rounds to f32; 4x is
+# exact in f32, so it is not rounded separately). Returns the blitter state; the mask is
+# o[o[7] + y * (aw + 32) + x].
+fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, top: f64, aw: i64, h: i64) -> [i64]:
+    val cx = ((0 - (x0 + 1)) * 4) as f64
+    var pv: [i64] = []
+    var px: [f64] = []
+    var py: [f64] = []
+    var moves = 0
+    for command in commands:
+        if command.verb == SFNT_GLYF_CLOSE: continue
+        if command.verb == SFNT_GLYF_MOVE:
+            pv.push(0)
+            moves = moves + 1
+        elif command.verb == SFNT_GLYF_LINE:
+            pv.push(1)
+        else:
+            pv.push(2)
+        val ax = (((command.x1 * scale) as f32) as f64)
+        val ay = (((command.y1 * scale) as f32) as f64)
+        px.push((((4.0 * ((((ax + phase) as f32) as f64)) + cx) as f32) as f64))
+        py.push((((top - ay) as f32) as f64))
+        if command.verb == SFNT_GLYF_QUAD:
+            pv.push(3)
+            val bx = (((command.x2 * scale) as f32) as f64)
+            val by = (((command.y2 * scale) as f32) as f64)
+            px.push((((4.0 * ((((bx + phase) as f32) as f64)) + cx) as f32) as f64))
+            py.push((((top - by) as f32) as f64))
+    val np = pv.len()
+    var o: [i64] = [0; 8 + aw + (aw + 32) * h]
+    o[0] = aw
+    o[1] = h
+    o[4] = 0
+    o[5] = aw
+    o[6] = -1
+    o[7] = 24 + aw
+    if np == 0: return o
+    val irl = _floor_glyf(px.min())
+    val irt = _floor_glyf(py.min())
+    val irr = _ceil_glyf(px.max())
+    val irb = _ceil_glyf(py.max())
+    val irw = irr - irl
+    val use_mask = irw <= 32 and ((irw + 3) / 4 * 4) * (irb - irt) <= 1024
+    val convex = moves == 1 and _aaa_convex(px, py, np)
+    if use_mask and moves == 1:
+        val r = _aaa_rect(pv, px, py, np)
+        if r.len() == 4 and _ceil_glyf(r[2]) - _floor_glyf(r[0]) >= 3:
+            o[3] = 1
+            _aaa_fat_rect(o, r)
+            return o
+    if use_mask:
+        o = [0; 8 + aw + (aw + 32) * h * 2]
+        o[0] = aw
+        o[1] = h
+        o[2] = 1
+        o[6] = -1
+        # Nothing reaches the A8 plane in mask mode, so the final mask lerp
+        # over zero is the mask plane itself.
+        o[7] = 24 + aw + (aw + 32) * h
+    o[3] = if convex: 0 else: 1
+    o[4] = irl
+    o[5] = irr
+    # Edges (SkEdgeBuilder order, implicit close per contour).
+    var e: [i64] = [0; (np + 4) * 24]
+    var n = 0
+    var sx = 0.0
+    var sy = 0.0
+    var qx = 0.0
+    var qy = 0.0
+    var open = false
+    var k = 0
+    while k < np:
+        if pv[k] == 0:
+            if open: n = _aaa_push_line(e, n, qx, qy, sx, sy)
+            sx = px[k]
+            sy = py[k]
+            qx = sx
+            qy = sy
+            open = true
+            k = k + 1
+        elif pv[k] == 1:
+            n = _aaa_push_line(e, n, qx, qy, px[k], py[k])
+            qx = px[k]
+            qy = py[k]
+            k = k + 1
+        else:
+            n = _aaa_push_quad(e, n, qx, qy, px[k], py[k], px[k + 1], py[k + 1])
+            qx = px[k + 1]
+            qy = py[k + 1]
+            k = k + 2
+    if open: n = _aaa_push_line(e, n, qx, qy, sx, sy)
+    if n == 0: return o
+    # Sort by (upper_y, x, dx), insertion (stable), then link head..tail.
+    var order: [i64] = []
+    var i = 0
+    while i < n:
+        val b = (i + 2) * 24
+        var j = order.len()
+        order.push(b)
+        while j > 0:
+            val a = order[j - 1]
+            val later = e[a + 4] > e[b + 4] or (e[a + 4] == e[b + 4] and (e[a] > e[b] or (e[a] == e[b] and e[a + 1] > e[b + 1])))
+            if not later: break
+            order[j] = a
+            j = j - 1
+        order[j] = b
+        i = i + 1
+    e[4] = -2147483648
+    e[5] = -2147483648
+    e[6] = 2147483647
+    e[20] = -1
+    e[21] = order[0]
+    e[28] = 2147483647
+    e[29] = 2147483647
+    e[30] = 2147483647
+    e[44] = order[n - 1]
+    e[45] = -1
+    e[order[0] + 20] = 0
+    e[order[n - 1] + 21] = 24
+    i = 1
+    while i < n:
+        e[order[i - 1] + 21] = order[i]
+        e[order[i] + 20] = order[i - 1]
+        i = i + 1
+    var left_b = 0
+    var right_b = aw << 16
+    if use_mask:
+        left_b = _aaa_max(left_b, irl << 16)
+        right_b = _aaa_min(right_b, irr << 16)
+    val start_y = _aaa_max(irt, 0)
+    val stop_y = _aaa_min(irb, h)
+    if convex and n >= 2:
+        _aaa_walk_convex(e, o, stop_y, left_b, right_b)
+    else:
+        _aaa_walk(e, o, start_y, stop_y, left_b, right_b, np > (irb - irt) * 2)
+    _aaa_flush(o)
+    o
 
 # Metrics of the cell `sfnt_lcd_outline_raster` builds at `phase_q`, without
 # the raster: [width, height, bearing_x, bearing_y], or [] where the raster
@@ -2053,10 +3555,31 @@ pub fn sfnt_lcd_outline_frame(outline: SfntLcdOutline, phase_q: i64) -> [i64]:
         return []
     [width, height, x0, outline.slo_bearing_y]
 
-# reason: the phase is Skia's quarter-pixel index; consumed by
-# text_layout/font_renderer.spl, so it must be public.
-# @allow(primitive_api)
-pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<SfntLcdGlyph>:
+# Phase-0 Skia AAA mask of `outline` (blitter state of `_lcd_aaa_mask`, with
+# the phase-0 frame x0 appended), memoised by outline identity (slo_key): one
+# glyph is drawn at up to four pen phases and the mask only shifts between
+# them. Bounded: the memo is dropped whole at 1024 outlines.
+var _lcd_aaa_memo: Dict<text, [i64]> = {}
+
+fn _lcd_aaa_phase0(outline: SfntLcdOutline) -> [i64]:
+    val key = outline.slo_key
+    if val Some(hit) = _lcd_aaa_memo.get(key):
+        return hit
+    val frame = sfnt_lcd_outline_frame(outline, 0)
+    var mask = _lcd_aaa_mask(outline.slo_commands, outline.slo_scale, 0.0, frame[2], 0.0 - outline.slo_raster_top, frame[0] * 4 - 8, frame[1])
+    mask.push(frame[2])
+    if _lcd_aaa_memo.len() >= 1024: _lcd_aaa_memo = {}
+    _lcd_aaa_memo[key] = mask
+    mask
+
+# Signed area / cover cells of `commands` (font units) in the A8 sample grid:
+# x' = (x * scale - left) * 4, y' = -y * scale - top.
+fn _lcd_area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, stride: i64, height: i64) -> [f64]:
+    _area_cells(commands, scale, left, top, stride, height, _SFNT_LCD_A8_PER_PX)
+
+# The exact-area LCD raster (the mask before the Skia AAA port), kept for
+# fonts the Latin-only hinter does not hint the way FreeType does (slo_area).
+fn _lcd_area_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<SfntLcdGlyph>:
     val frame = sfnt_lcd_outline_frame(outline, phase_q)
     if frame.len() != 4:
         return None
@@ -2127,6 +3650,104 @@ pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<
                 val s9 = a8[b + 9]
                 val s10 = a8[b + 10]
                 val s11 = a8[b + 11]
+                var r = (3 * s0 + 11 * s1 + 28 * s2 + 51 * s3 + 64 * s4 + 57 * s5 + 36 * s6 + 16 * s7 + 5 * s8 + s9) / 256
+                var g = (2 * (s1 + s10) + 8 * (s2 + s9) + 22 * (s3 + s8) + 43 * (s4 + s7) + 61 * (s5 + s6)) / 256
+                var bl = (s2 + 5 * s3 + 16 * s4 + 36 * s5 + 57 * s6 + 64 * s7 + 51 * s8 + 28 * s9 + 11 * s10 + 3 * s11) / 256
+                if r > 255: r = 255
+                if g > 255: g = 255
+                if bl > 255: bl = 255
+                rgb[o] = r as u8
+                rgb[o + 1] = g as u8
+                rgb[o + 2] = bl as u8
+                gray[gi] = ((r + g + bl + 1) / 3) as u8
+                s0 = s4
+                s1 = s5
+                s2 = s6
+                s3 = s7
+                s4 = s8
+                s5 = s9
+                s6 = s10
+                s7 = s11
+                b = b + 4
+                o = o + 3
+                gi = gi + 1
+                x = x + 1
+        y = y + 1
+    Some(SfntLcdGlyph(
+        slg_width: width, slg_height: height,
+        slg_advance: outline.slo_advance,
+        slg_bearing_x: x0,
+        slg_bearing_y: outline.slo_bearing_y,
+        slg_gray: gray, slg_rgb: rgb))
+
+# reason: the phase is Skia's quarter-pixel index; consumed by
+# text_layout/font_renderer.spl, so it must be public.
+# @allow(primitive_api)
+pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<SfntLcdGlyph>:
+    if outline.slo_area: return _lcd_area_outline_raster(outline, phase_q)
+    val frame = sfnt_lcd_outline_frame(outline, phase_q)
+    if frame.len() != 4:
+        return None
+    val width = frame[0]
+    val height = frame[1]
+    val x0 = frame[2]
+    val subpixels = width * 3
+    val mask = _lcd_aaa_phase0(outline)
+    val aw0 = mask[0]
+    # Phase q moves the path by exactly q A8 samples (all four quarter phases
+    # verified byte-identical to a direct raster, incl. fractional sizes), so
+    # mask sample k0 of phase 0 lands on sample k0 + shift of this frame.
+    val shift = phase_q - 4 * (x0 - mask[mask.len() - 1])
+    val stride = aw0 + 32
+    # Ink lies inside the path's sample bounds (mask[4]..mask[5]); one sample
+    # of margin each side keeps the scan conservative.
+    val lo0 = if mask[4] > 1: mask[4] - 1 else: 0
+    val hi0 = if mask[5] + 1 < aw0: mask[5] + 1 else: aw0
+    var gray: [u8] = [0u8; width * height]
+    var rgb: [u8] = [0u8; width * height * 3]
+    var y: i64 = 0
+    while y < height:
+        # The mask row is read in place: the filter's row a8 is Skia's 4W-8
+        # sample mask row padded by 8 zeros each side, so a8[j] = mask sample
+        # j - 8 - shift; the 16
+        # zero samples padding each mask row cover every tap below. Inked
+        # extent: first/last nonzero sample, in a8 - 4 units.
+        val row = mask[7] + y * stride
+        var lo: i64 = lo0
+        while lo < hi0 and mask[row + lo] == 0:
+            lo = lo + 1
+        # Skia pack4xHToMask: output pixel x reads A8 samples 4x-4 .. 4x+7
+        # (one pixel each side), so pixels more than one pixel away from any
+        # coverage stay the 0 they were allocated as.
+        if lo < hi0:
+            var hi: i64 = hi0 - 1
+            while mask[row + hi] == 0:
+                hi = hi - 1
+            val first = lo + shift + 4
+            val last = hi + shift + 5
+            var x: i64 = first / _SFNT_LCD_A8_PER_PX - 1
+            if x < 0: x = 0
+            var x_end: i64 = (last + _SFNT_LCD_A8_PER_PX - 1) / _SFNT_LCD_A8_PER_PX + 1
+            if x_end > width: x_end = width
+            # Skia pack4xHToMask taps (table above), unrolled, zero taps dropped.
+            # The 12-sample window slides by 4: eight taps carry over, four
+            # are read; g is symmetric, so its pairs are summed first.
+            var b = row - 8 - shift + x * _SFNT_LCD_A8_PER_PX
+            var s0 = mask[b]
+            var s1 = mask[b + 1]
+            var s2 = mask[b + 2]
+            var s3 = mask[b + 3]
+            var s4 = mask[b + 4]
+            var s5 = mask[b + 5]
+            var s6 = mask[b + 6]
+            var s7 = mask[b + 7]
+            var o = y * subpixels + x * 3
+            var gi = y * width + x
+            while x < x_end:
+                val s8 = mask[b + 8]
+                val s9 = mask[b + 9]
+                val s10 = mask[b + 10]
+                val s11 = mask[b + 11]
                 var r = (3 * s0 + 11 * s1 + 28 * s2 + 51 * s3 + 64 * s4 + 57 * s5 + 36 * s6 + 16 * s7 + 5 * s8 + s9) / 256
                 var g = (2 * (s1 + s10) + 8 * (s2 + s9) + 22 * (s3 + s8) + 43 * (s4 + s7) + 61 * (s5 + s6)) / 256
                 var bl = (s2 + 5 * s3 + 16 * s4 + 36 * s5 + 57 * s6 + 64 * s7 + 51 * s8 + 28 * s9 + 11 * s10 + 3 * s11) / 256
