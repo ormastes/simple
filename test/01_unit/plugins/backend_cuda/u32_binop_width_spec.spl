@@ -1,0 +1,59 @@
+# Tracks: cuda_jit_hello_lane_lower_module_missing_import_2026-08-25
+# A CUDA kernel `output[i] = a[i] + b[i]` over [u32] must lower the Add to a
+# U32 local, or the PTX backend rejects the store ("CUDA store value must
+# match pointer element type") and the live vector-add hello never runs.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir.*
+use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted}
+use plugins.backend_cuda.cuda_backend.{CudaBackend}
+
+fn vector_add_source(elem: text) -> text:
+    "@gpu(\"cuda\")\n" +
+    "fn vector_add(mut output: [{elem}], a: [{elem}], b: [{elem}], n: u32) -> ():\n" +
+    "    val i = gpu_global_id(0)\n" +
+    "    if i < n:\n" +
+    "        output[i] = a[i] + b[i]\n"
+
+fn lower_vector_add(elem: text) -> MirModule:
+    val parsed = parse_full_frontend(vector_add_source(elem), "uadd.spl", "uadd", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("uadd.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn add_result_kinds(module: MirModule) -> [text]:
+    var kinds: [text] = []
+    for f in mir_module_functions_sorted(module):
+        for b in f.blocks:
+            for ins in b.instructions:
+                match ins.kind:
+                    case MirInstKind.BinOp(dest, op, _, _):
+                        if op == MirBinOp.Add:
+                            for l in f.locals:
+                                if l.id.id == dest.id:
+                                    kinds = kinds.push("{l.type_.kind}")
+                    case _: ()
+    kinds
+
+describe "CUDA kernel same-width unsigned arithmetic":
+    it "lowers u32 + u32 to a U32 MIR local":
+        val kinds = add_result_kinds(lower_vector_add("u32"))
+        expect(kinds.len()).to_equal(1)
+        expect(kinds[0]).to_equal("MirTypeKind::U32")
+
+    it "compiles the u32 vector-add kernel to PTX":
+        val compiled = CudaBackend.create((8, 6)).compile(lower_vector_add("u32"))
+        expect(compiled.is_ok()).to_equal(true)
+
+    it "compiles the u16 vector-add kernel to PTX":
+        val compiled = CudaBackend.create((8, 6)).compile(lower_vector_add("u16"))
+        expect(compiled.is_ok()).to_equal(true)
+
+    it "compiles the u8 vector-add kernel to PTX":
+        val compiled = CudaBackend.create((8, 6)).compile(lower_vector_add("u8"))
+        expect(compiled.is_ok()).to_equal(true)

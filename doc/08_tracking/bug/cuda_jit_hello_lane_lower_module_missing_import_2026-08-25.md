@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** SUPERSEDED as far as a CUDA-less host can show (re-verified 2026-11-11, lane work/p3-interp7-20261111, fresh seed 46fe8f6b6def: 14/14 PASS); live-device dispatch re-run remains with the owning GPU lane.
+**Status:** verified 2026-11-26 on a live CUDA host (aarch64 GB10, lane work/bug-cuda-segv-20261126, seed fb80903917d6d5f5, `SIMPLE_GPU_TEST=1 SIMPLE_CUDA_TEST=1`): `cuda_jit_hello_spec.spl` 14/14. The last live failure (13/14, "CUDA store value must match pointer element type") was a separate MIR defect, fixed in fb5065750ca: same-width u32 arithmetic was widened to i64 in CUDA kernels. Its red/green spec is `test/01_unit/plugins/backend_cuda/u32_binop_width_spec.spl`.
 **Spec:** `test/03_system/gpu_lane/cuda_jit_hello_spec.spl` — `Results: 14 total, 13 passed, 1 failed`
 on `bin/simple` = Rust seed, host with 2 live CUDA devices (`SIMPLE_GPU_TEST=1 SIMPLE_CUDA_TEST=1`).
 Sibling `vulkan_jit_hello_spec.spl` passes live on the same host (`2 total, 2 passed`).
