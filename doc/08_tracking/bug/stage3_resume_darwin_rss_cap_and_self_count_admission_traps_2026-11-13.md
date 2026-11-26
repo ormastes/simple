@@ -1,6 +1,6 @@
 # Stage-3 resume traps on macOS: hardcoded 6.5 GiB tree-RSS default + admission gate self-counts the invoking wrapper
 
-- Status: open (workarounds documented; defaults not fixed)
+- Status: fix-implemented-verification-pending (unit/contract verified 2026-11-26; live Darwin Stage-3 resume pending P4)
 - Found: 2026-11-13
 - Component: `scripts/bootstrap/resume-stage3-from-admitted.sh` (Darwin RSS
   default), stage-3 memory admission gate (process scan)
@@ -77,3 +77,4 @@ script AND whose ppid chain does not include the scanning process.
 - **Trap 1 (Darwin RSS cap):** `bootstrap_stage3_memory_darwin_default_cap_kib` in `scripts/check/lib/bootstrap-stage3/memory-admission.shs` now computes `max(11534336, min(20971520, host_kib / 3))` from `sysctl -n hw.memsize` (falling back to `11534336` when unavailable), and `scripts/bootstrap/resume-stage3-from-admitted.sh` uses it when `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` is unset.
 - **Trap 2 (non-Linux wrapper self-count):** Added `bootstrap_stage3_memory_posix_args_kind` in `scripts/check/lib/bootstrap-stage3/memory-admission.shs` so `-c` wrapper strings containing `scripts/bootstrap/bootstrap-from-scratch.sh` are ignored on Darwin/BSD just like Linux `/proc`, alongside ancestor PID exclusion (`bootstrap_stage3_memory_ancestors`).
 - **Tests:** Updated `test/01_unit/scripts/bootstrap_stage3_darwin_rss_cap_contract_test.shs` (replacing stale `6835937`/`6835938` assertions and covering host scaling + wrapper filtering) and extended `test/01_unit/compiler/driver/bootstrap_stage3_resume_admission_prevention_spec.spl`.
+- **Trap 2 hardening (2026-11-26):** Replaced `bootstrap_stage3_memory_posix_args_kind`'s `awk split` scanner with a quote-aware Perl `argv[0]`/`argv[1]` classifier (`perl -e '...' -- "$1"`) handling login shells (`-bash`/`-sh`/`-zsh`), `env`/`VAR=VAL` unwrapping, non-shell exclusion (`grep qemu-system-...` / `grep bootstrap-from-scratch.sh` -> `none`), `--command` & option-arg flags (`-o`/`+o`/`-O`/`+O`/`--rcfile`/`--init-file`), quoted paths with spaces, and `windows-cim` preservation. Extended `test/01_unit/scripts/bootstrap_stage3_darwin_rss_cap_contract_test.shs` with RED->GREEN coverage for all edge cases; `bug_db.sdn` updated to `fix-implemented-verification-pending` and resealed (live Darwin Stage-3 resume pending P4).
