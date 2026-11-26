@@ -31,12 +31,19 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
 const XRAY_RING_CAPACITY_V2: i64 = 65536
 
 # MSVC export list for the flag-guard data symbols (no auto-export on MSVC).
-fn xray_msvc_export_directives(ring_wrap: bool) -> [text]:
-    var out = ["/EXPORT:__simple_xray_descriptor_v1,DATA", "/EXPORT:__simple_xray_names_v1,DATA",
-        "/EXPORT:__simple_xray_hook_v1,DATA", "/EXPORT:__simple_xray_ring_v2,DATA"]
+# On 32-bit x86 Windows (m:x), .drectve /EXPORT: names carry the COFF leading `_`
+# (`___simple_xray_*`), while x64/ARM64/ARMv7 (m:w) keep `__simple_xray_*`.
+fn xray_msvc_export_directives_for_arch(ring_wrap: bool, target_arch: text) -> [text]:
+    val is_x86_32 = target_arch == "i686" or target_arch == "i386" or target_arch == "x86"
+    val prefix = if is_x86_32: "___simple_xray_" else: "__simple_xray_"
+    var out = ["/EXPORT:{prefix}descriptor_v1,DATA", "/EXPORT:{prefix}names_v1,DATA",
+        "/EXPORT:{prefix}hook_v1,DATA", "/EXPORT:{prefix}ring_v2,DATA"]
     if ring_wrap:
-        out = out.push("/EXPORT:__simple_xray_ring_wrap_v2,DATA")
+        out = out.push("/EXPORT:{prefix}ring_wrap_v2,DATA")
     out
+
+fn xray_msvc_export_directives(ring_wrap: bool) -> [text]:
+    xray_msvc_export_directives_for_arch(ring_wrap, "x86_64")
 # These implementation helpers belong to the SSA transform owner. The public
 # facade also exports them; its separate native-resolution regression remains
 # covered by mir_opt_facade_ssa_owner_spec.spl.
@@ -1290,7 +1297,7 @@ impl MirTextCodegen for MirToLlvm:
         # in-house COFF linker). MinGW keeps auto-export (no list, no dllexport).
         if self.target_env == "msvc":
             self.builder.emit("module asm \".section .drectve,\\22yn\\22\"")
-            for directive in xray_msvc_export_directives(module.xray_ring_wrap):
+            for directive in xray_msvc_export_directives_for_arch(module.xray_ring_wrap, self.target_arch):
                 self.builder.emit("module asm \".ascii \\22 {directive}\\22\"")
             self.builder.emit("module asm \".text\"")
         for slot_name in slot_names:

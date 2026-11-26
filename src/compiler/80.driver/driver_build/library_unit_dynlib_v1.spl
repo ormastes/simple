@@ -447,8 +447,28 @@ fn _dynlib_codesign_darwin_v1(path: text) -> Result<text, text>:
         return Err("codesign failed on {path} (exit {code}): {err}")
     Ok(path)
 
+fn _dynlib_is_32bit_x86_windows_v1(target_or_os: text) -> bool:
+    if _dynlib_normalize_os_kind_v1(target_or_os) != "windows":
+        return false
+    val raw = target_or_os.trim().lower()
+    val arch = if raw == "":
+        host_arch().trim().lower()
+    elif raw.contains("-"):
+        raw.split("-")[0]
+    else:
+        raw
+    arch == "i686" or arch == "i386" or arch == "x86"
+
+fn _dynlib_normalize_nm_symbol_v1(raw_sym: text, is_darwin: bool, is_x86_win: bool) -> text:
+    if is_darwin and raw_sym.starts_with("_"):
+        return raw_sym.substring(1)
+    if is_x86_win and raw_sym.starts_with("_") and not raw_sym.starts_with("?") and not raw_sym.contains("@"):
+        return raw_sym.substring(1)
+    raw_sym
+
 pub fn library_unit_parse_nm_extern_output_v1(req: LibraryUnitNmParseRequestV1) -> LibraryUnitNmParseResultV1:
     val is_darwin = _dynlib_normalize_os_kind_v1(req.target_or_os) == "darwin"
+    val is_x86_win = _dynlib_is_32bit_x86_windows_v1(req.target_or_os)
     var defined: {text: bool} = {}
     var undefined: {text: bool} = {}
     var inits: {text: bool} = {}
@@ -463,10 +483,7 @@ pub fn library_unit_parse_nm_extern_output_v1(req: LibraryUnitNmParseRequestV1) 
         if parts.len() < 2:
             continue
         val raw_sym = parts[parts.len() - 1]
-        val sym = if is_darwin and raw_sym.starts_with("_"):
-            raw_sym.substring(1)
-        else:
-            raw_sym
+        val sym = _dynlib_normalize_nm_symbol_v1(raw_sym, is_darwin, is_x86_win)
         val kind = parts[parts.len() - 2]
         if kind == "U" or kind == "u":
             undefined[sym] = true

@@ -2779,7 +2779,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push("-fuse-ld=lld")
         if not config.pie:
             args.push("-no-pie")
-        for flag in native_retained_symbol_cc_args(config.retained_symbols, link_os):
+        val retained_target = if target != "": target else: config.target_triple
+        for flag in native_retained_symbol_cc_args_for_target(config.retained_symbols, link_os, retained_target):
             args.push(flag)
         for obj in object_files:
             args.push(obj)
@@ -2855,9 +2856,12 @@ fn _windows_link_arch(config: NativeLinkConfig) -> text:
         return "aarch64"
     if target.starts_with("x86_64-") or target.starts_with("amd64-"):
         return "x86_64"
+    if target.starts_with("i686-") or target.starts_with("i386-") or target.starts_with("x86-"):
+        return "i686"
     val detected = host_arch().lower()
     if detected == "arm64": return "aarch64"
     if detected == "amd64": return "x86_64"
+    if detected == "i386" or detected == "x86": return "i686"
     detected
 
 fn internal_coff_runtime_is_msvc(os: text, mingw_env: bool) -> bool:
@@ -3087,6 +3091,9 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
         msvc_config.machine = "ARM64"
         # MsvcConfig.default() pre-populates the x64 CRT/SDK directories.
         msvc_config.lib_paths = []
+    elif link_arch == "i686":
+        msvc_config.machine = "X86"
+        msvc_config.lib_paths = []
 
     # Populate CRT library paths from VS/SDK detection
     val crt_paths = _find_msvc_lib_paths_for_arch(link_arch)
@@ -3151,7 +3158,8 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     # Keep this final MSVC boundary defensive because an early self-hosted
     # compiler can misclassify its host while the selected linker is still
     # unambiguously link.exe.
-    var extra = native_retained_symbol_msvc_args(config.retained_symbols)
+    val msvc_target = if config.target_triple != "": config.target_triple else: link_arch
+    var extra = native_retained_symbol_msvc_args_for_target(config.retained_symbols, msvc_target)
     var has_opt_noref = false
     for flag in native_msvc_extra_args(config.extra_flags):
         if flag.replace("\"", "").trim().lower() == "/opt:noref":
