@@ -11,7 +11,7 @@ use std.nogc_sync_mut.io.windows_process_owner.{windows_process_quote_arg_v1, wi
 use std.nogc_sync_mut.io.windows_process_owner_abi.{CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CreateFileW, InitializeProcThreadAttributeList, DeleteProcThreadAttributeList, GetLastError, GetExitCodeProcess, windows_abi_update_proc_thread_attribute, windows_abi_handle_is_invalid, windows_abi_pointer_bytes, windows_abi_security_attributes_size, windows_abi_security_attributes_inherit_offset, windows_abi_startupinfoex_size, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset}
 use std.nogc_sync_mut.io.windows_appcontainer_abi.{CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName, DeleteAppContainerProfile, FreeSid}
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.io_runtime.{file_exists, getpid, time_now_monotonic_ms}
+use std.nogc_sync_mut.io_runtime.{env_get, file_exists, getpid, time_now_monotonic_ms}
 use std.nogc_sync_mut.sosix.app_container_types_v1.{SosixAppSandboxRequestV1, SosixAppSandboxResultV1, SOSIX_APP_SANDBOX_IDENTITY_V1}
 use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.sosix_windows_scope_sid_v1
 use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_is_win64_v1, sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_close_handle_v1, sec_read_ptr_v1, sec_write_ptr_v1, sec_u32_v1, sec_put_u32_v1, sec_wide_v1, sec_get_dacl_v1, sec_set_entries_v1, sec_set_dacl_v1, sec_access_entry_v1, sec_sid_equal_v1}
@@ -89,6 +89,7 @@ fn _request_reason(request: SosixAppSandboxRequestV1) -> text:
     val wall = request.wall.value
     if wall < 1 or wall > _WALL_MAX_MS: return "app-sandbox-request-invalid"
     if not windows_process_path_valid_v1(request.directory): return "app-sandbox-request-invalid"
+    if _system_root() == "": return "app-sandbox-systemroot-missing"
     _dirs_reason(request.readonly_dirs, request.writable_dirs, request.directory)
 
 # Per-run profile name: the AppContainer SID derives from the name, so a name unique to this run
@@ -185,11 +186,17 @@ fn _job_with_kill_on_close(limits: i64) -> i64:
         return 0
     job
 
+# The host SystemRoot (or windir) from the environment; empty when neither is set, which refuses the run.
+fn _system_root() -> text:
+    val root = env_get("SystemRoot").trim()
+    if root != "": return root
+    env_get("windir").trim()
+
 # Explicit minimal environment (sorted, NUL-separated; the wide copy adds the closing NUL):
 # nothing of the parent's environment reaches the child, and its temp dir is the granted work dir.
 fn _environment_block(directory: text) -> text:
     val work = _native(directory)
-    val system_root = "C:\\Windows"
+    val system_root = _system_root()
     "APPDATA=" + work + "\0LOCALAPPDATA=" + work + "\0PATH=" + system_root + "\\System32\0SystemDrive=C:\0SystemRoot=" + system_root + "\0TEMP=" + work + "\0TMP=" + work + "\0USERPROFILE=" + work + "\0windir=" + system_root + "\0"
 
 fn _launch(request: SosixAppSandboxRequestV1, sid: i64) -> LaunchV1:
@@ -305,8 +312,10 @@ fn _launch(request: SosixAppSandboxRequestV1, sid: i64) -> LaunchV1:
     if not released: reason = reason + "; app-sandbox-handle-release-failed"
     LaunchV1(reason: reason, exit_code: exit_code, timed_out: timed_out)
 
-# Grants the container SID on every listed dir and returns the dirs actually granted (a failed
-# grant is one atomic DACL write and left nothing), so exactly those are revoked at teardown.
+# Grants the container SID on every listed dir and returns the dirs actually granted (each single-dir
+# grant is one DACL write that leaves nothing on failure), so exactly those are revoked at teardown.
+# Propagation across the dir tree is NOT atomic: a partial failure can leave an orphan-SID ACE.
+# ponytail: partial grant propagation can leave an orphan-SID ACE on a subtree; upgrade path is a post-teardown DACL sweep removing the per-run SID from every listed tree.
 # reason is the first failure.
 fn _grant_all(request: SosixAppSandboxRequestV1, sid: i64) -> GrantsV1:
     var attempted: [text] = []
