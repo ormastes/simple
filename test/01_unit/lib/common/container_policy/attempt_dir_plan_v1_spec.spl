@@ -1,0 +1,35 @@
+"""Host-neutral attempt key and directory plan."""
+
+use std.spec.{describe, it, expect}
+use std.common.container_policy.attempt_dir_plan_v1.{ContainerAttemptNumberV1,
+    container_attempt_key_v1, container_attempt_dir_plan_v1}
+
+describe "attempt_dir_plan_v1":
+    it "builds the attempt key":
+        expect(container_attempt_key_v1("pod-1", ContainerAttemptNumberV1(2)).unwrap()).to_equal("pod-1-a2")
+    it "rejects bad identity":
+        expect(container_attempt_key_v1("pod-1", ContainerAttemptNumberV1(0)).unwrap_err()).to_equal(
+            "attempt-identity-invalid")
+        expect(container_attempt_key_v1("../x", ContainerAttemptNumberV1(1)).is_err()).to_equal(true)
+    it "lays out a posix state root":
+        val dirs = container_attempt_dir_plan_v1("/state", "pod-1-a1").unwrap()
+        expect(dirs.attempt_root).to_equal("/state/attempts/pod-1-a1")
+        expect(dirs.host_scope).to_equal("/state/host-scope")
+        expect(dirs.private_dir).to_equal("/state/attempts/pod-1-a1/private")
+        expect(dirs.broker_socket).to_equal("/state/attempts/pod-1-a1/ipc/broker.sock")
+    it "accepts a drive-letter state root":
+        val dirs = container_attempt_dir_plan_v1("C:/state", "k1").unwrap()
+        expect(dirs.workspace).to_equal("C:/state/attempts/k1/workspace")
+    it "rejects unsafe state roots":
+        expect(container_attempt_dir_plan_v1("", "k1").unwrap_err()).to_equal("state-root-empty")
+        expect(container_attempt_dir_plan_v1("/", "k1").unwrap_err()).to_equal("state-root-filesystem-root-rejected")
+        expect(container_attempt_dir_plan_v1("C:/", "k1").unwrap_err()).to_equal("state-root-filesystem-root-rejected")
+        expect(container_attempt_dir_plan_v1("C:", "k1").unwrap_err()).to_equal("state-root-filesystem-root-rejected")
+        expect(container_attempt_dir_plan_v1("C:\\", "k1").unwrap_err()).to_equal("state-root-filesystem-root-rejected")
+        expect(container_attempt_dir_plan_v1("/s/", "k1").unwrap_err()).to_equal("state-root-trailing-slash-rejected")
+        expect(container_attempt_dir_plan_v1("/s//t", "k1").unwrap_err()).to_equal("state-root-empty-segment-rejected")
+        expect(container_attempt_dir_plan_v1("/s/./t", "k1").unwrap_err()).to_equal("state-root-dot-segment-rejected")
+        expect(container_attempt_dir_plan_v1("/s/../t", "k1").unwrap_err()).to_equal("state-root-dotdot-segment-rejected")
+        expect(container_attempt_dir_plan_v1("/s\u{e9}", "k1").is_err()).to_equal(true)
+    it "rejects a bad attempt key":
+        expect(container_attempt_dir_plan_v1("/state", "../x").unwrap_err()).to_equal("attempt-key-invalid")

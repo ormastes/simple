@@ -1,0 +1,32 @@
+"""Host-neutral contained-workload lifecycle machine."""
+
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.contained_lifecycle_v1.{contained_lifecycle_next_v1,
+    contained_runtime_phase_v1, CONTAINED_STATE_VALIDATED_V1, CONTAINED_STATE_CLOSED_V1}
+use std.common.contracts.container.runtime_v1.{RUNTIME_PHASE_PREPARED, RUNTIME_PHASE_CREATED,
+    RUNTIME_PHASE_RUNNING, RUNTIME_PHASE_EXITED, RUNTIME_PHASE_DESTROYED, RUNTIME_PHASE_UNKNOWN}
+
+describe "contained_lifecycle_v1":
+    it "walks the full happy path to closed":
+        var state = CONTAINED_STATE_VALIDATED_V1
+        for event in ["prepare", "launch", "admitted", "stop", "retire", "absence-proven", "close"]:
+            state = contained_lifecycle_next_v1(state, event).unwrap()
+        expect(state).to_equal(CONTAINED_STATE_CLOSED_V1)
+    it "takes the leader-exit and unknown-outcome edges":
+        expect(contained_lifecycle_next_v1("running", "leader-exit").unwrap()).to_equal("retiring")
+        expect(contained_lifecycle_next_v1("launch-pending", "interrupted").unwrap()).to_equal("outcome-unknown")
+        expect(contained_lifecycle_next_v1("retiring", "uncertain").unwrap()).to_equal("outcome-unknown")
+        expect(contained_lifecycle_next_v1("outcome-unknown", "exact-recovery").unwrap()).to_equal("retiring")
+        expect(contained_lifecycle_next_v1("outcome-unknown", "quarantine").unwrap()).to_equal("quarantined")
+    it "never invents an edge":
+        expect(contained_lifecycle_next_v1("running", "absence-proven").unwrap_err()).to_equal(
+            "invalid-transition-running-absence-proven")
+        expect(contained_lifecycle_next_v1("quarantined", "close").is_err()).to_equal(true)
+        expect(contained_lifecycle_next_v1("validated", "admitted").is_err()).to_equal(true)
+    it "maps states to runtime phases":
+        expect(contained_runtime_phase_v1("validated")).to_equal(RUNTIME_PHASE_PREPARED)
+        expect(contained_runtime_phase_v1("launch-pending")).to_equal(RUNTIME_PHASE_CREATED)
+        expect(contained_runtime_phase_v1("stopping")).to_equal(RUNTIME_PHASE_RUNNING)
+        expect(contained_runtime_phase_v1("retiring")).to_equal(RUNTIME_PHASE_EXITED)
+        expect(contained_runtime_phase_v1("closed")).to_equal(RUNTIME_PHASE_DESTROYED)
+        expect(contained_runtime_phase_v1("quarantined")).to_equal(RUNTIME_PHASE_UNKNOWN)

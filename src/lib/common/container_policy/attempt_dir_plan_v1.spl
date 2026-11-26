@@ -1,0 +1,63 @@
+# Host-neutral per-attempt directory layout and attempt key (extracted from the
+# macOS Seatbelt leaf; S0 of the pure-Simple container plan). Pure data: no
+# directory is created here. Host-specific path rules (a leading `/`, the
+# Darwin sun_path limit) stay in the provider that needs them.
+
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+
+pub unit ContainerAttemptNumberV1: i64
+
+pub struct ContainerAttemptDirPlanV1:
+    state_root: text
+    host_scope: text
+    attempt_root: text
+    private_dir: text
+    workspace: text
+    output: text
+    home: text
+    tmp: text
+    ipc: text
+    broker_socket: text
+
+pub fn container_attempt_key_v1(workload_uid: text, attempt: ContainerAttemptNumberV1) -> Result<text, text>:
+    val number = attempt.value
+    if not builder_identifier_valid_v1(workload_uid) or number <= 0:
+        return Err("attempt-identity-invalid")
+    val key = workload_uid + "-a" + number.to_string()
+    if key.byte_len() > 128: return Err("attempt-key-too-long")
+    Ok(key)
+
+# Host-independent lexical check of the state root.
+fn _state_root_check_v1(root: text) -> Result<text, text>:
+    val n = root.byte_len()
+    if n == 0: return Err("state-root-empty")
+    var i = 0
+    while i < n:
+        val code = root.byte_at(i) as i64
+        if code < 32 or code == 127: return Err("state-root-control-byte-rejected")
+        if code > 127: return Err("state-root-non-ascii-rejected")
+        i = i + 1
+    val drive_only = n == 2 and root.byte_at(1) as i64 == 58
+    val drive_root = n == 3 and root.byte_at(1) as i64 == 58 and (root.byte_at(2) as i64 == 47 or root.byte_at(2) as i64 == 92)
+    if root == "/" or drive_only or drive_root: return Err("state-root-filesystem-root-rejected")
+    if root.ends_with("/"): return Err("state-root-trailing-slash-rejected")
+    if root.contains("//"): return Err("state-root-empty-segment-rejected")
+    if root == "." or root.starts_with("./") or root.contains("/./") or root.ends_with("/."):
+        return Err("state-root-dot-segment-rejected")
+    if root == ".." or root.starts_with("../") or root.contains("/../") or root.ends_with("/.."):
+        return Err("state-root-dotdot-segment-rejected")
+    Ok(root)
+
+pub fn container_attempt_dir_plan_v1(state_root: text, attempt_key: text) -> Result<ContainerAttemptDirPlanV1, text>:
+    _state_root_check_v1(state_root)?
+    if not builder_identifier_valid_v1(attempt_key): return Err("attempt-key-invalid")
+    val attempt_root = state_root + "/attempts/" + attempt_key
+    val ipc = attempt_root + "/ipc"
+    Ok(ContainerAttemptDirPlanV1(state_root: state_root, host_scope: state_root + "/host-scope",
+        attempt_root: attempt_root, private_dir: attempt_root + "/private",
+        workspace: attempt_root + "/workspace", output: attempt_root + "/output",
+        home: attempt_root + "/home", tmp: attempt_root + "/tmp", ipc: ipc,
+        broker_socket: ipc + "/broker.sock"))
+
+export ContainerAttemptNumberV1, ContainerAttemptDirPlanV1
+export container_attempt_key_v1, container_attempt_dir_plan_v1

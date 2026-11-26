@@ -12,28 +12,24 @@
 # returned 0" is not a canary result.
 
 use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.contracts.container.sandbox_canary_v1.{SandboxCanaryPlanV1, SandboxCanaryResultV1,
+    SandboxCanaryStatusV1, sandbox_canary_status_v1, SANDBOX_CANARY_QUALIFIED_V1, SANDBOX_CANARY_UNQUALIFIED_V1}
 use std.nogc_async_mut.container.providers.macos.seatbelt_profile_v1.SEATBELT_BASELINE_REVISION_V1
 
 pub const SEATBELT_MANIFEST_SCHEMA_V1 = "simple-seatbelt-qualification-v1"
 pub const SEATBELT_PROBE_PROVENANCE_V1 = "sosix-darwin-seatbelt-probe-v1"
 pub const SEATBELT_RUNTIME_ABI_V1 = "simple-seatbelt-runtime-abi-v1"
 
-pub const SEATBELT_QUALIFIED_V1 = "qualified"
-pub const SEATBELT_UNQUALIFIED_V1 = "unqualified"
+pub const SEATBELT_QUALIFIED_V1 = SANDBOX_CANARY_QUALIFIED_V1
+pub const SEATBELT_UNQUALIFIED_V1 = SANDBOX_CANARY_UNQUALIFIED_V1
 
 pub const SEATBELT_EXPECT_ALLOW_V1 = "allow"
 pub const SEATBELT_EXPECT_DENY_V1 = "deny"
 pub const SEATBELT_OBSERVED_NOT_RUN_V1 = "not-run"
 
-pub struct SeatbeltCanaryPlanV1:
-    id: text
-    expected: text
-    requirement: text
+pub type SeatbeltCanaryPlanV1 = SandboxCanaryPlanV1
 
-pub struct SeatbeltCanaryResultV1:
-    id: text
-    observed: text
-    evidence_digest: text
+pub type SeatbeltCanaryResultV1 = SandboxCanaryResultV1
 
 pub struct SeatbeltCapabilityManifestV1:
     schema: text
@@ -47,10 +43,7 @@ pub struct SeatbeltCapabilityManifestV1:
     profile_digest: text
     canaries: [SeatbeltCanaryResultV1]
 
-pub struct SeatbeltQualificationV1:
-    status: text
-    missing: [text]
-    reason: text
+pub type SeatbeltQualificationV1 = SandboxCanaryStatusV1
 
 fn _canary(id: text, expected: text, requirement: text) -> SeatbeltCanaryPlanV1:
     SeatbeltCanaryPlanV1(id: id, expected: expected, requirement: requirement)
@@ -124,17 +117,10 @@ pub fn seatbelt_capability_status_v1(manifest: SeatbeltCapabilityManifestV1,
         return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 runtime-abi-unqualified")
     if manifest.profile_revision != SEATBELT_BASELINE_REVISION_V1 or not builder_digest_valid_v1(manifest.profile_digest):
         return _seatbelt_unqualified_v1([], "SCMAC-PLATFORM-001 profile-revision-unqualified")
-    var missing: [text] = []
-    for canary in seatbelt_qualification_plan_v1():
-        var passed = false
-        for result in manifest.canaries:
-            if result.id == canary.id and result.observed == canary.expected and
-                    builder_digest_valid_v1(result.evidence_digest):
-                passed = true
-        if not passed: missing.push(canary.id)
-    if missing.len() > 0:
-        return _seatbelt_unqualified_v1(missing, "SCMAC-PLATFORM-001 canaries-not-passed")
-    SeatbeltQualificationV1(status: SEATBELT_QUALIFIED_V1, missing: [], reason: "")
+    val status = sandbox_canary_status_v1(seatbelt_qualification_plan_v1(), manifest.canaries)
+    if status.status != SANDBOX_CANARY_QUALIFIED_V1:
+        return _seatbelt_unqualified_v1(status.missing, "SCMAC-PLATFORM-001 " + status.reason)
+    status
 
 # Decode the native probe transcript (sosix_darwin_sandbox_v1_selfcheck.c
 # prints `canary <id> allow|deny` per observation) into a manifest. The

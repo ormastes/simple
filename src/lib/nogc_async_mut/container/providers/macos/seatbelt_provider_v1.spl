@@ -24,10 +24,16 @@ use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceip
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.control_deadline_v1.ContainerControlDeadlineV1
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeStateV1, RuntimeOperationV1,
-    RuntimeIntentV1, RUNTIME_PHASE_PREPARED, RUNTIME_PHASE_CREATED, RUNTIME_PHASE_RUNNING,
-    RUNTIME_PHASE_EXITED, RUNTIME_PHASE_DESTROYED, RUNTIME_PHASE_UNKNOWN,
+    RuntimeIntentV1,
     RUNTIME_STATUS_REJECTED, RUNTIME_STATUS_BLOCKED, runtime_command_empty}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.contracts.container.contained_lifecycle_v1.{contained_lifecycle_next_v1,
+    contained_runtime_phase_v1, CONTAINED_STATE_VALIDATED_V1, CONTAINED_STATE_PREPARED_V1,
+    CONTAINED_STATE_LAUNCH_PENDING_V1, CONTAINED_STATE_RUNNING_V1, CONTAINED_STATE_STOPPING_V1,
+    CONTAINED_STATE_RETIRING_V1, CONTAINED_STATE_ABSENT_V1, CONTAINED_STATE_CLOSED_V1,
+    CONTAINED_STATE_OUTCOME_UNKNOWN_V1, CONTAINED_STATE_QUARANTINED_V1}
+use std.common.container_policy.attempt_dir_plan_v1.{ContainerAttemptDirPlanV1, ContainerAttemptNumberV1,
+    container_attempt_key_v1, container_attempt_dir_plan_v1}
 use std.nogc_async_mut.container.providers.macos.seatbelt_profile_v1.{SeatbeltFsGrantInputV1,
     SeatbeltPolicyInputV1, SeatbeltProfileV1, seatbelt_path_check_v1, seatbelt_profile_compile_v1,
     SEATBELT_ACCESS_READ_DATA_V1, SEATBELT_ACCESS_READ_METADATA_V1, SEATBELT_ACCESS_WRITE_V1,
@@ -64,41 +70,25 @@ pub fn seatbelt_sosix_port_status_v1() -> SeatbeltSosixPortStatusV1:
 # §8.1 lifecycle mapping (semantic states mapped onto RuntimeStateV1 phases).
 # ---------------------------------------------------------------------------
 
-pub const SEATBELT_STATE_VALIDATED_V1 = "validated"
-pub const SEATBELT_STATE_PREPARED_V1 = "prepared"
-pub const SEATBELT_STATE_LAUNCH_PENDING_V1 = "launch-pending"
-pub const SEATBELT_STATE_RUNNING_V1 = "running"
-pub const SEATBELT_STATE_STOPPING_V1 = "stopping"
-pub const SEATBELT_STATE_RETIRING_V1 = "retiring"
-pub const SEATBELT_STATE_ABSENT_V1 = "absent"
-pub const SEATBELT_STATE_CLOSED_V1 = "closed"
-pub const SEATBELT_STATE_OUTCOME_UNKNOWN_V1 = "outcome-unknown"
-pub const SEATBELT_STATE_QUARANTINED_V1 = "quarantined"
+# State names and the transition machine are host-neutral (contained_lifecycle_v1).
+pub const SEATBELT_STATE_VALIDATED_V1 = CONTAINED_STATE_VALIDATED_V1
+pub const SEATBELT_STATE_PREPARED_V1 = CONTAINED_STATE_PREPARED_V1
+pub const SEATBELT_STATE_LAUNCH_PENDING_V1 = CONTAINED_STATE_LAUNCH_PENDING_V1
+pub const SEATBELT_STATE_RUNNING_V1 = CONTAINED_STATE_RUNNING_V1
+pub const SEATBELT_STATE_STOPPING_V1 = CONTAINED_STATE_STOPPING_V1
+pub const SEATBELT_STATE_RETIRING_V1 = CONTAINED_STATE_RETIRING_V1
+pub const SEATBELT_STATE_ABSENT_V1 = CONTAINED_STATE_ABSENT_V1
+pub const SEATBELT_STATE_CLOSED_V1 = CONTAINED_STATE_CLOSED_V1
+pub const SEATBELT_STATE_OUTCOME_UNKNOWN_V1 = CONTAINED_STATE_OUTCOME_UNKNOWN_V1
+pub const SEATBELT_STATE_QUARANTINED_V1 = CONTAINED_STATE_QUARANTINED_V1
 
-# Returns the next semantic state or an error; never invents an edge.
 pub fn seatbelt_lifecycle_next_v1(state: text, event: text) -> Result<text, text>:
-    if state == SEATBELT_STATE_VALIDATED_V1 and event == "prepare": return Ok(SEATBELT_STATE_PREPARED_V1)
-    if state == SEATBELT_STATE_PREPARED_V1 and event == "launch": return Ok(SEATBELT_STATE_LAUNCH_PENDING_V1)
-    if state == SEATBELT_STATE_LAUNCH_PENDING_V1 and event == "admitted": return Ok(SEATBELT_STATE_RUNNING_V1)
-    if state == SEATBELT_STATE_LAUNCH_PENDING_V1 and event == "interrupted": return Ok(SEATBELT_STATE_OUTCOME_UNKNOWN_V1)
-    if state == SEATBELT_STATE_RUNNING_V1 and event == "stop": return Ok(SEATBELT_STATE_STOPPING_V1)
-    if state == SEATBELT_STATE_RUNNING_V1 and event == "leader-exit": return Ok(SEATBELT_STATE_RETIRING_V1)
-    if state == SEATBELT_STATE_STOPPING_V1 and event == "retire": return Ok(SEATBELT_STATE_RETIRING_V1)
-    if state == SEATBELT_STATE_RETIRING_V1 and event == "absence-proven": return Ok(SEATBELT_STATE_ABSENT_V1)
-    if state == SEATBELT_STATE_RETIRING_V1 and event == "uncertain": return Ok(SEATBELT_STATE_OUTCOME_UNKNOWN_V1)
-    if state == SEATBELT_STATE_OUTCOME_UNKNOWN_V1 and event == "exact-recovery": return Ok(SEATBELT_STATE_RETIRING_V1)
-    if state == SEATBELT_STATE_OUTCOME_UNKNOWN_V1 and event == "quarantine": return Ok(SEATBELT_STATE_QUARANTINED_V1)
-    if state == SEATBELT_STATE_ABSENT_V1 and event == "close": return Ok(SEATBELT_STATE_CLOSED_V1)
-    Err("seatbelt-invalid-transition-" + state + "-" + event)
+    match contained_lifecycle_next_v1(state, event):
+        case Ok(next): Ok(next)
+        case Err(reason): Err("seatbelt-" + reason)
 
-# Leader exit with unresolved descendants is EXITED, never DESTROYED (§8.4).
 pub fn seatbelt_runtime_phase_v1(state: text) -> text:
-    if state == SEATBELT_STATE_VALIDATED_V1 or state == SEATBELT_STATE_PREPARED_V1: return RUNTIME_PHASE_PREPARED
-    if state == SEATBELT_STATE_LAUNCH_PENDING_V1: return RUNTIME_PHASE_CREATED
-    if state == SEATBELT_STATE_RUNNING_V1 or state == SEATBELT_STATE_STOPPING_V1: return RUNTIME_PHASE_RUNNING
-    if state == SEATBELT_STATE_RETIRING_V1: return RUNTIME_PHASE_EXITED
-    if state == SEATBELT_STATE_ABSENT_V1 or state == SEATBELT_STATE_CLOSED_V1: return RUNTIME_PHASE_DESTROYED
-    RUNTIME_PHASE_UNKNOWN
+    contained_runtime_phase_v1(state)
 
 # Facade action -> lifecycle event. `create` is worker admission + plan
 # transfer (launch-pending); `start` requires admitted native evidence.
@@ -116,41 +106,27 @@ fn _seatbelt_action_event_v1(action: text) -> Result<text, text>:
 
 pub const SEATBELT_BROKER_SOCKET_PATH_MAX_V1: i64 = 103
 
-pub struct SeatbeltAttemptDirPlanV1:
-    state_root: text
-    host_scope: text
-    attempt_root: text
-    private_dir: text
-    workspace: text
-    output: text
-    home: text
-    tmp: text
-    ipc: text
-    broker_socket: text
+# The layout is host-neutral (container_attempt_dir_plan_v1); this leaf keeps
+# only the Darwin rules: an absolute path and the sun_path length limit.
+pub type SeatbeltAttemptDirPlanV1 = ContainerAttemptDirPlanV1
 
 pub fn seatbelt_attempt_key_v1(workload_uid: text, attempt: i64) -> Result<text, text>:
-    if not builder_identifier_valid_v1(workload_uid) or attempt <= 0:
-        return Err("SCMAC-ADMIT-001 attempt-identity-invalid")
-    val key = workload_uid + "-a" + attempt.to_string()
-    if key.byte_len() > 128: return Err("SCMAC-ADMIT-001 attempt-key-too-long")
-    Ok(key)
+    match container_attempt_key_v1(workload_uid, ContainerAttemptNumberV1(attempt)):
+        case Ok(key): Ok(key)
+        case Err(reason): Err("SCMAC-ADMIT-001 " + reason)
 
 pub fn seatbelt_attempt_dir_plan_v1(state_root: text, attempt_key: text) -> Result<SeatbeltAttemptDirPlanV1, text>:
     val root_checked = seatbelt_path_check_v1(state_root)
     if root_checked.is_err(): return Err("SCMAC-FS-002 state_root " + root_checked.unwrap_err())
     if state_root == "/": return Err("SCMAC-FS-001 state_root filesystem-root-rejected")
-    if not builder_identifier_valid_v1(attempt_key): return Err("SCMAC-ADMIT-001 attempt-key-invalid")
-    val attempt_root = state_root + "/attempts/" + attempt_key
-    val ipc = attempt_root + "/ipc"
+    val plan = match container_attempt_dir_plan_v1(state_root, attempt_key):
+        case Ok(p): p
+        case Err(reason): return Err("SCMAC-ADMIT-001 " + reason)
     # Darwin sockaddr_un.sun_path holds 103 bytes + NUL. A longer broker path
     # cannot be bound and must be refused here, before any effect.
-    if (ipc + "/broker.sock").byte_len() > SEATBELT_BROKER_SOCKET_PATH_MAX_V1:
+    if plan.broker_socket.byte_len() > SEATBELT_BROKER_SOCKET_PATH_MAX_V1:
         return Err("SCMAC-FS-002 broker_socket path-exceeds-darwin-sun-path")
-    Ok(SeatbeltAttemptDirPlanV1(state_root: state_root, host_scope: state_root + "/host-scope",
-        attempt_root: attempt_root, private_dir: attempt_root + "/private",
-        workspace: attempt_root + "/workspace", output: attempt_root + "/output",
-        home: attempt_root + "/home", tmp: attempt_root + "/tmp", ipc: ipc,
-        broker_socket: ipc + "/broker.sock"))
+    Ok(plan)
 
 fn _grant(path: text, access: text) -> SeatbeltFsGrantInputV1:
     SeatbeltFsGrantInputV1(path: path, scope: SEATBELT_SCOPE_SUBPATH_V1, access: access)

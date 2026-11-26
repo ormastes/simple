@@ -118,6 +118,8 @@ entry. The leaf is deliberately not `rt_*`. Mac-qualified 2026-11-14: Darwin
 `src/runtime/test/sosix_darwin_sandbox_v1_selfcheck.c` 12/12 on the compiled
 attempt profile (see `doc/04_architecture/native_macos_simple_container.md`). Design: `doc/05_design/simple_container_macos_seatbelt.md` §2.3/§9.1/§15.2.
 
+Shared extraction (2026-11-26, container S0): the Seatbelt lifecycle machine, attempt key/dir layout and canary comparison are host-neutral and live in `src/lib/common/contracts/container/contained_lifecycle_v1.spl`, `src/lib/common/container_policy/attempt_dir_plan_v1.spl` and `src/lib/common/contracts/container/sandbox_canary_v1.spl`. `providers/macos/seatbelt_{provider,capabilities}_v1.spl` forward to them (keeping the `seatbelt-`/`SCMAC-*` error prefixes, the leading-`/` path check and the 103-byte sun_path limit); `SeatbeltAttemptDirPlanV1`, `SeatbeltCanaryPlanV1`, `SeatbeltCanaryResultV1`, `SeatbeltQualificationV1` are type aliases. Edit shared rules there, not in the macOS leaf.
+
 ## PTY shell kinds (2026-11-14)
 
 `std.sosix.pty` is the single PTY entry point (smux and Caret import nothing
