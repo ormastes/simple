@@ -1463,12 +1463,12 @@ fn text_container_frac_w(nodes: [HNode], styles: [Style], bw: [i32], run: i32, n
 # Where its exact width is known (`absolute_width_frac_milli`) the box's own
 # layout takes it (its text wraps against 30.21875, not 30), and at k > 1 the
 # box paints to round(k x exact right edge).
-# k > 1: an auto-width float or inline-block holding one text run paints to
+# An auto-width float or inline-block holding one text run paints to
 # round(k x its exact max-content right edge) (Chrome 159: a float `ipsum`,
 # 42.6875 px, is 171 device px at k = 4, not 4 x 43). Whole-px left edge.
 fn shrink_box_device_extra_w(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, c: i32, cst: Style, box_w: i32):
     val k = layout_device_scale()
-    if k <= 1 or cst.width_px != 0 or cst.width_zero or form_control_tag(nodes[c].tag):
+    if k < 1 or cst.width_px != 0 or cst.width_zero or form_control_tag(nodes[c].tag):
         return
     val d = flex_item_text_frac_delta_milli_px(nodes, styles, child_index, c, cst, box_w)
     if d != 0:
@@ -1491,6 +1491,10 @@ fn absolute_box_snap(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         err_x = (err_x * k - dx * 1000) / k
         val extra_w = if w_frac == BOX_FRAC_W_UNSET: 0 else: box_device_top_px((fx + w_frac) * k) - box_device_top_px(fx * k)
         box_device_extra_w_record(n, c, extra_w)
+    elif w_frac != BOX_FRAC_W_UNSET:
+        # k = 1: both edges round to the pixel (Chrome 159: `width:30.5px` at
+        # `left:120.25px` paints 120..150, 31 px).
+        box_device_extra_w_record(n, c, snap_milli_px(fx + w_frac) - sx)
     box_line_start_err_record(n, c, err_x)
     if static_y:
         return [ax + sx, ay]
@@ -1629,12 +1633,22 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     # fits against that, not against the floored whole px.
     if st.width_px > 0 and st.width_milli >= 0 and node_w == explicit_node_w and not (st.flex_basis_px > 0 and w > 0) and node.tag != "#text" and box_frac_w_at(i) == BOX_FRAC_W_UNSET:
         box_frac_w_set(nodes.len() as i32, i, st.width_milli)
-        # k > 1: the box paints to round(k x its exact right edge) (Chrome 159:
-        # `width:30.25px` at x 80 is 320..440 at k = 4, not 320..439).
+        # The box paints to round(k x its exact right edge) (Chrome 159:
+        # `width:30.25px` at x 80 is 320..440 at k = 4, not 320..439;
+        # `width:2.55rem`, 40.796875 px, is 41 px at k = 1).
         # ponytail: assumes a whole-px left edge; a fractional x would need its
         # error here as `absolute_box_snap` has it.
-        if layout_device_scale() > 1 and not form_control_tag(node.tag):
+        if not form_control_tag(node.tag):
             box_device_extra_w_record(nodes.len() as i32, i, box_device_top_px(st.width_milli * layout_device_scale()))
+    elif st.width_px == 0 and not st.width_zero and node.parent >= 0 and not form_control_tag(node.tag):
+        # An auto-width block that fills its parent spans the parent's painted
+        # width (Chrome 159: the child of a `width:40.5px` block is 41 px at
+        # k = 1, 162 device px at k = 4).
+        val pi = node.parent as i32
+        val pst = styles[pi]
+        val parent_extra = box_device_extra_w_at(pi)
+        if parent_extra != 0 and st.display == "block" and pst.display == "block" and st.float_mode == 0 and not st.position_absolute and not form_control_tag(nodes[pi].tag) and node_w == out_bw[pi] - pst.pad_l - pst.pad_r - pst.border_l - pst.border_r:
+            box_device_extra_w_record(nodes.len() as i32, i, parent_extra)
     if replaced_default_box_w(node.tag) > 0:
         # Replaced element with no intrinsic media loaded: fixed box from CSS
         # width/height, else the width/height HTML attributes, else the UA
