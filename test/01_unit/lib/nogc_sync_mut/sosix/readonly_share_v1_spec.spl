@@ -1,0 +1,106 @@
+# sosix_fs_link_readonly_v1: hard link first, copy only when allowed. Real temp dirs.
+use std.spec.{describe, it, expect, only_on_windows}
+use std.common.contracts.sosix.containment_v1.{SosixContainFlagV1}
+use std.nogc_sync_mut.sosix.readonly_share_v1.{sosix_fs_link_readonly_v1, sosix_fs_copy_readonly_v1}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, dir_list}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.io.file_ops.{path_absolute}
+
+fn _temp(tag: text) -> text:
+    dir_create_all("build/test-artifacts")
+    val owned = secure_temp_dir_raw("build/test-artifacts", "ro-" + tag + "-")
+    expect(owned == "").to_equal(false)
+    path_absolute(owned).replace("\\", "/")
+
+fn _cleanup(root: text):
+    val parent = path_absolute("build/test-artifacts").replace("\\", "/") + "/"
+    expect(root.starts_with(parent)).to_equal(true)
+    expect(dir_remove_all(root)).to_equal(true)
+
+fn _name_count(path: text) -> i64:
+    val r = process_run("fsutil", ["hardlink", "list", path.replace("/", "\\")])
+    var n: i64 = 0
+    for line in r.0.split("\n"):
+        if line.trim().starts_with("\\"):
+            n = n + 1
+    n
+
+fn _text(path: text) -> text:
+    file_read_regular_no_follow_bounded(path, 1000).unwrap()
+
+describe "sosix_fs_link_readonly_v1":
+    it "links one file under a second name with identical bytes":
+        val base = _temp("link")
+        expect(file_write_bytes(base + "/src.bin", "payload".bytes())).to_equal(true)
+        val r = sosix_fs_link_readonly_v1(base + "/src.bin", base + "/dst.bin", SosixContainFlagV1(false))
+        expect(r.reason).to_equal("")
+        expect(r.status).to_equal("linked")
+        expect(_text(base + "/dst.bin")).to_equal("payload")
+        _cleanup(base)
+
+    only_on_windows "measures NTFS link count 2 for a linked file":
+        val base = _temp("ntfs")
+        expect(file_write_bytes(base + "/src.bin", "payload".bytes())).to_equal(true)
+        expect(_name_count(base + "/src.bin")).to_equal(1)
+        val r = sosix_fs_link_readonly_v1(base + "/src.bin", base + "/dst.bin", SosixContainFlagV1(false))
+        expect(r.status).to_equal("linked")
+        expect(_name_count(base + "/src.bin")).to_equal(2)
+        expect(_name_count(base + "/dst.bin")).to_equal(2)
+        _cleanup(base)
+
+    it "rejects an existing destination and leaves it unchanged":
+        val base = _temp("exists")
+        expect(file_write_bytes(base + "/src.bin", "new".bytes())).to_equal(true)
+        expect(file_write_bytes(base + "/dst.bin", "old".bytes())).to_equal(true)
+        val r = sosix_fs_link_readonly_v1(base + "/src.bin", base + "/dst.bin", SosixContainFlagV1(true))
+        expect(r.status).to_equal("rejected")
+        expect(r.reason).to_equal("share-destination-exists")
+        expect(_text(base + "/dst.bin")).to_equal("old")
+        _cleanup(base)
+
+    it "rejects a missing source, empty paths and the same path":
+        val base = _temp("bad")
+        val flag = SosixContainFlagV1(true)
+        expect(sosix_fs_link_readonly_v1(base + "/nope", base + "/d", flag).reason).to_equal("share-source-not-regular")
+        expect(sosix_fs_link_readonly_v1("", base + "/d", flag).reason).to_equal("share-path-empty")
+        expect(sosix_fs_link_readonly_v1(base + "/nope", base + "/nope", flag).reason).to_equal("share-path-same")
+        expect(file_exists(base + "/d")).to_equal(false)
+        _cleanup(base)
+
+    it "rejects an unlinkable destination when copy is not allowed":
+        val base = _temp("nolink")
+        expect(file_write_bytes(base + "/src.bin", "x".bytes())).to_equal(true)
+        val r = sosix_fs_link_readonly_v1(base + "/src.bin", base + "/missing_dir/dst.bin", SosixContainFlagV1(false))
+        expect(r.status).to_equal("rejected")
+        expect(r.reason).to_equal("share-link-failed")
+        _cleanup(base)
+
+    it "public copy variant yields a copy with the same bytes and refuses an existing destination":
+        val base = _temp("copy")
+        expect(file_write_bytes(base + "/src.bin", "copy me".bytes())).to_equal(true)
+        val r = sosix_fs_copy_readonly_v1(base + "/src.bin", base + "/dst.bin")
+        expect(r.status).to_equal("copied")
+        expect(_text(base + "/dst.bin")).to_equal("copy me")
+        expect(sosix_fs_copy_readonly_v1(base + "/src.bin", base + "/dst.bin").reason).to_equal("share-destination-exists")
+        _cleanup(base)
+
+    it "allow_copy true still links when the link works and leaves no stage dir":
+        val base = _temp("allow")
+        expect(file_write_bytes(base + "/src.bin", "p".bytes())).to_equal(true)
+        val r = sosix_fs_link_readonly_v1(base + "/src.bin", base + "/dst.bin", SosixContainFlagV1(true))
+        expect(r.status).to_equal("linked")
+        val c = sosix_fs_copy_readonly_v1(base + "/src.bin", base + "/dst2.bin")
+        expect(c.status).to_equal("copied")
+        expect(dir_list(base).len()).to_equal(3)
+        _cleanup(base)
+
+    it "copy refuses an existing destination without changing it":
+        val base = _temp("excl")
+        expect(file_write_bytes(base + "/src.bin", "new".bytes())).to_equal(true)
+        expect(file_write_bytes(base + "/dst.bin", "old".bytes())).to_equal(true)
+        expect(sosix_fs_copy_readonly_v1(base + "/src.bin", base + "/dst.bin").reason).to_equal("share-destination-exists")
+        expect(_text(base + "/dst.bin")).to_equal("old")
+        expect(dir_list(base).len()).to_equal(2)
+        _cleanup(base)

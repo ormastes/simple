@@ -34,9 +34,9 @@ use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir, dir_walk,
     dir_is_real_no_follow}
 
-unit ViewBytesV1: i64
-unit ViewFlagV1: bool
-unit ViewCountV1: i64
+pub unit ViewBytesV1: i64
+pub unit ViewFlagV1: bool
+pub unit ViewCountV1: i64
 export ViewBytesV1, ViewFlagV1, ViewCountV1
 
 pub struct ViewVolumeV1:
@@ -857,9 +857,14 @@ pub fn storage_view_v1_clone(src: StorageViewV1, new_view_id: text) -> ViewHandl
 
 # --------------------------------------------------------------- destroy
 
+# Refuses while a materialized `lower/` exists: its links and the store pin are
+# owned by rootfs_materialize_v1, so the caller must run rootfs_dematerialize_v1
+# first (reason "lower-materialized").
 pub fn storage_view_v1_destroy(view: StorageViewV1) -> ViewDestroyV1:
     if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
         return _sv_destroy_result("rejected", "view-id-invalid")
+    if is_dir(_sv_view_dir(view.view_root, view.view_id) + "/lower"):
+        return _sv_destroy_result("rejected", "lower-materialized")
     val journal = match _sv_journal_load(view.view_root, view.view_id):
         case Ok(value): value
         case Err(reason): return _sv_destroy_result("rejected", reason)
@@ -893,3 +898,24 @@ pub fn storage_view_v1_destroy(view: StorageViewV1) -> ViewDestroyV1:
     if reason != "":
         return _sv_destroy_result("rejected", reason)
     _sv_destroy_result("ok", "")
+
+pub struct ViewBaseEntriesV1:
+    status: text    # "ok" | "rejected"
+    reason: text
+    paths: [text]
+    keys: [text]    # same length and order as paths
+
+# Lists the base manifest entries (path and object key) of a view. Every path is
+# re-checked against the view path policy; a view with no base lists nothing.
+pub fn storage_view_v1_base_entries(view: StorageViewV1) -> ViewBaseEntriesV1:
+    if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
+        return ViewBaseEntriesV1(status: "rejected", reason: "view-id-invalid", paths: [], keys: [])
+    if view.base_manifest_key == "":
+        return ViewBaseEntriesV1(status: "ok", reason: "", paths: [], keys: [])
+    val manifest = match _sv_manifest_load(view.store, view.base_manifest_key):
+        case Ok(value): value
+        case Err(reason): return ViewBaseEntriesV1(status: "rejected", reason: reason, paths: [], keys: [])
+    for p in manifest.paths:
+        if _sv_path_error(p) != "":
+            return ViewBaseEntriesV1(status: "rejected", reason: "base-path-invalid", paths: [], keys: [])
+    ViewBaseEntriesV1(status: "ok", reason: "", paths: manifest.paths, keys: manifest.keys)

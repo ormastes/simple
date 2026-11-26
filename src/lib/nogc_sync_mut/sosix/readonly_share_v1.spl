@@ -1,0 +1,74 @@
+"""SOSIX read-only sharing of one regular file under a second name.
+
+One portable body: hard link, seal read-only where the host can seal, copy only
+when the caller allows it and the link failed. It never branches on the OS.
+Windows cannot seal (`file_seal_readonly` answers false by design); the linked
+object keeps its integrity label instead. See
+doc/04_architecture/platform/container/pure_simple_container.md section 4.4.
+"""
+
+use std.common.contracts.sosix.containment_v1.{SosixContainFlagV1}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_hardlink, file_seal_readonly, secure_temp_dir_raw, file_publish_noreplace_raw,
+    file_read_regular_no_follow_bounded_bytes, file_write_bytes,
+    file_is_regular_no_follow}
+
+val SOSIX_FS_SHARE_MAX_COPY_BYTES_V1: i64 = 268435456
+
+pub struct SosixFsShareV1:
+    status: text    # "linked" | "copied" | "rejected"
+    reason: text
+
+fn _sfs_rejected(reason: text) -> SosixFsShareV1:
+    SosixFsShareV1(status: "rejected", reason: reason)
+
+pub fn sosix_fs_link_readonly_v1(source: text, destination: text,
+        allow_copy: SosixContainFlagV1) -> SosixFsShareV1:
+    if source == "" or destination == "":
+        return _sfs_rejected("share-path-empty")
+    if source == destination:
+        return _sfs_rejected("share-path-same")
+    if not file_is_regular_no_follow(source):
+        return _sfs_rejected("share-source-not-regular")
+    if file_exists(destination):
+        return _sfs_rejected("share-destination-exists")
+    if file_hardlink(source, destination):
+        # Sealing is best effort: a host that cannot seal keeps the link.
+        file_seal_readonly(destination)
+        return SosixFsShareV1(status: "linked", reason: "")
+    if not allow_copy.value:
+        return _sfs_rejected("share-link-failed")
+    sosix_fs_copy_readonly_v1(source, destination)
+
+# Bounded private copy for hosts or volume pairs that cannot hard link. The
+# bytes are staged in a private directory beside the destination and published
+# no-replace, so an existing destination is never overwritten, even by a race.
+pub fn sosix_fs_copy_readonly_v1(source: text, destination: text) -> SosixFsShareV1:
+    if source == "" or destination == "":
+        return _sfs_rejected("share-path-empty")
+    val norm = destination.replace("\\", "/")
+    val slash = norm.last_index_of("/")
+    if slash <= 0:
+        return _sfs_rejected("share-destination-parent-missing")
+    val parent = norm.substring(0, slash)
+    if not file_is_regular_no_follow(source):
+        return _sfs_rejected("share-source-not-regular")
+    val bytes = match file_read_regular_no_follow_bounded_bytes(source, SOSIX_FS_SHARE_MAX_COPY_BYTES_V1):
+        case Ok(value): value
+        case Err(_): return _sfs_rejected("share-copy-read-failed")
+    val stage = secure_temp_dir_raw(parent, "share-")
+    if stage.len() <= 0:
+        return _sfs_rejected("share-copy-stage-failed")
+    val staged = stage + "/payload"
+    if not file_write_bytes(staged, bytes):
+        dir_remove_all(stage)
+        return _sfs_rejected("share-copy-write-failed")
+    val published = file_publish_noreplace_raw(staged, destination)
+    dir_remove_all(stage)
+    if published == 0:
+        return _sfs_rejected("share-destination-exists")
+    if published != 1:
+        return _sfs_rejected("share-copy-write-failed")
+    # The copy is a private file, so sealing it is safe and also best effort.
+    file_seal_readonly(destination)
+    SosixFsShareV1(status: "copied", reason: "")
