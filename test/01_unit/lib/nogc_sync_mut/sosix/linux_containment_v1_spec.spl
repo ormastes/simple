@@ -1,6 +1,7 @@
 # Linux SOSIX containment (lane N1): review-only. Asserts the typed refusals and that
 # no evidence is ever produced; nothing here is a Linux capability claim.
 use std.spec.{describe, it, expect}
+use std.platform.{is_linux}
 use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainLimitsV1, SosixContainBytesV1, SosixContainCountV1, SosixContainCpuRateV1, SosixContainMillisV1, SosixContainFlagV1, SosixContainAdmissionV1, SosixContainLeaseV1, SosixContainSlotV1, SosixContainQualifyRequestV1}
 use std.nogc_sync_mut.sosix.containment_types_v1.{SosixContainMemoryProbeV1}
 use std.nogc_sync_mut.sosix.linux.containment_v1.{sosix_contain_support_v1, sosix_contain_start_v1, sosix_contain_poll_v1, sosix_contain_cancel_v1, sosix_contain_collect_v1, sosix_contain_qualify_v1, sosix_contain_memory_cap_evidence_v1}
@@ -11,6 +12,12 @@ fn request(memory: i64, network: text) -> SosixContainRequestV1:
     SosixContainRequestV1(program: "/bin/true", program_digest: DIGEST, args: [], environment: [], directory: "/", stdout_path: "/o", stderr_path: "/e",
         limits: SosixContainLimitsV1(memory: SosixContainBytesV1(memory), processes: SosixContainCountV1(0), cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(0)),
         identity: "inherit", scope: "", network: network, readonly_dirs: [], writable_dirs: [], private_pids: SosixContainFlagV1(false), root_dir: "")
+
+fn request_pids() -> SosixContainRequestV1:
+    val base = request(0, "host")
+    SosixContainRequestV1(program: base.program, program_digest: base.program_digest, args: [], environment: [], directory: "/", stdout_path: "/o", stderr_path: "/e",
+        limits: SosixContainLimitsV1(memory: SosixContainBytesV1(0), processes: SosixContainCountV1(4), cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(0)),
+        identity: "inherit", scope: "", network: "host", readonly_dirs: [], writable_dirs: [], private_pids: SosixContainFlagV1(false), root_dir: "")
 
 fn reason_of(admission: SosixContainAdmissionV1) -> text:
     match admission:
@@ -30,10 +37,11 @@ describe "linux sosix containment (review-only)":
         expect(s.kill_all_descendants.value).to_equal(false)
         expect(s.unprivileged.value).to_equal(false)
 
-    it "refuses constrained requests by axis and plain ones by the named gap":
-        expect(reason_of(sosix_contain_start_v1(request(1048576, "host")))).to_equal("containment-memory-limit-unsupported")
-        expect(reason_of(sosix_contain_start_v1(request(0, "none")))).to_equal("containment-network-isolation-unsupported")
-        expect(reason_of(sosix_contain_start_v1(request(0, "host")))).to_equal("containment-launch-owner-missing-linux")
+    it "refuses off-host before any owner, and per owner axis on Linux":
+        val want = if is_linux(): "containment-process-limit-unsupported-linux-owner" else: "containment-unimplemented-linux"
+        val net = if is_linux(): "containment-network-isolation-unsupported-linux-owner" else: "containment-unimplemented-linux"
+        expect(reason_of(sosix_contain_start_v1(request_pids()))).to_equal(want)
+        expect(reason_of(sosix_contain_start_v1(request(0, "none")))).to_equal(net)
 
     it "errors on lease operations":
         val lease = SosixContainLeaseV1(slot: SosixContainSlotV1(0))
