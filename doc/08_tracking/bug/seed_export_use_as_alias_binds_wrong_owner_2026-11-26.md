@@ -11,7 +11,7 @@ In `sosix/fs_v1.spl`:
 Repoint `pure_runtime_v1.spl` to the aliases, then run
 `test/03_system/app/container/feature/pure_simple_container_v1_spec.spl`.
 Passing drops from 18 to 6. Re-exporting the same names without `as` passes 18/18.
-Aliases of names from other modules in the same file (`file_hardlink as sosix_fs_hardlink`, `getpid as sosix_fs_getpid`) work.
+Aliases of names from other modules in the same file (`file_hardlink as sosix_fs_hardlink`, `file_write as sosix_fs_write_file`) work.
 
 ## Expected
 An `as` alias resolves to exactly the named owner symbol, whether or not another compiled module defines the same name.
