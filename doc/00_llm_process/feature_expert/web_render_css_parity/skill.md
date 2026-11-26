@@ -4992,3 +4992,45 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
     of a `scrollbar-width:none` parent (not inherited), and `none` with no
     overflow.
   - The vulkan 4K css-layout row went 0.41 -> 0.39 (baseline 2.09 -> 0.39).
+
+## 2026-11-26 — k=4 mid-line run start on the quarter device px (`work/webrender-4x-pen-x-20261126`)
+
+- **Symptom:** at 4x the first line of every catalog inventory row
+  (`<code>align-content</code> — partial; ...`) and the html `<kbd>` sample
+  showed full red/blue outline pairs. Best whole-device-px alignment was (0,0),
+  so the shift was sub-device-px.
+- **Diagnosis:** a red marker centroid after N glyphs (`redx` probe) showed that
+  glyphs INSIDE a run matched Chrome to 5 milli-px; only a run that starts
+  mid-line was off. Chrome on Linux turns on subpixel positioning above DSF 1
+  and starts such a run on the quarter device px of its exact pen. The device
+  pass (`draw_ir_device_scale.spl` `_dir_scale_command`) folded
+  `round(k x pen-origin-milli)` into x and dropped the rest, so every such run
+  started on a whole device px.
+- **Fix:** keep the sub-device-px rest as `pen-origin-milli` in DEVICE milli-px.
+  The stager's `_lcd_apply_pen_phases` (gray cells above 48 px) then takes the
+  quarter phase from origin + exact pen. Spec:
+  `inline_run_start_quarter_phase_k4_chrome159_spec.spl`.
+- **4x catalog** (one run, base 909d71684e9 with the hidden-scrollbar fix):
+
+  | page | before | after |
+  |---|---|---|
+  | overview | 0.21 | 0.07 |
+  | html | 0.28 | 0.10 |
+  | css-layout | 0.28 | 0.18 |
+  | css-paint | 0.29 | 0.14 |
+  | forms-media | 0.43 | 0.27 |
+  | animation | 0.31 | 0.14 |
+  | evidence | 0.10 | 0.03 |
+  | tab-bar | 0.16 | 0.13 |
+
+  The 1x catalog is unchanged.
+- **Scope of the pin:** only k=4 gray cells (glyphs above 48 device px) are
+  pinned by the spec. An LCD-size run at k=2 still goes through the
+  device-milli rest, but `_lcd_apply_pen_phases` can decline the phase there.
+  That case has no Chrome oracle yet.
+- **Known limit (follow-up):** exact device quarter TIES. RUN n=4 (174.375) and
+  n=12 (459.125) miss by one quarter because `pen_origin_milli` sums
+  milli-rounded advances (43.592 vs exact 43.59375), and Chrome rounds the
+  exact float up. Snapping to LayoutUnits does not help: DejaVu Sans Mono
+  `x<code>Tab</code>` sits on a half LayoutUnit (2361.5/64) and Chrome uses the
+  float there. The real fix is exact font-unit pen origins in layout.

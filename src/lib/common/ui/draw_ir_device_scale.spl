@@ -299,10 +299,11 @@ fn _dir_anchor_device_advances(advances: [i32], width: i32) -> ([i32], i32):
     (out, target as i32)
 
 # `pen-origin-milli`: a mid-line run's fractional start past its whole-CSS-px
-# command x (CSS milli-px). With device advances present the device pass moves
-# the command x by round(k x origin) and drops the prop, so the run starts on
-# Chrome's device pen (`<code>ab</code> plain` at k=4: 3 device px right of
-# k x the whole px) and no later stage applies the CSS-milli origin again.
+# command x (CSS milli-px before the device pass). With device advances present
+# the device pass moves the command x by the whole device px of k x origin and
+# keeps only the sub-device-px rest, now in DEVICE milli-px (0 drops the prop),
+# so the stager can start the run on Chrome's quarter device px and no later
+# stage applies the CSS-milli origin again.
 fn _dir_pen_origin_milli(style: [DrawIrStyleProp]) -> i64:
     for prop in style:
         if prop.key == "pen-origin-milli" and _dir_is_int(prop.value):
@@ -356,6 +357,7 @@ fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
     scaled.clip_rect = _dir_scale_rect(command.clip_rect, k)
     val has_device_prop = _dir_has_device_prop(command.computed_style)
     var device_pen_origin_folded = false
+    var device_pen_residual: i64 = 0
     if has_device_prop:
         # The clip moves with the boxes that own its edges (`device-clip`):
         # an svg snapped one device row up keeps its top row, an
@@ -373,8 +375,11 @@ fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
             scaled.width = anchored.1
             val origin = _dir_pen_origin_milli(command.computed_style)
             if origin != 0:
-                scaled.x = scaled.x + (_dir_round_div(origin * (k as i64), 1000) as i32)
+                val device_origin = origin * (k as i64)
+                val whole = _dir_round_div(device_origin, 1000)
+                scaled.x = scaled.x + (whole as i32)
                 device_pen_origin_folded = true
+                device_pen_residual = device_origin - whole * 1000
         val device_rect = _dir_device_rect(command.computed_style)
         if device_rect.len() == 4:
             scaled.x = scaled.x + device_rect[0]
@@ -392,6 +397,13 @@ fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
     scaled.computed_style = _dir_scale_style(if has_device_prop: _dir_without_device_props(command.computed_style) else: command.computed_style, k)
     if device_pen_origin_folded:
         scaled.computed_style = _dir_without_key(scaled.computed_style, "pen-origin-milli")
+        # The sub-device-px rest of k x origin stays with the run, now in
+        # DEVICE milli-px: Chrome (subpixel positioning at k > 1) starts the
+        # glyphs on the quarter device px of the exact pen, which the stager's
+        # pen phases pick from origin + exact pen (`x<code>a</code>l` at k=4:
+        # the `l` inks 0.48 device px left of the whole-px start).
+        if device_pen_residual != 0:
+            scaled.computed_style.push(DrawIrStyleProp(key: "pen-origin-milli", value: device_pen_residual.to_text()))
     scaled.points = _dir_scale_points(command.points, k)
     var run = command.glyph_run
     run.xs = _dir_scale_i32_list(command.glyph_run.xs, k)
