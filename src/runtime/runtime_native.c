@@ -8697,6 +8697,15 @@ void* rt_realloc(void* ptr, int64_t size) {
     size_t persistent_old_size = 0;
     int persistent_tracked = rt_persistent_raw_lookup_size(ptr, &persistent_old_size);
     RtCoreTransientRawAlloc* tracked = rt_core_transient_raw_lookup((uintptr_t)ptr);
+    /* Snapshot tracked metadata by value before rt_struct_alloc() can grow
+     * rt_core_transient_raw_allocs and free the backing array. */
+    int tracked_found = tracked != NULL;
+    size_t tracked_old_size = tracked
+        ? (tracked->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK)
+        : 0;
+    int tracked_owned = tracked
+        ? ((tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0)
+        : 0;
     size_t struct_bytes = 0;
     if (rt_struct_alloc_lookup_size(ptr, &struct_bytes)) {
         if (size == 0) {
@@ -8705,13 +8714,15 @@ void* rt_realloc(void* ptr, int64_t size) {
         }
         void* next = rt_struct_alloc(size);
         if (!next) return NULL;
-        if (tracked) {
-            int owned = (tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
+        if (tracked_found) {
             RtCoreTransientRawAlloc* next_t = rt_core_transient_raw_lookup((uintptr_t)next);
             if (next_t) {
-                next_t->bytes = (size_t)size | (owned ? RT_CORE_TRANSIENT_RAW_OWNED_BIT : 0);
+                next_t->bytes = (size_t)size |
+                    (tracked_owned ? RT_CORE_TRANSIENT_RAW_OWNED_BIT : 0);
             }
-            if (!owned && !rt_persistent_raw_register(next, (size_t)size)) {
+            if (tracked_owned) {
+                rt_persistent_raw_unregister(next);
+            } else if (!rt_persistent_raw_register(next, (size_t)size)) {
                 rt_free(next);
                 return NULL;
             }
@@ -8743,10 +8754,10 @@ void* rt_realloc(void* ptr, int64_t size) {
         }
         void* next = rt_observed_calloc_v1(1, (size_t)size);
         if (!next) return NULL;
-        if (tracked) {
-            int owned = (tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
-            if (!rt_core_transient_raw_register_state(next, (size_t)size, owned) ||
-                    (!owned && !rt_persistent_raw_register(next, (size_t)size))) {
+        if (tracked_found) {
+            if (!rt_core_transient_raw_register_state(next, (size_t)size, tracked_owned) ||
+                    (!tracked_owned && !rt_persistent_raw_register(next, (size_t)size))) {
+                rt_core_transient_raw_erase(next);
                 free(next);
                 return NULL;
             }
@@ -8760,7 +8771,7 @@ void* rt_realloc(void* ptr, int64_t size) {
         rt_mem_guard_free_sampled(ptr);
         return next;
     }
-    if (!tracked) {
+    if (!tracked_found) {
         if (size == 0 && persistent_tracked) {
             rt_free(ptr);
             return NULL;
@@ -8784,17 +8795,15 @@ void* rt_realloc(void* ptr, int64_t size) {
         free(ptr);
         return NULL;
     }
-    size_t old_size = tracked->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK;
-    int owned = (tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
     void* next = rt_observed_calloc_v1(1, (size_t)size);
     if (!next) return NULL;
-    if (!rt_core_transient_raw_register_state(next, (size_t)size, owned) ||
-            (!owned && !rt_persistent_raw_register(next, (size_t)size))) {
+    if (!rt_core_transient_raw_register_state(next, (size_t)size, tracked_owned) ||
+            (!tracked_owned && !rt_persistent_raw_register(next, (size_t)size))) {
         rt_core_transient_raw_erase(next);
         free(next);
         return NULL;
     }
-    memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
+    memcpy(next, ptr, tracked_old_size < (size_t)size ? tracked_old_size : (size_t)size);
     rt_persistent_raw_unregister(ptr);
     rt_core_transient_raw_erase(ptr);
     free(ptr);

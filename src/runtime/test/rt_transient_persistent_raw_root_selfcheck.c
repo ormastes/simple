@@ -302,10 +302,143 @@ static void test_prescope_realloc_free_and_bsm_adopt(void) {
     rt_free(legacy_scope0);
 }
 
+static void test_struct_realloc_across_table_growth(void) {
+    printf("[test] rt_struct_alloc realloc across transient raw table growth\n");
+    check(rt_transient_array_scope_begin() == 1, "setup scope begins for promoted_struct");
+    int64_t* promoted_struct = (int64_t*)rt_struct_alloc((int64_t)(2 * sizeof(int64_t)));
+    check(promoted_struct != NULL, "promoted rt_struct_alloc allocated");
+    promoted_struct[0] = 9999;
+    promoted_struct[1] = rt_string_new((const uint8_t*)"struct_grow_child_v1", 20);
+    check(rt_transient_array_scope_pause() == 1, "setup scope pauses for promoted_struct");
+    check(rt_transient_heap_promote((int64_t)(uintptr_t)promoted_struct) == 1,
+          "initial promoted_struct promotes cleanly");
+    check(rt_transient_array_scope_end() == 1, "setup scope ends for promoted_struct");
+
+    check(rt_transient_array_scope_begin() == 1, "growth scope begins");
+    int64_t* owned_struct = (int64_t*)rt_struct_alloc((int64_t)(2 * sizeof(int64_t)));
+    check(owned_struct != NULL, "owned rt_struct_alloc allocated");
+    owned_struct[0] = 4242;
+    owned_struct[1] = 8484;
+
+    /* Repeatedly resize both owned and promoted struct blocks while growing the
+     * transient raw registry past multiple 70% resize thresholds (256 -> 512
+     * -> 1024), exercising standalone rt_realloc's value-snapshotted `tracked`
+     * metadata across rt_core_transient_raw_grow() free(old). */
+    int realloc_ok = 1;
+    int valid_ok = 1;
+    for (int i = 0; i < 420; i++) {
+        void* filler = rt_alloc(16);
+        if (!filler) {
+            realloc_ok = 0;
+            break;
+        }
+        int64_t owned_sz = (int64_t)((2 + (i % 6)) * sizeof(int64_t));
+        int64_t* next_owned = (int64_t*)rt_realloc(owned_struct, owned_sz);
+        if (!next_owned || next_owned[0] != 4242 || next_owned[1] != 8484) {
+            realloc_ok = 0;
+            break;
+        }
+        owned_struct = next_owned;
+        if (!rt_struct_receiver_valid((int64_t)(uintptr_t)owned_struct, 0, owned_sz)) {
+            valid_ok = 0;
+            break;
+        }
+
+        int64_t prom_sz = (int64_t)((2 + ((i + 3) % 6)) * sizeof(int64_t));
+        int64_t* next_prom = (int64_t*)rt_realloc(promoted_struct, prom_sz);
+        if (!next_prom || next_prom[0] != 9999 || rt_string_len(next_prom[1]) != 20) {
+            realloc_ok = 0;
+            break;
+        }
+        promoted_struct = next_prom;
+        if (!rt_struct_receiver_valid((int64_t)(uintptr_t)promoted_struct, 0, prom_sz)) {
+            valid_ok = 0;
+            break;
+        }
+    }
+    check(realloc_ok, "struct reallocs across table growth preserve contents");
+    check(valid_ok, "resized struct blocks pass rt_struct_receiver_valid");
+
+    check(rt_transient_array_scope_pause() == 1, "growth scope pauses");
+    check(rt_transient_heap_promote((int64_t)(uintptr_t)promoted_struct) == 1,
+          "re-promoting resized promoted_struct succeeds");
+    check(rt_transient_array_scope_end() == 1, "growth scope ends");
+    churn_transient_heap(2);
+
+    check(rt_struct_receiver_valid((int64_t)(uintptr_t)owned_struct, 0, 8) == 0,
+          "owned rt_struct_alloc resized across growth is reclaimed at scope end");
+    check(rt_struct_receiver_valid((int64_t)(uintptr_t)promoted_struct, 0, 8) == 1,
+          "promoted rt_struct_alloc resized across growth remains registered");
+    check(promoted_struct[0] == 9999 && rt_string_len(promoted_struct[1]) == 20 &&
+              memcmp(rt_string_data(promoted_struct[1]), "struct_grow_child_v1", 20) == 0,
+          "promoted rt_struct_alloc payload and child survive scope end and churn");
+    rt_free(promoted_struct);
+    check(rt_struct_receiver_valid((int64_t)(uintptr_t)promoted_struct, 0, 8) == 0,
+          "freed promoted rt_struct_alloc unregisters cleanly");
+}
+
+static void test_paused_scope_realloc_preserves_owned(void) {
+    printf("[test] paused-scope rt_realloc preserves owned=1 and unowned=0 lifetimes\n");
+    check(rt_transient_array_scope_begin() == 1, "paused-realloc scope 1 begins");
+
+    int64_t* owned_raw = (int64_t*)rt_alloc((int64_t)(2 * sizeof(int64_t)));
+    int64_t* owned_struct = (int64_t*)rt_struct_alloc((int64_t)(2 * sizeof(int64_t)));
+    int64_t* paused_persistent = NULL;
+    check(owned_raw != NULL && owned_struct != NULL, "scope-owned blocks allocated");
+    owned_raw[0] = 111;
+    owned_struct[0] = 222;
+
+    check(rt_transient_array_scope_pause() == 1, "paused-realloc scope 1 pauses");
+    paused_persistent = (int64_t*)rt_alloc((int64_t)(2 * sizeof(int64_t)));
+    check(paused_persistent != NULL, "paused-scope raw block allocated");
+    paused_persistent[0] = 333;
+
+    owned_raw = (int64_t*)rt_realloc(owned_raw, (int64_t)(4 * sizeof(int64_t)));
+    owned_struct = (int64_t*)rt_realloc(owned_struct, (int64_t)(4 * sizeof(int64_t)));
+    check(owned_raw != NULL && owned_raw[0] == 111 && owned_raw[3] == 0,
+          "paused-scope rt_realloc of owned raw preserves prefix and zeroes tail");
+    check(owned_struct != NULL && owned_struct[0] == 222 && owned_struct[3] == 0,
+          "paused-scope rt_realloc of owned struct preserves prefix and zeroes tail");
+    check(rt_struct_receiver_valid((int64_t)(uintptr_t)owned_struct, 0, 32) == 1,
+          "paused-scope rt_realloc of owned struct remains valid before scope end");
+
+    check(rt_transient_array_scope_end() == 1, "paused-realloc scope 1 ends");
+
+    /* Check immediately in an empty probe scope (before any Scope 2 malloc
+     * can reuse the freed addresses) that neither owned block remained in
+     * persistent_raw, and both were reclaimed. */
+    check(rt_struct_receiver_valid((int64_t)(uintptr_t)owned_struct, 0, 8) == 0,
+          "paused-realloc owned struct was reclaimed at scope 1 end");
+    check(rt_transient_array_scope_begin() == 1 && rt_transient_array_scope_pause() == 1,
+          "empty probe scope begins and pauses");
+    check(rt_transient_heap_promote((int64_t)(((uintptr_t)owned_raw) | 1ULL)) == 0,
+          "paused-realloc owned raw was reclaimed and not left in persistent_raw");
+    check(rt_transient_heap_promote((int64_t)(((uintptr_t)owned_struct) | 1ULL)) == 0,
+          "paused-realloc owned struct was reclaimed and not left in persistent_raw");
+    check(rt_transient_array_scope_end() == 1, "empty probe scope ends");
+
+    check(rt_transient_array_scope_begin() == 1, "paused-realloc scope 2 begins");
+    paused_persistent = (int64_t*)rt_realloc(paused_persistent, (int64_t)(4 * sizeof(int64_t)));
+    check(paused_persistent != NULL && paused_persistent[0] == 333 && paused_persistent[3] == 0,
+          "paused_persistent survives unpaused scope 2 realloc");
+    paused_persistent[1] = rt_string_new((const uint8_t*)"unpaused_realloc_v01", 20);
+    check(rt_transient_array_scope_pause() == 1, "paused-realloc scope 2 pauses");
+    check(rt_transient_heap_promote((int64_t)(uintptr_t)paused_persistent) == 1,
+          "unpaused-realloc persistent raw remains promotable");
+    check(rt_transient_array_scope_end() == 1, "paused-realloc scope 2 ends");
+    churn_transient_heap(2);
+    check(paused_persistent[0] == 333 && rt_string_len(paused_persistent[1]) == 20 &&
+              memcmp(rt_string_data(paused_persistent[1]), "unpaused_realloc_v01", 20) == 0,
+          "persistent raw reallocated during unpaused scope 2 survives scope end");
+    rt_free(paused_persistent);
+}
+
 int main(void) {
     test_prescope_binding_versions_root();
     test_mixed_scalar_array_batch_and_multiscope();
     test_prescope_realloc_free_and_bsm_adopt();
+    test_struct_realloc_across_table_growth();
+    test_paused_scope_realloc_preserves_owned();
     if (failures == 0) {
         printf("SELFCHECK PASSED (0 failures)\n");
         return 0;
