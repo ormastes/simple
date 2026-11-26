@@ -1,5 +1,7 @@
 # Agent task plan — Simple Container Improvement, increment 1
 
+Remaining work after increment 3: `doc/03_plan/platform/container/simple_container_remaining_work.md`.
+
 **Date:** 2026-11-25
 **Design:** `doc/05_design/platform/container/simple_container_improvement.md`
 **Architecture:** `doc/04_architecture/platform/container/simple_container_improvement.md`
