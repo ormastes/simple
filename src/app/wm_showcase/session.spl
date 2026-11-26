@@ -482,13 +482,9 @@ impl WmShowcaseSession:
         )
         if spec.kind == "web" and produced.web_pixels.len() > 0:
             self.web_pixels_cache = produced.web_pixels
-        # Producer-side theme stamp: the compositor's acceptance gate compares
-        # frame.theme_id against its authoritative content theme resolution
-        # (active theme, falling back to the registry default). Frames without
-        # the stamp are rejected wholesale.
-        var stamped = produced.frame
-        stamped.theme_id = _wm_showcase_content_theme_id()
-        val accepted = self.comp.set_external_web_frame(window_id, stamped)
+        # Every _produce_frame producer stamps _showcase_frame_theme(), which
+        # the compositor's acceptance gate compares against frame.theme_id.
+        val accepted = self.comp.set_external_web_frame(window_id, produced.frame)
         self._record(
             spec, window_id, content_w, content_h, produced.frame.pixels,
             accepted,
@@ -548,13 +544,10 @@ impl WmShowcaseSession:
             offset_x: 0, offset_y: 0,
             width: entry.content_w, height: entry.content_h,
             pixels: pixels,
-            scene_revision: self.revision, content_revision: self.revision
+            scene_revision: self.revision, content_revision: self.revision,
+            theme: _showcase_frame_theme()
         )
-        # Same producer-side theme stamp as open_window: unstamped frames are
-        # rejected by the compositor's theme acceptance axis.
-        var stamped_move = frame
-        stamped_move.theme_id = _wm_showcase_content_theme_id()
-        if not self.comp.set_external_web_frame(entry.window_id, stamped_move):
+        if not self.comp.set_external_web_frame(entry.window_id, frame):
             return false
         var updated = entry
         updated.content_pixels = pixels
@@ -635,7 +628,8 @@ fn _produce_frame(
                 offset_x: 0, offset_y: 0,
                 width: content_w, height: content_h,
                 pixels: wm_showcase_2d_pixels(content_w, content_h),
-                scene_revision: revision, content_revision: revision
+                scene_revision: revision, content_revision: revision,
+                theme: _showcase_frame_theme()
             ),
             reason: "pixel-surface-frame-rejected",
             web_pixels: []
@@ -693,9 +687,3 @@ fn _produce_frame(
         reason: "gui-frame-rejected",
         web_pixels: []
     )
-
-fn _wm_showcase_content_theme_id() -> text:
-    """Mirror the compositor's authoritative content-theme resolution
-    (active theme id, or the registry default before any theme installs)."""
-    val active = active_wm_theme_id()
-    if active != "": active else: default_theme_id()
