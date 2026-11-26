@@ -605,9 +605,8 @@ bootstrap_stage3_hash_path_list() {
         fi
     fi
     if [ -n "$bootstrap_stage3_hash_tool" ]; then
-        bootstrap_stage3_hash_lines=$(wc -l <"$bootstrap_stage3_hash_paths") ||
+        bootstrap_stage3_hash_lines=$(wc -l <"$bootstrap_stage3_hash_paths" | tr -d ' ') ||
             return 1
-        bootstrap_stage3_hash_lines=${bootstrap_stage3_hash_lines# }
         bootstrap_stage3_hash_workers=$(
             bootstrap_stage3_hash_worker_count "$bootstrap_stage3_hash_lines"
         ) || return 1
@@ -3757,11 +3756,10 @@ bootstrap_stage3_directory_snapshot() (
     ' "$bootstrap_stage3_directory_snapshot_scan" \
         "$bootstrap_stage3_directory_snapshot_paths" \
         "$bootstrap_stage3_directory_snapshot_meta" || exit 1
-    wc -l <"$bootstrap_stage3_directory_snapshot_meta" \
+    wc -l <"$bootstrap_stage3_directory_snapshot_meta" | tr -d ' ' \
         >"$bootstrap_stage3_directory_snapshot_work/line-count" || exit 1
     IFS=' ' read -r bootstrap_stage3_directory_snapshot_lines \
         <"$bootstrap_stage3_directory_snapshot_work/line-count" || exit 1
-    bootstrap_stage3_directory_snapshot_lines=${bootstrap_stage3_directory_snapshot_lines# }
     bootstrap_stage3_hash_worker_count \
         "$bootstrap_stage3_directory_snapshot_lines" \
         >"$bootstrap_stage3_directory_snapshot_work/worker-count" || exit 1
@@ -6143,10 +6141,38 @@ STAGE3_NATIVE
 # 4x cap applies rather than the bare 300s that fails a full-checkout walk.
 bootstrap_stage3_git_budget_ms() {
     stage3_loadavg=${STAGE3_LOADAVG_FILE:-/proc/loadavg}
-    stage3_ncpu=${STAGE3_NCPU:-$(nproc 2>/dev/null || echo 1)}
+    stage3_ncpu=
+    for stage3_ncpu_src in env getconf sysctl nproc; do
+        case "$stage3_ncpu_src" in
+            env) stage3_ncpu_probe=${STAGE3_NCPU:-} ;;
+            getconf) stage3_ncpu_probe=$(getconf _NPROCESSORS_ONLN 2>/dev/null || :) ;;
+            sysctl)
+                if command -v sysctl >/dev/null 2>&1; then
+                    stage3_ncpu_probe=$(sysctl -n hw.ncpu 2>/dev/null || :)
+                elif [ -x /usr/sbin/sysctl ]; then
+                    stage3_ncpu_probe=$(/usr/sbin/sysctl -n hw.ncpu 2>/dev/null || :)
+                else
+                    stage3_ncpu_probe=
+                fi
+                ;;
+            nproc) stage3_ncpu_probe=$(nproc 2>/dev/null || :) ;;
+        esac
+        case "$stage3_ncpu_probe" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$stage3_ncpu_probe" -ge 1 ] 2>/dev/null; then
+            stage3_ncpu=$stage3_ncpu_probe
+            break
+        fi
+    done
+    [ -n "$stage3_ncpu" ] || stage3_ncpu=1
     if [ -r "$stage3_loadavg" ]; then
-        stage3_load=$(cut -d' ' -f1 "$stage3_loadavg" 2>/dev/null | cut -d. -f1)
-        stage3_scale=$(( 1 + ${stage3_load:-0} / (stage3_ncpu > 0 ? stage3_ncpu : 1) ))
+        stage3_load=
+        IFS=' .' read -r stage3_load _ <"$stage3_loadavg" 2>/dev/null || :
+        case "$stage3_load" in
+            ''|*[!0-9]*) stage3_load=0 ;;
+        esac
+        stage3_scale=$(( 1 + stage3_load / stage3_ncpu ))
     else
         stage3_scale=4
     fi
@@ -6359,10 +6385,10 @@ bootstrap_stage3_git_state() {
                 >"$bootstrap_stage3_git_file_shas" || exit 1
             rm -f "${bootstrap_stage3_git_file_shas}.raw"
             bootstrap_stage3_git_sha_count=$(
-                wc -l <"$bootstrap_stage3_git_file_shas"
+                wc -l <"$bootstrap_stage3_git_file_shas" | tr -d ' '
             ) || exit 1
             bootstrap_stage3_git_path_count=$(
-                wc -l <"$bootstrap_stage3_git_files_only"
+                wc -l <"$bootstrap_stage3_git_files_only" | tr -d ' '
             ) || exit 1
             [ "$bootstrap_stage3_git_sha_count" -eq \
                 "$bootstrap_stage3_git_path_count" ] || exit 1
