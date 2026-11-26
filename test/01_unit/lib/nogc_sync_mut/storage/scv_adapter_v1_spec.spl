@@ -182,3 +182,33 @@ describe "scv_adapter_v1 enable":
         expect(is_dir(scv_adapter_v1_store_root(repo))).to_equal(true)
         expect(scv_adapter_v1_enable("")).to_equal("repo-root-empty")
         _cleanup(repo)
+
+describe "scv_adapter_v1 corrupt legacy blob":
+    it "keeps the pin for a key already in the store and GC leaves the good object":
+        val repo = _repo("keeppin")
+        val good = "good chunk".bytes()
+        val id = _put_chunk(repo, good)
+        val root = scv_adapter_v1_store_root(repo)
+        val first = scv_adapter_v1_pin_reachable(repo, id + "\n", "scv")
+        expect(first.pinned.value).to_equal(1)
+        expect(file_write_bytes(repo + "/.scv/objects/chunks/" + id + ".blob", "corrupt".bytes())).to_equal(true)
+        val again = scv_adapter_v1_pin_reachable(repo, id + "\n", "scv")
+        expect(again.status).to_equal("ok")
+        expect(again.pinned.value).to_equal(1)
+        expect(again.skipped.value).to_equal(0)
+        val held = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(held.unreachable.len()).to_equal(0)
+        expect(_count_objects(root)).to_equal(1)
+        _cleanup(repo)
+
+    it "still skips a corrupt blob whose key was never imported":
+        val repo = _repo("nopin")
+        val id = _legacy_id("never imported".bytes())
+        expect(file_write_bytes(repo + "/.scv/objects/chunks/" + id + ".blob", "corrupt".bytes())).to_equal(true)
+        val root = scv_adapter_v1_store_root(repo)
+        val pinned = scv_adapter_v1_pin_reachable(repo, id + "\n", "scv")
+        expect(pinned.status).to_equal("ok")
+        expect(pinned.pinned.value).to_equal(0)
+        expect(pinned.skipped.value).to_equal(1)
+        expect(_count_objects(root)).to_equal(0)
+        _cleanup(repo)
