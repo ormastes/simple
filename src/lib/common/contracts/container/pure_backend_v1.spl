@@ -11,7 +11,14 @@ use std.common.contracts.container.capability_report_v1.{ContainerCapabilityRepo
     CONTAINER_ISOLATION_KIND_NATIVE_V1, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1}
 use std.common.contracts.container.backend_identity_v1.{CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1,
     CONTAINER_ENGINE_SIMPLE_PURE_CONTAINER_V1}
-use std.common.contracts.sosix.containment_v1.{SosixContainSupportV1}
+use std.common.contracts.sosix.containment_v1.{SosixContainSupportV1, SosixContainQualifyResultV1,
+    sosix_contain_canary_pass_v1,
+    SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1,
+    SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1,
+    SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1,
+    SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1,
+    SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1}
+use std.common.crypto.sha256.{sha256_text}
 
 pub const PURE_CONTAINER_BACKEND_V1 = CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1
 pub const PURE_CONTAINER_ENGINE_V1 = CONTAINER_ENGINE_SIMPLE_PURE_CONTAINER_V1
@@ -27,6 +34,7 @@ pub struct PureContainerEvidenceV1:
     base_fully_linked: ContainerCapabilityFlagV1
     launch_observed: ContainerCapabilityFlagV1
     cleanup_observed: ContainerCapabilityFlagV1
+    roots_digest: text
     evidence_revision: text
 # The support contract has no availability field: a variant that enforces no
 # axis at all (sosix_contain_support_none_v1, whatever mechanism name it
@@ -67,6 +75,34 @@ pub fn pure_container_capability_report_v1(support: SosixContainSupportV1,
     report.provider_version = PURE_CONTAINER_ENGINE_V1
     report.evidence_revision = evidence.evidence_revision
     report
+# The one producer of evidence fields. Every flag derives from the qualify
+# result alone (memory from its own evidence); a qualify run that did not
+# complete or produced no evidence digest affirms nothing.
+pub fn pure_container_evidence_from_qualify_v1(qualify: SosixContainQualifyResultV1,
+        memory_enforced: ContainerCapabilityFlagV1, memory_digest: text,
+        host_os: text, host_arch: text, guest_abi: text, root_view_kind: text,
+        roots_digest: text) -> PureContainerEvidenceV1:
+    val ran = qualify.reason == "" and qualify.evidence_digest != ""
+    val launch = ran and sosix_contain_canary_pass_v1(qualify, SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1).value
+    val cleanup = ran and sosix_contain_canary_pass_v1(qualify, SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1).value
+    var write_ok = ran
+    for id in [SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1,
+            SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1,
+            SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1]:
+        if not sosix_contain_canary_pass_v1(qualify, id).value: write_ok = false
+    val memory = ran and memory_enforced.value and memory_digest != ""
+    val revision = if qualify.evidence_digest == "":
+        "pure:unaffirmed"
+    else:
+        "pure:" + sha256_text(qualify.evidence_digest + "\n" + memory_digest + "\n" + roots_digest)
+    PureContainerEvidenceV1(host_os: host_os, host_arch: host_arch, guest_abi: guest_abi,
+        root_view_kind: root_view_kind, memory_cap_enforced: ContainerCapabilityFlagV1(memory),
+        write_confinement_observed: ContainerCapabilityFlagV1(write_ok),
+        base_fully_linked: ContainerCapabilityFlagV1(false),
+        launch_observed: ContainerCapabilityFlagV1(launch),
+        cleanup_observed: ContainerCapabilityFlagV1(cleanup),
+        roots_digest: roots_digest, evidence_revision: revision)
+
 
 export PURE_CONTAINER_BACKEND_V1, PURE_CONTAINER_ENGINE_V1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1
-export PureContainerEvidenceV1, pure_container_capability_report_v1
+export PureContainerEvidenceV1, pure_container_capability_report_v1, pure_container_evidence_from_qualify_v1

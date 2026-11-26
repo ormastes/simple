@@ -3,7 +3,7 @@
 # Design: doc/04_architecture/platform/container/pure_simple_container.md 6
 use std.spec.{describe, it, expect}
 use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1,
-    pure_container_capability_report_v1, PURE_CONTAINER_BACKEND_V1,
+    pure_container_capability_report_v1, pure_container_evidence_from_qualify_v1, PURE_CONTAINER_BACKEND_V1,
     PURE_CONTAINER_ENGINE_V1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1}
 use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1,
     container_capability_requirement_v1_empty, container_capability_v1_admission_reason,
@@ -11,7 +11,12 @@ use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlag
     CONTAINER_CLIENT_AUTHORITY_USER_V1, CONTAINER_CLIENT_AUTHORITY_DELEGATED_V1,
     CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1, CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1}
 use std.common.contracts.sosix.containment_v1.{SosixContainFlagV1, SosixContainSupportV1,
-    sosix_contain_support_none_v1}
+    sosix_contain_support_none_v1, SosixContainCanaryV1, SosixContainQualifyResultV1,
+    SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, SOSIX_CONTAIN_CANARY_OWN_WRITE_V1,
+    SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1, SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1,
+    SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1,
+    SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1,
+    SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1}
 
 fn _windows_support() -> SosixContainSupportV1:
     var s = sosix_contain_support_none_v1("windows-job+restricted-token")
@@ -31,7 +36,7 @@ fn _evidence(revision: text, memory: bool) -> PureContainerEvidenceV1:
         write_confinement_observed: ContainerCapabilityFlagV1(true),
         base_fully_linked: ContainerCapabilityFlagV1(true),
         launch_observed: ContainerCapabilityFlagV1(true),
-        cleanup_observed: ContainerCapabilityFlagV1(true), evidence_revision: revision)
+        cleanup_observed: ContainerCapabilityFlagV1(true), roots_digest: "r", evidence_revision: revision)
 
 fn _full_support() -> SosixContainSupportV1:
     var s = _windows_support()
@@ -139,3 +144,68 @@ describe "pure_container_capability_report_v1 admission":
         var req = container_capability_requirement_v1_empty()
         req.required_memory_hard_limit = ContainerCapabilityFlagV1(true)
         expect(container_capability_v1_admission_reason(r, req)).to_equal("memory-hard-limit-missing")
+
+
+fn _qc(id: text, expected: text, control: text) -> SosixContainCanaryV1:
+    SosixContainCanaryV1(id: id, expected: expected, observed: expected, control: control)
+
+fn _qualify(reason: text, digest: text) -> SosixContainQualifyResultV1:
+    SosixContainQualifyResultV1(canaries: [
+        _qc(SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, "allow", "none"),
+        _qc(SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, "allow", "none"),
+        _qc(SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1, "allow", "none"),
+        _qc(SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, "allow", "none"),
+        _qc(SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, "deny", "allow"),
+        _qc(SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1, "deny", "allow"),
+        _qc(SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, "deny", "allow"),
+        _qc(SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1, "deny", "allow"),
+        _qc(SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1, "deny", "allow")],
+        evidence_digest: digest, reason: reason)
+
+describe "pure_container_evidence_from_qualify_v1":
+    it "affirms every flag from a passing qualify and memory evidence":
+        val e = pure_container_evidence_from_qualify_v1(_qualify("", "d".repeat(64)),
+            ContainerCapabilityFlagV1(true), "m".repeat(64), "windows", "x86_64", "windows-amd64",
+            PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, "r".repeat(64))
+        expect(e.launch_observed.value).to_equal(true)
+        expect(e.cleanup_observed.value).to_equal(true)
+        expect(e.write_confinement_observed.value).to_equal(true)
+        expect(e.memory_cap_enforced.value).to_equal(true)
+        expect(e.base_fully_linked.value).to_equal(false)
+        expect(e.roots_digest).to_equal("r".repeat(64))
+        expect(e.host_os).to_equal("windows")
+        expect(e.evidence_revision.starts_with("pure:")).to_equal(true)
+        expect(e.evidence_revision == "pure:unaffirmed").to_equal(false)
+
+    it "affirms nothing from a qualify that did not run":
+        val e = pure_container_evidence_from_qualify_v1(_qualify("containment-qualify-unimplemented-linux", ""),
+            ContainerCapabilityFlagV1(true), "m".repeat(64), "linux", "x86_64", "linux-amd64", "", "r")
+        expect(e.launch_observed.value).to_equal(false)
+        expect(e.cleanup_observed.value).to_equal(false)
+        expect(e.write_confinement_observed.value).to_equal(false)
+        expect(e.memory_cap_enforced.value).to_equal(false)
+        expect(e.evidence_revision).to_equal("pure:unaffirmed")
+
+    it "affirms nothing when a reason is set even with an evidence digest":
+        val e = pure_container_evidence_from_qualify_v1(_qualify("x", "d".repeat(64)),
+            ContainerCapabilityFlagV1(true), "m", "windows", "x86_64", "windows-amd64", "", "r")
+        expect(e.launch_observed.value).to_equal(false)
+        expect(e.write_confinement_observed.value).to_equal(false)
+
+    it "follows only the listed canaries per field":
+        var q = _qualify("", "d".repeat(64))
+        q.canaries[0] = SosixContainCanaryV1(id: SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, expected: "allow",
+            observed: "deny", control: "none")
+        val e = pure_container_evidence_from_qualify_v1(q, ContainerCapabilityFlagV1(false), "",
+            "windows", "x86_64", "windows-amd64", "", "r")
+        expect(e.launch_observed.value).to_equal(false)
+        expect(e.cleanup_observed.value).to_equal(true)
+        expect(e.write_confinement_observed.value).to_equal(true)
+        expect(e.memory_cap_enforced.value).to_equal(false)
+        var w = _qualify("", "d".repeat(64))
+        w.canaries[4] = SosixContainCanaryV1(id: SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, expected: "deny",
+            observed: "deny", control: "deny")
+        val e2 = pure_container_evidence_from_qualify_v1(w, ContainerCapabilityFlagV1(true), "m",
+            "windows", "x86_64", "windows-amd64", "", "r")
+        expect(e2.write_confinement_observed.value).to_equal(false)
+        expect(e2.launch_observed.value).to_equal(true)
