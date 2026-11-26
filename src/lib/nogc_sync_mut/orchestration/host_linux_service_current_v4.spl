@@ -76,7 +76,7 @@ use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServic
     HostAgentActionAuthorityV4, host_agent_detach_apply_v4, host_linux_service_agent_attachment_inspect_v4,
     HostAgentAttachServiceV4, host_agent_attach_apply_v4, HostAgentTerminalAuthorityV4, host_agent_terminal_authority_v4,
     host_linux_service_agent_attachment_authority_inspect_v4,
-    host_linux_service_agent_attachment_lease_v4, host_linux_service_agent_pane_io_v4}
+    host_linux_service_agent_attachment_lease_v4, host_linux_service_agent_pane_io_v4, host_agent_transfer_holder_v4}
 use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
 use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneIoResultV4,
     host_agent_pane_io_refused_v4}
@@ -1462,6 +1462,47 @@ fn linux_service_live_epoch_v4(owner: HostLinuxServiceCurrentV4) -> Result<i64, 
     if record.epoch_generation <= 0: return Err("linux-host-service-epoch-generation")
     Ok(record.epoch_generation)
 
+pub struct HostAgentPaneTargetAuthorityV4:
+    service_incarnation: text
+    service_epoch: i64
+
+# An invoke frame carries no signature. Verify the held bytes against the archived signed execute
+# before exposing the Host identity for signing a pane binding. No agent turn runs here.
+pub fn host_linux_service_agent_pane_target_authority_v4(owner: HostLinuxServiceCurrentV4,
+        operation_id: text, invoke_source: text) -> Result<HostAgentPaneTargetAuthorityV4, text>:
+    val metadata = owner.current_v4()?
+    val capacity = owner.capacity.unwrap()
+    if not capacity.ledger.continuity_proven: return Err("linux-host-service-startup-quarantine")
+    if owner.reconcile_error != "" or not owner.inventory_returned: return Err("linux-host-agent-before-reconcile")
+    if owner.agent.is_none(): return Err("linux-host-agent-pane-target-unstarted")
+    val agent = owner.agent.unwrap()
+    val invoke = host_agent_invoke_request_decode_v4(invoke_source)?
+    if invoke.operation_id != operation_id or agent.operation_id != operation_id:
+        return Err("linux-host-agent-pane-target-operation-mismatch")
+    if agent.payload_digest != sha256_text(invoke_source): return Err("linux-host-agent-invoke-conflict")
+    if agent.stage != "running" or agent.pending or agent.stop_requested or host_agent_transfer_holder_v4(agent) != "container":
+        return Err("linux-host-agent-pane-target-not-running")
+
+    val scope = owner.scope.unwrap()
+    val archived = distributed_operation_journal_read_v3(capacity.journal,
+        linux_service_execute_relative_v4(scope, operation_id)?, 2097152)?
+    val execute = host_linux_service_agent_execute_v4(archived, operation_id)?
+    val stored = distributed_operation_journal_read_v3(capacity.journal,
+        linux_service_association_relative_v4(scope, operation_id)?, 2097152)?
+    if host_execution_association_digest_v3(execute.association)? != agent.association_digest:
+        return Err("linux-host-agent-pane-target-association-mismatch")
+    val policy = metadata.policy
+    val context = host_local_context_v1(policy)
+    if context.grant_clock <= 0 or context.grant_clock < agent.clock_ms:
+        return Err("linux-host-agent-pane-target-clock")
+    val _grant = linux_service_execute_authorize_core_v4(scope, policy, metadata.configuration.controller_ref,
+        execute, stored, context)?
+    val manifest = host_linux_service_agent_admit_v4(capacity, scope, execute, stored, invoke, false)?
+    if agent.not_after != manifest.base.not_after or context.grant_clock >= manifest.base.not_after:
+        return Err("linux-host-agent-pane-target-window")
+    Ok(HostAgentPaneTargetAuthorityV4(service_incarnation: scope.continuity_id,
+        service_epoch: linux_service_live_epoch_v4(owner)?))
+
 # The held-run inputs every controller-signed attachment action re-derives (attach, the terminal authority): the
 # archived signed execute of the held agent and its association digest, as HostAgentActionAuthorityV4 under the
 # installed policy and a fresh clock.
@@ -2071,6 +2112,7 @@ export host_linux_service_start_v4, host_linux_service_prepare_v4, host_linux_se
 export host_linux_service_open_installed_v4, host_linux_service_anchor_parent_v4
 export host_linux_service_dispatch_v4, host_linux_service_execute_v4, host_linux_service_dispatch_installed_v4
 export host_linux_service_agent_invoke_v4, host_linux_service_agent_cancel_v4
+export HostAgentPaneTargetAuthorityV4, host_linux_service_agent_pane_target_authority_v4
 export host_linux_service_agent_attach_v4, host_linux_service_agent_terminal_authority_v4, host_linux_service_agent_pane_control_target_v4
 export HostLinuxServiceLeaseTurnV4, HostLinuxServicePaneIoTurnV4, host_linux_service_attachment_lease_v4, host_linux_service_pane_io_v4
 export host_linux_service_remote_build_open_v4, host_linux_service_remote_build_input_v4, host_linux_service_remote_build_start_v4
