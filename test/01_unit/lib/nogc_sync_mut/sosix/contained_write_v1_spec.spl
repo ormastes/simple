@@ -125,6 +125,38 @@ describe "windows world-writable refusal":
         expect(logon.starts_with("S-1-")).to_equal(true)
         expect(_refused_for("logon", logon, 0x1301BF)).to_equal("grant-target-world-writable")
 
+    only_on_windows "replays the conditional-ACE bypass: an XA allow for Everyone is refused":
+        val root = _fresh_dir("xa")
+        val bad = "{root}/bad"
+        val good = "{root}/good"
+        expect(dir_create_all(bad)).to_equal(true)
+        expect(dir_create_all(good)).to_equal(true)
+        val sddl = "D:PAI(XA;OICI;0x1701bf;;;WD;(Member_of_any {{SID(WD)}}))(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"
+        val script = "$a = Get-Acl -LiteralPath '{_native(bad)}'; $a.SetSecurityDescriptorSddlForm('{sddl}'); Set-Acl -LiteralPath '{_native(bad)}' -AclObject $a"
+        val made = process_run_timeout("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-NoProfile", "-Command", script], 60000)
+        expect(made.2).to_equal(0)
+        expect(sosix_fs_grant_contained_write_v1(bad, "scope-a")).to_equal("grant-target-world-writable")
+        # control: a clean sibling in the same run is granted
+        expect(sosix_fs_grant_contained_write_v1(good, "scope-a")).to_equal("")
+        dir_remove_all(root)
+
+    only_on_windows "refuses a directory that already carries a scope ACE":
+        val root = _fresh_dir("sc")
+        val dir = "{root}/d"
+        val other = "{root}/o"
+        expect(dir_create_all(dir)).to_equal(true)
+        expect(dir_create_all(other)).to_equal(true)
+        expect(sosix_fs_grant_contained_write_v1(dir, "scope-b")).to_equal("")
+        expect(sosix_fs_grant_contained_write_v1(dir, "scope-a")).to_equal("grant-target-already-scoped")
+        # control: an unscoped directory is still granted to scope-a
+        expect(sosix_fs_grant_contained_write_v1(other, "scope-a")).to_equal("")
+        # and scope-b still cannot write into scope-a's directory
+        val token_b = sosix_windows_restricted_token_open_v1("scope-b").unwrap()
+        expect(_write_as(token_b.value, "{dir}/b.txt")).to_equal(0)
+        expect(_write_as(token_b.value, "{other}/b.txt") != 0).to_equal(true)
+        expect(sosix_windows_restricted_token_close_v1(token_b).value).to_equal(true)
+        dir_remove_all(root)
+
     only_on_windows "does not refuse a read-only ACE for Users (control)":
         expect(_refused_for("ro", "S-1-5-32-545", 0x1200A9)).to_equal("")
 

@@ -79,6 +79,41 @@ fn _logon_sid_in(groups: i64) -> i64:
         index = index + 1
     0
 
+# Access-denied ACE types: denied, denied object, denied callback, denied callback object.
+# Every other type is treated as an allow, including conditional, object and unknown types.
+fn _ace_is_deny(kind: i64) -> bool:
+    kind == 1 or kind == 6 or kind == 10 or kind == 12
+
+# Address of the trustee SID inside an ACE, or 0 when the type's layout is not known.
+# Basic and callback ACEs (0, 1, 9, 10) carry it at +8; object ACEs (5, 6, 11, 12) after
+# a flags word and up to two GUIDs.
+fn _ace_sid(ace: i64, kind: i64) -> i64:
+    if kind == 0 or kind == 1 or kind == 9 or kind == 10: return ace + 8
+    if kind == 5 or kind == 6 or kind == 11 or kind == 12:
+        val flags = sec_u32_v1(ace + 8)
+        var offset = ace + 12
+        if (flags & 1) != 0: offset = offset + 16
+        if (flags & 2) != 0: offset = offset + 16
+        return offset
+    0
+
+# Flag true when any ACE of the DACL names a SID of the scope/reader family (fixed prefix).
+pub fn sosix_windows_dacl_has_scope_ace_v1(acl: SosixWindowsAclV1) -> Result<SosixContainFlagV1, text>:
+    val dacl = acl.value
+    if dacl == 0: return Ok(SosixContainFlagV1(false))
+    val count = sec_u16_v1(dacl + 4)
+    var ace = dacl + 8
+    var index = 0
+    var found = false
+    while index < count and index < 4096:
+        val size = sec_u16_v1(ace + 2)
+        if size < 8: return Err("dacl-unreadable")
+        val sid = _ace_sid(ace, sec_u8_v1(ace))
+        if sid != 0 and sec_sid_text_v1(sid).starts_with("{_SID_PREFIX}-"): found = true
+        ace = ace + size
+        index = index + 1
+    Ok(SosixContainFlagV1(found))
+
 # Flag true when the DACL grants write (data, append, delete, delete-child, WRITE_DAC,
 # WRITE_OWNER, GENERIC_WRITE/ALL) to Everyone, Users, Authenticated Users or the logon SID.
 # Reads every allow ACE; deny ACEs are ignored (conservative toward refusing).
@@ -104,11 +139,16 @@ pub fn sosix_windows_dacl_grants_world_write_v1(acl: SosixWindowsAclV1) -> Resul
             if size < 8:
                 failed = true
                 break
-            if kind == 0 and (sec_u32_v1(ace + 4) & _WRITE_BITS) != 0:
-                val sid = ace + 8
-                if sec_sid_equal_v1(sid, everyone) or sec_sid_equal_v1(sid, users) or sec_sid_equal_v1(sid, authenticated) or (logon != 0 and sec_sid_equal_v1(sid, logon)):
+            if not _ace_is_deny(kind):
+                val sid = _ace_sid(ace, kind)
+                if sid == 0:
+                    # unknown or unlocatable allow-like ACE: fail closed
                     verdict = true
                     break
+                if (sec_u32_v1(ace + 4) & _WRITE_BITS) != 0:
+                    if sec_sid_equal_v1(sid, everyone) or sec_sid_equal_v1(sid, users) or sec_sid_equal_v1(sid, authenticated) or (logon != 0 and sec_sid_equal_v1(sid, logon)):
+                        verdict = true
+                        break
             ace = ace + size
             index = index + 1
     sec_local_free_v1(everyone)
@@ -264,7 +304,9 @@ pub fn sosix_windows_logon_sid_v1() -> Result<text, text>:
     var result = Err("token-logon-sid-missing")
     if groups != 0:
         val sid = _logon_sid_in(groups)
-        if sid != 0: result = Ok(sec_sid_text_v1(sid))
+        if sid != 0:
+            val sid_text = sec_sid_text_v1(sid)
+            result = if sid_text == "": Err("token-logon-sid-convert-failed") else: Ok(sid_text)
     sec_free_v1(groups)
     val _closed = sec_close_handle_v1(token)
     result
