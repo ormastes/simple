@@ -27,3 +27,5 @@ Expected: allow the lifecycle edges into the outcome-unknown state and report `t
   - Fix: an exclusive mkdir (SOSIX `dir_create` that fails on exists), or an ownership nonce in the view journal.
 - **Loser's journal over-claims. FIXED 2026-11-27.** `_after_create_refused_v1` now also rebuilds the session journal with empty `owned_paths` on `view-exists`, so the loser's journal (still `destroyed`, status `rejected`) no longer names the winner's view dir or the attempt root. Spec: the view-exists loser asserts both are absent from its `owned_paths`.
 - **Untested path.** A failure after `dir_create_all(view_dir)` (a truly half-created view) has no spec.
+- **Fixed 2026-11-27:** `_prepare_v1` also refuses a `view_dir` that is a regular file, so that case no longer reaches create and leaks the loser's own attempt root.
+- **Still open:** a racer with the same `view_root` but a different `state_root`, if admission allows it, would still blank an attempt root it created. This is fail-closed: it leaves a permanent `attempt-exists`, with no data loss.
