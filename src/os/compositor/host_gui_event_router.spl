@@ -17,6 +17,16 @@ use common.ui.widget.{UIEvent}
 use common.ui.window_scene_draw_ir.{shared_wm_browser_content_extra_height}
 use nogc_sync_mut.ui.session.{UISession}
 use os.compositor.host_compositor_core.{HostCompositor}
+use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_PIXEL}
+
+@allow(primitive_api)  # reason: one input event in the remote surface queue wire terms (window id, content-local point, key and action codes)
+pub struct HostRemoteInputTarget:
+    window_id: i64
+    kind: text
+    local_x: i64
+    local_y: i64
+    key: i64
+    action: i64
 
 fn host_glfw_key_name(key: i64) -> text:
     if key >= 65 and key <= 90:
@@ -66,6 +76,11 @@ impl HostGuiEventRouter:
         false
 
     me update_client_target(compositor: HostCompositor) -> bool:
+        self.client_target_window(compositor) == self.internal_window_id
+
+    me client_target_window(compositor: HostCompositor) -> i64:
+        """Top-most window whose content rect holds the pointer (0 = none);
+        sets last_local_x/y to the point in that window's content space."""
         var target_window_id: i64 = 0
         for window in compositor.windows:
             val content_x = window.x + 4
@@ -96,7 +111,47 @@ impl HostGuiEventRouter:
                 target_window_id = window.id
                 self.last_local_x = local_x
                 self.last_local_y = local_y
-        target_window_id == self.internal_window_id
+        target_window_id
+
+    me remote_input_target(
+        kind: i64,
+        key_code: i64,
+        action: i64,
+        x_milli: i64,
+        y_milli: i64,
+        compositor: HostCompositor
+    ) -> HostRemoteInputTarget:
+        """Decide whether one event belongs to a window whose content is a
+        remote application's pixel surface. Pointer move/button resolve with
+        the same hit-test as route_scalar; a key goes to the focused window.
+        A pointer captured by this router's local client stays local.
+        window_id 0 means: not remote-owned, route locally as before."""
+        val none = HostRemoteInputTarget(window_id: 0, kind: "", local_x: 0, local_y: 0, key: 0, action: 0)
+        if kind == WINDOW_EVENT_KEY:
+            for window in compositor.windows:
+                if (window.focused and not window.minimized and
+                    window.content_owner == HOST_CONTENT_OWNER_PIXEL):
+                    return HostRemoteInputTarget(window_id: window.id, kind: "key", local_x: 0, local_y: 0, key: key_code, action: action)
+            return none
+        if kind != WINDOW_EVENT_POINTER_MOVE and kind != WINDOW_EVENT_POINTER_BUTTON:
+            return none
+        if self.client_pointer_captured:
+            return none
+        self.pointer_x = (x_milli / 1000).to_i32()
+        self.pointer_y = (y_milli / 1000).to_i32()
+        val target = self.client_target_window(compositor)
+        if target <= 0:
+            return none
+        for window in compositor.windows:
+            if window.id == target and window.content_owner == HOST_CONTENT_OWNER_PIXEL:
+                return HostRemoteInputTarget(
+                    window_id: target,
+                    kind: if kind == WINDOW_EVENT_POINTER_MOVE: "move" else: "button",
+                    local_x: self.last_local_x.to_i64(),
+                    local_y: self.last_local_y.to_i64(),
+                    key: if kind == WINDOW_EVENT_POINTER_MOVE: 0 else: key_code,
+                    action: action)
+        none
 
     me update_captured_target(compositor: HostCompositor) -> bool:
         # Deliberately ignores passthrough_*: an explicit pointer capture

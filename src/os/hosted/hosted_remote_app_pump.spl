@@ -1,0 +1,165 @@
+#![allow(primitive_api)] # pump rows carry monotonic micros, poll counters and the host event scalars hosted_entry already holds
+# Remote application presentation: request pump for the windowed host.
+#
+# hosted_entry.spl calls hosted_remote_app_pump_step once per frame. The pump
+# is OFF unless SIMPLE_HOSTED_WM_REMOTE_APPS=1; when on it takes the EXISTING
+# daemon_sdk singleton lock of wm_daemon_config() (so a resident wm daemon
+# and the windowed host never serve the same request directory, and
+# SIMPLE_WM_DAEMON_DIR isolates it), reads the request directory at most once
+# per HOSTED_REMOTE_APP_POLL_MICROS, and routes every request through the
+# same wm_remote_app_route systems the resident daemon serve loop uses.
+# Message passing only: the request/response files are the only channel.
+#
+# Return-the-object: every function hands back the compositor and the pump;
+# the caller MUST adopt both.
+# Plan: doc/03_plan/ui/wm_remote_app/remote_app_presentation_plan.md
+
+use std.daemon_sdk.daemon.{daemon_runner_start}
+use std.daemon_sdk.lock.{DaemonLockReceiptV1, release_daemon_lock_owned}
+use std.daemon_sdk.types.{DaemonConfig}
+use std.daemon_sdk.protocol.{read_daemon_requests, write_daemon_response, clear_processed_requests}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use common.io.window_event.{WINDOW_EVENT_KEY, WINDOW_EVENT_POINTER_BUTTON, WINDOW_EVENT_POINTER_MOVE, WINDOW_ACTION_PRESS, WINDOW_ACTION_RELEASE}
+use os.compositor.host_compositor_core.{HostCompositor}
+use os.compositor.host_gui_event_router.{HostGuiEventRouter}
+use app.play.wm_daemon_client.{wm_daemon_config, wm_daemon_surface_dir}
+use app.play.wm_remote_app_host.{
+    WmRemoteAppState,
+    wm_remote_app_state_new,
+    wm_remote_app_route,
+    wm_remote_app_reap,
+    wm_remote_app_deliver_input,
+    wm_remote_app_shutdown,
+    wm_remote_app_sweep_stale,
+}
+
+# ~60 Hz request latency; the directory is not read more often than this.
+val HOSTED_REMOTE_APP_POLL_MICROS: i64 = 16000
+# Dead-client sweep cadence while at least one remote surface exists.
+val HOSTED_REMOTE_APP_REAP_MICROS: i64 = 500000
+
+pub struct HostedRemoteAppPump:
+    enabled: bool
+    config: DaemonConfig
+    lock: DaemonLockReceiptV1
+    state: WmRemoteAppState
+    next_poll_micros: i64
+    next_reap_micros: i64
+    polls: i64
+    # Hit-test only (internal window 0 is never a local client).
+    router: HostGuiEventRouter
+
+pub struct HostedRemoteAppPumpOutcome:
+    comp: HostCompositor
+    pump: HostedRemoteAppPump
+    handled: i64
+
+pub struct HostedRemoteAppInputOutcome:
+    pump: HostedRemoteAppPump
+    routed: i64
+
+fn _no_lock(config: DaemonConfig) -> DaemonLockReceiptV1:
+    DaemonLockReceiptV1(path: config.lock_path, pid: -1, record: "", acquired: false)
+
+fn _pump(enabled: bool, config: DaemonConfig, lock: DaemonLockReceiptV1, state: WmRemoteAppState) -> HostedRemoteAppPump:
+    HostedRemoteAppPump(
+        enabled: enabled, config: config, lock: lock, state: state,
+        next_poll_micros: 0, next_reap_micros: 0, polls: 0,
+        router: HostGuiEventRouter.new(0))
+
+pub fn hosted_remote_app_pump_open_with(enabled: bool, config: DaemonConfig, surface_dir: text) -> HostedRemoteAppPump:
+    """Disabled: no lock, no directory, no filesystem access ever. Enabled:
+    daemon_runner_start takes the singleton lock exactly as the resident
+    daemon does; if another window manager holds it the pump stays off."""
+    val state = wm_remote_app_state_new(surface_dir)
+    if not enabled:
+        return _pump(false, config, _no_lock(config), state)
+    val runner = daemon_runner_start(config)
+    if not runner.is_running():
+        print "[hosted-wm] remote-apps disabled reason=lock-held lock={config.lock_path}"
+        return _pump(false, config, _no_lock(config), state)
+    # This process now holds the singleton lock: slot directories left under
+    # the surface directory belong to a window manager that is gone.
+    wm_remote_app_sweep_stale(surface_dir)
+    print "[hosted-wm] remote-apps enabled request_dir={config.request_dir}"
+    _pump(true, config, runner.lock_receipt, state)
+
+pub fn hosted_remote_app_pump_open() -> HostedRemoteAppPump:
+    hosted_remote_app_pump_open_with(
+        env_get("SIMPLE_HOSTED_WM_REMOTE_APPS") == "1",
+        wm_daemon_config(), wm_daemon_surface_dir())
+
+pub fn hosted_remote_app_pump_with_state(state: WmRemoteAppState) -> HostedRemoteAppPump:
+    """A pump over an existing surface table with no request directory: for
+    callers that only forward input (and for specs)."""
+    val config = wm_daemon_config()
+    _pump(false, config, _no_lock(config), state)
+
+pub fn hosted_remote_app_pump_step(comp_in: HostCompositor, pump_in: HostedRemoteAppPump, now_micros: i64) -> HostedRemoteAppPumpOutcome:
+    """One frame's worth of request handling. Idle cost: one bool test when
+    disabled; one compare when inside the poll interval. `handled` counts
+    answered requests plus reaped surfaces, i.e. "the frame may have changed"."""
+    if not pump_in.enabled or now_micros < pump_in.next_poll_micros:
+        return HostedRemoteAppPumpOutcome(comp: comp_in, pump: pump_in, handled: 0)
+    var comp = comp_in
+    var pump = pump_in
+    pump.next_poll_micros = now_micros + HOSTED_REMOTE_APP_POLL_MICROS
+    pump.polls = pump.polls + 1
+    var state = pump.state
+    var processed_ids: [text] = []
+    for req in read_daemon_requests(pump.config.request_dir):
+        # Kinds this host does not serve get wm_remote_app_route's
+        # unknown-kind refusal, so nothing is left to be re-read.
+        val out = wm_remote_app_route(comp, state, req)
+        comp = out.comp
+        state = out.state
+        write_daemon_response(out.resp, pump.config.response_dir)
+        processed_ids.push(req.id)
+    var handled = processed_ids.len().to_i64()
+    if handled > 0:
+        clear_processed_requests(pump.config.request_dir, processed_ids)
+    if state.rows.len() > 0 and (handled > 0 or now_micros >= pump.next_reap_micros):
+        pump.next_reap_micros = now_micros + HOSTED_REMOTE_APP_REAP_MICROS
+        val swept = wm_remote_app_reap(comp, state)
+        comp = swept.comp
+        state = swept.state
+        handled = handled + swept.reaped
+    pump.state = state
+    HostedRemoteAppPumpOutcome(comp: comp, pump: pump, handled: handled)
+
+pub fn hosted_remote_app_pump_forward_input(comp: HostCompositor, pump_in: HostedRemoteAppPump, kind: i64, key_code: i64, action: i64, x_milli: i64, y_milli: i64) -> HostedRemoteAppInputOutcome:
+    """Deliver one host event to the remote client whose window it targets.
+    `routed` is that window id, 0 when the target is not remote-owned (the
+    caller's local routing is then the only routing)."""
+    var pump = pump_in
+    if pump.state.rows.len() == 0:
+        return HostedRemoteAppInputOutcome(pump: pump, routed: 0)
+    var router = pump.router
+    val target = router.remote_input_target(kind, key_code, action, x_milli, y_milli, comp)
+    pump.router = router
+    if target.window_id <= 0:
+        return HostedRemoteAppInputOutcome(pump: pump, routed: 0)
+    val delivered = wm_remote_app_deliver_input(
+        pump.state, target.window_id, target.kind,
+        target.local_x, target.local_y, target.key, target.action)
+    pump.state = delivered.state
+    HostedRemoteAppInputOutcome(pump: pump, routed: delivered.routed)
+
+pub fn hosted_remote_app_pump_pointer_move(comp: HostCompositor, pump: HostedRemoteAppPump, x: i32, y: i32) -> HostedRemoteAppInputOutcome:
+    hosted_remote_app_pump_forward_input(comp, pump, WINDOW_EVENT_POINTER_MOVE, 0, 0, x.to_i64() * 1000, y.to_i64() * 1000)
+
+pub fn hosted_remote_app_pump_pointer_button(comp: HostCompositor, pump: HostedRemoteAppPump, button: i64, pressed: bool, x: i32, y: i32) -> HostedRemoteAppInputOutcome:
+    val action = if pressed: WINDOW_ACTION_PRESS else: WINDOW_ACTION_RELEASE
+    hosted_remote_app_pump_forward_input(comp, pump, WINDOW_EVENT_POINTER_BUTTON, button, action, x.to_i64() * 1000, y.to_i64() * 1000)
+
+pub fn hosted_remote_app_pump_key(comp: HostCompositor, pump: HostedRemoteAppPump, keycode: i64, pressed: bool) -> HostedRemoteAppInputOutcome:
+    val action = if pressed: WINDOW_ACTION_PRESS else: WINDOW_ACTION_RELEASE
+    hosted_remote_app_pump_forward_input(comp, pump, WINDOW_EVENT_KEY, keycode, action, 0, 0)
+
+pub fn hosted_remote_app_pump_close(pump: HostedRemoteAppPump) -> bool:
+    """Delete this instance's slots and release the singleton lock (true when
+    there was nothing to release)."""
+    if not pump.enabled:
+        return true
+    wm_remote_app_shutdown(pump.state)
+    release_daemon_lock_owned(pump.lock)

@@ -1,0 +1,185 @@
+# Resizing a remote application window reallocates its shared present slot.
+#
+# Tracks: wm_host_external_content_owner_2026-07-29
+#
+# Production route against the production HostCompositor + headless backend.
+# Two directions: the client asks for a new size, and the window manager
+# resizes the window underneath the client (which must then be told, and must
+# acknowledge by resizing its surface before it can present again).
+
+use std.spec.{describe, it, expect}
+use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_request_new}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.file_ops.{file_size}
+use os.userlib.ipc_protocol.{COMP_RESIZE}
+use app.play.wm_daemon.{wm_daemon_build_handle}
+use app.play.wm_daemon_client.{WMD_SURFACE_EVENTS, WMD_FRAME_PROBE}
+use app.play.wm_remote_app_client.{
+    WmRemoteAppWindow,
+    wm_remote_app_open_request,
+    wm_remote_app_window_from_response,
+    wm_remote_app_present_request,
+    wm_remote_app_damage_request,
+    wm_remote_app_resize_request,
+}
+use app.play.wm_remote_app_host.{
+    wm_remote_app_state_new,
+    wm_remote_app_route,
+    wm_remote_app_reap,
+}
+
+val KNOWN: u32 = 0xFF12AB34u32
+val OTHER: u32 = 0xFF00C853u32
+
+fn solid(width: i32, height: i32, color: u32) -> [u32]:
+    var pixels: [u32] = []
+    var i: i64 = 0
+    while i < width.to_i64() * height.to_i64():
+        pixels.push(color)
+        i = i + 1
+    pixels
+
+fn probe_request(color: u32, window_id: i64) -> DaemonRequest:
+    var req = daemon_request_new(WMD_FRAME_PROBE)
+    req.set_field("color", "{color.to_i64()}")
+    req.set_field("id", "{window_id}")
+    req
+
+fn field_i64(resp: DaemonResponse, key: text) -> i64:
+    resp.get_field(key).to_i64() ?? -1
+
+fn surface_dir() -> text:
+    "/tmp/wm_remote_app_resize_spec_{getpid()}"
+
+describe "remote application window resize":
+    it "reallocates the slot when the client asks for a larger surface":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val small = wm_remote_app_window_from_response(opened.resp)
+        val first = wm_remote_app_route(comp, state, wm_remote_app_present_request(small, solid(200, 120, KNOWN), 1, getpid()))
+        comp = first.comp
+        state = first.state
+        expect(first.resp.get_field("accepted")).to_equal("true")
+
+        val resized = wm_remote_app_route(comp, state, wm_remote_app_resize_request(small, 320, 200, getpid()))
+        comp = resized.comp
+        state = resized.state
+        val large = wm_remote_app_window_from_response(resized.resp)
+        expect(large.ok).to_equal(true)
+        expect(large.window_id).to_equal(small.window_id)
+        expect(large.width).to_equal(320)
+        expect(large.height).to_equal(200)
+        expect(file_size(large.slot_path)).to_equal(320 * 200 * 4)
+        expect(comp.windows[0].w).to_equal(320 + 8)
+        expect(comp.windows[0].h).to_equal(200 + 36)
+
+        # The retained frame has the old size: a delta against it is refused.
+        val delta = wm_remote_app_route(comp, state, wm_remote_app_damage_request(large, solid(320, 200, OTHER), 2, getpid(), 0, 0, 8, 8))
+        comp = delta.comp
+        state = delta.state
+        expect(delta.resp.get_field("reason")).to_equal("full-frame-required")
+        # So is a frame of the old size.
+        val old_size = wm_remote_app_route(comp, state, wm_remote_app_present_request(small, solid(200, 120, OTHER), 3, getpid()))
+        comp = old_size.comp
+        state = old_size.state
+        expect(old_size.resp.get_field("reason")).to_equal("size-mismatch")
+
+        val second = wm_remote_app_route(comp, state, wm_remote_app_present_request(large, solid(320, 200, OTHER), 4, getpid()))
+        comp = second.comp
+        state = second.state
+        expect(second.resp.get_field("accepted")).to_equal("true")
+        val probe = wm_remote_app_route(comp, state, probe_request(OTHER, large.window_id))
+        comp = probe.comp
+        state = probe.state
+        expect(field_i64(probe.resp, "content_count")).to_equal(320 * 200)
+        val stale = wm_remote_app_route(comp, state, probe_request(KNOWN, large.window_id))
+        expect(field_i64(stale.resp, "count")).to_equal(0)
+
+    it "tells the client when the window manager resized its window":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val small = wm_remote_app_window_from_response(opened.resp)
+        val first = wm_remote_app_route(comp, state, wm_remote_app_present_request(small, solid(200, 120, KNOWN), 1, getpid()))
+        comp = first.comp
+        state = first.state
+
+        comp.apply_bridge_request(0, 0, COMP_RESIZE.to_i64(), small.window_id, "", comp.windows[0].x, comp.windows[0].y, 400 + 8, 240 + 36, "", 0, "remote-app")
+        expect(comp.windows[0].w).to_equal(400 + 8)
+        val swept = wm_remote_app_reap(comp, state)
+        comp = swept.comp
+        state = swept.state
+        expect(swept.reaped).to_equal(0)
+        val swept_again = wm_remote_app_reap(comp, state)
+        comp = swept_again.comp
+        state = swept_again.state
+
+        var drain = daemon_request_new(WMD_SURFACE_EVENTS)
+        drain.set_field("id", "{small.window_id}")
+        drain.set_field("pid", "{getpid()}")
+        val events = wm_remote_app_route(comp, state, drain)
+        comp = events.comp
+        state = events.state
+        # Announced once, not once per sweep.
+        expect(field_i64(events.resp, "count")).to_equal(1)
+        expect(events.resp.get_field("ev0")).to_equal("configure|400|240|0|0")
+
+        # Until the client acknowledges, its old-size frames are refused and
+        # the refusal carries the size it has to adopt.
+        val refused = wm_remote_app_route(comp, state, wm_remote_app_present_request(small, solid(200, 120, OTHER), 2, getpid()))
+        comp = refused.comp
+        state = refused.state
+        expect(refused.resp.get_field("reason")).to_equal("size-mismatch")
+        expect(field_i64(refused.resp, "w")).to_equal(400)
+        expect(field_i64(refused.resp, "h")).to_equal(240)
+
+        val resized = wm_remote_app_route(comp, state, wm_remote_app_resize_request(small, 400, 240, getpid()))
+        comp = resized.comp
+        state = resized.state
+        val large = wm_remote_app_window_from_response(resized.resp)
+        expect(large.ok).to_equal(true)
+        val second = wm_remote_app_route(comp, state, wm_remote_app_present_request(large, solid(400, 240, OTHER), 3, getpid()))
+        comp = second.comp
+        state = second.state
+        expect(second.resp.get_field("accepted")).to_equal("true")
+        val probe = wm_remote_app_route(comp, state, probe_request(OTHER, large.window_id))
+        expect(field_i64(probe.resp, "content_count")).to_equal(400 * 240)
+
+    it "refuses a resize from a process that does not own the window":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        val foreign = wm_remote_app_route(comp, state, wm_remote_app_resize_request(window, 320, 200, getpid() + 1))
+        comp = foreign.comp
+        state = foreign.state
+        expect(foreign.resp.get_field("reason")).to_equal("not-owner")
+        expect(file_size(window.slot_path)).to_equal(200 * 120 * 4)
+        expect(comp.windows[0].w).to_equal(200 + 8)
+
+    it "reports the size the compositor clamped to instead of replacing the slot":
+        var comp = wm_daemon_build_handle().compositor
+        var state = wm_remote_app_state_new(surface_dir())
+        val opened = wm_remote_app_route(comp, state, wm_remote_app_open_request("Remote", 200, 120, getpid()))
+        comp = opened.comp
+        state = opened.state
+        val window = wm_remote_app_window_from_response(opened.resp)
+        # Below the compositor's minimum window size.
+        val clamped = wm_remote_app_route(comp, state, wm_remote_app_resize_request(window, 40, 30, getpid()))
+        comp = clamped.comp
+        state = clamped.state
+        expect(clamped.resp.get_field("reason")).to_equal("window-refused")
+        expect(field_i64(clamped.resp, "w")).to_equal((comp.windows[0].w - 8).to_i64())
+        expect(field_i64(clamped.resp, "h")).to_equal((comp.windows[0].h - 36).to_i64())
+        expect(field_i64(clamped.resp, "w") > 40).to_equal(true)
+        expect(file_size(window.slot_path)).to_equal(200 * 120 * 4)
+        # Adopting the reported size works.
+        val adopted = wm_remote_app_route(comp, state, wm_remote_app_resize_request(window, field_i64(clamped.resp, "w").to_i32(), field_i64(clamped.resp, "h").to_i32(), getpid()))
+        expect(wm_remote_app_window_from_response(adopted.resp).ok).to_equal(true)

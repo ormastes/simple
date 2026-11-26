@@ -1,0 +1,40 @@
+# Window-manager process for the windowed-host pump proof.
+# Builds the compositor the way hosted_entry.spl main does
+# (HostCompositor.new_headless 1024x720) and runs hosted_entry's per-frame
+# pump call in a frame loop. The winit window, event loop and raster present
+# of hosted_entry are NOT exercised here (no display server on the proof
+# host). Stops when "<SIMPLE_WM_DAEMON_DIR>/stop" appears.
+# Tracks: wm_host_external_content_owner_2026-07-29
+
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.sffi.system.{sleep_ms}
+use std.io_runtime.{file_exists}
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_core.{HostCompositor}
+use os.hosted.hosted_remote_app_pump.{hosted_remote_app_pump_open, hosted_remote_app_pump_step, hosted_remote_app_pump_close}
+
+fn main() -> i64:
+    var comp = HostCompositor.new_headless(Size(width: 1024 as u64, height: 720 as u64))
+    var pump = hosted_remote_app_pump_open()
+    if not pump.enabled:
+        print "hosted-pump wm pid={getpid()} enabled=false"
+        return 3
+    print "hosted-pump wm pid={getpid()} enabled=true"
+    val stop_path = "{env_get("SIMPLE_WM_DAEMON_DIR")}/stop"
+    val end_at = time_now_unix_micros() + 900000000
+    var frame: i64 = 0
+    var handled_total: i64 = 0
+    while time_now_unix_micros() < end_at:
+        val out = hosted_remote_app_pump_step(comp, pump, time_now_unix_micros())
+        comp = out.comp
+        pump = out.pump
+        handled_total = handled_total + out.handled
+        frame = frame + 1
+        if frame % 200 == 0 and file_exists(stop_path):
+            break
+        sleep_ms(4)
+    val released = hosted_remote_app_pump_close(pump)
+    print "hosted-pump wm frames={frame} polls={pump.polls} handled={handled_total} released={released}"
+    0

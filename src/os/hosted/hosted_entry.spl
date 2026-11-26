@@ -60,6 +60,7 @@ use os.compositor.shared_mdi_setup.{
 }
 use common.ui.window_scene.{shared_wm_motion_background_next_due_micros, shared_wm_motion_dirty_due, shared_wm_motion_background_consume_due}
 use common.ui.window_scene_draw_ir.{WM_BROWSER_TOOLBAR_HEIGHT}
+use os.hosted.hosted_remote_app_pump.{hosted_remote_app_pump_open, hosted_remote_app_pump_step, hosted_remote_app_pump_close, hosted_remote_app_pump_pointer_move, hosted_remote_app_pump_pointer_button, hosted_remote_app_pump_key}
 use std.nogc_sync_mut.io.window_winit.{
     winit_event_text,
     rt_winit_event_loop_new, rt_winit_window_new,
@@ -757,12 +758,19 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     # back to a full render_frame() rather than risking an incorrect partial
     # paint.
     var last_motion_fired_due: i64 = -1
+    # Remote application presentation: off unless SIMPLE_HOSTED_WM_REMOTE_APPS=1.
+    var remote_pump = hosted_remote_app_pump_open()
     val end_at = rt_time_now_micros() + 300000000
     while running and rt_time_now_micros() < end_at:
         var other_dirty = false
         var motion_dirty = false
         var evidence_capture_requested = false
         val now_micros = rt_time_now_micros()
+        val remote_step = hosted_remote_app_pump_step(comp, remote_pump, now_micros)
+        comp = remote_step.comp
+        remote_pump = remote_step.pump
+        if remote_step.handled > 0:
+            other_dirty = true
         val wall_clock_ms = rt_time_now_unix_micros() / 1000
         if (browser_renderer_close_pending and
             now_micros >= browser_renderer_close_retry_at_micros):
@@ -1074,6 +1082,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 val mx = (rt_winit_event_mouse_x_milli(ev) / 1000).to_i32()
                 val my = (rt_winit_event_mouse_y_milli(ev) / 1000).to_i32()
                 comp.pointer_move(mx, my)
+                remote_pump = hosted_remote_app_pump_pointer_move(comp, remote_pump, mx, my).pump
                 # GUI-session content lane: mirror the baremetal
                 # dispatch_gui_pointer_event move semantics (captured target
                 # wins; otherwise the client-area hit under the pointer).
@@ -1138,6 +1147,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 # the event is observable even though no chrome action consumes
                 # them yet (parity with ui.browser/app.spl's unconditional forward).
                 comp.handle_mouse_button(button, pressed)
+                remote_pump = hosted_remote_app_pump_pointer_button(comp, remote_pump, button, pressed, comp.pointer_x, comp.pointer_y).pump
                 if (allow_wm_close and wm_close_window_id > 0 and
                     host_compositor_find_window_index(
                         comp, wm_close_window_id
@@ -1502,6 +1512,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 key_events = key_events + 1
                 val key_state = if pressed_key: "down" else: "up"
                 print "[hosted-wm] event key count={key_events} state={key_state} scancode={scan_code} keycode={keycode}"
+                remote_pump = hosted_remote_app_pump_key(comp, remote_pump, keycode, pressed_key).pump
                 var semantic_consumed = false
                 val focused = host_compositor_focused_window_id(comp)
                 if focused == browser_profile_window_id:
@@ -2104,6 +2115,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 running = false
             else:
                 print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase} revision={comp.render_revision} semantic_event_id={presented_event_id} mutation_revision={presented_mutation_revision} {raster.frame_provenance()} {raster.font_provenance()}"
+    val _ = hosted_remote_app_pump_close(remote_pump)
     var shared_hsts_closed = true
     if browser_renderers.hsts_dirty():
         if browser_profile == nil:
