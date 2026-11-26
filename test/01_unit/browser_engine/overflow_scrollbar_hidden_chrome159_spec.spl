@@ -1,0 +1,199 @@
+"""
+## Purpose and audience
+Purpose: Pin how an `overflow:auto` scrollport that has NO painted scrollbar
+lays out and paints against Chrome 159, in the two ways that happens:
+`scrollbar-width:none` on the box, and Chrome's `--hide-scrollbars` capture
+flag (the flag every Chrome-vs-Simple parity harness passes, including the
+catalog pixel diff). In both, Chrome paints no track/thumb AND reserves no
+15 px gutter: the content box keeps its full authored width. Simple honoured
+`scrollbar-width:none` only in the Draw IR paint, still reserved the 15 px
+gutter in block layout and still painted the k=1 raster scrollbar, and had no
+equivalent of `--hide-scrollbars`, so the catalog's `.scroll` box (css-layout)
+carried a 15 x 88 px scrollbar Chrome never drew (1350 of 6952 mismatching px
+at k=1, 21525 of 52352 at k=4).
+Simple's mirror of the capture flag is `SIMPLE_WEB_HIDE_SCROLLBARS=1`: every
+scrollport behaves as `scrollbar-width:none`. Default (unset) keeps the
+classic 15 px scrollbar, as Chrome does without the flag.
+Audience: web renderer layout (scrollport gutter) and paint (scrollbars).
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+[--hide-scrollbars] --force-device-scale-factor=k --window-size=300,300
+--screenshot`, 2026-11-26). Two `margin:10px;width:200px;height:90px;
+overflow:auto;padding:8px;border:1px solid #000` boxes, each holding eight
+20 px lines of red-on-red text (content overflows); box B adds
+`scrollbar-width:none`. Box A border rows 10..117, box B 128..235. Red run
+of one row (cols, device px at k=4):
+
+| row (CSS)        | mode                 | Chrome k=1        | Chrome k=4         | base Simple k=1 / k=4 |
+|------------------|----------------------|-------------------|--------------------|-----------------------|
+| 158 (box B)      | default              | red 19..218, white 219..226 | red 76..875, white 876..907 | red 19..203 / 76..815 |
+| 40 (box A)       | hide-scrollbars      | red 19..218, white 219..226 | red 76..875, white 876..907 | red ..203 + thumb 212..226 |
+| 14 (box A pad)   | hide-scrollbars      | white 11..226     | white 44..907      | thumb 212..226        |
+| 40 (box A)       | default              | red 19..203 (15 px gutter + scrollbar 212..226) | red 76..815 | same (green) |
+"""
+
+"""
+Traceability: REQ-WEB-PAINT-SCROLLBAR-HIDDEN-001 - a scrollport with a hidden scrollbar reserves no gutter and paints no track/thumb.
+"""
+# @tag: unit, browser_engine, layout, paint, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl 1%
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val W: i32 = 300
+val H: i32 = 300
+val LINES: text = "<div class=\"c\">L1<br>L2<br>L3<br>L4<br>L5<br>L6<br>L7<br>L8</div>"
+val PAGE: text = "<!doctype html><html><head><style>body{margin:0;background:#fff;font:16px/20px sans-serif}" +
+    ".s{margin:10px;width:200px;height:90px;overflow:auto;padding:8px;border:1px solid #000}" +
+    ".c{background:#f00;color:#f00}</style></head><body>" +
+    "<div class=\"s\">" + LINES + "</div>" +
+    "<div class=\"s\" style=\"scrollbar-width:none\">" + LINES + "</div></body></html>"
+
+fn _render(k: i32, hide: bool) -> [u32]:
+    env_set("SIMPLE_WEB_HIDE_SCROLLBARS", if hide: "1" else: "0")
+    val px = if k == 1: simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd") else: simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, k, "cpu_simd")
+    env_set("SIMPLE_WEB_HIDE_SCROLLBARS", "0")
+    px
+
+# Last device column of the red run starting at CSS x 19 on CSS row y.
+fn _red_end(px: [u32], k: i32, y: i32) -> i32:
+    val fw = W * k
+    val row = y * k + k / 2
+    var x = 19 * k
+    while x < fw and (px[row * fw + x] & 0xFFFFFFu32) == 0xFF0000u32:
+        x = x + 1
+    x - 1
+
+# Number of non-white device px on CSS row y over device cols x0..x1.
+fn _non_white(px: [u32], k: i32, y: i32, x0: i32, x1: i32) -> i32:
+    val fw = W * k
+    val row = y * k + k / 2
+    var n = 0
+    var x = x0
+    while x <= x1:
+        if (px[row * fw + x] & 0xFFFFFFu32) != 0xFFFFFFu32:
+            n = n + 1
+        x = x + 1
+    n
+
+describe "overflow scrollport with a hidden scrollbar (Chrome 159)":
+    it "AC-1: k=1 scrollbar-width:none reserves no gutter":
+        val px = _render(1, false)
+        expect(_red_end(px, 1, 158)).to_equal(218)
+        expect(_non_white(px, 1, 158, 219, 226)).to_equal(0)
+
+    it "AC-2: k=4 scrollbar-width:none reserves no gutter":
+        val px = _render(4, false)
+        expect(_red_end(px, 4, 158)).to_equal(875)
+        expect(_non_white(px, 4, 158, 876, 907)).to_equal(0)
+
+    it "AC-3: k=1 hide-scrollbars mode drops gutter and scrollbar paint":
+        val px = _render(1, true)
+        expect(_red_end(px, 1, 40)).to_equal(218)
+        expect(_non_white(px, 1, 40, 219, 226)).to_equal(0)
+        expect(_non_white(px, 1, 14, 11, 226)).to_equal(0)
+
+    it "AC-4: k=4 hide-scrollbars mode drops gutter and scrollbar paint":
+        val px = _render(4, true)
+        expect(_red_end(px, 4, 40)).to_equal(875)
+        expect(_non_white(px, 4, 40, 876, 907)).to_equal(0)
+        expect(_non_white(px, 4, 14, 44, 907)).to_equal(0)
+
+    it "AC-5: default mode keeps the 15 px gutter and paints the scrollbar":
+        val p1 = _render(1, false)
+        expect(_red_end(p1, 1, 40)).to_equal(203)
+        expect(_non_white(p1, 1, 40, 212, 226) > 0).to_equal(true)
+        val p4 = _render(4, false)
+        expect(_red_end(p4, 4, 40)).to_equal(815)
+        expect(_non_white(p4, 4, 40, 848, 907) > 0).to_equal(true)
+
+# Negative cases (Chrome oracle k=1, same flags, window 1300x200): five
+# `position:absolute;top:10px;width:200px;height:60px;padding:8px;border:1px`
+# boxes of red-on-red lines. Red run on CSS row 30, from col left+9:
+#   left 10   overflow:hidden                       19..218 default and hide
+#   left 270  overflow:visible                     279..478 default and hide
+#   left 530  overflow:scroll                      539..723 + scrollbar default; 539..738 hide
+#   left 790  overflow:auto in a scrollbar-width:none parent (not inherited)
+#                                                  799..983 + scrollbar default; 799..998 hide
+#   left 1050 overflow:auto;scrollbar-width:none, one line (no overflow)
+#                                                 1059..1258 default and hide
+val NW: i32 = 1300
+val NH: i32 = 120
+val NEG: text = "<!doctype html><html><head><style>body{margin:0;background:#fff;font:16px/20px sans-serif}" +
+    ".s{position:absolute;top:10px;width:200px;height:60px;padding:8px;border:1px solid #000}" +
+    ".c{background:#f00;color:#f00}</style></head><body>" +
+    "<div class=\"s\" style=\"left:10px;overflow:hidden\">" + LINES + "</div>" +
+    "<div class=\"s\" style=\"left:270px;overflow:visible\">" + LINES + "</div>" +
+    "<div class=\"s\" style=\"left:530px;overflow:scroll\">" + LINES + "</div>" +
+    "<div style=\"position:absolute;left:790px;top:10px;width:240px;scrollbar-width:none\"><div class=\"s\" style=\"position:static;overflow:auto\">" + LINES + "</div></div>" +
+    "<div class=\"s\" style=\"left:1050px;overflow:auto;scrollbar-width:none\"><div class=\"c\">L1</div></div></body></html>"
+
+fn _render_neg(hide: bool) -> [u32]:
+    env_set("SIMPLE_WEB_HIDE_SCROLLBARS", if hide: "1" else: "0")
+    val px = simple_web_render_html_to_pixels_with_engine2d_backend(NEG, NW, NH, "cpu_simd")
+    env_set("SIMPLE_WEB_HIDE_SCROLLBARS", "0")
+    px
+
+# Last CSS column of the red run starting at CSS x0 on CSS row 30 (k=1).
+fn _neg_red_end(px: [u32], x0: i32) -> i32:
+    val row = 30
+    var x = x0
+    while x < NW and (px[row * NW + x] & 0xFFFFFFu32) == 0xFF0000u32:
+        x = x + 1
+    x - 1
+
+fn _neg_non_white(px: [u32], x0: i32, x1: i32) -> i32:
+    var n = 0
+    var x = x0
+    while x <= x1:
+        if (px[30 * NW + x] & 0xFFFFFFu32) != 0xFFFFFFu32:
+            n = n + 1
+        x = x + 1
+    n
+
+describe "hidden scrollbar: cache and negative cases (Chrome 159)":
+    it "AC-6: k=4 default then hide then default never reuses the other mode's frame":
+        val d1 = _render(4, false)
+        val h1 = _render(4, true)
+        val d2 = _render(4, false)
+        expect(_red_end(d1, 4, 40)).to_equal(815)
+        expect(_red_end(h1, 4, 40)).to_equal(875)
+        expect(_non_white(h1, 4, 40, 876, 907)).to_equal(0)
+        expect(_red_end(d2, 4, 40)).to_equal(815)
+
+    it "AC-7: hide mode leaves overflow:hidden / visible boxes unchanged":
+        val d = _render_neg(false)
+        val h = _render_neg(true)
+        expect(_neg_red_end(d, 19)).to_equal(218)
+        expect(_neg_red_end(h, 19)).to_equal(218)
+        expect(_neg_red_end(d, 279)).to_equal(478)
+        expect(_neg_red_end(h, 279)).to_equal(478)
+
+    it "AC-8: overflow:scroll keeps its scrollbar by default and drops it in hide mode":
+        val d = _render_neg(false)
+        val h = _render_neg(true)
+        expect(_neg_red_end(d, 539)).to_equal(723)
+        expect(_neg_non_white(d, 732, 746) > 0).to_equal(true)
+        expect(_neg_red_end(h, 539)).to_equal(738)
+        expect(_neg_non_white(h, 739, 746)).to_equal(0)
+
+    it "AC-9: scrollbar-width is not inherited: an auto child of a none parent keeps its scrollbar":
+        val d = _render_neg(false)
+        expect(_neg_red_end(d, 799)).to_equal(983)
+        expect(_neg_non_white(d, 992, 1006) > 0).to_equal(true)
+        val h = _render_neg(true)
+        expect(_neg_red_end(h, 799)).to_equal(998)
+
+    it "AC-10: scrollbar-width:none with no overflow keeps the full content width":
+        val d = _render_neg(false)
+        val h = _render_neg(true)
+        expect(_neg_red_end(d, 1059)).to_equal(1258)
+        expect(_neg_red_end(h, 1059)).to_equal(1258)
+        expect(_neg_non_white(d, 1259, 1266)).to_equal(0)

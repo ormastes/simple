@@ -4949,3 +4949,46 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
 - **Pinned by** `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_small_fill_cost_spec.spl`: frame hash, dirty-tile hash and fill/alpha hit counts (cpu_simd and software give the same hash) including a repeated same-colour run (the memo-hit path), plus same-process RELATIVE timing (a repeated opaque fill <= 0.8x an alternating one, a translucent rect <= 0.6x its 4 rows; head 0.47x / 0.31x, base 1.0x / 1.09x). Absolute us budgets flake on the shared box.
 - **Not changed, side finding:** `Engine2D.draw_rect_blend` on the CPU lane goes through `emu_draw_rect_blend`; before the rect-only readback change it cost ~21 ms per 1x1 call at 4x (whole-frame `read_pixels`). `_engine2d_draw_ir_path_fill` calls it for every edge pixel. Re-measure it after the rect-only readback change.
 - **Open:** each fill still pays ~4 us a row for `record_simd_fill_hit`/`record_simd_alpha_hit` (a bulk counter needs a new public API), plus Engine2D dispatch ~12 us (the `if val Some(...)` backend chain plus `_vulkan_primitive_target()`).
+## 2026-11-26 — catalog triage + hidden scrollbars (`work/webrender-catalog-triage-20261126`)
+
+- **Triage tooling.** A clustering probe over `<page>.chrome.png` vs
+  `<page>.simple.ppm` (8 CSS px cells, 8-neighbour components, per-region
+  Simple-extra / Simple-missing ink) separates three signatures. Sparse dots on
+  glyph edges are glyph raster (lcdround / gray-raster lanes). A full red/blue
+  outline pair along a text line is a pen-x shift, which is layout/shaping. A
+  solid block is a box/paint feature.
+- **Largest unowned region: the css-layout `.scroll` scrollbar.** Every
+  Chrome-vs-Simple harness captures Chrome with `--hide-scrollbars`. Measured on
+  Chrome 159, that flag paints no track/thumb AND reserves no 15 px gutter: the
+  content keeps its full width, the same as `scrollbar-width:none`. Simple
+  painted a 15 x 88 px scrollbar: 1350 of 6952 mismatching px at k=1 and 21525
+  of 52352 at k=4.
+- **Fix.**
+  - `scrollbar-width:none` now also skips the block-layout gutter
+    (`layout_engine` `scrollbar_gutter`) and the k=1 raster scrollbar pass
+    (`paint_raster`). Draw IR already honoured it.
+  - `SIMPLE_WEB_HIDE_SCROLLBARS=1` (`web_hide_scrollbars_enabled`, read in
+    `_normalize_final_overflow_axes` for non-visible overflow only) makes every
+    scrollport `scrollbar-width:none`.
+  - `check-chrome-catalog-pixel-diff.shs` sets it on the Simple side. The
+    default is unchanged; the AC-5 guard checks that it still has the 15 px
+    gutter and scrollbar.
+  - Spec: `overflow_scrollbar_hidden_chrome159_spec.spl`.
+- **Catalog:** css-layout 1.01 -> 0.82 (k=1) and 0.47 -> 0.28 (k=4). No other
+  page moved. Both baseline rows were lowered.
+- **Follow-up (not done):** the other `--hide-scrollbars` parity specs
+  (`test/02_integration/rendering/chrome_vs_simple_*`) do not set the env yet.
+- **Next unowned class:** 4x pen-x drift along the first line of the inventory
+  rows (`— partial; values=...`) and in `<code>`/monospace runs
+  (`Tab, ArrowR...`). It shows full outline pairs while the second line shows
+  only raster dots, so it is a pen/advance issue and not raster.
+- **Review fixes (same lane).**
+  - `_web_document_cache_key` names `SIMPLE_WEB_HIDE_SCROLLBARS`. Without it a
+    hidden-scrollbar frame was served from the default frame's cache entry;
+    AC-6/8/9 fail on the old key.
+  - `_tile_paint_ops` pass 5 skips `scrollbar_width_none`.
+  - The env is read once per style pass.
+  - Negative ACs cover `overflow:hidden`, `visible` and `scroll`, an `auto` child
+    of a `scrollbar-width:none` parent (not inherited), and `none` with no
+    overflow.
+  - The vulkan 4K css-layout row went 0.41 -> 0.39 (baseline 2.09 -> 0.39).
