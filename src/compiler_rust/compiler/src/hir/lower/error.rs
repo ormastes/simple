@@ -5,6 +5,12 @@ use super::super::lifetime::LifetimeViolation;
 use super::super::types::TypeId;
 use super::memory_warning::{MemoryWarningCode, MemoryWarningCollector};
 
+/// Prefix on a lowering verdict that is a TYPE error (declared return type,
+/// float->int slot), not a JIT capability gap. The run driver refuses to
+/// demote such a module to the interpreter (exec_core.rs
+/// `jit_failure_must_propagate`), so `simple run` exits non-zero.
+pub const LOWERING_TYPE_ERROR_TAG: &str = "error[E1003]";
+
 /// Render the declared-field hint for `CannotInferFieldType`.
 ///
 /// Returns the empty string when nothing is known, so the field-ACCESS path

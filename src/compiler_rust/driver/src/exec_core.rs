@@ -1776,9 +1776,13 @@ impl JitRunError {
 fn jit_failure_must_propagate(jit_err: &str, strict_all: bool) -> bool {
     // error[SPL-PAT-001] (Option pattern shape) is a TYPE error, not a JIT capability gap:
     // demoting it to the interpreter would run the ill-typed program silently.
+    // Same for a lowering type error (declared return type, float->int slot):
+    // the interpreter would run the ill-typed program and exit 0 (owner
+    // decision 2026-11-26, optional_return_into_scalar_fn_accepted_2026-11-26).
     strict_all
         || jit_err.contains("SIMPLE_JIT_STRICT:")
         || jit_err.contains("error[SPL-PAT-001]")
+        || jit_err.contains(simple_compiler::hir::LOWERING_TYPE_ERROR_TAG)
         || is_private_fn_visibility_error(jit_err)
 }
 
@@ -1906,6 +1910,12 @@ fn jit_strict_fallback_error_for(kind: &str, err: &impl std::fmt::Display, path:
             "SIMPLE_JIT_STRICT: {kind}: {msg}{where_}: paren-less accessor on a builtin \
              container -- use the method form (e.g. `.len()`); refusing to fall back to the interpreter"
         );
+    }
+
+    // A lowering TYPE error is the program's verdict, not a JIT gap: the
+    // interpreter would run it and exit 0 (owner decision 2026-11-26).
+    if msg.contains(simple_compiler::hir::LOWERING_TYPE_ERROR_TAG) {
+        return format!("{kind}: {msg}{where_}");
     }
 
     eprintln!(
@@ -2449,6 +2459,26 @@ mod execution_mode_validation_tests {
         assert!(jit_failure_must_propagate(call_rule, false));
         assert!(jit_failure_must_propagate(friend_rule, false));
         assert!(!jit_failure_must_propagate("semantic: function secret_helper not found", false));
+    }
+
+    /// optional_return_into_scalar_fn_accepted_2026-11-26: lowering type
+    /// errors (Option -> scalar return, float -> int slot, primitive return
+    /// mismatch) stop the fallback; a plain lowering gap still falls back.
+    #[test]
+    fn lowering_type_errors_never_fall_back() {
+        let option_return = "HIR lowering error: Unsupported feature: error[E1003] type mismatch: `value` is declared \
+                             to return `i64` but returns `i64?`";
+        let float_slot = "HIR lowering error: Unsupported feature: error[E1003] type mismatch: argument 1 of `f` is \
+                          declared as `i64` but receives `f64`";
+        let float_return = "HIR lowering error: Unsupported feature: error[E1003] type mismatch: `f` is declared \
+                            to return `i64` but returns `f64`";
+        // Other primitive return mismatches stay untagged and keep the fallback.
+        let return_pair = "HIR lowering error: Type mismatch: expected TypeId(5), found TypeId(12)";
+        assert!(jit_failure_must_propagate(option_return, false));
+        assert!(jit_failure_must_propagate(float_slot, false));
+        assert!(jit_failure_must_propagate(float_return, false));
+        assert!(!jit_failure_must_propagate(return_pair, false));
+        assert!(!jit_failure_must_propagate("HIR lowering error: Unknown variable: x", false));
     }
 
     /// End to end on the default (JIT) lane: a main-less product file that

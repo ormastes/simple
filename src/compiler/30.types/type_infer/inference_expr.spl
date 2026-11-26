@@ -1080,6 +1080,33 @@ impl HmInferContext:
                                 Ok(HirType(kind: HirTypeKind.Optional(resolved_base), span: span))
                     case Err(e): Err(e)
 
+            # `left ?? right`: on a `T?` left the result is `T` and `right` must
+            # be a `T` (or a `T?` when chaining `a ?? b ?? c`, result `T?`). A
+            # non-optional left is returned as is. A mismatch is reported at the
+            # `??` expression (unify alone reported span 0:0). Without this arm every `??`
+            # died as "unsupported expression kind: NullCoalesce".
+            case NullCoalesce(nc_left, nc_right):
+                match self.synthesize_expr(nc_left):
+                    case Ok(left_ty):
+                        val resolved_left = self.resolve(left_ty)
+                        match self.synthesize_expr(nc_right):
+                            case Ok(right_ty):
+                                match resolved_left.kind:
+                                    case Optional(left_inner):
+                                        val resolved_right = self.resolve(right_ty)
+                                        match resolved_right.kind:
+                                            case Optional(right_inner):
+                                                match self.unify(left_inner, right_inner):
+                                                    case Ok(_): Ok(self.resolve(resolved_right))
+                                                    case Err(_): Err(TypeInferError.Mismatch(expected: left_inner, found: resolved_right, span: span))
+                                            case _:
+                                                match self.unify(left_inner, resolved_right):
+                                                    case Ok(_): Ok(self.resolve(left_inner))
+                                                    case Err(_): Err(TypeInferError.Mismatch(expected: left_inner, found: resolved_right, span: span))
+                                    case _: Ok(resolved_left)
+                            case Err(e): Err(e)
+                    case Err(e): Err(e)
+
             # Block expression (e.g. a desugared `match` tail). Without this arm
             # the whole expression died as "unsupported expression kind: Block"
             # at span 0:0 and never reached the nested E-TYPE-NIL-COMPARE check.

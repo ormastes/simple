@@ -119,5 +119,18 @@ impl HmInferContext:
                     self.generate_obligation_for_method_call(receiver_ty, method_name, span)
                 if has_resolved_method and resolved_method_id < 0:
                     return Err(TypeInferError.Other("invalid resolved method id", span))
+                # `Dict<K, V>.get(k)` is `V?` (policy since 2026-11-03), as in
+                # the seed HIR (expr/mod.rs `get` arm), so returning it bare from
+                # `-> V` is a mismatch. The seed keeps a u64 value bare (its
+                # JIT cannot decode `u64?` yet); mirror that.
+                if method_name == "get" and argument_count == 1:
+                    match self.resolve(receiver_ty).kind:
+                        case Dict(_, value_ty):
+                            val bare_u64 = match self.resolve(value_ty).kind:
+                                case Int(bits, signed): bits == 64 and not signed
+                                case _: false
+                            if not bare_u64:
+                                return Ok(HirType(kind: HirTypeKind.Optional(value_ty), span: span))
+                        case _: pass
                 Ok(self.fresh_var(span))
             case Err(e): Err(e)

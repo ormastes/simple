@@ -3,7 +3,7 @@ use simple_parser::ast::ReferenceCapability;
 
 use crate::hir::lifetime::{ReferenceOrigin, ScopeKind};
 use crate::hir::lower::context::FunctionContext;
-use crate::hir::lower::error::{LowerError, LowerResult};
+use crate::hir::lower::error::{LowerError, LowerResult, LOWERING_TYPE_ERROR_TAG};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
     ConcurrencyMode, FunctionLayoutHint, HirContract, HirExpr, HirFunction, HirStmt, HirType, LayoutAnchor, LayoutPhase,
@@ -484,14 +484,86 @@ impl Lowerer {
         };
         let int = name(expected);
         Err(LowerError::Unsupported(format!(
-            "type mismatch: {slot} is declared as `{int}` but receives `{}`; convert explicitly with `as {int}` or `.to_{int}()`",
+            "{LOWERING_TYPE_ERROR_TAG} type mismatch: {slot} is declared as `{int}` but receives `{}`; convert explicitly with `as {int}` or `.to_{int}()`",
             name(value.ty)
         )))
     }
 
+    /// `T?` returned where a concrete scalar is declared. The seed's Option
+    /// typing is authoritative here (a declared `-> T?` or `Dict.get`), and
+    /// admitting it hands the caller the Option heap word. `bool` is left out:
+    /// a bool return slot already decodes truthiness (`rt_value_truthy`, the
+    /// `_json_bool` shape pinned in branch_coverage/types.rs), so no heap word
+    /// escapes there.
+    fn is_option_into_scalar(&self, expected: TypeId, found: TypeId) -> bool {
+        let scalar = matches!(
+            self.module.types.get(expected),
+            Some(HirType::Char | HirType::Int { .. } | HirType::Float { .. } | HirType::String)
+        );
+        // A type the untyped-receiver suffix search borrowed is not the
+        // program's declared type (see `suffix_guessed_return_types`).
+        let guessed = self.suffix_guessed_return_types.contains(&found);
+        // Any payload: an Option word reaches the scalar slot whatever `T` is
+        // (`Option<f64>` into `-> i64` printed garbage when narrowed to `T`).
+        scalar && !guessed && self.is_option_type(found)
+    }
+
+    /// `T?` (shared-pointer form) or an `Option<..>` enum, payload known or not.
+    pub(in crate::hir::lower) fn is_option_type(&self, ty: TypeId) -> bool {
+        self.module.types.optional_inner(ty).is_some()
+            || matches!(self.module.types.get(ty), Some(HirType::Enum { name, .. }) if name == "Option")
+    }
+
+    /// Payload of a `T?` (shared-pointer form) or an `Option<T>` enum.
+    fn option_payload(&self, ty: TypeId) -> Option<TypeId> {
+        if let Some(inner) = self.module.types.optional_inner(ty) {
+            return Some(inner);
+        }
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, type_bindings, .. }) if name == "Option" => type_bindings.get("T").copied(),
+            _ => None,
+        }
+    }
+
+    fn scalar_type_name(&self, ty: TypeId) -> String {
+        match self.module.types.get(ty) {
+            _ if ty == TypeId::ANY => "any".to_string(),
+            Some(HirType::Bool) => "bool".to_string(),
+            Some(HirType::Char) => "char".to_string(),
+            Some(HirType::String) => "text".to_string(),
+            Some(HirType::Float { bits }) => format!("f{bits}"),
+            Some(HirType::Int { bits, signedness }) => {
+                format!("{}{bits}", if matches!(signedness, crate::hir::Signedness::Unsigned) { "u" } else { "i" })
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
     pub(crate) fn validate_declared_return_type(&self, expected: TypeId, found: TypeId) -> LowerResult<()> {
+        // Before the compatibility check: `T?` shares the shared-pointer
+        // representation, which `hir_types_compatible` admits as `T`.
+        if self.is_option_into_scalar(expected, found) {
+            let want = self.scalar_type_name(expected);
+            let got = self.option_payload(found).map(|p| self.scalar_type_name(p)).unwrap_or_else(|| "any".to_string());
+            let func = self.current_function_name.clone().unwrap_or_default();
+            return Err(LowerError::Unsupported(format!(
+                "{LOWERING_TYPE_ERROR_TAG} type mismatch: `{func}` is declared to return `{want}` but returns `{got}?`; unwrap with `?? <default>` or declare `-> {want}?`"
+            )));
+        }
         if self.hir_types_compatible(expected, found) {
             return Ok(());
+        }
+        // float -> int return: owner-approved fatal type error (2026-11-24).
+        // Other primitive pairs stay the untagged `TypeMismatch` below, which
+        // still falls back to the interpreter on `run`.
+        if is_float_into_int(expected, found) {
+            let func = self.current_function_name.clone().unwrap_or_default();
+            return Err(LowerError::Unsupported(format!(
+                "{LOWERING_TYPE_ERROR_TAG} type mismatch: `{func}` is declared to return `{}` but returns `{}`; convert explicitly with `as {}`",
+                self.scalar_type_name(expected),
+                self.scalar_type_name(found),
+                self.scalar_type_name(expected)
+            )));
         }
         // Aggregate on either side: the seed's aggregate typing in the
         // gradual corners (trailing `match` arm unification, cross-module
@@ -1450,6 +1522,13 @@ impl Lowerer {
         }
         if declared_return_type.is_some() {
             if let Err(error) = self.validate_implicit_return_type(&body, return_type) {
+                // The HIR tail carries no span: point at the function instead.
+                let error = match error {
+                    LowerError::Unsupported(message) => {
+                        LowerError::Unsupported(format!("{message} (function at line {})", f.span.line))
+                    }
+                    other => other,
+                };
                 // Unconditional: the error variant carries only two TypeIds, so
                 // without this line a strict-JIT refusal names no function.
                 eprintln!(

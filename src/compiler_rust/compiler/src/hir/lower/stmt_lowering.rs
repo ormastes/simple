@@ -1093,7 +1093,15 @@ impl Lowerer {
                     let expr = self.lower_bool_return_expr(v, ctx);
                     self.expected_target_type = prev_expected;
                     let expr = expr?;
-                    self.validate_declared_return_type(ctx.return_type, expr.ty)?;
+                    // The verdict names the function but not where it is:
+                    // imported modules lower under the entry file's path.
+                    self.validate_declared_return_type(ctx.return_type, expr.ty)
+                        .map_err(|error| match error {
+                            LowerError::Unsupported(message) => {
+                                LowerError::Unsupported(format!("{message} (return at line {})", ret.span.line))
+                            }
+                            other => other,
+                        })?;
 
                     // Check for returning local reference (E2005)
                     // If the return expression is a variable reference, check its origin

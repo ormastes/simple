@@ -282,7 +282,7 @@ impl Lowerer {
                         _ => {}
                     }
                 }
-                let method_ty = self.lookup_method_return_type(recv_ty, method);
+                let method_ty = self.method_return_type_marking_guess(recv_ty, method);
                 if method_ty != TypeId::ANY {
                     return Ok(method_ty);
                 }

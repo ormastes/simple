@@ -52,6 +52,12 @@ pub struct Lowerer {
     pub(super) current_class_type: Option<TypeId>,
     /// Current function/method name being lowered, used to enrich lowering diagnostics.
     pub(super) current_function_name: Option<String>,
+    /// Return types the untyped-receiver `.method` suffix search borrowed
+    /// from some same-named user method. They are a guess, not a declaration,
+    /// so the Option->scalar return rule (`is_option_into_scalar`) skips them.
+    pub(super) suffix_guessed_return_types: HashSet<TypeId>,
+    /// Set by `lookup_method_return_type` when its result came from that guess.
+    pub(super) last_method_return_guessed: std::cell::Cell<bool>,
     /// Declaration line of the function currently being lowered. Recorded so the
     /// `lenient_types` unresolved-name fallback can attribute the global it
     /// emits to a source location; `Expr::Identifier` carries no span of its own.
@@ -447,6 +453,8 @@ impl Lowerer {
             proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
+            suffix_guessed_return_types: HashSet::new(),
+            last_method_return_guessed: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
@@ -554,6 +562,8 @@ impl Lowerer {
             proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
+            suffix_guessed_return_types: HashSet::new(),
+            last_method_return_guessed: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
@@ -684,6 +694,8 @@ impl Lowerer {
             proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
+            suffix_guessed_return_types: HashSet::new(),
+            last_method_return_guessed: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
