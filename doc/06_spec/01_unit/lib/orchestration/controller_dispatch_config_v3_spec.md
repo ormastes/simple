@@ -14,3 +14,8 @@ metadata validation and make no native ownership or authorization claim.
 
 No opaque owner, signed Host execution, network exchange or private credential
 is synthesized. Actual transport and both-owner cleanup need integrated scenarios.
+
+Linux enrollment checks preserve the canonical signed V3 source, derive the
+same ready-selector and status pins as the Linux Host, and reject a wrong
+backend, altered enrollment digest, mixed binding fields or inconsistent
+metadata view. Windows config round trips keep their existing V2 bytes.

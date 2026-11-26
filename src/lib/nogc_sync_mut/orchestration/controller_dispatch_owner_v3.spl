@@ -10,7 +10,6 @@ use std.nogc_sync_mut.orchestration.workload_store_v1.*
 use std.nogc_sync_mut.orchestration.assignment_commit_v1.ControllerAssignmentContextV1
 use std.nogc_sync_mut.orchestration.desired_input_objects_v1.controller_desired_operation_id_v1
 use std.nogc_sync_mut.orchestration.agent_preflight_objects_v1.agent_preflight_for_workload_v1
-use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.host_service_enrollment_payload_digest_v2
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.nogc_sync_mut.io.host_service_ready_reader_v1.*
 use std.nogc_sync_mut.io.host_service_auth_exchange_v6.*
@@ -125,7 +124,8 @@ pub fn controller_dispatch_host_status_match_v3(context: ControllerDispatchConte
     val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, native_machine_id: plan.native_machine_id,
         service_scope_id: plan.service_scope_id, boot_id: plan.boot_id, provider_generation: plan.provider_generation,
         continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
-    if (plan.backend != "windows-docker-process" or not status.ready or status.scope != scope or status.authority_id != context.config.host_authority_id or
+    if (plan.backend != "windows-docker-process" or status.backend != "windows-docker-process" or
+            not status.ready or status.scope != scope or status.authority_id != context.config.host_authority_id or
             status.authority_id != packet.binding.host_intent.fence.authority_id or
             status.provider_identity_digest != context.config.provider_identity_digest or
             container_scope_fence_id_v2(status.scope)? != packet.binding.host_intent.fence.boot_id):
@@ -135,11 +135,12 @@ pub fn controller_dispatch_host_status_match_v3(context: ControllerDispatchConte
 # milestone_0046: `require_ready` is false ONLY for host-action mode: the controller-signed Host actions (the abandons and
 # the retention release) exist for a Host whose startup quarantine left continuity unproven (status.ready false). Every
 # installed-identity comparison still applies.
-fn dispatch_service_status_v3(config: ControllerDispatchConfigV3, status: HostControllerStatusV3, require_ready: bool) -> Result<bool, text>:
+pub fn dispatch_service_status_v3(config: ControllerDispatchConfigV3, status: HostControllerStatusV3, require_ready: bool) -> Result<bool, text>:
     val canonical = host_controller_status_encode_v3(status)?
     val binding = config.host_binding
-    val digest = host_service_enrollment_payload_digest_v2(binding)?
-    if ((require_ready and not status.ready) or status.enrollment_digest != digest or status.authority_id != "host-" + digest or
+    val digest = controller_dispatch_host_enrollment_digest_v3(config)?
+    if ((require_ready and not status.ready) or status.backend != binding.backend or
+            status.enrollment_digest != digest or status.authority_id != "host-" + digest or
             status.provider_identity_digest != binding.provider_identity_digest or
             status.scope.physical_host_id != binding.physical_host_id or
             status.scope.native_machine_id != binding.native_machine_id or
@@ -218,14 +219,10 @@ fn dispatch_reader_v3(original: ControllerDispatchStateV3) -> ControllerDispatch
     val config = owner.root.unwrap().config_v3()
     if config.is_err(): return dispatch_fail_v3(owner, config.unwrap_err())
     val installed = config.unwrap()
-    val enrollment = host_service_enrollment_payload_digest_v2(installed.host_binding)
-    if enrollment.is_err(): return dispatch_fail_v3(owner, enrollment.unwrap_err())
-    # Shared DATA formula dependency: host_capacity_owner_v1:37-40. The reader
-    # independently proves protected selector/publication; it does NOT replay WAL.
-    val authority = sha256_text("HOST-CAPACITY-AUTHORITY-V1\n" + installed.host_binding.physical_host_id +
-        "\n" + "host-" + enrollment.unwrap() + "\n")
+    val authority = controller_dispatch_host_ready_authority_v3(installed)
+    if authority.is_err(): return dispatch_fail_v3(owner, authority.unwrap_err())
     val opened = host_service_ready_reader_open_v1(installed.setup_credential_path, installed.setup_credential_digest,
-        installed.host_deployment_root, authority)
+        installed.host_deployment_root, authority.unwrap())
     owner.reader = opened.owner
     if opened.error != "" or not opened.ready or opened.owner.is_none():
         return dispatch_fail_v3(owner, if opened.error != "": opened.error else: "dispatch-reader-not-ready")

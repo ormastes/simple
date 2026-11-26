@@ -336,3 +336,19 @@ The [test plan](../../03_plan/sys_test/server_contexts.md) lists the outstanding
 runtime gates. The [contract manual](../../06_spec/01_unit/lib/common/config_core/server_context_v1_spec.md)
 is manually authored and records **NOT_RUN**. No warm-start latency, request
 latency, RSS, remote mutation, or LinuxPodman/WindowsDocker receipt is claimed.
+
+
+### Linux retained Host enrollment in the controller
+
+Use the exact signed Linux V3 binding as the `linuxHostEnrollment` string in
+the installed Controller dispatch document. That document also pins the
+existing setup credential and Host deployment root. A Windows controller
+document uses the existing `hostEnrollment` field and canonical V2 bytes.
+Provide exactly one binding for a retained Host. The installed binding
+determines the ready-selector authority and the authenticated status check.
+
+The SSH controller gateway may opt in to `agent-attachment` with an installed
+`dispatchRoot` and `dispatchConfigDigest`. The request names the held run and
+carries a closed attachment action. Attach and detach require their original
+signed V4 frames. Inspect reports the retained attachment and current
+terminal authority. These actions use the same installed Host and smux owner.
