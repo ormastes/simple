@@ -178,3 +178,14 @@ baremetal runtime C:
    the spawn path is `src/os/**` work — out of this lane's scope.
 
 **Status: OPEN** (compiler codegen residual). DB row updated.
+
+## BF-9 Update (2026-11-26) — OS-side `char_at`/`starts_with` elimination & verify waiting (`fix-implemented-verification-pending`)
+
+- **OS-side fix**: Replaced remaining `text.char_at()` and `text.starts_with()` calls in `src/os/apps/sshd/` (`ssh_identification.spl:ssh_identification_text_to_bytes_stable`, shared byte-prefix helper `ssh_text_starts_with_bytes`, `ssh_remote_shell.spl`, `host_key_loader.spl`, `ssh_sftp_v3.spl`, and `ssh_session_shell_test_ext.spl`) with `text_to_bytes` byte scans. Also fixed `'\r'`/`'\n'` raw-string newline comparison in `SshRemoteShell.feed_remote_input` (`"\r"`/`"\n"`).
+- **Host specs**:
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_sshd_byte_pack_and_text_spec.spl --mode=interpreter` -> `3 examples, 0 failures`.
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/apps/sshd/ssh_identification_spec.spl test/01_unit/os/apps/sshd/ssh_text_utf8_reject_spec.spl --mode=interpreter`
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/ssh_multi_cmd.shs && sh scripts/os/ssh_clang_hello_ring3.shs
+  ```

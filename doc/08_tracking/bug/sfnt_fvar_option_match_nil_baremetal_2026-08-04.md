@@ -111,3 +111,12 @@ Reviewed at 7a06b4aafd5, lane file scope includes
 
 **Status: OPEN** (compiler defect; workaround + spec in place at HEAD).
 DB row updated.
+
+## BF-9 Update (2026-11-26) — verify waiting (`fix-implemented-verification-pending`)
+
+- **Verified contract**: Confirmed `std.common.encoding.sfnt` optional table (`fvar`/`gvar`/`name`) `Some`/`None` match behavior alongside SimpleOS `Option<i64>` socket-owner match parity (`rt_net_resolve_socket_read_owner`).
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_sfnt_option_match_boundary_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+  ```

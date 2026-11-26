@@ -340,3 +340,13 @@ OPEN as previously narrowed; no code change made this pass.
 ## Triage 2026-11-04 (c28-w4)
 
 Triage 2026-11-04: root causes 1 and 2 fixed; open part is root cause 3 (in-guest hello.spl rc=70, str.clear receiver=0x0) which needs a rebuilt kernel plus guest simple through the OVMF-pflash board-proxy pipeline; not reproducible on this Windows host without that lane. Premise may be stale: the interpreter/seed was redeployed 2026-11-04 (0b2c3d015b7). QUESTION: is there a current SimpleOS guest image build to re-run the rc=70 probe on, or should this be set to verification-pending against the next kernel build?
+
+## BF-9 Update (2026-11-26) — RC1/RC2 contract verified; RC3 (`lexer.spl`) remains `open`
+
+- **Fixed-contract OS/loader portion (RC1/RC2)**: Kernel ELF64 admission and ELF32 / `W|X` / truncated-header rejection verified in `src/os/kernel/loader/elf_loader.spl` (`load_user_executable`, `elf_admit_executable`).
+- **Remaining open portion (RC3)**: In-guest `/usr/bin/simple hello.spl` (`rc=70`, `str.clear` receiver=0x0) in `src/compiler/10.frontend/core/lexer.spl` (outside BF-9 ownership) remains `open` until fixed and verified in an OVMF guest run.
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_elf64_loader_contract_spec.spl --mode=interpreter` -> `3 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/check/check-simpleos-x86-kernel-elf.shs && sh scripts/os/ssh_simple_hello_uefi.shs
+  ```

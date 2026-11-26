@@ -218,3 +218,14 @@ happened. `rt_dealloc` intentionally still does not infer ownership.
 **Status: fix-implemented-verification-pending** (allocator half verified at
 C level; parent bug stays open pending owner integration + QEMU WM rerun).
 DB row updated.
+
+## BF-9 Update (2026-11-26) — verify waiting (`fix-implemented-verification-pending`)
+
+- **OS kernel heap fix**: Updated `src/os/kernel/memory/heap.spl` to track per-allocation sizes (`_track_heap_alloc` / `_take_tracked_heap_size`), refuse duplicate/untracked frees cleanly (preventing class-0 `mi_free_raw(..., 0)` freelist corruption and reclaimed-span aliasing), pass the true recorded size to `mi_free_raw` and decrement `total_allocated` / restore `total_free`, and reclaim/reuse non-overlapping large page-backed spans via `_reclaim_heap_pages` / `_alloc_reclaimed_pages` inside `_kernel_pmm_page_alloc`.
+- **Host specs**:
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_heap_reclaim_spec.spl --mode=interpreter` -> `5 examples, 0 failures` (covers unsized reclaim, 50-cycle interactive reuse, 210 KiB cumulative large-page reclaim in a 128 KiB heap, duplicate unsized `heap_free` safety, and duplicate `heap_free_size` zero-aliasing safety).
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel/memory/heap_mimalloc_spec.spl --mode=interpreter` -> `6 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+  ```

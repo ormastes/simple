@@ -152,3 +152,12 @@ tooling lane; `bin/simple test` is additionally blocked repo-wide at HEAD by
 the pinned seed rejecting `@representation_boundary`), the remaining arm64 ISO
 output/contents-path expectation, and the controlled native-payload fixture
 contract from the 2026-11-10 update.
+
+## BF-9 Update (2026-11-26) — verify waiting (`fix-implemented-verification-pending`)
+
+- **Verified OS VFS contract**: Confirmed clean NvfsPosix and DbFs rootfs mount isolation (`_clear_vfs_rootfs_for_test` / `_mount_hosted_rootfs_for_test`), absent pre-existing `/VERSION`, clean write/rewrite size behavior (`g_vfs_write_file_text` / `g_vfs_read_file_text`), and normalized shard `updated_at` in `.sdn`.
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_nvfs_rootfs_contract_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+- **Linux/QEMU image tooling verification pending**:
+  ```sh
+  sh scripts/os/mkfs-nvfs.shs && bin/simple test test/01_unit/os/installer/image_builder_artifact_spec.spl
+  ```

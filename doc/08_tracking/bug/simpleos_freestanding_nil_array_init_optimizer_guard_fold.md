@@ -116,3 +116,12 @@ silent replacement. Confirm which archive the rebuilt sysroot ships.
 Both tests are local-only: CI `rust-tests.yml:112` excludes `simple-compiler`
 from `cargo test` (and `:119` builds only `--lib --no-run`), and they need
 clang/ld.lld with the X86 target plus `qemu-x86_64`.
+
+## BF-9 Update (2026-11-26) — verify waiting (`fix-implemented-verification-pending`)
+
+- **OS-side fix**: Added `_rt_net_sockets_ready` / `_rt_net_ensure_sockets()` and `_rt_net_last_plain_payload_ready` / `_rt_net_ensure_plain_payload()` lazy-init guards in `src/os/kernel/net/rt_net_socket_facade.spl` matching `src/os/kernel/fs/fat32_fd_table.spl` so freestanding builds cannot trap on uninitialized module-global arrays.
+- **Host spec**: `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_freestanding_init_and_u32_contract_spec.spl --mode=interpreter` -> `2 examples, 0 failures`.
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/ssh_simple_hello_uefi.shs
+  ```
