@@ -5200,3 +5200,88 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
 - **Open:**
   - Vertical writing modes still write top/bottom (marked `# ponytail:`).
   - The heading margins (0.67em etc.) have the same fixed-at-UA-size shape, so `h1{font-size:20px}` keeps a 21 px margin. Not measured yet.
+## 2026-11-26 — fractional margins in flex, grid and float items (frac-margin-flex lane)
+
+**Spec:** `test/01_unit/browser_engine/fractional_margin_flex_grid_float_chrome159_spec.spl`
+(1/15 on base `329e5ea3b3c`, 15/15 on head). 27 Chrome 159 cases at k=1 and k=4:
+row flex (`10%`, `0.4em`, a sibling's margin-right, two accumulating margins,
+flex-grow / flex-end / center free space, row-reverse, nested in a `10%` block),
+column flex (explicit width, stretched auto width, center, flex-end), a grid item in a
+template column, left / right / two left floats, an auto-width text float; guards for
+rows where something else takes the free space (`flex:1`, `margin-left:auto`,
+`space-between`, a definite-basis grower), a whole-px float pair in a new BFC, a
+stretched templated grid item and opposite-signed fractions.
+
+**Root cause.** The block-child path (2026-11-25 section) was the only one that read
+`margin_*_milli`. Flex, grid and float placed items at whole-px margins, so `10%` of
+205 px (20.5) painted from 60 (Chrome 61) and `0.4em` (6.390625) from device 184 at
+k=4 (Chrome 186). The row-flex pen `frac_adj_milli` snapped only in CSS px and
+recorded no device column.
+
+**Fix (all in `layout_engine.spl`, every new record gated on a non-zero fraction):**
+- `margin_l_err_milli` / `margin_r_err_milli`: the milli-px `resolve_horizontal_margin` drops.
+- Row flex: the measuring loop sums the dropped fractions (`margin_err_total`); the pen
+  starts at the container's `box_line_start_err_at(i)`. Whatever takes the free space
+  gives the total back: an end / center offset (center by half), every grower its
+  flex-grow weighted share (through `item_frac_delta_milli`), auto margins evenly. The
+  item moves to its device column through `box_x_snap`. Gated on ANY fraction
+  (`margin_has_frac`), not the sum, so opposite-signed fractions cannot switch it off;
+  space-* and shrinking rows keep whole px. Invariant: the last item's right edge plus
+  its margin lands on the content edge at k=1 and k=4. Row-reverse snaps the reflected edge
+  `2*err0 - pen - width_frac + ml_err - mr_err` (physical margins are not swapped).
+- Column flex, grid items: exact left edge per alignment through `box_x_snap`; a stretched
+  auto-width item also snaps its right edge and records `box_device_extra_w`.
+- Floats: `box_x_snap` on the margin fraction; `g_float_frac_i` / `g_float_frac_err`
+  remember the last left float's exact right edge (rewritten for every left float, 0
+  when whole, cleared by `float_ctx_truncate`) so the next left float against it starts
+  from 92.78, not 92. A first version recorded only fractional floats and kept the index
+  across truncation, so a later float at a reused index could inherit a stale fraction.
+
+**Traps.**
+- `1.5em` at 16 px is a whole 24 px: a "fractional em" fixture needs `0.4em` / `1.3em`.
+- A template-less `display:grid` already matched Chrome on base; only a templated grid
+  reaches the grid-item path.
+- `free -g` "free" is not the memory gate: `memwait.shs` reads the available column.
+
+**Open (ponytail):** space-between / -around / -evenly and shrinking rows keep whole-px
+margins; multi-line (wrap) rows and the shrink-to-fit / intrinsic measuring passes still
+use whole-px margins; row-reverse moves only the left edge; float_ctx keeps whole px
+(one left float remembered, right floats not).
+
+**Gates (seed1126b):** 16 specs green; matrix 79; catalogs 1x worst 1.01, 4x worst 0.47,
+byte-identical to base 16/16 (no catalog page has a fractional flex/grid/float margin).
+**Perf** (css-layout, seed1126b, load < 8, warmups discarded), medians base / head:
+- 6 alternated rounds: k=1 2967 / 2916 ms, RSS 2.39 / 2.38 GB; k=4 3084 / 2998 ms.
+- k=4 RSS is bimodal on both sides (about 2.31 or 2.49 GB per run): the 6-round
+  medians read 2.33 / 2.40, so it was rerun with 7 rounds, head first on odd
+  rounds: 2.43 / 2.38 GB, 3138 / 3140 ms. The new paths are integer arithmetic only.
+Perf above was measured on the first fix (`c0dd41e24dd`); the follow-up only adds
+per-row booleans and gated per-item integer shares, so it was not rerun. Gates and
+both catalogs were rerun on the follow-up: unchanged, still byte-identical 16/16.
+
+### 2026-11-26 — second review of frac-margin-flex (worse-than-base cases inside fractional rows)
+
+Spec now 21 ACs (16/21 on `374b401e7ed`, 21/21 after):
+- **Exact overflow:** the gate used whole-px free space while the exact margins are larger
+  (two `width:88px; margin:0 3.3%` items end at 202.6 of 200; flex-end with 1px whole and
+  -0.2px exact free space started left of ix). The row now needs
+  `main_free_space*1000 >= margin_err_total`, else base output. Chrome shrinks these
+  items (147..232 vs base 146..233); still open.
+- `safe-center` / `unsafe-center` give the fraction back like `center` (the parser
+  normalises `safe center` to `safe-center`, as `row_flex_distribution` matches).
+- A grower's give-back never cuts below its min-width floor (`w_floor_px`); measured red
+  at 346..544 (Chrome 346..545).
+- A row-reverse grower snaps both edges (`rev_right`); `frac_snapped` keeps the forward
+  pen on the whole width.
+- `box_x_snap_clear` before each gated path (only where the style has a fraction), so a
+  second layout pass at another width cannot reuse a stale dx / line-start error / width.
+- **Found by the byte-identity AC:** `_decl_horizontal_margin_px` read em through a
+  one-decimal parse, so `0.375em` was 4px and `0.625em` 9px (Chrome 6 / 10). The whole px
+  now comes from the same exact parse as `margin_*_milli`. Trap: a fixture of `0.4em`
+  hides this (one decimal is enough there).
+
+Gates (seed1126b): 16 specs green, matrix 79, catalogs 1x worst 1.01 / 4x worst 0.47,
+byte-identical to base 16/16. Perf css-layout (load < 8, warmups discarded), base / head:
+6 rounds k=1 3126 / 3207 ms, k=4 3190 / 3209 ms; RSS k=1 read 2.41 / 2.48 GB (per-run
+spread 2.30..2.59 on both sides), rerun 7 rounds head-first-on-odd: 2.359 / 2.375 GB
+(+0.7%), 3026 / 3057 ms.
