@@ -3,7 +3,7 @@
 - ID: `mcp_script_perf_empty_protocol_false_pass_2026_11_10`
 - Priority: P2
 - Owner: `scripts/check/check-mcp-script-mode-perf.shs`
-- Status: fix implemented; 18 executable contract controls covered; review pending.
+- Status: FIXED (2026-11-27) — source repair landed in `1305f6bf618` and `e3a09a382d5`; live-verified 18/18 contract controls on `release/1.0.0`.
 
 ## Reproduction
 
@@ -64,3 +64,13 @@ tracked `doc/06_spec` tree contains zero executable `_spec.spl` files.
 This repair qualifies the measurement gate only. It supplies no startup/RSS
 measurement for the production server and does not close
 `mcp_interpreter_startup_12s_2026-09-14` or admit a compiler/runtime.
+
+## Live Verification on `release/1.0.0` (2026-11-27, lane `w3-2-scripts-specs-hygiene`)
+
+- **Landed fix commits (ancestors of base `74713fbd005`):**
+  - `1305f6bf618` (`fix(mcp): reject invalid protocol samples in performance gate`)
+  - `e3a09a382d5` (`fix(mcp): reject nonfinite JSON and strengthen protocol controls`)
+- **Live regression re-run against `scripts/check/check-mcp-script-mode-perf.shs`:**
+  - `scripts/check/check-mcp-script-mode-perf-contract.py` was removed on 2026-11-26 in `02cd694e250`; extracted `02cd694e250^:scripts/check/check-mcp-script-mode-perf-contract.py` outside the worktree and executed it with Python 3.13 directly against the worktree's `scripts/check/check-mcp-script-mode-perf.shs` on Windows.
+  - Exited `0` with `mcp_perf_contract_cases=18 failures=0` (all 18 controls PASS: `valid_valid`, `unicode_valid`, `empty_valid`, `missing_valid`, `foreign_valid`, `duplicate_valid`, `error_valid`, `invalid_init_valid`, `invalid_tools_valid`, `invalid_tool_valid`, `numeric_id_valid`, `wrong_length_valid`, `truncated_valid`, `trailing_valid`, `duplicate_member_valid`, `nonfinite_valid`, `nonzero_valid`, `valid_empty`).
+- **Tracking closure:** Updated `doc/08_tracking/bug/db/mcp_script_perf_empty_protocol_false_pass_2026_11_10.sdn` (`status` -> `fixed`, `valid` -> `true`) and appended a `done` row to `bug_fix_claims` closing the stale `fixing` claim (`01a1c3cc/app_services`).

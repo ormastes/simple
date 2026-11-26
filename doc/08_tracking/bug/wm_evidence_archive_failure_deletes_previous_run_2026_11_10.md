@@ -1,6 +1,7 @@
 # WM archive failure discarded the previous run
 
-Priority: P2. Source repair and direct regression verified; landing pending.
+- **Status:** FIXED (2026-11-27)
+- **Priority:** P2 (source repair landed in `e1dfe42238f`; live-verified on `release/1.0.0`).
 
 The fullscreen evidence wrapper sources
 `scripts/check/lib/simpleos-wm-fullscreen/retention.shs` before resetting its
@@ -86,3 +87,15 @@ not qualification of the seven broader WM, guest, Metal, or 8K bugs.
 
 Provider input/output/cache-read/cache-create usage: unavailable. Comparable
 cohort average and usage ratio: unavailable; no estimates are fabricated.
+
+## Live Verification on `release/1.0.0` (2026-11-27, lane `w3-2-scripts-specs-hygiene`)
+
+- **Landed fix commit (ancestor of base `74713fbd005`):** `e1dfe42238f` (`fix(wm): preserve previous evidence when archiving fails`).
+- **Live regression re-run (Windows Git sh against `scripts/check/lib/simpleos-wm-fullscreen/retention.shs`):**
+  - `sh scripts/check/check-wm-evidence-retention.shs` -> exit `0` (`STATUS: PASS (9 actual retention scenarios; no guest/render qualification)`)
+  - `sh scripts/check/check-wm-evidence-retention.shs --extended-only` -> exit `0` (5/5 PASS: clock-fail, staging-fail, collision, unexpected status, failed run preserves previous PASS)
+  - `sh scripts/check/check-wm-evidence-retention.shs --completion-record-only` -> exit `0` (4/4 PASS: PASS-A/PASS-B/FAIL, marker-create-fail, marker-publish-fail, invalid-marker)
+  - `sh scripts/check/check-wm-evidence-retention.shs --metadata-only` -> exit `0` (`PASS: metadata-fail retains original evidence without published archive`)
+  - `sh scripts/check/check-wm-evidence-retention.shs --prune-only` -> exit `0` (`PASS: pruning failure retains canonical and previous archived evidence`)
+  - `sh scripts/check/check-wm-evidence-retention.shs --newest-pass-only` -> exit `0` (`PASS: newest completed PASS survives adversarial archive name ordering`)
+- **Tracking closure:** Updated `doc/08_tracking/bug/db/wm_evidence_archive_failure_deletes_previous_run_2026_11_10.sdn` (`status` -> `fixed`, `valid` -> `true`) and appended a `done` row to `bug_fix_claims` closing the stale `fixing` claim (`01a1c3cc/os_wm`).

@@ -1,6 +1,7 @@
 # Sharded claim-and-show deletes its own display input
 
-Priority: P1. Source repair and focused verification complete; PR landing pending.
+- **Status:** FIXED (2026-11-27)
+- **Priority:** P1 (source repair landed in `6bc1e955a0b` and `0bf93c3738c`; live-verified on `release/1.0.0`).
 
 ## Failure
 
@@ -57,3 +58,13 @@ Windows Git sh ran these shell-owner checks in the isolated worktree
 Shell syntax and working/staged direct env/process guards also passed.
 This evidence does not claim
 Simple compiler, native runtime, GUI, or bootstrap qualification.
+
+## Live Verification on `release/1.0.0` (2026-11-27, lane `w3-2-scripts-specs-hygiene`)
+
+- **Landed fix commits (ancestors of base `74713fbd005`):**
+  - `6bc1e955a0b` (`fix(tracking): preserve sharded view through claim display`)
+  - `0bf93c3738c` (`fix(tracking): define die before sharded DB init and avoid awk -v newlines in bug-db-shard`)
+- **Live regression re-run (Windows Git sh in `C:\dev\wt\w3-2-scripts-specs-hygiene`):**
+  - `sh scripts/check/check-bug-claim-sharded-show.shs` -> exit `0`
+  - Verbatim output: `PASS: sharded claim-and-show, both tables, details, refresh, refusal, read-only, release and cleanup`
+- **Tracking closure:** Updated `doc/08_tracking/bug/db/bug_claim_sharded_show_deletes_parent_merged_view_2026_11_10.sdn` (`status` -> `fixed`, `valid` -> `true`) and appended a `done` row to `bug_fix_claims` closing the stale `fixing` claim (`01a1c3cc/gui_evidence`).
