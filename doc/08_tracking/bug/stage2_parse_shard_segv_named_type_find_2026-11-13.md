@@ -244,3 +244,9 @@ warnings before and after the change. The error is `W-ANY-NOTRUN`, and the
 warnings are on lines this change did not touch. The new spec has 0 errors.
 `types.spl` was not linted because it exceeds the lint cost budget
 (`.claude/rules/commands.md`).
+
+
+## Addendum 2026-11-27 (lane work/w2-1-compiler-hir-mir-20261127)
+
+- Verified host unit spec `test/01_unit/compiler/cache/public_summary_validation_parse_isolation_spec.spl` (`2/2` passed, `0` failed in `--mode=interpreter`).
+- Aligned `.sdn` shard status from stale `open` to `fix-implemented-verification-pending` (Stage 2 native parse-shard rebuild verification remains pending).

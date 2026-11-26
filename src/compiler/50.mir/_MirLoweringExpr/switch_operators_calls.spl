@@ -53,7 +53,7 @@ use compiler.hir.ownership_types.{hir_type_requires_move, hir_type_ownership_is_
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_instructions.{MirPlace}
-use compiler.mir.mir_lowering_types.{MirLowering, MirError, MirAdaptedFileWriteBytesExternReceiptV1, mir_error_is_fatal}
+use compiler.mir.mir_lowering_types.{MirLowering, MirError, MirAdaptedFileWriteBytesExternReceiptV1, mir_error_is_fatal, MirMutRefArgWriteback}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.text_extern_abi.{text_arg_indices, text_extern_semantic_arity, boxed_text_arg_indices, tagged_text_value_arg_indices, tagged_text_value_arg_is_identity, file_write_bytes_array_alias_target}
 use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_profile_is_critical, match_coverage_critical_missing_ids, match_coverage_requires_hard_error}
@@ -9707,6 +9707,7 @@ impl MirLowering:
                 lw.global_constants_by_id = self.global_constants_by_id
                 lw.global_const_exprs = self.global_const_exprs
                 lw.struct_type_param_names = self.struct_type_param_names
+                lw.module_fn_params = self.module_fn_params
                 if self.declaration_repository != None:
                     # Share only admitted declaration metadata and expression
                     # descriptors. Lifted bodies have their own lambda scratch.
@@ -9726,6 +9727,7 @@ impl MirLowering:
                     lw.struct_field_has_default = self.struct_field_has_default
                     lw.struct_field_type_param = self.struct_field_type_param
                     lw.struct_type_param_names = self.struct_type_param_names
+                    lw.module_fn_params = self.module_fn_params
                     lw.struct_field_over_type_param = self.struct_field_over_type_param
                     lw.struct_method_ambiguous = self.struct_method_ambiguous
                     lw.enum_variant_owners = self.enum_variant_owners
@@ -10425,7 +10427,7 @@ impl MirLowering:
                 break
         if is_direct and has_named_arguments:
             named_binding_name = self.provider_callable_symbol_name(direct_symbol, direct_name)
-            match self.named_call_slots_v1(named_binding_name, args):
+            match self.named_call_slots_v1(named_binding_name, args, direct_symbol):
                 case Ok(slots): named_slots = slots
                 case Err(reason):
                     self.error_fatal(reason, Some(callee.span))
@@ -10493,6 +10495,7 @@ impl MirLowering:
         # though the coercion runs before any module split (the operand types
         # alone read f64 == f64 afterwards).
         var int_literal_coerced_arg_indices: [i64] = []
+        var mut_ref_writebacks: [MirMutRefArgWriteback] = []
         for arg in args:
             val current_arg_index = if named_slots.len() > 0: named_slots[direct_arg_index] else: direct_arg_index
             direct_arg_index = direct_arg_index + 1
@@ -10538,28 +10541,14 @@ impl MirLowering:
                 if lambda_operand != None:
                     arg_operands = arg_operands.push(lambda_operand.unwrap())
                     continue
-            # `x: mut <primitive>` param: pass the caller local's address
+            # `x: mut <primitive>` param: pass a stack-slot address and write back
             # (bug mut_param_annotation_no_reference_propagation_2026-07-20).
-            if current_arg_index < call_param_types.len() and (not arg.has_name or named_slots.len() > 0):
-                var mut_ref_operand: MirOperand? = None
-                match call_param_types[current_arg_index].kind:
-                    case HirTypeKind.Ref(ref_inner, true):
-                        match ref_inner.kind:
-                            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
-                                match arg_kind:
-                                    case HirExprKind.NamedVar(ref_symbol, _):
-                                        val ref_key = mir_expr_symbol_id_value(ref_symbol)
-                                        val var_local = self.find_local(ref_key)
-                                        if var_local.id >= 0:
-                                            var b_mut_ref = self.builder
-                                            val ref_local = b_mut_ref.emit_ref(MirPlace.local_place(var_local), MirBorrowKind.Mutable, MirType(kind: MirTypeKind.Ref(self.lower_type(ref_inner), true)))
-                                            self.builder = b_mut_ref
-                                            mut_ref_operand = Some(mir_operand_copy(ref_local))
-                                    case _: ()
-                            case _: ()
-                    case _: ()
-                if val ref_operand = mut_ref_operand:
-                    arg_operands = arg_operands.push(ref_operand)
+            if current_arg_index < call_param_types.len() and (not arg.has_name or named_slots.len() > 0 or not is_direct):
+                val mut_ref_prep = self.prepare_mut_ref_primitive_expr_v1(arg_value, call_param_types[current_arg_index], None)
+                if mut_ref_prep.matched:
+                    arg_operands = arg_operands.push(mut_ref_prep.operand)
+                    if mut_ref_prep.has_writeback:
+                        mut_ref_writebacks = mut_ref_writebacks.push(mut_ref_prep.writeback)
                     continue
             var arg_local = if current_arg_index < call_param_types.len() and (not arg.has_name or named_slots.len() > 0):
                 self.lower_expr_for_slot(arg_value, call_param_types[current_arg_index])
@@ -10783,7 +10772,7 @@ impl MirLowering:
 
         val source_arg_operands = arg_operands
         if named_slots.len() > 0:
-            arg_operands = self.complete_named_call_operands_v1(named_binding_name, arg_operands, named_slots)
+            arg_operands = self.complete_named_call_operands_v1(named_binding_name, arg_operands, named_slots, direct_symbol)
 
         if is_direct:
             # A bare, unimported interpreter builtin (`env_get` without a `use`)
@@ -10898,6 +10887,7 @@ impl MirLowering:
                 self.symbol_to_operand(direct_symbol)
             val adapted_receipt = self.adapted_file_write_bytes_receipt_for_call_v1(direct_symbol, resolved_name)
             var result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type, direct_symbol, adapted_receipt)
+            self.emit_mut_ref_primitive_writebacks_v1(mut_ref_writebacks)
             if direct_runtime_value_abi != 0 and return_type.kind == MirTypeKind.I8:
                 var abi_builder = self.builder
                 val wide_result = abi_builder.emit_cast(mir_operand_copy(result), MirType.i64())
@@ -10928,7 +10918,11 @@ impl MirLowering:
         # Field-method fallback can supply the projected callable so its
         # receiver is not evaluated a second time. Argument lowering above
         # remains shared with ordinary calls.
-        var callee_local = if val supplied = prelowered_callee: supplied else: self.lower_expr(callee)
+        var callee_local = LocalId(id: -1)
+        if prelowered_callee.?:
+            callee_local = prelowered_callee.unwrap()
+        else:
+            callee_local = self.lower_expr(callee)
         var function_type = self.find_local_hir_type(callee_local.id)
         if not function_type.?:
             function_type = self.enum_match_expr_type(callee)
@@ -10959,7 +10953,9 @@ impl MirLowering:
                             function_type = Some(optional_inner)
                         case _: ()
                 case _: ()
-        self.emit_typed_function_value_call(callee_local, arg_operands, function_type, callee.span, indirect_return, call_param_types, arg_operands.len())
+        val indirect_call_result = self.emit_typed_function_value_call(callee_local, arg_operands, function_type, callee.span, indirect_return, call_param_types, arg_operands.len())
+        self.emit_mut_ref_primitive_writebacks_v1(mut_ref_writebacks)
+        indirect_call_result
 
     me emit_typed_function_value_call(callee_local: LocalId, arg_operands: [MirOperand], function_type: HirType?, call_span: Span, indirect_return: HirType?, call_param_types: [HirType], args_len: i64) -> LocalId:
         # The helper proves the signature from the declared function type;

@@ -62,3 +62,9 @@ same alias policy (`_driver_entry_closure_mode()`) as the closure walk, no
 test/doc filter. Imported modules keep the filter.
 Spec: `test/01_unit/compiler/driver/requested_entry_test_tree_spec.spl` (1/1).
 `driver_source_loading_spec` is 5/10 both with and without this change.
+
+
+## Addendum 2026-11-27 (lane work/w2-1-compiler-hir-mir-20261127)
+
+- Verified host unit spec `test/01_unit/compiler/driver/requested_entry_test_tree_spec.spl` (`1/1` passed, `0` failed in `--mode=interpreter`).
+- Aligned `.sdn` shard status from stale `open` to `fix-implemented-verification-pending` (Stage 2 native rebuild verification remains pending).

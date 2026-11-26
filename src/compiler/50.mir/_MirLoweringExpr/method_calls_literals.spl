@@ -38,9 +38,9 @@ use compiler.hir.ownership_types.{hir_type_requires_move, hir_type_ownership_is_
 use compiler.semantics.perf_facts.builtin_collection.{resolve_builtin_collection_operation}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
-use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir.mir_lowering_types.{MirLowering, MirError, MirMutRefArgWriteback, MirMutRefArgPrepared, MirMethodCallOperands}
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity_raw, mir_scalar_trait_owner_key_v1}
-use compiler.mir.mir_lowering_stmts.{mir_expr_kind_is_place}
+use compiler.mir.mir_lowering_stmts.{mir_expr_kind_is_place, mir_mut_ref_primitive_inner_v1}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.mir_instruction_support.{GpuBarrierScope, GpuMemoryScope}
 use std.io_runtime.{env_get_opt}
@@ -827,14 +827,15 @@ impl MirLowering:
             case _: ()
         if not first_param_is_owner:
             return None
-        val arg_operands = self.build_args_from_receiver(receiver_local, args, param_types)
+        val ufcs_pack = self.build_args_from_receiver_with_writebacks_v1(receiver_local, args, param_types, func_id)
         val func_operand = self.symbol_to_operand(func_id)
         val return_type = self.resolved_call_return_type(func_id)
-        val final_args = self.pad_trailing_default_args(func_operand, arg_operands)
+        val final_args = self.pad_trailing_default_args(func_operand, ufcs_pack.operands)
         var b = self.builder
         val result = b.emit_call(func_operand, final_args, return_type)
         self.builder = b
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, receiver_local)
+        self.emit_mut_ref_primitive_writebacks_v1(ufcs_pack.writebacks)
         if val result_local = result:
             self.remember_call_hir_return(result_local, func_id)
             return Some(result_local)
@@ -5516,18 +5517,18 @@ impl MirLowering:
                     method_param_types = self.erased_method_param_types_v1(method_id, args)
                 val raw_generic_flags = self.class_erased_raw_slot_flags_v1(method_id, method_param_types, args, 1)
                 val effective_method_param_types = mask_class_erased_raw_param_types_v1(method_param_types, raw_generic_flags)
-                val arg_operands = if wb_kind != 0:
-                    self.build_args_from_receiver(wb_receiver, args, effective_method_param_types)
+                val instance_pack = if wb_kind != 0:
+                    self.build_args_from_receiver_with_writebacks_v1(wb_receiver, args, effective_method_param_types, method_id)
                 else if has_prelowered_method_receiver:
                     # Predicate dispatch may pre-lower a receiver to prove
                     # whether stale resolved owner metadata must yield to
                     # primitive text. Reuse that value for a genuine custom
                     # instance method so a call-expression receiver is never
                     # evaluated twice.
-                    self.build_args_from_receiver(prelowered_method_receiver, args, effective_method_param_types)
+                    self.build_args_from_receiver_with_writebacks_v1(prelowered_method_receiver, args, effective_method_param_types, method_id)
                 else:
-                    self.lower_receiver_and_args(receiver, args, effective_method_param_types)
-                val adapted_arg_operands = self.adapt_class_erased_raw_operands_v1(arg_operands, raw_generic_flags)
+                    self.lower_receiver_and_args_with_writebacks_v1(receiver, args, effective_method_param_types, method_id)
+                val adapted_arg_operands = self.adapt_class_erased_raw_operands_v1(instance_pack.operands, raw_generic_flags)
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
                 # Pad omitted trailing defaulted params -- this arm calls
@@ -5551,6 +5552,7 @@ impl MirLowering:
                 # is an independent result (bool/int/Self/unit), never an
                 # implicit replacement for the receiver's owning field/slot.
                 self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+                self.emit_mut_ref_primitive_writebacks_v1(instance_pack.writebacks)
                 if val result_local = result:
                     self.remember_method_call_hir_return_operands_v1(result_local, method_id, adapted_arg_operands, Some(receiver))
                 else:
@@ -5566,41 +5568,66 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=trait method={method}\n")
                 val method_param_types = self.resolved_call_hir_param_types(method_id)
-                val arg_operands = if wb_kind != 0:
-                    self.build_args_from_receiver(wb_receiver, args, method_param_types)
+                val trait_pack = if wb_kind != 0:
+                    self.build_args_from_receiver_with_writebacks_v1(wb_receiver, args, method_param_types, method_id)
                 else if has_prelowered_method_receiver:
-                    self.build_args_from_receiver(prelowered_method_receiver, args, method_param_types)
+                    self.build_args_from_receiver_with_writebacks_v1(prelowered_method_receiver, args, method_param_types, method_id)
                 else:
-                    self.lower_receiver_and_args(receiver, args, method_param_types)
-                self.emit_scalar_or_resolved_trait_call_v1(method_id, arg_operands,
-                    wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+                    self.lower_receiver_and_args_with_writebacks_v1(receiver, args, method_param_types, method_id)
+                self.emit_scalar_or_resolved_trait_call_v1(method_id, trait_pack.operands,
+                    wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver, trait_pack.writebacks)
 
             case FreeFunction(func_id):
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=free method={method}\n")
-                val free_receiver = if wb_kind != 0:
-                    wb_receiver
-                else if has_prelowered_method_receiver:
-                    prelowered_method_receiver
-                else:
-                    self.lower_expr(receiver)
                 var selected_func_id = func_id
-                val free_owner = self.struct_value_syms.get(free_receiver.id)
-                if chr_method_shape and chr_has_custom_owner and free_owner != None and free_owner != "":
-                    val owner_method_key = self.struct_owner_method_key(free_owner ?? "", method)
-                    if self.struct_method_key_present_v1(owner_method_key):
-                        selected_func_id = self.struct_method_syms[owner_method_key]
                 val free_param_types = self.resolved_call_hir_param_types(func_id)
-                # `x.f()` -> `f(x)`: a native-trait first parameter (declared,
-                # or an erased `R: Trait` binder) receives the object, exactly
-                # as the direct-call argument path converts it. Only when the
-                # free function itself is the callee: an owner-method override
-                # above takes a concrete `self`.
-                val free_receiver_arg = if selected_func_id.id == func_id.id and free_param_types.len() > 0:
-                    self.coerce_native_trait_object(free_receiver, receiver, free_param_types[0])
-                else:
-                    free_receiver
-                val arg_operands = self.build_args_from_receiver(free_receiver_arg, args, free_param_types)
+                var free_mut_recv_matched = false
+                var free_mut_recv_wb_list: [MirMutRefArgWriteback] = []
+                var free_mut_recv_slot = LocalId(id: -1)
+                var free_mut_recv_inner_mir = MirType.i64()
+                var free_initial_operands: [MirOperand] = []
+                val defer_free_receiver_for_mut_ref = (wb_kind == 0 and not has_prelowered_method_receiver and
+                    not (chr_method_shape and chr_has_custom_owner) and free_param_types.len() > 0 and
+                    mir_mut_ref_primitive_inner_v1(free_param_types[0]).?)
+                if defer_free_receiver_for_mut_ref:
+                    val recv_prep = self.prepare_mut_ref_primitive_expr_v1(receiver, free_param_types[0], None)
+                    if recv_prep.matched:
+                        free_mut_recv_matched = true
+                        free_mut_recv_slot = recv_prep.slot
+                        free_mut_recv_inner_mir = recv_prep.inner_mir_type
+                        free_initial_operands = free_initial_operands.push(recv_prep.operand)
+                        if recv_prep.has_writeback:
+                            free_mut_recv_wb_list = free_mut_recv_wb_list.push(recv_prep.writeback)
+                var effective_wb_receiver = wb_receiver
+                if not free_mut_recv_matched:
+                    val free_receiver = if wb_kind != 0:
+                        wb_receiver
+                    else if has_prelowered_method_receiver:
+                        prelowered_method_receiver
+                    else:
+                        self.lower_expr(receiver)
+                    val free_owner = self.struct_value_syms.get(free_receiver.id)
+                    if chr_method_shape and chr_has_custom_owner and free_owner != None and free_owner != "":
+                        val owner_method_key = self.struct_owner_method_key(free_owner ?? "", method)
+                        if self.struct_method_key_present_v1(owner_method_key):
+                            selected_func_id = self.struct_method_syms[owner_method_key]
+                    if selected_func_id.id == func_id.id and free_param_types.len() > 0 and mir_mut_ref_primitive_inner_v1(free_param_types[0]).?:
+                        val recv_prep = self.prepare_mut_ref_primitive_expr_v1(receiver, free_param_types[0], Some(free_receiver))
+                        if recv_prep.matched:
+                            free_mut_recv_matched = true
+                            free_mut_recv_slot = recv_prep.slot
+                            free_mut_recv_inner_mir = recv_prep.inner_mir_type
+                            free_initial_operands = free_initial_operands.push(recv_prep.operand)
+                            if wb_kind == 0 and recv_prep.has_writeback:
+                                free_mut_recv_wb_list = free_mut_recv_wb_list.push(recv_prep.writeback)
+                    if not free_mut_recv_matched:
+                        val free_receiver_arg = if selected_func_id.id == func_id.id and free_param_types.len() > 0:
+                            self.coerce_native_trait_object(free_receiver, receiver, free_param_types[0])
+                        else:
+                            free_receiver
+                        free_initial_operands = free_initial_operands.push(mir_operand_copy(free_receiver_arg))
+                val free_pack = self.lower_explicit_call_args_with_writebacks_v1(free_initial_operands, args, free_param_types, 1, selected_func_id)
                 val func_operand = self.symbol_to_operand(selected_func_id)
                 val return_type = self.resolved_call_return_type(selected_func_id)
                 # Same receiver/self index-0 alignment as the InstanceMethod
@@ -5608,14 +5635,18 @@ impl MirLowering:
                 # the custom-owner override branch above can also swap
                 # `selected_func_id` to a real method whose params[0] is the
                 # synthetic `self` -- both cases align 1:1 with arg_operands).
-                val final_free_args = self.pad_trailing_default_args(func_operand, arg_operands)
+                val final_free_args = self.pad_trailing_default_args(func_operand, free_pack.operands)
                 var b = self.builder
                 val result = b.emit_call(func_operand, final_free_args, return_type)
+                if free_mut_recv_matched and wb_kind != 0:
+                    effective_wb_receiver = b.emit_load(mir_operand_copy(free_mut_recv_slot), free_mut_recv_inner_mir)
                 self.builder = b
                 # The callee mutates its receiver in place. Its return value
                 # is an independent result (bool/int/Self/unit), never an
                 # implicit replacement for the receiver's owning field/slot.
-                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, effective_wb_receiver)
+                self.emit_mut_ref_primitive_writebacks_v1(free_mut_recv_wb_list)
+                self.emit_mut_ref_primitive_writebacks_v1(free_pack.writebacks)
                 if val result_local = result:
                     self.remember_call_hir_return(result_local, selected_func_id)
                     result_local
@@ -5631,22 +5662,18 @@ impl MirLowering:
             case StaticMethod(type_id, method_id):
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=static method={method}\n")
-                var arg_operands: [MirOperand] = []
                 # A static method has no receiver slot: explicit argument i
                 # is declared parameter i.
                 val static_param_types = self.resolved_call_hir_param_types(method_id)
                 val raw_static_flags = self.class_erased_raw_slot_flags_v1(method_id, static_param_types, args, 0)
                 val effective_static_param_types = mask_class_erased_raw_param_types_v1(static_param_types, raw_static_flags)
-                var static_arg_index = 0
-                for arg in args:
-                    val arg_local = self.lower_method_call_arg(arg, effective_static_param_types, static_arg_index)
-                    arg_operands = arg_operands.push(mir_operand_copy(arg_local))
-                    static_arg_index = static_arg_index + 1
-                arg_operands = self.adapt_class_erased_raw_operands_v1(arg_operands, raw_static_flags)
+                val static_pack = self.lower_explicit_call_args_with_writebacks_v1([], args, effective_static_param_types, 0, method_id)
+                val arg_operands = self.adapt_class_erased_raw_operands_v1(static_pack.operands, raw_static_flags)
 
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
                 val result = self.emit_resolved_direct_call(method_operand, arg_operands, return_type, None, None)
+                self.emit_mut_ref_primitive_writebacks_v1(static_pack.writebacks)
                 self.remember_call_hir_return(result, method_id)
                 # mir_generic_static_ctor_result_method_unresolved_2026-11-05:
                 # `val b = Box.of(4); b.get()` -- a generic struct's return
@@ -5781,16 +5808,11 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-static method={method}\n")
                 if val resolved_static_method_id = static_method_id:
-                    var static_args: [MirOperand] = []
                     val name_static_param_types = self.resolved_call_hir_param_types(resolved_static_method_id)
                     val raw_name_static_flags = self.class_erased_raw_slot_flags_v1(resolved_static_method_id, name_static_param_types, args, 0)
                     val effective_name_static_param_types = mask_class_erased_raw_param_types_v1(name_static_param_types, raw_name_static_flags)
-                    var name_static_arg_index = 0
-                    for arg in args:
-                        val static_arg = self.lower_method_call_arg(arg, effective_name_static_param_types, name_static_arg_index)
-                        static_args.push(mir_operand_copy(static_arg))
-                        name_static_arg_index = name_static_arg_index + 1
-                    static_args = self.adapt_class_erased_raw_operands_v1(static_args, raw_name_static_flags)
+                    val name_static_pack = self.lower_explicit_call_args_with_writebacks_v1([], args, effective_name_static_param_types, 0, resolved_static_method_id)
+                    val static_args = self.adapt_class_erased_raw_operands_v1(name_static_pack.operands, raw_name_static_flags)
                     var static_return_type = self.resolved_call_return_type(resolved_static_method_id)
                     self.provider_method_materialize_v1("{static_receiver_name}::{method}")
                     if val static_result_name = self.struct_method_return_names.get("{static_receiver_name}::{method}"):
@@ -5805,6 +5827,7 @@ impl MirLowering:
                                                         static_result_symbol.id)))
                                         case _: ()
                     val static_result = self.emit_resolved_direct_call(self.symbol_to_operand(resolved_static_method_id), static_args, static_return_type, None, None)
+                    self.emit_mut_ref_primitive_writebacks_v1(name_static_pack.writebacks)
                     self.remember_call_hir_return(static_result, resolved_static_method_id)
                     self.remember_method_return_provenance(static_result, "{static_receiver_name}::{method}")
                     return static_result
@@ -5944,20 +5967,16 @@ impl MirLowering:
                             # with the same explicit-push construction used by the
                             # resolved helpers; the one-element generic literal is
                             # the exact Stage 3 receiver-loss trigger.
-                            var im_arg_operands: [MirOperand] = []
-                            im_arg_operands = im_arg_operands.push(mir_operand_copy(unresolved_receiver_local))
+                            var im_initial_operands: [MirOperand] = []
+                            im_initial_operands = im_initial_operands.push(mir_operand_copy(unresolved_receiver_local))
                             val im_param_types = self.resolved_call_hir_param_types(resolved_method_id)
                             val raw_im_flags = self.class_erased_raw_slot_flags_v1(resolved_method_id, im_param_types, args, 1)
                             val effective_im_param_types = mask_class_erased_raw_param_types_v1(im_param_types, raw_im_flags)
                             val prev_im_hir_bindings = erased_callback_hir_bindings_swap_v1(
                                 self.method_receiver_erased_hir_bindings_v1(unresolved_receiver_local, Some(receiver), effective_im_param_types))
-                            var im_arg_index = 0
-                            for arg in args:
-                                val im_arg_local = self.lower_method_call_arg(arg, effective_im_param_types, im_arg_index + 1)
-                                im_arg_operands = im_arg_operands.push(mir_operand_copy(im_arg_local))
-                                im_arg_index = im_arg_index + 1
+                            val im_pack = self.lower_explicit_call_args_with_writebacks_v1(im_initial_operands, args, effective_im_param_types, 1, resolved_method_id)
                             val _restored_im_hir_bindings = erased_callback_hir_bindings_swap_v1(prev_im_hir_bindings)
-                            im_arg_operands = self.adapt_class_erased_raw_operands_v1(im_arg_operands, raw_im_flags)
+                            val im_arg_operands = self.adapt_class_erased_raw_operands_v1(im_pack.operands, raw_im_flags)
                             val im_method_operand = self.symbol_to_operand(resolved_method_id)
                             val im_return_type = self.resolved_call_return_type(resolved_method_id)
                             # Full-array pad, receiver included -- same alignment
@@ -5971,6 +5990,7 @@ impl MirLowering:
                             # Keep the mutated receiver, independently of the
                             # method's declared return type and returned value.
                             self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+                            self.emit_mut_ref_primitive_writebacks_v1(im_pack.writebacks)
                             if val im_result_local = im_result:
                                 val updated_im_local = self.remember_method_call_hir_return_v1(im_result_local, resolved_method_id, Some(unresolved_receiver_local), Some(receiver))
                                 self.remember_method_return_provenance(updated_im_local, unresolved_method_key)
@@ -6802,14 +6822,15 @@ impl MirLowering:
                         elif target.id < 0:
                             self.error_fatal("ambiguous scalar trait method: {method}", Some(receiver.span))
                         else:
-                            val scalar_args = self.build_args_from_receiver(unresolved_receiver_local,
-                                args, self.resolved_call_hir_param_types(target))
-                            return self.emit_scalar_or_resolved_trait_call_v1(target, scalar_args,
-                                wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+                            val scalar_pack = self.build_args_from_receiver_with_writebacks_v1(unresolved_receiver_local,
+                                args, self.resolved_call_hir_param_types(target), target)
+                            return self.emit_scalar_or_resolved_trait_call_v1(target, scalar_pack.operands,
+                                wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver, scalar_pack.writebacks)
                 self.reject_unresolved_method_call_v1(receiver, method, "runtime-fallback", self.unresolved_method_lookup_detail_v1(method, unresolved_struct_name ?? "", declared_record_owner))
 
     me emit_scalar_or_resolved_trait_call_v1(method_id: SymbolId, arg_operands: [MirOperand],
-            wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64, wb_receiver: LocalId) -> LocalId:
+            wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64, wb_receiver: LocalId,
+            mut_writebacks: [MirMutRefArgWriteback] = []) -> LocalId:
         val method_operand = self.symbol_to_operand(method_id)
         val return_type = self.resolved_call_return_type(method_id)
         # Same receiver/self index-0 alignment as the InstanceMethod
@@ -6822,6 +6843,7 @@ impl MirLowering:
         # is an independent result (bool/int/Self/unit), never an
         # implicit replacement for the receiver's owning field/slot.
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+        self.emit_mut_ref_primitive_writebacks_v1(mut_writebacks)
         if val result_local = result:
             self.remember_method_call_hir_return_operands_v1(result_local, method_id, arg_operands, None)
         else:
@@ -6889,6 +6911,16 @@ impl MirLowering:
         else:
             ""
 
+    me build_args_from_receiver_with_writebacks_v1(receiver_local: LocalId, args: [HirCallArg], param_types: [HirType], callee_symbol: SymbolId = SymbolId(id: -1)) -> MirMethodCallOperands:
+        """Build arg operands and `mut` primitive writebacks from a pre-lowered receiver local."""
+        var initial_operands: [MirOperand] = []
+        initial_operands = initial_operands.push(mir_operand_copy(receiver_local))
+        val prev_hir_bindings = erased_callback_hir_bindings_swap_v1(
+            self.method_receiver_erased_hir_bindings_v1(receiver_local, None, param_types))
+        val call_pack = self.lower_explicit_call_args_with_writebacks_v1(initial_operands, args, param_types, 1, callee_symbol)
+        val _restored_hir_bindings = erased_callback_hir_bindings_swap_v1(prev_hir_bindings)
+        call_pack
+
     me build_args_from_receiver(receiver_local: LocalId, args: [HirCallArg], param_types: [HirType]) -> [MirOperand]:
         """Build arg operands starting from a pre-lowered receiver local.
 
@@ -6896,20 +6928,8 @@ impl MirLowering:
         avoid re-lowering the receiver HIR (which would duplicate side
         effects and re-run emit_gep/emit_load for the indexed slot).
         """
-        # Match lower_receiver_and_args: a one-element generic literal can
-        # disappear in the self-hosted compiler and erase the sole receiver
-        # of a zero-explicit-argument method call.
-        var arg_operands: [MirOperand] = []
-        arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
-        val prev_hir_bindings = erased_callback_hir_bindings_swap_v1(
-            self.method_receiver_erased_hir_bindings_v1(receiver_local, None, param_types))
-        var explicit_index = 0
-        for arg in args:
-            val arg_local = self.lower_method_call_arg(arg, param_types, explicit_index + 1)
-            arg_operands = arg_operands.push(mir_operand_copy(arg_local))
-            explicit_index = explicit_index + 1
-        val _restored_hir_bindings = erased_callback_hir_bindings_swap_v1(prev_hir_bindings)
-        arg_operands
+        val call_pack = self.build_args_from_receiver_with_writebacks_v1(receiver_local, args, param_types)
+        call_pack.operands
 
     me remember_method_return_provenance(result_local: LocalId, method_key: text):
         """Preserve owner-qualified aggregate/array identity on method results."""
@@ -7121,32 +7141,35 @@ impl MirLowering:
         know the implementor set and is a compile error."""
         self.trait_impl_owners_materialize_v1(trait_key)
         val owners = self.trait_impl_owners.get(trait_key) ?? []
-        # The implementor is chosen below, after the operands are lowered, so
-        # no declared parameter list is known here: arguments stay raw.
-        val arg_operands = self.lower_receiver_and_args(receiver, args, [])
         var has_generic_owner = false
         for owner in owners:
             if owner.starts_with("generic:"):
                 has_generic_owner = true
         if not self.trait_impl_closure_complete:
+            val _raw_operands = self.lower_receiver_and_args(receiver, args, [])
             self.error_fatal("trait-object call {trait_key}.{method}: this lowering does not cover the whole build closure (demand/incremental lane lowers dirty packages only), so the implementor set is unknown; stage2 devirtualizes trait objects only under whole-closure lowering", Some(receiver.span))
         elif has_generic_owner:
+            val _raw_operands = self.lower_receiver_and_args(receiver, args, [])
             self.error_fatal("trait-object call {trait_key}.{method}: a generic implementor (`impl<T> {trait_key} for ...`) is in the build closure; stage2 cannot devirtualize it", Some(receiver.span))
         elif owners.len() == 1:
             val impl_key = "{trait_key}::{owners[0]}::{method}"
             self.trait_impl_method_materialize_v1(impl_key)
             if self.trait_impl_methods.has(impl_key):
                 val method_id = self.trait_impl_methods[impl_key]
+                val method_param_types = self.resolved_call_hir_param_types(method_id)
+                val trait_pack = self.lower_receiver_and_args_with_writebacks_v1(receiver, args, method_param_types, method_id)
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
-                val final_args = self.pad_trailing_default_args(method_operand, arg_operands)
+                val final_args = self.pad_trailing_default_args(method_operand, trait_pack.operands)
                 var b = self.builder
                 val result = b.emit_call(method_operand, final_args, return_type)
                 self.builder = b
+                self.emit_mut_ref_primitive_writebacks_v1(trait_pack.writebacks)
                 # Devirtualized: counted so an archive-producing lane can refuse
                 # this module.
                 self.devirtualized_calls = self.devirtualized_calls + 1
-                if val result_local = result:
+                if result.?:
+                    val result_local = result.unwrap()
                     self.remember_call_hir_return(result_local, method_id)
                     return result_local
                 var bv = self.builder
@@ -7154,9 +7177,12 @@ impl MirLowering:
                 bv.emit_const(void_temp, MirConstValue.Int(0), MirType.i64())
                 self.builder = bv
                 return void_temp
+            val _raw_operands = self.lower_receiver_and_args(receiver, args, [])
             self.error_fatal("trait-object call {trait_key}.{method}: implementor {owners[0]} has no `{method}` (default trait methods on trait objects are not supported by stage2)", Some(receiver.span))
         elif owners.len() > 1:
+            val _raw_operands = self.lower_receiver_and_args(receiver, args, [])
             self.error_fatal("trait-object call {trait_key}.{method}: {owners.len()} implementors in the build closure and stage2 objects carry no runtime type identity; dynamic trait dispatch is unsupported (bug stage2_trait_typed_receiver_method_unresolved_2026-10-10)", Some(receiver.span))
+        val _trap_operands = self.lower_receiver_and_args(receiver, args, [])
         var bp = self.builder
         val panic_msg = bp.emit_const_str("trait method {trait_key}.{method} called, but no implementation of {trait_key} is in the build closure")
         val panic_op = MirOperand(kind: MirOperandKind.Const(
