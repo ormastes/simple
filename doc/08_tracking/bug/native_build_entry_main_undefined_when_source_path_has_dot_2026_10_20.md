@@ -111,3 +111,9 @@ repro under `<tmp>/dot.1/` still needs a rebuilt producer.
 
 - **Classification:** `KEPT-WITH-REASON`
 - **Disposition:** Kept `scripts/check/check-stage-binaries-runnable.shs:339,712` (`# @workaround bug=native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20`) and the underscore temp/probe paths (`${SELF_NAME}_XXXXXX`, `probe_$_n`) intact. While the source fix (`PR #4033` + 2026-11-13 Windows fix) is in `src/compiler/80.driver/driver_entry_closure_core.spl` and `src/compiler/00.common/module_path_naming.spl`, native Stage 3 verification under `<tmp>/dot.1/` remains pending (`bug_db.sdn` `fix-implemented-verification-pending`), and `check-stage-binaries-runnable.shs` also probes tracked/historical Stage 1/2 binaries (`bootstrap/**/simple`, `--rev`) predating PR #4033.
+
+## WA-P9 Audit (2026-11-26)
+
+- **Source & driver verification:** Confirmed `module_canonical_fold_name`, `module_surface_admitted_logical_id_v1` (`src/compiler/80.driver/driver_source_parse_streaming.spl`), `driver_entry_closure_core.spl`, and `core_codegen.spl` uniformly preserve canonical identity for dotted paths.
+- **Checks run on `release/1.0.0`:** `dotted_source_entry_identity_spec.spl` (9/9 pass), `module_canonical_fold_name_spec.spl` (4/4 pass), `scripts/check/check-stage-binaries-runnable.shs --selftest` (11/11 fixtures pass), `sh -n scripts/check/check-stage-binaries-runnable.shs` (pass).
+- **Script disposition:** Kept `scripts/check/check-stage-binaries-runnable.shs:339,712` (`# @workaround bug=native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20`); historical/tracked stage binaries and host `$TMPDIR` probing still depend on it until Stage 3 native `<tmp>/dot.1/` verification qualifies rebuilt producers.

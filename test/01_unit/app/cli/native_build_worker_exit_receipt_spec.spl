@@ -1,0 +1,116 @@
+# @cover src/app/cli/native_build_worker_entry.spl 80%
+# @cover src/compiler/80.driver/driver_build/native_file_worker_v1.spl 50%
+"""
+# Native-build shard worker early failure exit receipts (BUG-WIN-HIR-WORKER-DIAGNOSTICS-20261010)
+
+Verifies that HIR and MIR shard children publish bounded failure causes and
+exit receipts through `native_build_worker_entry` and all worker dispatchers
+even when failures occur before `SIMPLE_HIR_SHARD` is populated or outside
+`run_native_build_worker`.
+"""
+
+use std.spec.*
+use app.cli.native_build_worker_entry.{
+    run_native_build_worker_entry, native_build_worker_publish_failure_receipt_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_error_reason_publish_v1, native_file_worker_error_reason_read_v1}
+use app.io.env_ops.{env_snapshot, env_clear, env_set, env_restore}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_read, getpid}
+
+fn _fresh_shard_queue(name: text) -> text:
+    val dir = "build/spec_nb_worker_{name}_{getpid()}"
+    val _rm = dir_remove_all(dir)
+    val _mk = dir_create_all(dir)
+    dir
+
+describe "native-build worker early failure receipts":
+    """
+    Purpose: verify early and dispatched worker failure receipt publishing across shard queues.
+    Audience: bootstrap and native-build engineers debugging silent Windows child exits.
+    """
+    it "publishes HIR profile rejection to HIR shard queue before compile":
+        """Verifies profile rejection is recorded before cli_native_build executes."""
+        val queue = _fresh_shard_queue("hir_profile")
+        val saved = env_snapshot()
+        env_clear()
+        val _s1 = env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
+        val _s2 = env_set("SIMPLE_HIR_WORKER_PROFILE_V1", "1")
+        val _s3 = env_set("SIMPLE_HIR_SHARD_QUEUE", queue)
+        val _s4 = env_set("SIMPLE_HIR_SHARD_OWNER", "0/4@1")
+        val rc = run_native_build_worker_entry(["--entry", "missing.spl", "--hir-shard=1/1"])
+        val reason = native_file_worker_error_reason_read_v1(queue, "0/4@1")
+        env_restore(saved)
+        val _rm = dir_remove_all(queue)
+        expect(rc).to_equal(1)
+        expect(reason).to_contain("HIR worker profile rejected:")
+
+    it "falls back to --hir-shard flag owner on early policy handoff rejection":
+        val queue = _fresh_shard_queue("hir_handoff")
+        val saved = env_snapshot()
+        env_clear()
+        val _s1 = env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
+        val _s2 = env_set("SIMPLE_HIR_SHARD_QUEUE", queue)
+        val rc = run_native_build_worker_entry(["--entry", "missing.spl", "--hir-shard=2/8"])
+        val reason = native_file_worker_error_reason_read_v1(queue, "2/8")
+        env_restore(saved)
+        val _rm = dir_remove_all(queue)
+        expect(rc).to_equal(1)
+        expect(reason).to_contain("native-build worker rejected its internal policy handoff:")
+
+    it "publishes internal entrypoint refusal when worker marker env is missing":
+        val queue = _fresh_shard_queue("hir_marker")
+        val saved = env_snapshot()
+        env_clear()
+        val _s1 = env_set("SIMPLE_HIR_SHARD_QUEUE", queue)
+        val _s2 = env_set("SIMPLE_HIR_SHARD_OWNER", "3/8@0")
+        val rc = run_native_build_worker_entry(["--hir-shard=3/8"])
+        val reason = native_file_worker_error_reason_read_v1(queue, "3/8@0")
+        env_restore(saved)
+        val _rm = dir_remove_all(queue)
+        expect(rc).to_equal(1)
+        expect(reason).to_contain("internal entrypoint")
+
+    it "publishes HIR and MIR receipts for unit children while preserving first module reason":
+        val hir_q = _fresh_shard_queue("unit_hir")
+        val mir_q = _fresh_shard_queue("unit_mir")
+        val _pre = native_file_worker_error_reason_publish_v1(hir_q, "0/4@unit", "module=foo failed")
+        val saved = env_snapshot()
+        env_clear()
+        val _s1 = env_set("SIMPLE_HIR_SHARD_QUEUE", hir_q)
+        val _s2 = env_set("SIMPLE_HIR_SHARD_OWNER", "0/4@unit")
+        val _s3 = env_set("SIMPLE_MIR_SHARD_QUEUE", mir_q)
+        val _s4 = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@unit")
+        val ok = native_build_worker_publish_failure_receipt_v1(["--hir-shard=0/4"], 2, "")
+        val hir_reason = native_file_worker_error_reason_read_v1(hir_q, "0/4@unit")
+        val mir_reason = native_file_worker_error_reason_read_v1(mir_q, "0/1@unit")
+        env_restore(saved)
+        val _rm1 = dir_remove_all(hir_q)
+        val _rm2 = dir_remove_all(mir_q)
+        assert_true(ok)
+        expect(hir_reason).to_equal("module=foo failed")
+        expect(mir_reason).to_contain("mir-shard child exited 2 without publishing a cause")
+
+    it "skips receipt publication on zero exit code":
+        val queue = _fresh_shard_queue("zero_exit")
+        val saved = env_snapshot()
+        env_clear()
+        val _s1 = env_set("SIMPLE_HIR_SHARD_QUEUE", queue)
+        val _s2 = env_set("SIMPLE_HIR_SHARD_OWNER", "0/4@0")
+        val ok = native_build_worker_publish_failure_receipt_v1(["--hir-shard=0/4"], 0, "ignored")
+        val reason = native_file_worker_error_reason_read_v1(queue, "0/4@0")
+        env_restore(saved)
+        val _rm = dir_remove_all(queue)
+        assert_false(ok)
+        expect(reason).to_equal("")
+
+    it "wires shared failure receipt publisher across all worker entrypoints":
+        val entry_src = file_read("src/app/cli/native_build_worker_entry.spl")
+        val worker_src = file_read("src/app/cli/native_build_worker.spl")
+        val boot_src = file_read("src/app/cli/bootstrap_main.spl")
+        val main_src = file_read("src/app/cli/_CliMain/main_and_help.spl")
+        val nb_src = file_read("src/app/cli/native_build_main.spl")
+        expect(entry_src).to_contain("native_build_worker_publish_failure_receipt_v1")
+        expect(worker_src).to_contain("native_build_worker_publish_failure_receipt_v1")
+        expect(boot_src).to_contain("native_build_worker_publish_failure_receipt_v1")
+        expect(main_src).to_contain("native_build_worker_publish_failure_receipt_v1")
+        expect(nb_src).to_contain("native_file_worker_env_failure_receipt_publish_v1")

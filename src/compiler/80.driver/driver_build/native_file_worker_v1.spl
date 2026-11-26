@@ -715,3 +715,42 @@ pub fn native_file_worker_exit_receipt_publish_v1(queue: text, owner: text, labe
     if code == 0 or queue == "" or owner == "":
         return false
     native_file_worker_error_reason_publish_v1(queue, owner, native_file_worker_exit_receipt_reason_v1(label, code))
+
+fn _native_file_worker_flag_value_v1(args: [text], prefix: text) -> text:
+    for arg in args:
+        if arg.starts_with(prefix):
+            return arg.substring(prefix.byte_len(), arg.byte_len())
+    ""
+
+fn _native_file_worker_publish_one_failure_v1(queue: text, owner: text, label: text, code: i64, reason: text) -> bool:
+    if code == 0 or queue == "" or owner == "":
+        return false
+    var wrote = false
+    if reason != "":
+        wrote = native_file_worker_error_reason_publish_v1(queue, owner, reason)
+    if native_file_worker_exit_receipt_publish_v1(queue, owner, label, code):
+        wrote = true
+    wrote
+
+# Shared shard failure receipt publisher for early worker exit paths before or
+# outside `run_native_build_worker` (BUG-WIN-HIR-WORKER-DIAGNOSTICS-20261010).
+# reason: shard exit receipt boundary accepts process exit status code and reason text
+@allow(primitive_api)
+pub fn native_file_worker_env_failure_receipt_publish_v1(args: [text], code: i64, reason: text) -> bool:
+    if code == 0:
+        return false
+    val hir_queue = env_get_nullable("SIMPLE_HIR_SHARD_QUEUE") ?? ""
+    var hir_owner = env_get_nullable("SIMPLE_HIR_SHARD_OWNER") ?? ""
+    if hir_owner == "":
+        hir_owner = _native_file_worker_flag_value_v1(args, "--hir-shard=")
+    if hir_owner == "":
+        hir_owner = env_get_nullable("SIMPLE_HIR_SHARD") ?? ""
+    val mir_queue = env_get_nullable("SIMPLE_MIR_SHARD_QUEUE") ?? ""
+    var mir_owner = env_get_nullable("SIMPLE_MIR_SHARD_OWNER") ?? ""
+    if mir_owner == "":
+        mir_owner = _native_file_worker_flag_value_v1(args, "--mir-shard=")
+    if mir_owner == "":
+        mir_owner = env_get_nullable("SIMPLE_MIR_SHARD") ?? ""
+    val hir_ok = _native_file_worker_publish_one_failure_v1(hir_queue, hir_owner, "hir-shard", code, reason)
+    val mir_ok = _native_file_worker_publish_one_failure_v1(mir_queue, mir_owner, "mir-shard", code, reason)
+    hir_ok or mir_ok
