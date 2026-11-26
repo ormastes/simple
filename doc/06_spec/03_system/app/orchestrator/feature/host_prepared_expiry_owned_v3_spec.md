@@ -1,14 +1,13 @@
 # Owner-bearing prepared helper expiry V3
 
 Status: **AUTHORED SOURCE-ONLY NOT_RUN**. No tests, builds or native executions
-were run. Requirement trace: `HOST-HELPER-01`, `HOST-HELPER-02`, `HOST-HELPER-03`.
+were run. Requirement trace: `HOST-HELPER-01`, `HOST-HELPER-02`, `HOST-HELPER-03`,
+and `AT-HOST-05` for the journal orderings below.
 
 Spec: `test/03_system/app/orchestrator/feature/host_prepared_expiry_owned_v3_spec.spl`.
 API: `host_capacity_owner_expire_prepared_owned_v3` in
 `src/lib/nogc_sync_mut/orchestration/host_capacity_owner_v1.spl`.
-The new API was inspected in the separate Host worktree
-`/home/yoon/dev/simple-parallel-podman-ci-20261107`; its integration is a
-prerequisite for executing this spec from the Windows worktree.
+The API is present on `release/1.0.0`.
 
 The specs reuse the actual signed `host_helper_fixture_v1`, canonical helper
 request encode/decode, real helper preparation and real signed begin path.
@@ -26,7 +25,12 @@ The successful case creates a second genuinely signed sibling helper, then
 checks that both its reservation and the parent reservation remain unchanged
 and charged. It checks the returned journal's cancelled operation, incremented
 sequence, unchanged lease identity, and ledger revision equal to sequence plus
-one. Every case closes the actual returned owner rather than a stale input copy.
+one. The original signed execution request arrives one monotonic tick after
+expiry. It must return no lease and preserve the cancelled operation, released
+capacity, and exact owner. In the opposite ordering, a signed begin consumes
+the reservation first. Expiry and replay of the authorization preserve the
+executing state and charge and yield no second lease. Every case closes the
+actual returned owner.
 
 Scope is the generic expiry contract through the real Linux signed journal
 fixture. Beginning helper execution here records ownership and a signed lease;

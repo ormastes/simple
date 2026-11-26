@@ -11,6 +11,7 @@ use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1,
     host_capacity_owner_expire_prepared_owned_v3, host_capacity_owner_close_v1}
 use std.common.contracts.orchestration.host_capacity_v1.{HostReservationV1,
     HostReservationStateV1, host_available_capacity_v1}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
 use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
 use std.nogc_sync_mut.io_runtime.dir_remove
 
@@ -19,6 +20,11 @@ fn prepared_expiry_prepare_v3(fixture: HostHelperFixtureV1) -> HostHelperPrepare
     val request = host_helper_request_decode_v1(bytes).unwrap()
     host_helper_prepare_v1(fixture.owner, request, fixture.policy, fixture.scope,
         host_helper_clock_v1(), host_helper_clock_v1)
+
+fn prepared_expiry_late_clock_v3() -> HostReservationAuthorizationContextV1:
+    var clock = host_helper_clock_v1()
+    clock.monotonic_ms = 1001
+    clock
 
 fn prepared_expiry_row_v3(owner: HostCapacityOwnerV1, operation_id: text) -> HostReservationV1:
     for row in owner.ledger.reservations:
@@ -55,6 +61,7 @@ describe "Owner-bearing prepared helper expiry V3":
         dir_remove(fixture.root, true)
 
     it "expires only the selected prepared helper at its deadline and preserves parent and sibling charge":
+        # @req AT-HOST-05
         step("Prepare two signed helpers and use the returned committed owner to check one exact release")
         val fixture = host_helper_fixture_v1()
         val first = prepared_expiry_prepare_v3(fixture)
@@ -88,10 +95,25 @@ describe "Owner-bearing prepared helper expiry V3":
         expect(after.cpu_millis).to_equal(before.cpu_millis + fixture.request.intent.reservation.cpu_millis)
         expect(after.memory_bytes).to_equal(before.memory_bytes + fixture.request.intent.reservation.memory_bytes)
         expect(expired.owner.ledger.reservations.len()).to_equal(second.owner.ledger.reservations.len())
-        expect(host_capacity_owner_close_v1(expired.owner).unwrap()).to_equal(true)
+        step("Present the original signed execute authorization after the timer wins")
+        val late_clock = prepared_expiry_late_clock_v3()
+        expect(late_clock.monotonic_ms).to_equal(deadline + 1)
+        val late = host_helper_begin_v1(expired.owner, fixture.request, first.receipt.unwrap(),
+            fixture.execution_signed, fixture.execution_approval, fixture.policy, fixture.scope,
+            late_clock, prepared_expiry_late_clock_v3)
+        expect(late.error).to_equal("helper-execution-reconciliation-required")
+        expect(late.lease.is_none()).to_equal(true)
+        prepared_expiry_same_owner_v3(late.owner, expired.owner)
+        expect(distributed_operation_journal_lookup_v2(late.owner.journal,
+            fixture.request.operation.id).unwrap().state).to_equal("cancelled")
+        val remaining = host_available_capacity_v1(late.owner.ledger).unwrap()
+        expect(remaining.cpu_millis).to_equal(after.cpu_millis)
+        expect(remaining.memory_bytes).to_equal(after.memory_bytes)
+        expect(host_capacity_owner_close_v1(late.owner).unwrap()).to_equal(true)
         dir_remove(fixture.root, true)
 
     it "refuses expiry of an executing helper and keeps its actual charge":
+        # @req AT-HOST-05
         step("Begin genuine signed execution ownership without launching a helper process then try the preparation timer")
         val fixture = host_helper_fixture_v1()
         val prepared = prepared_expiry_prepare_v3(fixture)
@@ -115,7 +137,19 @@ describe "Owner-bearing prepared helper expiry V3":
         val after = host_available_capacity_v1(denied.owner.ledger).unwrap()
         expect(after.cpu_millis).to_equal(before.cpu_millis)
         expect(after.memory_bytes).to_equal(before.memory_bytes)
-        expect(host_capacity_owner_close_v1(denied.owner).unwrap()).to_equal(true)
+        step("Replay the original signed execute authorization without creating a second lease")
+        val replay = host_helper_begin_v1(denied.owner, fixture.request, prepared.receipt.unwrap(),
+            fixture.execution_signed, fixture.execution_approval, fixture.policy, fixture.scope,
+            host_helper_clock_v1(), host_helper_clock_v1)
+        expect(replay.error).to_equal("helper-execution-reconciliation-required")
+        expect(replay.lease.is_none()).to_equal(true)
+        prepared_expiry_same_owner_v3(replay.owner, denied.owner)
+        expect(distributed_operation_journal_lookup_v2(replay.owner.journal,
+            fixture.request.operation.id).unwrap().state).to_equal("executing")
+        val remaining = host_available_capacity_v1(replay.owner.ledger).unwrap()
+        expect(remaining.cpu_millis).to_equal(before.cpu_millis)
+        expect(remaining.memory_bytes).to_equal(before.memory_bytes)
+        expect(host_capacity_owner_close_v1(replay.owner).unwrap()).to_equal(true)
         dir_remove(fixture.root, true)
 
     it "retains the unchanged owner for missing operations and invalid timer values":
