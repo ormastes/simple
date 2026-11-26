@@ -917,12 +917,15 @@ fn use_warning_seen(key: String) -> bool {
 
 /// A module whose surface cannot be enumerated statically: it re-exports via a
 /// glob (`export use x.*`) or a bare `export use {..}` that pulls from siblings.
+/// A plain glob import (`use x.*`) is opaque too: the loader publishes what it
+/// pulls in transitively (driver_source_pipeline_impl is two such lines).
 /// Checking such a module would produce false positives, so we skip it.
 fn module_surface_is_opaque(items: &[Node]) -> bool {
     items.iter().any(|item| match item {
         Node::ExportUseStmt(export_stmt) => {
             matches!(export_stmt.target, ImportTarget::Glob) || export_stmt.path.segments.is_empty()
         }
+        Node::UseStmt(use_stmt) => matches!(use_stmt.target, ImportTarget::Glob),
         _ => false,
     })
 }
@@ -1152,6 +1155,33 @@ pub(crate) fn is_unprovided_use_error(e: &CompileError) -> bool {
 /// surface depends on the host and is not a complete provided set.
 fn source_is_host_gated(src: &str) -> bool {
     src.lines().any(|l| l.starts_with("@when(") || l.starts_with("@cfg("))
+}
+
+fn use_list_warnings_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none())
+}
+
+/// `SIMPLE_STRICT_USE=1` turns an unprovided braced use name into a hard error.
+fn strict_use_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SIMPLE_STRICT_USE").is_ok_and(|v| v == "1"))
+}
+
+/// Default (non-strict) lane: an unprovided-use rejection is reported once as a
+/// `[use-warning]` and loading continues. ponytail: warn-only until the
+/// tree-wide census of modules that re-expose braced imports is empty.
+fn unprovided_use_outcome(r: Result<(), CompileError>) -> Result<(), CompileError> {
+    match r {
+        Err(e) if !strict_use_enabled() => {
+            let msg = e.to_string();
+            if use_list_warnings_enabled() && !use_warning_seen(msg.clone()) {
+                eprintln!("[use-warning] {msg}");
+            }
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 /// Reject braced `use` names the resolved module does not provide. The loader
@@ -1445,7 +1475,7 @@ pub fn load_and_merge_module(
                 decrement_load_depth();
                 return Err(e);
             }
-            if let Err(e) = check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided) {
+            if let Err(e) = unprovided_use_outcome(check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided)) {
                 clear_partial_module_exports(&module_path);
                 unmark_module_loading(&module_path);
                 decrement_load_depth();
@@ -1874,7 +1904,7 @@ pub fn load_and_merge_module(
         decrement_load_depth();
         return Err(e);
     }
-    if let Err(e) = check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names) {
+    if let Err(e) = unprovided_use_outcome(check_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names)) {
         clear_partial_module_exports(&module_path);
         unmark_module_loading(&module_path);
         decrement_load_depth();
