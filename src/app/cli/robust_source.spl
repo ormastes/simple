@@ -13,7 +13,8 @@ use std.io_runtime.{is_dir, dir_walk}
 use compiler.semantics.lint.bound_origin_facts.{bound_origin_inventory_text, bound_origin_inventory_sdn, bound_origin_boundaries_text, bound_origin_inventory_text_of, bound_origin_inventory_sdn_of, bound_origin_boundaries_text_of, BoundOriginFact}
 use compiler.semantics.lint.hir_origin_table.{hir_origin_table_for_module, hir_origin_table_facts}
 use compiler.common.config.{Logger}
-use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend.{parse_full_frontend_stage4_streaming}
+use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1, transient_array_scope_pause_v1, transient_array_scope_end_v1, transient_heap_promote_v1}
 use compiler.core.parser.{parser_has_errors}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
@@ -72,16 +73,30 @@ fn _robust_lints_text(paths: [text], sources: [text]) -> text:
     out
 
 # HIR facts of one file as reference-shaped rows (origin := root_origin);
-# None when the file does not parse.
+# None when the file does not parse. Everything per-file (parser graph is
+# reclaimed by the streaming parse scope; HIR and the origin table by the
+# lowering scope below) is freed once the facts are emitted, so the peak
+# footprint no longer grows with the file count. Only the small fact rows are
+# promoted out. If the scope is unavailable the file is lowered unscoped.
 fn _robust_hir_facts(source: text, path: text) -> [BoundOriginFact]?:
-    val parsed = parse_full_frontend(source, path, "robust_hir", Logger(level: 0))
+    val parsed = parse_full_frontend_stage4_streaming(source, path, "robust_hir", Logger(level: 0))
     if parser_has_errors():
         return None
+    val scoped = transient_array_scope_begin_v1()
     var lowering = HirLowering.with_filename(path)
     val hir = lowering.lower_module(parsed)
     var out: [BoundOriginFact] = []
     for r in hir_origin_table_facts(hir_origin_table_for_module(hir)):
         out.push(BoundOriginFact(line_num: r.line_num, function: r.function, subject: r.subject, origin: r.root_origin, boundary: r.boundary))
+    if not scoped:
+        return Some(out)
+    if not transient_array_scope_pause_v1():
+        transient_array_scope_end_v1()
+        return None
+    val kept = transient_heap_promote_v1<[BoundOriginFact]>(out)
+    val ended = transient_array_scope_end_v1()
+    if not kept or not ended:
+        return None
     Some(out)
 
 fn _robust_render_hir(surface: text, paths: [text], sources: [text]) -> text?:

@@ -76,3 +76,43 @@ under `TODO(seed, P2)` in
 Output is byte-identical. Peak RSS is 3x higher on the JIT path (JIT code plus
 the whole frontend compiled at once). That is recorded here as a perf regression
 to follow up, not fixed in this change.
+
+## Follow-up: JIT peak RSS (2026-11-27, branch work/robust-jit-rss-20261127)
+Status: verification-pending (fix landed, not natively verified)
+
+The 2458 MB peak is NOT only fixed JIT overhead. Per-file probe
+(`rt_process_rss_kib` every 10 files over the 158 `.spl` under
+`test/01_unit/compiler/lint`): about 1250 MB floor (JIT code plus the frontend
+compiled at once, reached in the first ~25 s) and then roughly 7 MB per file on
+top. Parse alone grows ~4.7 MB/file, lowering adds ~2 MB/file. Retention scales
+with source size (~500 bytes per source byte); parsing the same file 150 times
+grows the same, `ast_reset()` alone does not grow. The interpreter does not
+grow (refcount frees per-file data); only the JIT keeps the parser graph, HIR
+module and origin table alive.
+
+Fix (`src/app/cli/robust_source.spl`, `_robust_hir_facts`): parse with
+`parse_full_frontend_stage4_streaming` (its transient scope reclaims parser
+scratch), then run lowering + origin table + fact rows inside a transient array
+scope and promote only the fact rows before ending it. Same pattern as
+`src/app/compiler_entrypoint/inventory_scratch.spl`. If the scope is
+unavailable the file is lowered unscoped.
+
+`run_robust(["boundaries","--source","hir", <dir>])` via a `main` driver on the
+seed JIT (PowerShell `PeakWorkingSet64`, Windows, shared box):
+
+| files | before wall / RSS | after wall / RSS |
+|---|---|---|
+| 1 | 24 s / 1376 MB | 22 s / 1366 MB |
+| 8 | 24 s / 1344 MB | 23 s / 1356 MB |
+| 32 | 25 s / 1426 MB | 25 s / 1351 MB |
+| 158 (whole dir) | 33 s / 2438 MB | 33 s / 1397 MB |
+
+Output of the whole-dir run is byte-identical before and after. Remaining
+~1.2-1.4 GB is the fixed JIT floor (the 1-file run costs the same); remaining
+per-file growth is ~1-3 MB (the promoted parser module). Bound:
+`sh scripts/check/check-robust-hir-rss.shs [simple]` runs
+`test/01_unit/app/cli/robust_hir_rss_probe.spl` on the JIT (24 parses of
+compiler-sized files): PASS 84 MB with the scopes, FAIL 554 MB without. It is a
+probe with `main`, not a spec, because the test runner interprets specs and the
+interpreter shows no retention. Specs `bound_origin_facts_spec`,
+`robust_source_parity_spec`, `origin_sif_summary_spec` stay green.

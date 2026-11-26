@@ -1,0 +1,47 @@
+# Memory probe for `simple robust --source hir` (not a spec: the test runner
+# interprets specs, and the interpreter frees per-file data by refcount, so only
+# a JIT run with a `main` can show the retention). Run by
+# scripts/check/check-robust-hir-rss.shs. Prints one verdict line.
+use std.io_runtime.{file_read}
+use app.cli.robust_source.{robust_render, robust_source_available}
+
+extern fn rt_process_rss_kib() -> i64
+
+val RSS_PROBE_ROUNDS = 4
+# Unscoped JIT retained ~23 MB per file here, scoped ~3 MB; allow 6 MB.
+val RSS_PROBE_MB_PER_FILE = 6
+
+fn main():
+    # Retention scales with source size (about 500 bytes per source byte), so
+    # probe real compiler-sized inputs rather than the tiny robust fixtures.
+    val base = ["test/01_unit/compiler/lint/bound_late_cast_spec.spl", "src/compiler/35.semantics/lint/hir_origin_table.spl", "src/compiler/35.semantics/lint/bound_origin_facts.spl"]
+    var paths: [text] = []
+    for _r in 0..2:
+        for b in base:
+            paths.push(b)
+    var sources: [text] = []
+    for p in paths:
+        sources.push(file_read(p))
+    if not robust_source_available("hir"):
+        print "RSS-PROBE FAIL hir source unavailable"
+        return
+    val warm = robust_render("boundaries", "hir", paths, sources)
+    if not warm.?:
+        print "RSS-PROBE FAIL warm render is None"
+        return
+    val before_mb = rt_process_rss_kib() / 1024
+    var round = 0
+    while round < RSS_PROBE_ROUNDS:
+        val again = robust_render("boundaries", "hir", paths, sources)
+        if again.unwrap() != warm.unwrap():
+            print "RSS-PROBE FAIL render differs on round {round}"
+            return
+        round = round + 1
+    val grown_mb = rt_process_rss_kib() / 1024 - before_mb
+    val files = RSS_PROBE_ROUNDS * paths.len()
+    val limit_mb = files * RSS_PROBE_MB_PER_FILE
+    if grown_mb < limit_mb:
+        print "RSS-PROBE PASS grew {grown_mb} MB over {files} files (limit {limit_mb} MB)"
+    else:
+        print "RSS-PROBE FAIL grew {grown_mb} MB over {files} files (limit {limit_mb} MB)"
+main()
