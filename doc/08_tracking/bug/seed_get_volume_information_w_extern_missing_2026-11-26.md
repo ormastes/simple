@@ -21,3 +21,14 @@ the DACL must be readable and non-NULL for every dir, writable dirs must read ba
 low label, readonly dirs must carry the reader ACE and no low label. It is untested on
 a FAT/exFAT volume. Fix: add `GetVolumeInformationW` to `NAMES` and dispatch, then
 check the 0x8 flag for every dir in `_acl_refusal_v1`.
+
+## Status: FIXED (2026-11-26)
+
+`GetVolumeInformationW` and `GetVolumePathNameW` are now registered in
+`interpreter_extern/windows_abi.rs` (kernel32 link block, `NAMES`, dispatch). The
+native-link prefix list in `native_project/tools.rs` already admits both via `Get`.
+Both are declared in `io/windows_volume_abi.spl`, wrapped by
+`windows_volume_persistent_acls_v1`, and `_acl_refusal_v1` in `containment_launch_v1.spl`
+now refuses with `containment-volume-no-acl` when `FILE_PERSISTENT_ACLS` (0x8) is clear,
+for readonly and writable dirs alike. The DACL probe stays as the secondary check.
+Untested on a real FAT/exFAT volume (none on the evidence host); C: reports 0x8.

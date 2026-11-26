@@ -10,6 +10,7 @@ use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms, thread_sleep}
 use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{SosixWindowsTokenV1, sosix_windows_restricted_token_open_v1, sosix_windows_restricted_token_close_v1}
 use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_wide_v1, sec_read_ptr_v1, sec_get_dacl_v1, sec_label_rid_v1, SEC_LOW_INTEGRITY_RID_V1, sec_sid_from_text_v1, sec_sid_equal_v1, sec_u8_v1, sec_u16_v1, sec_u32_v1}
 use std.nogc_sync_mut.io.dir_ops.{is_dir}
+use std.nogc_sync_mut.io.windows_volume_abi.{windows_volume_persistent_acls_v1}
 use std.nogc_sync_mut.sosix.containment_types_v1.{SOSIX_CONTAIN_REASON_WRITABLE_NOT_GRANTED_V1, SOSIX_CONTAIN_REASON_READONLY_LOW_LABEL_V1, SOSIX_CONTAIN_REASON_READONLY_NOT_GRANTED_V1}
 use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{sosix_windows_reader_sid_v1}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{CreateFileW, GetFileInformationByHandleEx, CloseHandle, windows_abi_handle_is_invalid}
@@ -26,9 +27,9 @@ fn _support_v1() -> SosixContainSupportV1:
         kill_all_descendants: yes, write_confinement: yes, read_confinement: no,
         network_isolation: no, pid_isolation: no, root_remap: no, unprivileged: yes)
 
-# Persistent ACLs are probed by behaviour, not by a volume flag: a path whose DACL cannot be
+# Secondary persistent-ACL probe (the volume flag is primary): a path whose DACL cannot be
 # read, or reads as absent (a NULL DACL grants everyone), cannot carry the grants this
-# mechanism depends on, so the request is refused. Untested on a FAT/exFAT volume here.
+# mechanism depends on, so the request is refused.
 fn _path_has_dacl_v1(path: text) -> bool:
     val slot = sec_alloc_v1(8)
     if slot == 0: return false
@@ -38,14 +39,11 @@ fn _path_has_dacl_v1(path: text) -> bool:
     sec_free_v1(slot)
     present
 
-# ponytail: arch 4.2 names FILE_PERSISTENT_ACLS (0x8 from GetVolumeInformationW) as the check.
-# Measured on this seed: declaring and calling GetVolumeInformationW works under `run` of a
-# script with fn main (JIT) but fails under `test` and any interpreted run with
-# "semantic: ... unknown extern function: GetVolumeInformationW" (it is not in the seed
-# windows_abi NAMES list), and an unknown extern aborts the whole spec, so it is not called.
-# Fallback kept: DACL readable and non-NULL for every dir. Writable dirs also need the low
-# label their grant writes; readonly dirs must carry the reader ACE (so a FAT or no-ACL dir,
-# where the read grant cannot have been written, is refused at admit) and must not be low.
+# arch 4.2: every dir (readonly and writable) must sit on a volume that reports
+# FILE_PERSISTENT_ACLS (0x8, GetVolumeInformationW on the GetVolumePathNameW root); that is the
+# primary check. The DACL probe above stays as the secondary check. Writable dirs also need the
+# low label their grant writes; readonly dirs must carry the reader ACE and must not be low.
+# The refusal path is untested on a real FAT/exFAT volume (this host has none).
 
 # FILE_GENERIC_READ|FILE_GENERIC_EXECUTE: what the read grant writes for the reader SID.
 const _READ_EXEC_MASK = 0x1200A9
@@ -82,6 +80,7 @@ fn _has_reader_ace_v1(path: text) -> bool:
 fn _acl_refusal_v1(readonly_dirs: [text], writable_dirs: [text]) -> text:
     for dir in readonly_dirs + writable_dirs:
         if not windows_process_path_valid_v1(dir) or not is_dir(dir): return "containment-request-invalid"
+        if not windows_volume_persistent_acls_v1(dir): return "containment-volume-no-acl"
         if not _path_has_dacl_v1(dir): return "containment-volume-no-acl"
     for dir in writable_dirs:
         if sec_label_rid_v1(dir.replace("/", "\\")) != SEC_LOW_INTEGRITY_RID_V1: return SOSIX_CONTAIN_REASON_WRITABLE_NOT_GRANTED_V1
