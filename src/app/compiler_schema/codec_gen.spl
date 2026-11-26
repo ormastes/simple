@@ -663,11 +663,29 @@ fn _presence_flag_of(u: CodecUniverse, decl: CodecDecl, f: FieldDecl) -> text:
             return g.binder
     ""
 
+fn _text_presence_flag_of(u: CodecUniverse, decl: CodecDecl, f: FieldDecl) -> text:
+    """The `has_<field>` bool flag binder for a non-optional `text` field, or "".
+
+    An absent `has_*`-flagged text field can hold `nil` in lowered HIR
+    (e.g. `specialization_of: nil` when `has_specialization_of: false`), so the
+    encoder normalizes `!node.<flag>` and `nil` to `""` (`\n` on wire), while
+    `_field_is_bare` keeps the decoder on `""` so `"\\N"` never widens the
+    local to `Option<text>` (which staged-native boxes via `rt_enum_new`).
+    """
+    if u.classify(f.type_text).cat != "prim_text":
+        return ""
+    for g in decl.fields:
+        if g.binder == "has_" + f.binder and _strip_default(g.type_text).trim() == "bool":
+            return g.binder
+    ""
+
 fn _field_is_bare(u: CodecUniverse, decl: CodecDecl, f: FieldDecl) -> bool:
-    """False only for a has_*-flagged non-legacy field whose encoder still
-    writes the payload (non-node shapes): absence stays a real `nil` state
-    there. Flag-gated node fields (see _presence_flag_of) are bare."""
+    """False only for a has_*-flagged non-legacy, non-text field whose encoder
+    still writes the payload: flag-gated node and text fields keep a bare
+    (never Option-boxed) local slot."""
     if _presence_flag_of(u, decl, f) != "":
+        return true
+    if _text_presence_flag_of(u, decl, f) != "":
         return true
     if bare_node_placeholder_v1(_strip_default(f.type_text).trim()) != "":
         return true
@@ -749,6 +767,14 @@ fn _emit_default_file_helpers() -> text:
     out = out + "        if unescaped.starts_with(\"@@\"):\n"
     out = out + "            return unescaped.substring(1, unescaped.byte_len())\n"
     out = out + "    unescaped\n\n"
+    out = out + "fn _hc_enc_flagged_text(w: HirCodecWriter, present: bool, v: text):\n"
+    out = out + "    if not present:\n"
+    out = out + "        w.put_text(\"\")\n"
+    out = out + "        return\n"
+    out = out + "    if v == nil:\n"
+    out = out + "        w.put_text(\"\")\n"
+    out = out + "        return\n"
+    out = out + "    w.put_text(v)\n\n"
     out
 
 fn _emit_placeholder_helpers(u: CodecUniverse, order: [text]) -> text:
@@ -923,13 +949,30 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "while i{k} < n{k}:\n"
         val key_shape = u.classify(s.a)
         val key_is_opt_node = key_shape.cat == "node" or key_shape.cat == "opaque"
-        out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node, key_shape.cat == "prim_text")
+        if key_shape.cat == "prim_i64":
+            val _key_wire_slot = c.next()
+            out = out + indent + "    val raw_dk{k} = r.next()\n"
+            out = out + indent + "    var key_i64_{k}: i64 = 0\n"
+            out = out + indent + "    if raw_dk{k} == \"N\":\n"
+            out = out + indent + "        r.reject_malformed(\"nil_in_non_optional_dict_key\")\n"
+            out = out + indent + "    else:\n"
+            out = out + indent + "        key_i64_{k} = flat_pool_parse_i64(raw_dk{k})\n"
+            out = out + indent + "    val dk{k}: i64 = key_i64_{k}\n"
+        else:
+            out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node, key_shape.cat == "prim_text")
         val value_shape = u.classify(s.b)
         if value_shape.cat == "prim_i64":
             # Keep later emitted local names aligned with scalar _emit_dec.
             val _wire_slot = c.next()
             out = out + indent + "    val value_pos{k} = r.pos\n"
             out = out + indent + "    val dv{k}: i64 = r.next_i64()\n"
+        elif value_shape.cat == "prim_bool":
+            # Stage-2 native codegen mis-types `if raw == "N": nil else: raw == "1"`
+            # as i64 and stores rt_value_int_wide(1) = 0x9 instead of bool 0xb, which
+            # the encoder then compares against 0xb and re-encodes as false (0).
+            val _bool_wire_slot = c.next()
+            out = out + indent + "    val raw_dv{k} = r.next()\n"
+            out = out + indent + "    val dv{k}: bool = raw_dv{k} == \"1\"\n"
         else:
             out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c, required_node)
         # Store through presence binds of optional node keys/values, never the
@@ -958,6 +1001,26 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
                 out = out + indent + "                r.reject_malformed(\"nil_in_non_optional_dict_key\")\n"
             else:
                 out = out + indent + "            " + target + "[dk{k}] = dv{k}\n"
+        elif value_shape.cat == "prim_bool":
+            out = out + indent + "    if r.ok:\n"
+            out = out + indent + "        if raw_dv{k} == \"N\":\n"
+            out = out + indent + "            r.reject_malformed(\"nil_in_non_optional_scalar\")\n"
+            out = out + indent + "        elif raw_dv{k} != \"1\" and raw_dv{k} != \"0\":\n"
+            out = out + indent + "            r.reject_malformed(\"bool_dictionary_value\")\n"
+            out = out + indent + "        else:\n"
+            if key_is_opt_node:
+                out = out + indent + "            if val present_k{k} = dk{k}:\n"
+                out = out + indent + "                if dv{k}:\n"
+                out = out + indent + "                    " + target + "[present_k{k}] = true\n"
+                out = out + indent + "                else:\n"
+                out = out + indent + "                    " + target + "[present_k{k}] = false\n"
+                out = out + indent + "            else:\n"
+                out = out + indent + "                r.reject_malformed(\"nil_in_non_optional_dict_key\")\n"
+            else:
+                out = out + indent + "            if dv{k}:\n"
+                out = out + indent + "                " + target + "[dk{k}] = true\n"
+                out = out + indent + "            else:\n"
+                out = out + indent + "                " + target + "[dk{k}] = false\n"
         elif key_is_opt_node:
             out = out + indent + "    if val present_k{k} = dk{k}:\n"
             out = out + indent + "        if val present_v{k} = dv{k}:\n"
@@ -1031,11 +1094,14 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
         # Enforce in the actual presence branch, not a separate live-state read.
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
         val flag = _presence_flag_of(u, decl, f)
+        val text_flag = _text_presence_flag_of(u, decl, f)
         if flag != "":
             body.push("    if not node." + flag + ":\n")
             body.push("        w.put_i64(0)\n")
             body.push("    else:\n")
             body.push(_emit_enc(u, f.type_text, "node." + f.binder, "        ", c, required_function_entry))
+        elif text_flag != "":
+            body.push("    _hc_enc_flagged_text(w, node." + text_flag + ", node." + f.binder + ")\n")
         elif decl.name == "Span" and f.binder == "file":
             body.push("    _hc_enc_span_file(w, node.file)\n")
         else:
