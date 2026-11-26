@@ -4877,3 +4877,20 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
   - k=1: 4094 / 4160 ms;
   - k=4: 3841 / 3778 ms;
   - RSS medians: k=1 2.36 / 2.36 GB (5 rounds at load < 8, head first on odd rounds, one warmup per side; a noisy first run read 2.32 / 2.41), k=4 2.34 / 2.33 GB.
+
+## 2026-11-26 — devanagari_render_k4 AC-3/4/6/7 are glyph raster
+
+- **Rule out position first.** Dump the draw IR text command (`glyph_run.glyph_ids`,
+  `xs`, `ys` and the `device-glyph-xs` prop) and compare it with Chrome's
+  `--print-to-pdf` glyph table. Then check that the baseline edge row (the
+  row below the last solid one) matches. If both match, the remaining
+  one-row edges are raster.
+- **Trap: a row of exactly 192 at k=4 is one of four vertical samples.** The
+  gray path above 48 px is a 4x4 kernel (16 levels). Chrome's analytic
+  coverage of about 0.2 gives 202-206 there, so the spec's < 200 ink rule
+  flips on a coverage difference of less than 0.05.
+- **Trap: an edge 0.4-0.7 px higher in Chrome** with an equal baseline is
+  y-hinting (slight autohint) that Simple's unhinted gray path does not do. It
+  is not a layout `device_dy` problem.
+- **Ownership:** the gray path above 48 px is excluded by the lcdround claim,
+  so file a HANDOFF in the claims file rather than leaving it implied.
