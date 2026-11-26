@@ -705,7 +705,23 @@ impl ModuleResolver {
         // from "the edit did not matter" — measurements taken that way are
         // silently about a different tree. Skip straight to the project-rooted
         // stdlib strategy below.
-        let anchored_stdlib = segments[0] == "std" || segments[0] == "std_lib";
+        // A bare reserved root (`use lib.{X}`, one segment) is the stdlib root
+        // itself. The `lib.*` branch above needs two segments, so a bare `lib`
+        // used to fall through to the importer's directory and load a sibling
+        // `lib.spl`'s TYPES -- which the interpreter and the flattening loader
+        // never load, so JIT `run` died at runtime ("Function 'Acc.add' not
+        // found"). When such a sibling exists, say so at compile time.
+        let bare_reserved_root = segments.len() == 1 && matches!(segments[0].as_str(), "std" | "std_lib" | "lib");
+        let anchored_stdlib = segments[0] == "std" || segments[0] == "std_lib" || bare_reserved_root;
+        if bare_reserved_root {
+            let root = segments[0].as_str();
+            if p_is_file(&base_dir.join(format!("{root}.spl"))) || p_is_file(&base_dir.join(root).join("__init__.spl")) {
+                return Err(CompileError::semantic(format!(
+                    "cannot resolve import: `{root}` is a reserved stdlib root, so `use {root}...` never imports the sibling module `{root}` beside {}; rename that module",
+                    from_file.display()
+                )));
+            }
+        }
         let base_result = if anchored_stdlib {
             Err(CompileError::semantic(format!(
                 "stdlib import `{}` resolves from the project stdlib roots only",
