@@ -670,14 +670,18 @@ impl HirLowering:
 
     fn declared_match_subject_type(subject: HirExpr) -> HirType?:
         if subject.has_type_:
-            return Some(subject.type_)
+            if declared_pattern_slot_type_is_concrete(subject.type_):
+                return Some(subject.type_)
         val symbol = _hir_expr_symbol_or_invalid(subject.kind)
         if symbol.is_valid():
             if val declaration = self.symbols.get_symbol_raw(symbol.id):
-                return declaration.type_
+                if val decl_ty = declaration.type_:
+                    if declared_pattern_slot_type_is_concrete(decl_ty):
+                        return Some(decl_ty)
         # Tuple literals do not carry an inferred HIR annotation on the
         # native path. Their declared children still identify each slot's
         # owner. Inspect existing HIR only; never evaluate the subject again.
+        var fallback_field_type: HirType? = None
         match subject.kind:
             case HirExprKind.Field(_, _, resolved_field):
                 # `match sym.kind:` over a resolved struct field carries no
@@ -687,7 +691,10 @@ impl HirLowering:
                 # bound as a catch-all (bare_enum_pattern_binding_in_compiler_2026_10_14).
                 if val field_symbol = resolved_field:
                     if val field_declaration = self.symbols.get_symbol_raw(field_symbol.id):
-                        return field_declaration.type_
+                        if val field_ty = field_declaration.type_:
+                            if declared_pattern_slot_type_is_concrete(field_ty):
+                                return Some(field_ty)
+                            fallback_field_type = Some(field_ty)
             case HirExprKind.TupleLit(elements):
                 var slot_types: [HirType] = []
                 for element in elements:
@@ -706,8 +713,15 @@ impl HirLowering:
         # rt_hal_isolated_host.host_join_exact).
         val transported = self.binding_kind_type(subject.kind, subject.span)
         match transported.kind:
-            case HirTypeKind.Error: None
-            case _: Some(transported)
+            case HirTypeKind.Error: ()
+            case _: return Some(transported)
+        if subject.has_type_:
+            return Some(subject.type_)
+        if symbol.is_valid():
+            if val declaration = self.symbols.get_symbol_raw(symbol.id):
+                if declaration.type_.?:
+                    return declaration.type_
+        fallback_field_type
 
     me lower_match_pattern(p: Pattern, subject_type: HirType?) -> HirPattern:
         # Standalone/nested subject positions own their description. The actual
