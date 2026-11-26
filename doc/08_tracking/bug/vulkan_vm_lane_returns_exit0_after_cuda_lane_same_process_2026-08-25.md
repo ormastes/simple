@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status (2026-11-22): RESOLVED-DISAPPEARED — see the 2026-11-22 section at the end.** Original status: OPEN — `examples/08_gpu/backends/backends_spec.spl` is deliberately RED on this host
+**Status (2026-11-26): RESOLVED-DISAPPEARED — confirmed again on 2026-11-26, see the section at the end.** Original status: OPEN — `examples/08_gpu/backends/backends_spec.spl` is deliberately RED on this host
 (`Results: 4 total, 3 passed, 1 failed, 1 skipped`), per the "correct spec that fails" rule.
 **Binary:** Rust seed. **Host:** Linux, 2x NVIDIA, Vulkan 1.4.312 live.
 
@@ -155,3 +155,23 @@ Not run: `examples/08_gpu/backends/backends_spec.spl` itself (no full-CLI `simpl
 this host). Under the seed's compiled `run` mode both lanes still skip
 (`skip:cuda-driver-unavailable`, `skip:vulkan-instance-init-failed` — the latter is
 `vulkan_instance_init_fails_under_run_but_not_test_2026-08-25.md`).
+
+## 2026-11-26 verification on a live CUDA + Vulkan host (lane gpuvk, work/bug-vk-after-cuda-20261126)
+
+**Status: RESOLVED-DISAPPEARED — the Vulkan-after-CUDA interference does not reproduce with both lanes live. No fix for the interference itself was identified, and this host has one integrated GPU where the found-env had two discrete GPUs.**
+
+Host: Linux aarch64, NVIDIA GB10 (integrated, PCI `10de:2e12`, `nvidia_icd.json`), libcuda
+`/usr/lib/aarch64-linux-gnu/libcuda.so.1`. Found-env was 2x discrete NVIDIA (TITAN RTX + RTX A6000),
+so this is a different topology; the same-process precondition (a clean live CUDA run first) is met.
+Seed `/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple` (sha256 prefix `fb80903917d6d5f5`).
+
+- `seed test examples/08_gpu/backends/backends_spec.spl`:
+  `SPEC FILE VERDICT: ... executed=4 passed=4 failed=0`, `Results: 4 total, 4 passed, 0 failed, 1 skipped`
+  (the one skip is `skip:metal-unavailable-not-macos`; the cuda and vulkan examples took the live branch).
+- Fixture copying the spec's sequence in one `main` (CUDA probe/init/`run_source`, then Vulkan),
+  `SIMPLE_EXECUTION_MODE=interpret seed run`, 8 runs. The precondition (a clean live CUDA run first) held
+  in 7 of them, and the Vulkan lane returned `ok=true exit=3 records=1 v=9` in **7/7 valid runs**. Run 3 failed CUDA init with
+  `cuda-lane-arena-guard-init-failed` (`ok=false records=0`); it does not count as a valid run, though the Vulkan lane after it was still
+  correct. That intermittent CUDA init failure is a separate CUDA-lane defect, filed as `cuda_lane_arena_guard_init_intermittent_failure_2026-11-26`.
+
+The stale `KNOWN RED` comment was removed from `backends_spec.spl` in the same change.
