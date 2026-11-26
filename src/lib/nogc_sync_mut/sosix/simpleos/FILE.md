@@ -9,6 +9,7 @@ TODO(platform-variant-migration): move here — nothing yet; new simpleos-specif
 
 - **FILE.md** — this manifest.
 - **contained_write_v1.spl** — typed refusal for contained write/read grants (`contained-write-unimplemented-simpleos`).
+- **app_container_v1.spl** — typed refusal for the app sandbox (`app-sandbox-unimplemented-simpleos`).
 - **containment_v1.spl** — typed refusal for SOSIX containment (`containment-unimplemented-simpleos`).
 
 ## Child Manifests

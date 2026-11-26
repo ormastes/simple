@@ -1,0 +1,84 @@
+# App-sandbox fixture child. Usage: simple run app_sandbox_probe.spl args: <mode> <a> [<b>]
+#   read <target> <control>  prints "TARGET allow|deny" then "CONTROL allow|deny"
+#   write <path>             prints "TARGET allow|deny" (write returned true and the file exists)
+#   tcp <host:port>          prints "TARGET allow|deny" (a connection was opened)
+#   dns <host>               prints "TARGET allow|deny" (a name resolved to an address)
+#   exit <code>              exits with <code>
+#   sleep                    sleeps 60 s (the caller times it out)
+# The probe only reports; the spec decides. It imports NOTHING from std: the AppContainer child
+# is granted its staging dir only, so the stdlib source tree is unreadable to it and a
+# `use std...` would fail to resolve. The raw runtime externs below are the same ones
+# std.nogc_sync_mut.io_runtime and sffi.net declare.
+@unsafe(reason: "raw runtime argument array for a sandboxed fixture child that cannot load std", capabilities: [ffi])
+extern fn sys_get_args() -> [text]
+@unsafe(reason: "raw nullable file read for a sandboxed fixture child that cannot load std", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+@unsafe(reason: "raw file write for a sandboxed fixture child that cannot load std", capabilities: [ffi])
+extern fn rt_file_write_text(path: text, content: text) -> bool
+@unsafe(reason: "raw file-existence probe for a sandboxed fixture child that cannot load std", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw process exit for a sandboxed fixture child that cannot load std", capabilities: [ffi])
+extern fn rt_exit(code: i64)
+@unsafe(reason: "raw sleep for a sandboxed fixture child that cannot load std", capabilities: [ffi])
+extern fn rt_thread_sleep(millis: i64)
+@unsafe(reason: "raw TCP connect for a sandboxed fixture child that cannot load std", capabilities: [ffi])
+extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
+@unsafe(reason: "raw TCP close for a sandboxed fixture child that cannot load std", capabilities: [ffi])
+extern fn rt_io_tcp_close(fd: i64) -> bool
+@unsafe(reason: "raw hosted DNS lookup for a sandboxed fixture child that cannot load std; empty is failure", capabilities: [ffi])
+extern fn rt_dns_lookup(hostname: text) -> text
+
+fn verdict(allowed: bool) -> text:
+    if allowed: "allow" else: "deny"
+
+fn parse_number(value: text) -> i64:
+    var total = 0
+    var index = 0
+    while index < value.byte_len():
+        val digit = value.char_code_at(index) - 48
+        if digit < 0 or digit > 9: return 0
+        total = total * 10 + digit
+        index = index + 1
+    total
+
+fn readable(path: text) -> bool:
+    val content = rt_file_read_text(path)
+    content.is_some() and content.unwrap().byte_len() > 0
+
+fn connects(addr: text) -> bool:
+    val fd = rt_io_tcp_connect_timeout(addr, 3000)
+    if fd < 0: return false
+    val _closed = rt_io_tcp_close(fd)
+    true
+
+fn main():
+    val args = sys_get_args()
+    var rest: [text] = []
+    var index = 0
+    while index < args.len():
+        if args[index] == "args:": rest = args[index + 1:]
+        index = index + 1
+    if rest.len() < 1:
+        print("PROBE-ERROR usage")
+        rt_exit(2)
+        return
+    val mode = rest[0]
+    if mode == "read" and rest.len() >= 3:
+        print("TARGET " + verdict(readable(rest[1])))
+        print("CONTROL " + verdict(readable(rest[2])))
+    elif mode == "write" and rest.len() >= 2:
+        val wrote = rt_file_write_text(rest[1], "app-sandbox-probe")
+        print("TARGET " + verdict(wrote and rt_file_exists(rest[1])))
+    elif mode == "tcp" and rest.len() >= 2:
+        print("TARGET " + verdict(connects(rest[1])))
+    elif mode == "dns" and rest.len() >= 2:
+        print("TARGET " + verdict(rt_dns_lookup(rest[1]).byte_len() > 0))
+    elif mode == "exit" and rest.len() >= 2:
+        rt_exit(parse_number(rest[1]))
+    elif mode == "sleep":
+        rt_thread_sleep(60000)
+    else:
+        print("PROBE-ERROR unknown-mode")
+        rt_exit(2)
+
+main()
