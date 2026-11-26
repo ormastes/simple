@@ -152,3 +152,10 @@ it does not resolve the general ambiguous erased generic-return contract.
 
 The new compiler bytes must execute cast/index native fixtures and compile/run
 the original runtime byte-at fixture before further bootstrap admission.
+
+## Uniform P3 audit 2026-11-26 (`KEPT-WITH-REASON`)
+
+Isolated native probes on uniform P3 confirm the erased generic `-> T` tuple-getter remains fundamentally ambiguous for mixed raw-scalar / record enum payloads:
+- `payload.unwrap()` tail (`generic_unwrap_req<T>`): `i64` `42` double-boxes to `336`, and `ProbeRec` crashes with `SIGSEGV (exit 139)`.
+- `if val present = payload: return present` (`get_if_req<T>`): handles `Node.Two(Pair, Pair)` (`1 left 2 right`), **but corrupts raw scalar `i64` from an enum payload tuple (`Node.PairNum(77, ...)` -> `9`, i.e., `77 >> 3`)** because the concrete `-> i64` caller executes `rt_value_as_int_wide` on the unshifted raw slot word.
+- Concrete typed payload owners (`_sffi_hir_expr_payload_req`, `_sffi_local_id_payload_req`, `_sffi_mir_const_value_payload_req`, `_sffi_mir_type_payload_req`, `_sffi_aggregate_kind_payload_req`, `_sffi_mir_operand_list_payload_req`) remain required and pinned by `test/01_unit/compiler/50.mir/wa_src_lane5_workaround_audit_spec.spl`.
