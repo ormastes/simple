@@ -1,0 +1,77 @@
+#!/bin/sh
+# Runner for src/runtime/test/rt_bounded_read_allocation_selfcheck.c.
+#
+# Compiles the core-C runtime composition (source list read from
+# runtime_compiler.spl, same defines as check-rt-thread-owner-contract.shs),
+# links the selfcheck with GNU ld --wrap for the allocation/I/O edges it
+# injects, then runs the 42-case logic contract plus two bounded-allocation
+# benches (4 KiB and 4 MiB files under a 1 GiB limit).
+#
+#   sh scripts/check/check-rt-bounded-read-allocation.shs [work-dir]
+#
+# Linux/GNU-linker only (the selfcheck relies on --wrap and __read_chk).
+# Verdict is the last stdout line: PASS (exit 0) / FAIL (exit 1) /
+# ERROR — nothing was checked (exit 2). Non-Linux hosts print SKIP (exit 0).
+# Bug: doc/08_tracking/bug/bounded_read_limit_allocation_2026-10-12.md
+set -u
+
+if [ "$(uname -s)" != Linux ]; then
+    echo "SKIP — rt_bounded_read_allocation_selfcheck needs Linux + GNU ld --wrap"
+    exit 0
+fi
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "ERROR — nothing was checked (not in a git checkout)"; exit 2; }
+own_work=0
+if [ -n "${1:-}" ]; then
+    work="$1"
+else
+    work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    own_work=1
+    trap 'rm -rf "$work"' EXIT INT TERM
+fi
+mkdir -p "$work/files" || { echo "ERROR — nothing was checked (cannot create $work)"; exit 2; }
+rt="$repo/src/runtime"
+rc_spl="$repo/src/compiler/70.backend/backend/runtime_compiler.spl"
+sources=$(awk '/^pub fn runtime_core_c_sources_v1/ {f=1} f && /^    \["/ {print; exit}' "$rc_spl" |
+    sed 's/^    \[\(.*\)\]$/\1/' | tr -d '" ' | tr ',' ' ')
+[ -n "$sources" ] || { echo "ERROR — nothing was checked (no core-C source list in $rc_spl)"; exit 2; }
+
+objs=""
+compile() {
+    name=$1; src=$2; extra=$3
+    out="$work/$name.o"
+    # shellcheck disable=SC2086
+    "${CC:-cc}" -c -O2 -g -std=gnu11 -fPIC $extra -I "$rt" -I "$rt/platform" \
+        -DSIMPLE_ABI_VERSION=1 -DSIMPLE_ABI_VERSION_DEFERRED=0 -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 \
+        -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_CORE_C_STANDALONE=1 -o "$out" "$src" > "$work/$name.log" 2>&1 ||
+        { echo "FAIL — $name.c did not compile (see $work/$name.log)"; exit 1; }
+    objs="$objs $out"
+}
+
+for name in $sources; do compile "$name" "$rt/$name.c" ""; done
+for name in hosted_cocoa hosted_win32; do compile "$name" "$rt/$name.c" ""; done
+compile selfcheck "$rt/test/rt_bounded_read_allocation_selfcheck.c" "-Wall -Wextra -Werror"
+
+exe="$work/rt_bounded_read_allocation_selfcheck"
+# shellcheck disable=SC2086
+"${CC:-cc}" $objs -o "$exe" \
+    -Wl,--wrap=malloc,--wrap=realloc,--wrap=free,--wrap=open,--wrap=close,--wrap=fstat,--wrap=read,--wrap=__read_chk \
+    -lpthread -ldl -lm > "$work/link.log" 2>&1 ||
+    { echo "FAIL — selfcheck did not link (see $work/link.log)"; exit 1; }
+
+logic=$(timeout 120 "$exe" logic "$work/files" bounded 2>&1)
+status=$?
+printf '%s\n' "$logic"
+[ "$status" -eq 0 ] || { echo "FAIL — logic contract exited $status"; exit 1; }
+printf '%s\n' "$logic" | grep -q '^PASS cases=42 ' || { echo "FAIL — logic contract did not report PASS cases=42"; exit 1; }
+
+for spec in "4096 8 4097" "4194304 3 4194305"; do
+    set -- $spec
+    bench=$(timeout 60 "$exe" bench "$work/files" "$1" 1073741824 "$2" 2>&1)
+    status=$?
+    printf '%s\n' "$bench"
+    [ "$status" -eq 0 ] || { echo "FAIL — bench $1 exited $status"; exit 1; }
+    # The reader must allocate observed size + 1 sentinel, never the 1 GiB limit.
+    printf '%s\n' "$bench" | grep -q "\"max_malloc_request\":$3," ||
+        { echo "FAIL — bench $1 allocated more than size+1 (expected max_malloc_request $3)"; exit 1; }
+done
+echo "PASS — 42-case bounded read contract + 2 allocation benches (size+1, not limit)"
