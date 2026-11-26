@@ -135,9 +135,10 @@ static RtTransientRawAlloc* rt_transient_raw_lookup(uintptr_t ptr) {
     }
 }
 
-static int rt_transient_raw_register(void* ptr, size_t bytes) {
+static int rt_transient_raw_register_state(void* ptr, size_t bytes, int owned) {
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-    return rt_transient_raw_owner_register(ptr, (uint64_t)bytes) != 0;
+    return rt_transient_raw_owner_register_state(
+        ptr, (uint64_t)bytes, owned ? 1 : 0) != 0;
 #else
     if (!ptr || !rt_transient_raw_active) return ptr != NULL;
     if (bytes > RT_TRANSIENT_RAW_SIZE_MASK) return 0;
@@ -145,9 +146,16 @@ static int rt_transient_raw_register(void* ptr, size_t bytes) {
             >= rt_transient_raw_cap * 7 && !rt_transient_raw_grow()) {
         return 0;
     }
-    size_t stored = bytes |
-        (rt_transient_raw_paused ? 0 : RT_TRANSIENT_RAW_OWNED_BIT);
+    size_t stored = bytes | (owned ? RT_TRANSIENT_RAW_OWNED_BIT : 0);
     return rt_transient_raw_insert((uintptr_t)ptr, stored);
+#endif
+}
+
+static int rt_transient_raw_register(void* ptr, size_t bytes) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    return rt_transient_raw_owner_register(ptr, (uint64_t)bytes) != 0;
+#else
+    return rt_transient_raw_register_state(ptr, bytes, !rt_transient_raw_paused);
 #endif
 }
 
@@ -502,21 +510,34 @@ void* rt_realloc(void* ptr, int64_t size) {
     size_t old_size = 0;
     size_t persistent_old_size = 0;
     int persistent_tracked = rt_persistent_raw_lookup_size(ptr, &persistent_old_size);
-#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     uint64_t transient_bytes = 0;
     int8_t transient_owned = 0;
-    int transient_tracked =
+    int transient_tracked = 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    transient_tracked =
         rt_transient_raw_owner_query(ptr, &transient_bytes, &transient_owned) != 0;
+#else
+    {
+        RtTransientRawAlloc* tracked = rt_transient_raw_lookup((uintptr_t)ptr);
+        if (tracked) {
+            transient_tracked = 1;
+            transient_bytes = (uint64_t)(tracked->bytes & RT_TRANSIENT_RAW_SIZE_MASK);
+            transient_owned = (tracked->bytes & RT_TRANSIENT_RAW_OWNED_BIT) != 0 ? 1 : 0;
+        }
+    }
+#endif
 #define RT_PRESERVE_TRANSIENT_REALLOC(next_ptr) \
     do { \
         if (transient_tracked) { \
-            rt_transient_raw_owner_unregister(next_ptr); \
-            if (!rt_transient_raw_owner_register_state( \
-                    next_ptr, (uint64_t)size, transient_owned)) { \
+            rt_transient_raw_erase(next_ptr); \
+            if (!rt_transient_raw_register_state( \
+                    next_ptr, (size_t)size, transient_owned != 0)) { \
                 rt_free((uint8_t*)(next_ptr)); \
                 return NULL; \
             } \
-            if (!transient_owned && !rt_persistent_raw_register(next_ptr, (size_t)size)) { \
+            if (transient_owned) { \
+                rt_persistent_raw_unregister(next_ptr); \
+            } else if (!rt_persistent_raw_register(next_ptr, (size_t)size)) { \
                 rt_free((uint8_t*)(next_ptr)); \
                 return NULL; \
             } \
@@ -528,18 +549,6 @@ void* rt_realloc(void* ptr, int64_t size) {
             } \
         } \
     } while (0)
-#else
-#define RT_PRESERVE_TRANSIENT_REALLOC(next_ptr) \
-    do { \
-        if (persistent_tracked) { \
-            if (!rt_transient_raw_promote((uintptr_t)(next_ptr)) || \
-                    !rt_persistent_raw_register(next_ptr, (size_t)size)) { \
-                rt_free((uint8_t*)(next_ptr)); \
-                return NULL; \
-            } \
-        } \
-    } while (0)
-#endif
     if (rt_struct_alloc_lookup_size(ptr, &old_size)) {
         void* next = rt_struct_alloc(size);
         if (!next) return NULL;
@@ -571,16 +580,8 @@ void* rt_realloc(void* ptr, int64_t size) {
         return next;
     }
 
-#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-    if (transient_tracked) old_size = (size_t)transient_bytes;
-#else
-    RtTransientRawAlloc* tracked = rt_transient_raw_lookup((uintptr_t)ptr);
-    int transient_tracked = tracked != NULL;
-    if (tracked) {
-        old_size = tracked->bytes & RT_TRANSIENT_RAW_SIZE_MASK;
-    }
-#endif
     if (transient_tracked) {
+        old_size = (size_t)transient_bytes;
         void* next = rt_alloc(size);
         if (!next) return NULL;
         RT_PRESERVE_TRANSIENT_REALLOC(next);
