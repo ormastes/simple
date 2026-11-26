@@ -127,3 +127,72 @@ material, border and secondary-text parity: red 20/21 -> green 21/21.
 `simpleos_wm_theme_bootstrap_spec` 3/3 before and after;
 `wm_theme_bootstrap_contract_spec` 1/12 before and after, identical failing
 names (pre-existing, source-text assertions).
+
+## Follow-up 2026-11-26: accent override and carried-over aetheric paint
+
+Root cause of `#64d2ff`: every WM root (`html.spl`, `html_modern_preview.spl`,
+`simple_web_window_renderer.spl`) hardcoded `data-wm-accent="blue"`, and the
+generated CSS rule `:root[data-wm-accent=blue] { --ui-accent: #64d2ff }` is
+more specific than the package `:root` block. `wm.js` did the same in the live
+page: `_applyAccentPreference` defaulted to the first choice (`blue`) and
+wrote `--ui-accent` inline. Fix: a `theme` accent choice (first, the default)
+that sets no override and removes the inline properties, so the package
+accent wins; the five explicit accents still apply when picked.
+
+The glass package also still carried aetheric-only paint. Replaced with
+GlassColorTokens.dark values (`src/lib/common/ui/glass/tokens.spl:108`):
+background gradient `#0A0A0F/#0b0d10`, badge and button text `#0A0A0F` (see the contrast table below),
+titlebar/menubar `rgba(20,20,25,0.72)` (surface_container_lowest), input,
+tab bar and statusbar `rgba(25,25,32,0.72)`, error tint from `#FF453A`,
+dialog overlay from the glass background.
+
+Evidence (Chromium headless, `getComputedStyle`, glass_dark preview):
+
+| value | before | after |
+|---|---|---|
+| `--ui-accent` | `#64d2ff` | `#0A84FF` |
+| `--ui-badge-text` | `#061222` | `#F5F5F7` |
+| `--app-background-image` | `#0f172a/#1e1b4b/#312e81` | `#0A0A0F/#0b0d10` |
+| `--ui-titlebar-background` | `rgba(14,14,16,0.72)` | `rgba(20,20,25,0.72)` |
+| `--ui-input-background` | `rgba(19,19,21,0.76)` | `rgba(25,25,32,0.72)` |
+| aetheric-only literals in page | 13 | 0 |
+
+Screenshot sha256 prefix `f312c92193d3e84c` -> `c068328fca52c13b`.
+`theme_package_spec` 20/20 (new assertion: no aetheric-only literal in the
+glass composed CSS), `web_wm_modern_shell_spec` 5/5.
+
+Review follow-up (same day):
+
+- Small-text contrast (WCAG AA 4.5:1). `#F5F5F7` on the accent button was
+  3.35:1 and on the `#FF453A` badge 3.13:1. Button and badge text are now
+  `#0A0A0F` (the glass background): 5.42:1 and 5.80:1. The rendered WM badge
+  rules hardcoded white on `#ef4444` (3.76:1) for every theme; they now read
+  `var(--ui-badge-text)` / `var(--ui-badge-background)`, with a `#d70015`
+  fallback (5.38:1 with white) for themes without a package.
+  `wm_theme_quality_report` gains `button_text_contrast_x100` and
+  `badge_text_contrast_x100` from the package tokens (last `.widget-button`
+  rule, `--ui-badge-text` over `--ui-accent` / `--ui-error`), and
+  `color_checked` requires both >= 450 when the theme has a package. Red
+  293/291 with the old tokens -> green; aetheric_dark (11.0/11.1) and
+  fluid_light (6.7/6.5) also pass.
+- The `theme` accent choice has a `var(--ui-accent)` swatch rule, and the
+  static palette and control-center markup in the WM page and preview now
+  show `theme` selected as choice 0, with blue as choice 1.
+- The default accent changes for every theme, not only glass_dark. That is
+  intended and matches Chrome's default: the default follows the theme and an
+  explicit pick overrides it. Chromium values from the static preview
+  (before / after):
+
+| theme | `--ui-accent` | badge text/fill | theme swatch |
+|---|---|---|---|
+| glass_dark | `#64d2ff` / `#0A84FF` | white on `#ef4444` / `#0A0A0F` on `#FF453A` | none / `#0A84FF` |
+| aetheric_dark | `#64d2ff` / `#adc6ff` | white on `#ef4444` / `#061222` on `#ffb4ab` | none / `#adc6ff` |
+| fluid_light | `#64d2ff` / `#0058bc` | white on `#ef4444` / white on `#ba1a1a` | none / `#0058bc` |
+| obsidian (no package) | `#64d2ff` / `#89b4fa` | white on `#ef4444` / white on `#d70015` | none / `#89b4fa` |
+
+  In the live page, `wm.js` used to write `#64d2ff` inline for every theme;
+  it now removes the inline value for `theme`.
+- `web_wm_modern_shell_spec` 5/5, `theme_package_spec` 21/21, and
+  `web_api_spec` 13/16 with the same three failures as before.
+  Still not updated: the quality inspector's accent-policy preview still
+  shows the five fixed colours (static markup, 5-column grid).
