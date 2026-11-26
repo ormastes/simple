@@ -44,6 +44,7 @@ Remaining:
   `grouped_native_worker` (batch load).
 - DONE 2026-11-26 hs7 (FIXED-VERIFICATION-PENDING): `moduleloader_unload` releases the path slot (lockless `hot_swap_slot_release`); a pinned path can be loaded and pinned again after unload.
 - DONE 2026-11-26 hs7 follow-up (FIXED-VERIFICATION-PENDING): compat `moduleloader_pin_hot_swap` refuses a different-identity re-pin (same rule as LazyModuleLoader); hot_swap spec fixtures create `build/test_tmp` before writing.
+- DONE 2026-11-26 hs7 lazy fast path (FIXED-VERIFICATION-PENDING): `SmfGetter.get` resolves a direct SMF file path (binary-safe read), so lazy `moduleloader_reload` / `moduleloader_pin_hot_swap` after a batch load reach the identity check; `hot_swap_autopin` 3/3, `hot_swap_lazy_wiring` 2/2.
 - State migration across an ABI change (currently refused).
 - Land the OS-thread pin/reclaim stress spec once the seed shared-object crash is fixed (or on a native binary).
 - Bug (FIXED-VERIFICATION-PENDING 2026-11-23, work/at1-20261123): `atomic_i64_new` resolved to an

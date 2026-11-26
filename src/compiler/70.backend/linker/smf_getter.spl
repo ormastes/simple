@@ -13,11 +13,12 @@ use compiler.hir.hir_types.{Effect}
 #   getter.add_search_path("/usr/lib/simple")
 #   val smf_data = getter.get("std/io/mod")?
 
-use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.io_runtime.{file_read_bytes}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
 
-use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_HEADER_SIZE, fnv1a_hash, lib_smf_text_to_bytes}
+use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_HEADER_SIZE, fnv1a_hash}
 use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
 use compiler.backend.linker.smf_reader.{SmfReaderImpl}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
@@ -212,6 +213,15 @@ impl SmfGetter:
         if search_result.is_ok():
             return search_result
 
+        # ObjectProvider takes "module_name_or_path"; the lazy loader passes
+        # the file path it loaded. Resolve an existing file and index it.
+        if file_exists(module_name):
+            val direct = self.load_single_file(SmfLocation.single_file(module_name, module_name, 0))
+            if direct.is_ok():
+                self.module_index[module_name] = SmfLocation.single_file(
+                    module_name, module_name, direct.unwrap().len())
+            return direct
+
         Err("Module not found: {module_name}")
 
     """Get object file data for a module.
@@ -336,8 +346,8 @@ impl SmfGetter:
         if not file_exists(location.file_path):
             return Err("Failed to read SMF file: {location.file_path}")
 
-        val file_text: text = file_read(location.file_path)
-        val file_data = lib_smf_text_to_bytes(file_text)
+        # Binary-safe: SMF images carry non-UTF-8 bytes.
+        val file_data = file_read_bytes(location.file_path)
 
         if self.verbose:
             print "[smf-getter] Loaded single file: {location.module_name} ({file_data.len()} bytes)"
@@ -366,8 +376,7 @@ impl SmfGetter:
 
             if file_exists(full_path):
                 # Load and index
-                val file_text: text = file_read(full_path)
-                val file_data = lib_smf_text_to_bytes(file_text)
+                val file_data = file_read_bytes(full_path)
 
                 # Add to index
                 val location = SmfLocation.single_file(
