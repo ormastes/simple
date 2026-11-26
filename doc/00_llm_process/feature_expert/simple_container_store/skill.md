@@ -34,7 +34,7 @@ repo; afterwards `scv gc` imports and pins reachable chunks (fail closed).
 Use a Nov-25+ binary, e.g. `C:/dev/keep/seeds/simple-local-20261125.exe test <spec>`.
 Specs (test/01_unit/lib/nogc_sync_mut/storage + common): hash_policy 10,
 object_record 15, immutable_store 26, scv_adapter 6, storage_view 13 (junction
-example is Windows-only via `skip_on_unix`), capability_report 10,
+example is Windows-only via `only_on_windows`), capability_report 10,
 lifecycle_journal 11, system 2, plus `scv_gc_store_e2e_spec.spl` (2).
 
 ## Not done
