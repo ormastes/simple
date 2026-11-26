@@ -1012,3 +1012,26 @@ capsule symbol strength (link-architecture lane). No code change this lane.
 ## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
 
 **CLOSED/SUPERSEDED (confirmed)** — All six cited fix commits verified ancestors of this base (`72b11296929` `2cf4bb13366` `478f4b1b093` `f6c03cbc837` `62f9fed02aa` `2e12cd1f450f`); `src/runtime/tools/stage3_fdwalk.c` present (20031 bytes). End-to-end macOS Stage-3 run remains a macOS-host grant.
+
+---
+
+## 2026-11-26 macOS arm64 audit & verification addendum (`work/fix-macos-stage3-authority-20261126`)
+
+Audited all six files in scope on Darwin arm64 (`Darwin 25.5.0`, Apple Silicon):
+- `src/compiler_rust/runtime/src/cache_host_authority_v1.rs`: `#[cfg(any(target_os = "macos", target_os = "ios"))]` uses `st_mtime_nsec`/`st_ctime_nsec` (`stat_nsec_equal`), `errno()` uses `*libc::__error()`, and non-Linux publish/quarantine paths are guarded. No remaining macOS defect.
+- `scripts/check/lib/bootstrap-stage3/authority.shs`: found and fixed two remaining macOS portability defects:
+  1. `bootstrap_stage3_git_budget_ms` used bare `nproc 2>/dev/null || echo 1` (absent on stock macOS `/usr/bin:/bin`, falling back to `1` CPU instead of host CPU count); updated to `getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1` matching `bootstrap_stage3_hash_worker_count`.
+  2. `bootstrap_stage3_hash_path_list`, `bootstrap_stage3_directory_snapshot`, and `bootstrap_stage3_git_state` used `wc -l <file` with `${var# }` or raw output, leaving leading spaces on BSD/macOS `wc -l`; normalized via `tr -d ' '`.
+- `scripts/check/lib/bootstrap-stage3/manifest-verify.shs`: verified procfs-guarded `bootstrap_stage3_own_pid`, `bootstrap_stage3_phase_status_path` (`/dev/fd/N`), `bootstrap_stage3_fd_identity` / `bootstrap_stage3_fd_stamp` / `bootstrap_stage3_fd_matches_path`, `directory-snapshot` parity with `authority.shs`, and fail-closed `portable-descriptor-capsule-not-supported` refusal live on Darwin.
+- `src/runtime/tools/stage3_fdwalk.c`: compiled with `cc -std=c11 -Wall -Wextra -Werror -O1` with 0 warnings; `--selftest` (26/26), `walk --dir-fd`, symlink (`68`), missing (`66`), bad-component (`65`), held-fd `exec` (`/bin/sh`), and unlinked-fd rejection (`71`) all pass live on Darwin.
+- `scripts/bootstrap/bootstrap-from-scratch.sh` & `scripts/bootstrap/resume-stage3-from-admitted.sh`: audited `stat`, `readlink`, `date`, `vm_stat`, `sysctl`, `pgrep`, `df -Pk`, `shasum`, and Darwin RSS watchdog / `darwin-pinned` capture branches; no remaining macOS portability breaks found.
+
+Live verification commands executed (2026-11-26, Darwin arm64):
+- `sh scripts/check/check-bootstrap-fd-identity.shs` -> `PASS — 33 fixture(s) checked on Darwin arm`
+- `sh scripts/check/check-stage3-fdwalk-helper.shs` -> `PASS — 13 check(s) executed, 0 failed`
+- `sh test/01_unit/scripts/candidate_frontend_darwin_capture_test.shs` -> `PASS: macOS frontend capture and bounded receipt integration`
+- `sh test/01_unit/scripts/bootstrap_stage3_darwin_rss_cap_contract_test.shs` -> `PASS: Darwin Stage 3 RSS watchdog honors cap and inherited session`
+- `sh test/01_unit/scripts/bootstrap_stage3_darwin_nested_watchdog_test.shs` -> `PASS: Darwin watchdog standalone/inherited sessions, monitor, partial rejection, exit propagation`
+- `sh test/01_unit/scripts/macos_stage3_authority_portability_contract_test.shs` -> `PASS: macOS Stage-3 authority, manifest-verify, and stage3_fdwalk portability verified`
+
+Not run in this session (memory guard: concurrent ~14 GiB LLVM build on 24 GiB host; other-lane compiler/link residuals documented above): `cargo build`, `native-build`, and end-to-end `bootstrap-from-scratch.sh --full-bootstrap --deploy` / `resume-stage3-from-admitted.sh`. Bug DB status transitioned from `open` to `fix-implemented-verification-pending` (`doc/08_tracking/bug/bug_db.sdn` + shard).
