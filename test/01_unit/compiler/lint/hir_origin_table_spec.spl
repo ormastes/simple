@@ -1,0 +1,133 @@
+"""
+## Purpose and audience
+Purpose: Prove the typed HIR origin side table (ValueSemanticOrigin keyed by
+HIR expression id, plus BoundaryPermit) agrees with the text-level reference
+`bound_origin_facts` on its fixtures, and resolves a let-copy alias chain that
+the text scan cannot.
+Audience: compiler engineers maintaining robust-boundary origin facts.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+One file at a time; no SIF serialization and no CLI surface (other lanes).
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.semantics.lint.bound_origin_facts.{bound_origin_facts, BoundOriginFact}
+use compiler.semantics.lint.hir_origin_table.{hir_origin_table_for_module, hir_origin_table_facts, hir_decl_expr_id, HirOriginTable, ValueSemanticOrigin, BoundaryPermit}
+
+fn lower_src(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "origin_fixture.spl", "origin_fixture", Logger(level: 0))
+    expect(parser_has_errors()).to_equal(false)
+    var lowering = HirLowering.with_filename("origin_fixture.spl")
+    lowering.lower_module(parsed)
+
+fn table_of(source: text) -> HirOriginTable:
+    hir_origin_table_for_module(lower_src(source))
+
+fn text_key(f: BoundOriginFact) -> text:
+    "{f.line_num} {f.function} {f.subject} {f.origin} {f.boundary}"
+
+fn hir_key(f: ValueSemanticOrigin) -> text:
+    "{f.line_num} {f.function} {f.subject} {f.origin} {f.boundary}"
+
+fn sorted_keys(keys: [text]) -> [text]:
+    var out = keys
+    var i = 1
+    while i < out.len():
+        var j = i
+        while j > 0 and out[j - 1] > out[j]:
+            val tmp = out[j - 1]
+            out[j - 1] = out[j]
+            out[j] = tmp
+            j = j - 1
+        i = i + 1
+    out
+
+fn expect_agree(source: text):
+    var tk: [text] = []
+    for f in bound_origin_facts(source, "origin_fixture.spl"):
+        tk.push(text_key(f))
+    var hk: [text] = []
+    for f in hir_origin_table_facts(table_of(source)):
+        hk.push(hir_key(f))
+    expect(sorted_keys(hk).join("\n")).to_equal(sorted_keys(tk).join("\n"))
+
+fn row_of(t: HirOriginTable, subject: text) -> ValueSemanticOrigin?:
+    for f in hir_origin_table_facts(t):
+        if f.subject == subject:
+            return Some(f)
+    None
+
+val SRC = "extern fn c_read() -> i32\n@unsafe(reason: \"adapter\", capabilities: [ffi])\nfn adapter(n: i64) -> i32:\n    val raw = c_read()\n    val k = 5\n    val c = raw as i64\n    val d = raw\n    val e = helper(k)\n    raw\n"
+val GREET_SRC = "fn greet(sep: text = \"a, b), c\", n: i64):\n    n\n"
+val PLAIN_SRC = "fn plain(a: i64, b: text) -> i64:\n    val s = \"hi\"\n    val t = true\n    val m = b.len()\n    val q = a + 1\n    var w = -3\n    if a > 0:\n        val inner = a\n    a\n"
+
+# @manual_section: hir_origin_table
+describe "HIR origin table agrees with the text-level reference":
+    """On the bound_origin_facts fixtures both produce the same fact set."""
+
+    it "agrees on the extern/param/literal/cast/copy/call fixture":
+        # @req: REQ-DIAG-POLICY-001
+        step("Compare HIR table rows with text facts")
+        expect_agree(SRC)
+
+    it "agrees on a signature with a comma-bearing string default":
+        # @req: REQ-DIAG-POLICY-001
+        step("Compare params")
+        expect_agree(GREET_SRC)
+
+    it "agrees on literals, method calls, expressions and nested blocks":
+        # @req: REQ-DIAG-POLICY-001
+        step("Compare plain function rows")
+        expect_agree(PLAIN_SRC)
+
+    it "agrees on a multi-line signature and tuple bindings":
+        # @req: REQ-DIAG-POLICY-001
+        step("Compare tuple-bound names")
+        expect_agree("fn pair(u: i64, v: i64) -> (i64, i64):\n    (u, v)\nfn wide(\n    a: i64,\n    b: i64,\n) -> i64:\n    val (x, y) = pair(a, b)\n    val (p, _) = pair(1, 2)\n    x\n")
+
+    it "keys rows by HIR expression id and records the ffi permit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Check keys and BoundaryPermit")
+        val t = table_of(SRC)
+        expect(t.order.len()).to_equal(t.by_expr.len())
+        if val raw = row_of(t, "raw"):
+            expect(raw.expr_id >= 0).to_equal(true)
+            expect(t.by_expr.contains_key(raw.expr_id)).to_equal(true)
+        else:
+            expect("raw row").to_equal("missing")
+        if val n = row_of(t, "n"):
+            expect(n.expr_id).to_equal(hir_decl_expr_id(n.symbol_id))
+        else:
+            expect("n row").to_equal("missing")
+        expect(t.permits.len()).to_equal(1)
+        expect(t.permits[0].function).to_equal("adapter")
+        expect(t.permits[0].boundary).to_equal(true)
+        expect(t.permits[0].reason).to_equal("adapter")
+
+val ALIAS_SRC = "extern fn c_read() -> i32\nfn alias_chain() -> i32:\n    val raw = c_read()\n    val a = raw\n    val b = a\n    val c = b\n    c\n"
+
+describe "HIR origin table resolves let-copy alias chains":
+    """Only the HIR table follows symbols: the text scan stops at `copy`."""
+
+    it "reports the extern origin at the end of a copy chain":
+        # @req: REQ-DIAG-POLICY-001
+        step("Text facts say copy; HIR root_origin says extern_return")
+        var text_c = ""
+        for f in bound_origin_facts(ALIAS_SRC, "m.spl"):
+            if f.subject == "c":
+                text_c = f.origin
+        expect(text_c).to_equal("copy")
+        if val c = row_of(table_of(ALIAS_SRC), "c"):
+            expect(c.origin).to_equal("copy")
+            expect(c.root_origin).to_equal("extern_return")
+        else:
+            expect("c row").to_equal("missing")
