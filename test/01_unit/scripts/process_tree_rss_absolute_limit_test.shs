@@ -5,12 +5,12 @@
 #
 # This test used to assert that 5859376 KiB (one above the decimal 6 GB
 # DEFAULT) is refused. That was never the ceiling: the watchdog has admitted
-# up to 6835937 KiB (decimal 7 GB) since the macOS Stage 3 policy, so the
+# up to the watchdog `$compiler_ceiling_kib` (decimal 7 GB at first, widened since) since the macOS Stage 3 policy, so the
 # assertion only "passed" on hosts where the watchdog failed to start for an
 # unrelated reason. It now pins the real policy
 # (scripts/resource/process-tree-rss-watchdog.md):
-#   - no declared worker count: ceiling 6835937 KiB;
-#   - --compiler-jobs=N: max(6835937, min(3145728 + N*262144, 3/4 host RAM)).
+#   - no declared worker count: the watchdog fixed ceiling;
+#   - --compiler-jobs=N: max(fixed ceiling, min(3145728 + N*1048576, 3/4 host RAM)).
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 watchdog="$root/scripts/resource/process-tree-rss-watchdog.pl"
@@ -24,6 +24,9 @@ unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_PROCESS_TREE_RSS_CAP_KIB 
     SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE || :
 fail() { echo "FAIL: $*" >&2; exit 1; }
 checks=0
+# The fixed ceiling is owned by the watchdog (widened repeatedly); read it, never copy it.
+fixed=$(sed -n 's/^my \$compiler_ceiling_kib = \([0-9][0-9]*\);.*/\1/p' "$watchdog")
+case "$fixed" in ''|*[!0-9]*) fail "cannot read the fixed ceiling from the watchdog" ;; esac
 
 # direct EXPECT LABEL WATCHDOG-ARGS...   EXPECT = refused | admitted
 direct() {
@@ -49,8 +52,8 @@ direct() {
 
 # No declared worker count: the fixed ceiling, exactly.
 direct admitted 'default cap' --max-rss-kib=5859375
-direct admitted 'cap at the fixed ceiling' --max-rss-kib=6835937
-for cap in 6835938 8388608 33554432; do
+direct admitted 'cap at the fixed ceiling' --max-rss-kib="$fixed"
+for cap in $((fixed + 1)) $((fixed * 2)) $((fixed * 4)); do
     direct refused "direct cap $cap" --max-rss-kib="$cap"
     for name in SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_PROCESS_TREE_RSS_CAP_KIB; do
         rm -f "$tmp/launched"
@@ -58,7 +61,7 @@ for cap in 6835938 8388608 33554432; do
         env "$name=$cap" sh "$wrapper" 5 0 /bin/sh -c 'touch "$1"' sh "$tmp/launched" \
             >"$tmp/env-limit.log" 2>&1 || rc=$?
         [ "$rc" -ne 0 ] && [ ! -e "$tmp/launched" ] || fail "$name=$cap admitted"
-        grep -q 'rss-guard: cap [0-9]* KiB must be between 1 and 6835937 KiB' "$tmp/env-limit.log" ||
+        grep -q "KiB exceeds the hard ceiling $fixed KiB" "$tmp/env-limit.log" ||
             fail "$name=$cap refused without a reason"
         checks=$((checks + 1))
     done
@@ -69,11 +72,11 @@ resolved=$(sh "$root/scripts/bootstrap/lib/tree-rss-policy.shs" --resolve 80 "")
     fail 'tree RSS policy cannot resolve on this host'
 ceiling=$(printf '%s\n' "$resolved" | sed -n 's/^ceiling_kib=//p')
 case "$ceiling" in ''|*[!0-9]*) fail "unusable policy ceiling: $ceiling" ;; esac
-[ "$ceiling" -ge 6835937 ] || fail "job-scaled ceiling $ceiling fell below the fixed ceiling"
+[ "$ceiling" -ge "$fixed" ] || fail "job-scaled ceiling $ceiling fell below the fixed ceiling"
 direct admitted "80-job cap at the ceiling ($ceiling)" --compiler-jobs=80 --max-rss-kib="$ceiling"
 direct refused "80-job cap above the ceiling ($ceiling)" --compiler-jobs=80 --max-rss-kib="$((ceiling + 1))"
 # The absolute bound of the formula itself: no host, however large, admits
-# more than 3 GiB + 128 * 256 MiB for the maximum worker count.
-direct refused '128-job cap above the formula maximum' --compiler-jobs=128 --max-rss-kib=36700161
+# more than 3 GiB + 128 * 1 GiB (per-job ceiling 1048576 KiB) for the maximum worker count.
+direct refused '128-job cap above the formula maximum' --compiler-jobs=128 --max-rss-kib=$((3145728 + 128 * 1048576 + 1))
 
 echo "PASS — $checks case(s): caps above the hard ceiling are refused with a reason on the direct and both environment routes; caps at it are admitted"
