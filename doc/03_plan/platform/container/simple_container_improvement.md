@@ -1,5 +1,10 @@
 # Agent task plan — Simple Container Improvement, increment 1
 
+- Store sweeper and cross-owner follow-ups (Fable review, 2026-11-27):
+  - An unrestorable foreign pin now stays in a tomb marked `keep`, and the call returns `pin-owner-changed-unrestored`. Nothing yet surfaces or reclaims these tombs.
+  - A pin restored as `<id>.r<n>` is not discoverable by its owner, so its refs are retained indefinitely.
+  - There is still no directory sync: after a crash, a record can persist while its object rename does not.
+  - The collect-path sweep spec runs on an uninitialized root, so only the direct `sweep_staging` calls are proven.
 Remaining work after increment 3: `doc/03_plan/platform/container/simple_container_remaining_work.md`.
 
 **Date:** 2026-11-25

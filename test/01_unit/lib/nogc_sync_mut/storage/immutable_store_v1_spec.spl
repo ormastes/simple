@@ -568,6 +568,24 @@ describe "immutable_store_v1 crash and failure safety":
         expect(owner_b.unwrap()).to_equal("owner-b")
         _store_cleanup(root)
 
+    it "keeps an unrestorable foreign pin in a marked tomb the sweeper never deletes":
+        val root = _store_root("rel-owner-unrestored")
+        val a = immutable_store_v1_ingest(root, "owner unrestored".bytes(), HASH_POLICY_V1_XXH3_128)
+        # 126 bytes: a valid pin id with no room for a `.r<n>` suffix.
+        var long_id = ""
+        while long_id.byte_len() < 126:
+            long_id = long_id + "p"
+        expect(immutable_store_v1_pin(root, long_id, "owner-b", [a.object_key])).to_equal("")
+        val tomb = root + "/staging/pinrel-z"
+        dir_create_all(tomb)
+        expect(rename_path(root + "/pins/" + long_id, tomb + "/pin")).to_equal(true)
+        expect(immutable_store_v1_pin(root, long_id, "owner-c", [a.object_key])).to_equal("")
+        expect(_isv1_release_pin_finish(root, long_id, "owner-a", tomb)).to_equal("pin-owner-changed-unrestored")
+        expect(file_exists(tomb + "/keep")).to_equal(true)
+        immutable_store_v1_sweep_staging(root, StoreCountV1(0))
+        expect(file_exists(tomb + "/pin/owner")).to_equal(true)
+        _store_cleanup(root)
+
     it "sweeps stale staging dirs but keeps fresh ones, and never during dry-run GC":
         val root = _store_root("staging-sweep")
         dir_create_all(root + "/staging/ingest-dead")
