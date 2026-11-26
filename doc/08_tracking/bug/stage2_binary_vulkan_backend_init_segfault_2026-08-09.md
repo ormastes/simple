@@ -104,3 +104,54 @@ Re-run against the CURRENT frozen stage2 (or first admitted stage3) so
 the "many Vulkan landings since 2026-08-09" question is answered with
 evidence; close this record only on `VK_PROBE PASS` from the
 self-hosted binary.
+
+## 2026-11-26 attempt on Linux aarch64 NVIDIA GB10 (gpuvk lane) — still unverified on Stage 2
+
+Host: real NVIDIA Vulkan driver (`nvidia_icd.json`, PCI `10de:2e12`), worktree on release/1.0.0
+`79445b063c4`. The probe is the Symptom section's program plus progress prints. Place it under the
+checkout, because `native-build` refuses an entry outside the git root (`SCV-E-ADMISSION:
+source-inventory-scope-unsupported`):
+
+```simple
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+fn main() -> i64:
+    print "create..."
+    var backend = VulkanBackend.create()
+    print "init..."
+    if not backend.init(64, 64):
+        print "VK_PROBE INIT_FAIL"
+        return 1
+    backend.clear(0xFF204060u32)
+    backend.draw_rect_filled(8, 8, 16, 16, 0xFFCC3020u32)
+    val px = backend.read_pixels()
+    if px[16 * 64 + 16] == 0xFFCC3020u32 and px[0] == 0xFF204060u32:
+        print "VK_PROBE PASS"
+        return 0
+    print "VK_PROBE WRONG_PIXELS"
+    3
+```
+(this run used the path `build/vkprobe/vk_probe2.spl`).
+
+**Control (Rust seed `/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple`, sha256 prefix
+`fb80903917d6d5f5`):**
+
+- `SIMPLE_EXECUTION_MODE=interpret seed run`: `create...` `init...` `VK_PROBE PASS`.
+  The backend and its SFFI are sound on this host.
+- `seed run` (default JIT lane): `VK_PROBE INIT_FAIL` (rc=1, no crash). This is the existing
+  record `vulkan_instance_init_fails_under_run_but_not_test_2026-08-25`, not this one.
+
+**Stage 2 lane mismatch:** the admitted aarch64 Stage 2 binary (sha256 `53e9e2e7513658f1…`,
+built from `4995f23e7ccd`, receipts `stage2-admission` / `stage2-sanity: pass`) is the bootstrap
+CLI. It exposes only `compile` and `native-build`, so this record's `$S run` repro cannot be
+replayed as written. The closest self-hosted path is `SIMPLE_BOOTSTRAP=1 $S native-build` of the
+probe followed by running that executable. That tests the AOT code the self-hosted compiler emits,
+not an interpreter.
+
+**Result:** the native-build was killed by its 3600 s timeout before it linked. The probe's
+closure is 402 modules; parse, closure and HIR finished, and 74 per-module `mir-child` native
+compiles completed in the hour. So there is no executable yet, and **neither 139 nor PASS has
+been observed** from a self-hosted binary. Status stays **open**.
+
+Close only on `VK_PROBE PASS` from the Stage 2-built executable. An exit of 139 confirms this
+record. `INIT_FAIL`, or unresolved `rt_vulkan*` symbols at link, means the record cannot be
+verified on this artifact; name that gap rather than closing.
