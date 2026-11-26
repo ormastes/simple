@@ -1,0 +1,169 @@
+# Purpose and audience: executable regression specification for generic `-> T` tail unwrap/if-val/match across scalars and records.
+# @req REQ-SSPEC-COMPILER
+"""
+# Generic `-> T` Tail Unwrap / `if val` / `match` Regression Guard
+
+Verifies `stage2_generic_tail_unwrap_reboxes_record_2026-11-19` root-cause fixes in `50.mir`:
+1. Free erased generic functions unwrapping `T?` via `.unwrap()`, `!`, `if val`, or `match Some(x)`
+   preserve the tagged `T` word without emitting `rt_value_int_wide` (no `ptr << 3` SIGSEGV on records
+   and no `x8` double-boxing on scalars).
+2. Concrete callers encode scalar `T?` arguments (`encode_erased_scalar_opt_arg_v1`) and multi-field
+   enum payload tuple slots (`encode_enum_tuple_payload_slot_v1`) uniformly as `RuntimeValue` words,
+   and decode concrete `-> T` / turbofish `-> T?` scalar returns cleanly.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_set}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val PROBE_SOURCE: text =
+    "@unsafe(reason: \"probe raw tuple ABI\", capabilities: [ffi])\n" +
+    "extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?\n" +
+    "@unsafe(reason: \"probe raw payload ABI\", capabilities: [ffi])\n" +
+    "extern fn rt_enum_payload<T, TPayload>(value: T) -> TPayload\n\n" +
+    "struct ProbeRec:\n" +
+    "    x: i64\n" +
+    "    y: i64\n\n" +
+    "enum Node:\n" +
+    "    PairNum(i64, ProbeRec)\n" +
+    "    PairFlt(f64, ProbeRec)\n" +
+    "    Two(ProbeRec, ProbeRec)\n\n" +
+    "fn tuple_at<TElement>(tuple: i64, index: i64) -> TElement?:\n" +
+    "    unsafe(capabilities: [ffi]):\n" +
+    "        rt_tuple_get<TElement>(tuple, index)\n\n" +
+    "fn payload_of<T>(value: T) -> i64:\n" +
+    "    unsafe(capabilities: [ffi]):\n" +
+    "        rt_enum_payload<T, i64>(value)\n\n" +
+    "fn first<T>(xs: [T]) -> T?:\n" +
+    "    if xs.len() == 0:\n" +
+    "        return None\n" +
+    "    Some(xs[0])\n\n" +
+    "fn req_unwrap<T>(v: T?) -> T:\n" +
+    "    v.unwrap()\n\n" +
+    "fn req_bang<T>(v: T?) -> T:\n" +
+    "    v!\n\n" +
+    "fn req_if<T>(v: T?) -> T:\n" +
+    "    if val p = v:\n" +
+    "        return p\n" +
+    "    panic(\"none\")\n\n" +
+    "fn req_match<T>(v: T?) -> T:\n" +
+    "    match v:\n" +
+    "        case Some(x): x\n" +
+    "        case None: panic(\"none\")\n\n" +
+    "fn get_unwrap_req<T>(tuple: i64, index: i64) -> T:\n" +
+    "    tuple_at<T>(tuple, index).unwrap()\n\n" +
+    "fn get_if_req<T>(tuple: i64, index: i64) -> T:\n" +
+    "    if val p = tuple_at<T>(tuple, index):\n" +
+    "        return p\n" +
+    "    panic(\"absent\")\n\n" +
+    "fn head_var_unwrap<T>(xs: [T]) -> T:\n" +
+    "    val opt = first(xs)\n" +
+    "    opt.unwrap()\n\n" +
+    "fn head_match<T>(xs: [T]) -> T:\n" +
+    "    match first(xs):\n" +
+    "        case Some(x): x\n" +
+    "        case None: panic(\"empty\")\n\n" +
+    "fn use_opt_int() -> i64:\n" +
+    "    val a: i64 = req_unwrap<i64>(Some(42))\n" +
+    "    val b: i64 = req_if<i64>(Some(77))\n" +
+    "    val c: i64 = req_match<i64>(Some(3))\n" +
+    "    val d: i64 = req_bang<i64>(Some(9))\n" +
+    "    a + b + c + d\n\n" +
+    "fn use_opt_flt() -> f64:\n" +
+    "    val a: f64 = req_unwrap<f64>(Some(0.1))\n" +
+    "    val b: f64 = req_if<f64>(Some(3.5))\n" +
+    "    a + b\n\n" +
+    "fn use_opt_rec() -> i64:\n" +
+    "    val a: ProbeRec = req_unwrap<ProbeRec>(Some(ProbeRec(x: 11, y: 22)))\n" +
+    "    val b: ProbeRec = req_if<ProbeRec>(Some(ProbeRec(x: 3, y: 4)))\n" +
+    "    val c: ProbeRec = req_match<ProbeRec>(Some(ProbeRec(x: 5, y: 6)))\n" +
+    "    a.x + b.y + c.x\n\n" +
+    "fn use_enum_tuple_mixed() -> i64:\n" +
+    "    val pn = Node.PairNum(77, ProbeRec(x: 9, y: 8))\n" +
+    "    val pl = payload_of<Node>(pn)\n" +
+    "    val n0: i64 = get_if_req<i64>(pl, 0)\n" +
+    "    val n1: i64 = get_unwrap_req<i64>(pl, 0)\n" +
+    "    val p1: ProbeRec = get_unwrap_req<ProbeRec>(pl, 1)\n" +
+    "    val direct: i64 = tuple_at<i64>(pl, 0) ?? -1\n" +
+    "    n0 + n1 + p1.x + direct\n\n" +
+    "fn use_enum_tuple_flt() -> f64:\n" +
+    "    val pf = Node.PairFlt(0.1, ProbeRec(x: 1, y: 2))\n" +
+    "    match pf:\n" +
+    "        case Node.PairFlt(f, _): f\n" +
+    "        case _: 0.0\n\n" +
+    "fn use_head_variants() -> i64:\n" +
+    "    val hi: i64 = head_var_unwrap<i64>([42])\n" +
+    "    val hm: ProbeRec = head_match<ProbeRec>([ProbeRec(x: 5, y: 6)])\n" +
+    "    hi + hm.y\n"
+
+struct LoweredProbe:
+    fns: Dict<text, text>
+    ir: text
+    errors: text
+
+fn lower_probe() -> LoweredProbe:
+    val module = parse_and_build_module(PROBE_SOURCE, "gtu_sr.spl")
+    var hir_lowering = HirLowering.with_filename("gtu_sr.spl")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    var errors = ""
+    for e in hir_lowering.errors:
+        errors = errors + "hir: " + e.message + "\n"
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    for e in mir_lowering.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    var fns: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val prefix = "gtu_sr."
+        val short = if function.name.starts_with(prefix): function.name.substring(prefix.len(), function.name.len()) else: function.name
+        fns[short] = serialize_mir_function(function)
+    val ir = MirToLlvm.create("gtu_sr", CodegenTarget.X86_64, None).translate_module(mir)
+    LoweredProbe(fns: fns, ir: ir, errors: errors)
+
+describe "erased generic -> T tail unwrap/if-val/match for scalars and records":
+    it "lowers all generic and concrete probe shapes without HIR or MIR errors":
+        val lowered = lower_probe()
+        expect(lowered.errors).to_equal("")
+        expect(lowered.ir).to_contain("req_unwrap(")
+
+    it "never emits rt_value_int_wide inside generic -> T unwrap, bang, if-val, or match bodies":
+        val fns = lower_probe().fns
+        for name in ["req_unwrap", "req_bang", "req_if", "req_match", "get_unwrap_req", "get_if_req", "head_var_unwrap", "head_match"]:
+            val mir = fns[name] ?? "missing"
+            expect(mir).to_contain("rt_unwrap_or_self")
+            expect(mir.contains("rt_value_int_wide")).to_equal(false)
+
+    it "encodes scalar T? args and decodes scalar -> T returns at concrete callers":
+        val fns = lower_probe().fns
+        val ui = fns["use_opt_int"] ?? "missing"
+        expect(ui).to_contain("rt_value_int_wide")
+        expect(ui).to_contain("rt_value_as_int_wide")
+        val uf = fns["use_opt_flt"] ?? "missing"
+        expect(uf).to_contain("rt_value_float")
+        expect(uf).to_contain("rt_value_as_float")
+        val ur = fns["use_opt_rec"] ?? "missing"
+        expect(ur.contains("rt_value_int_wide")).to_equal(false)
+        expect(ur.contains("rt_value_as_int_wide")).to_equal(false)
+
+    it "tags and decodes multi-field enum tuple scalars consistently with rt_tuple_get<T>":
+        val fns = lower_probe().fns
+        val em = fns["use_enum_tuple_mixed"] ?? "missing"
+        expect(em).to_contain("rt_value_int_wide")
+        expect(em).to_contain("rt_value_as_int_wide")
+        val ef = fns["use_enum_tuple_flt"] ?? "missing"
+        expect(ef).to_contain("rt_value_float")
+        expect(ef).to_contain("rt_value_as_float")

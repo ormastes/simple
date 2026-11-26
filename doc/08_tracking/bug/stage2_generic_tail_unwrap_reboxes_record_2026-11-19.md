@@ -1,10 +1,14 @@
 # Erased generic `-> T` tail `.unwrap()` int-boxes a record payload (Stage 3 MIR SIGSEGV)
 
 - **Date:** 2026-11-19
-- **Status:** workaround in source (`# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19`);
-  the fixture's `tuple_at` forwarder shape cannot be fixed soundly in 50.mir, so
-  the workaround IS the fix for it (see "Lowering fix"); a sibling double-box for
-  argument-bound producers is fixed in MIR (native proof needs a Stage 2 built from it)
+- **Status:** `ROOT-FIXED+STAGE2-GATED` — root cause fixed in `src/compiler/50.mir`
+  (`method_calls_literals.spl`, `expr_dispatch.spl`, `switch_operators_calls.spl`);
+  the `# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19`
+  concrete typed payload owners in `expr_dispatch.spl` and `core_codegen.spl`
+  remain Stage-2-gated for one bootstrap hop past `162c481782f` because the
+  current Stage 2/3 seed (`162c481782f`) still emits `rt_value_int_wide` in
+  `generic_unwrap_req<T>` and shifts raw `i64` (`77 >> 3 = 9`) on
+  `Node.PairNum(77, ...)`.
 - **Lane:** Stage 2 (integ18, cranelift) -> Stage 3 -> Stage 3 self-build, aarch64 Linux
 - **Source pin:** release/1.0.0 `cbff0ece9e8`
 - **Family:** `stage3_array_copy_unique_static_leaf_2026-11-19.md`,
@@ -153,9 +157,15 @@ it does not resolve the general ambiguous erased generic-return contract.
 The new compiler bytes must execute cast/index native fixtures and compile/run
 the original runtime byte-at fixture before further bootstrap admission.
 
-## Uniform P3 audit 2026-11-26 (`KEPT-WITH-REASON`)
+## Uniform P3 audit & root-cause fix 2026-11-26 (`ROOT-FIXED+STAGE2-GATED`)
 
-Isolated native probes on uniform P3 confirm the erased generic `-> T` tuple-getter remains fundamentally ambiguous for mixed raw-scalar / record enum payloads:
-- `payload.unwrap()` tail (`generic_unwrap_req<T>`): `i64` `42` double-boxes to `336`, and `ProbeRec` crashes with `SIGSEGV (exit 139)`.
-- `if val present = payload: return present` (`get_if_req<T>`): handles `Node.Two(Pair, Pair)` (`1 left 2 right`), **but corrupts raw scalar `i64` from an enum payload tuple (`Node.PairNum(77, ...)` -> `9`, i.e., `77 >> 3`)** because the concrete `-> i64` caller executes `rt_value_as_int_wide` on the unshifted raw slot word.
-- Concrete typed payload owners (`_sffi_hir_expr_payload_req`, `_sffi_local_id_payload_req`, `_sffi_mir_const_value_payload_req`, `_sffi_mir_type_payload_req`, `_sffi_aggregate_kind_payload_req`, `_sffi_mir_operand_list_payload_req`) remain required and pinned by `test/01_unit/compiler/50.mir/wa_src_lane5_workaround_audit_spec.spl`.
+Isolated native probes on uniform P3 (`162c481782f`) confirmed the erased generic `-> T` contract had four gaps in `50.mir`:
+- `payload.unwrap()` tail (`generic_unwrap_req<T>`): `i64` `42` double-boxed to `336`, and `ProbeRec` crashed with `SIGSEGV (exit 139)`.
+- `if val present = payload: return present` (`get_if_req<T>`): handled `Node.Two(Pair, Pair)` (`1 left 2 right`) and `rt_tuple_set(t, 0, 42)` (`42`), **but corrupted raw scalar `i64` from an enum payload tuple (`Node.PairNum(77, ...)` -> `9`, i.e., `77 >> 3`)** and `req_opt_if<i64>(Some(77))` -> `9` because neither multi-field enum tuple slots (`box_lowered_enum_tuple_payload`) nor concrete `T?` call arguments encoded scalar payloads into `RuntimeValue` words.
+- `match v: case Some(x): x` inside `-> T` left `x` unmarked and int-boxed records via `rt_value_int_wide`.
+
+**Root-cause fix in `50.mir` (`work/fix-wa3-generic-tail-unwrap-20261126`):**
+1. **Free generic `T?` unwrap / `!` / `if val` / `match` (`method_calls_literals.spl`, `expr_dispatch.spl`, `switch_operators_calls.spl`)**: any `T?` unwrap/match inside a free erased generic body (`not current_fn_is_method`) marks the extracted `T` payload as a runtime value so `-> T` returns do not emit `rt_value_int_wide` (no `ptr << 3` `SIGSEGV` on records and no `x8` double-boxing on scalars).
+2. **`T?` parameter encoding (`switch_operators_calls.spl`, `encode_erased_scalar_opt_arg_v1`)**: concrete callers passing scalar `T?` (`Int`, `Float`, `Bool`) into a `T?` parameter encode the `Some` payload (`rt_value_int_wide`, `rt_value_float`, `11`/`19`), matching `decode_erased_scalar_call_payload` on return.
+3. **Uniform multi-field enum payload tuples (`switch_operators_calls.spl`, `encode_enum_tuple_payload_slot_v1` / `decode_enum_tuple_payload_slot_v1`)**: `box_lowered_enum_tuple_payload` encodes scalar slots (`rt_value_int_wide`, `rt_value_float`, `rt_value_u64`, bool/char tags) identically to `rt_tuple_set(..., Any)`, and `lower_enum_match` / `emit_enum_payload_deep` decode `rt_tuple_get` scalar slots symmetrically; `decode_erased_scalar_call_payload` also handles explicit turbofish `-> T?` option returns (`payload_get<i64>`, `rt_tuple_get<i64>`) via `rt_is_some` + `rt_unwrap_or_self`.
+4. **Stage-2 gate for concrete payload helpers (`expr_dispatch.spl`, `core_codegen.spl`)**: `# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19` and `_sffi_*_payload_req` remain in source as `ROOT-FIXED+STAGE2-GATED` for one bootstrap hop past `162c481782f` (until Stage 2/3 is rebuilt with the fix above, so `162c481782f` does not compile `.unwrap()` in `expr_dispatch.spl` / `core_codegen.spl` with `rt_value_int_wide`). Pinned by `test/01_unit/compiler/mir/generic_tail_unwrap_record_spec.spl`, `test/01_unit/compiler/50.mir/generic_tail_unwrap_scalar_and_record_spec.spl`, and `test/01_unit/compiler/50.mir/wa_src_lane5_workaround_audit_spec.spl`.

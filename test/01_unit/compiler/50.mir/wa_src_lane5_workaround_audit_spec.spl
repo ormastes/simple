@@ -7,7 +7,7 @@ Verifies all 8 WA-S5 assigned `@workaround` bugs across `50.mir`, `55.borrow`,
 `70.backend`, and `lib/scv`:
 1. `BUG-NATIVE-NESTED-STRUCT-NIL-COPY-20261016` (`ROOT-FIXED+STAGE2-GATED`)
 2. `stage2_local_symbol_index_bucket_tagged_id_2026-11-03` (`ROOT-FIXED+STAGE2-GATED`)
-3. `stage2_generic_tail_unwrap_reboxes_record_2026-11-19` (`KEPT-WITH-REASON`)
+3. `stage2_generic_tail_unwrap_reboxes_record_2026-11-19` (`ROOT-FIXED+STAGE2-GATED`)
 4. `stage2_if_val_text_option_transport_tls_end_2026-11-04` (`ROOT-FIXED+STAGE2-GATED`)
 5. `mir_aggregate_trace_array_receiver_2026_10_25` (`RETIRED`, PR #11847)
 6. `nll_live_aliases_method_arg_corruption_2026_10_22` (`RETIRED`, PR #11847)
@@ -198,7 +198,37 @@ describe "WA-S5 compiler & SCV workaround audit":
             expect_not(site_body.contains("@workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03"))
             expect_not(site_body.contains("self.restore_mirror_bindings("))
 
-    it "stage2_generic_tail_unwrap_reboxes_record_2026-11-19: keeps concrete required tuple payload getters and avoids generic .unwrap() tail":
+    it "stage2_generic_tail_unwrap_reboxes_record_2026-11-19: lowers generic -> T unwrap/if-val/match without rt_value_int_wide and keeps Stage-2-gated concrete payload getters":
+        val probe_src =
+            "@unsafe(reason: \"probe tuple\", capabilities: [ffi])\n" +
+            "extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?\n" +
+            "struct ProbeRec:\n" +
+            "    x: i64\n" +
+            "    y: i64\n" +
+            "fn tuple_at<T>(tuple: i64, index: i64) -> T?:\n" +
+            "    unsafe(capabilities: [ffi]): rt_tuple_get<T>(tuple, index)\n" +
+            "fn req_unwrap<T>(v: T?) -> T:\n" +
+            "    v.unwrap()\n" +
+            "fn req_if<T>(v: T?) -> T:\n" +
+            "    if val p = v: return p\n" +
+            "    panic(\"none\")\n" +
+            "fn get_req<T>(t: i64, i: i64) -> T:\n" +
+            "    tuple_at<T>(t, i).unwrap()\n" +
+            "fn use_all(t: i64) -> i64:\n" +
+            "    val a: i64 = req_unwrap<i64>(Some(42))\n" +
+            "    val b: i64 = req_if<i64>(Some(77))\n" +
+            "    val r: ProbeRec = get_req<ProbeRec>(t, 0)\n" +
+            "    a + b + r.x\n"
+        val r = lower_lane5_src(probe_src)
+        expect(r.errors).to_equal([])
+        for g_name in ["req_unwrap", "req_if", "get_req"]:
+            val g_mir = find_lane5_mir_fn(r.mir_fns, g_name)
+            assert_true(g_mir != "")
+            expect(g_mir).to_contain("rt_unwrap_or_self")
+            expect_not(g_mir.contains("rt_value_int_wide"))
+        val use_ir = fn_slice(SliceQuery(src: r.ir, header: "use_all(", stop: "\n}"))
+        expect(use_ir).to_contain("@rt_value_int_wide(")
+        expect(use_ir).to_contain("@rt_value_as_int_wide(")
         val ed = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
         val cg = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
         expect(ed).to_contain("@workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19")
