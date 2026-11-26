@@ -58,8 +58,13 @@ use std.database.server.transport.{ MemoryTransport, DbStopControl }
 # Fixtures
 # ============================================================================
 
-fn make_store() -> SdnDatabase:
-    var db = SdnDatabase.new("/tmp/dbtier_spec.sdn")
+# Every scenario gets its OWN store path.  All examples used to share
+# `/tmp/dbtier_spec.sdn`; a COMMIT persists through `SdnDatabase.save()`, which
+# takes a `FileLock` on that path, so two concurrent runs of this file (or of
+# any lane touching the same path) contend on one lock whose acquire budget is
+# five minutes — a latent runner hang.  Mirrors db_durability_spec.spl.
+fn make_store(tag: text) -> SdnDatabase:
+    var db = SdnDatabase.new("build/dbtier_" + tag + ".sdn")
     val users = SdnTable.new("users", ["id", "name", "valid"])
     db.set_table("users", users)
     val audit = SdnTable.new("audit", ["id", "event", "valid"])
@@ -80,8 +85,18 @@ fn make_policy() -> CapabilityTable:
     policy.register_authenticated(empty_capability("mallory"), "mallory-secret")
     policy
 
-fn make_server() -> DbServerCapsule:
-    DbServerCapsule.new(make_store(), make_policy())
+fn make_server(tag: text) -> DbServerCapsule:
+    DbServerCapsule.new(make_store(tag), make_policy())
+
+# `store_read` returns `SdnRow?`, so an absent row arrives as `Option::None`,
+# which is NOT equal to `nil` — `assert_nil` on it reports a false failure even
+# though the row is correctly absent.  Collapse the Option to a bool first.
+fn row_absent(store: SdnDatabase, table_name: text, key: text) -> bool:
+    match store_read(store, table_name, key):
+        Some(_):
+            false
+        None:
+            true
 
 # ============================================================================
 # @manual_section Connection lifecycle and request framing
@@ -92,13 +107,13 @@ describe "DB server tier — connection lifecycle":
     it "rejects a known principal without its credential":
         # @req REQ-SSPEC-SYSTEM
         step("rejects a known principal without its credential")
-        var server = make_server()
+        var server = make_server("rejects_a_known_principal_without_its_cr")
         assert_contains(server.handle_message("OPEN as=alice"), "code=auth")
 
     it "rejects a known principal with the wrong credential":
         # @req REQ-SSPEC-SYSTEM
         step("rejects a known principal with the wrong credential")
-        var server = make_server()
+        var server = make_server("rejects_a_known_principal_with_the_wrong")
         assert_contains(server.handle_message("OPEN as=alice credential=bob-secret"), "code=auth")
 
     it "stores only a fixed digest and returns an authenticated principal proof":
@@ -114,7 +129,7 @@ describe "DB server tier — connection lifecycle":
     it "gives each client its own session id":
         # @req REQ-SSPEC-SYSTEM
         step("gives each client its own session id")
-        var server = make_server()
+        var server = make_server("gives_each_client_its_own_session_id")
         val first = server.handle_message("OPEN as=alice credential=alice-secret")
         val second = server.handle_message("OPEN as=bob credential=bob-secret")
         assert_equal(first, "OK session=1")
@@ -148,7 +163,7 @@ describe "DB server tier — connection lifecycle":
             Err(error): panic("client write shutdown failed: {error.message}")
             Ok(_): pass
 
-        var server = make_server()
+        var server = make_server("binds_serves_cleans_up_closes_and_rebind")
         match server.serve_listener(control, 1):
             Err(error): panic("listener serve failed: {error.message}")
             Ok(accepted): expect(accepted).to_equal(1)
@@ -187,7 +202,7 @@ describe "DB server tier — connection lifecycle":
             Err(error): panic("idle local_addr failed: {error.message}")
             Ok(value): value
         var retained = control.stop_handle()
-        val server = make_server()
+        val server = make_server("stops_an_idle_serving_owner_once_through")
         val worker = thread_spawn_with_args(server, control, \server_value, control_value:
             var owned_server: DbServerCapsule = server_value
             val owned_control: DbListenerControl = control_value
@@ -229,7 +244,7 @@ describe "DB server tier — connection lifecycle":
             Err(error): panic("post-stop local_addr failed: {error.message}")
             Ok(value): value
         var retained = control.stop_handle()
-        val server = make_server()
+        val server = make_server("rejects_a_connection_completed_after_sto")
         val worker = thread_spawn_with_args(server, control, \server_value, control_value:
             var owned_server: DbServerCapsule = server_value
             val owned_control: DbListenerControl = control_value
@@ -274,7 +289,7 @@ describe "DB server tier — connection lifecycle":
     it "terminates the connection and cleans sessions after a write failure":
         # @req REQ-SSPEC-SYSTEM
         step("terminates the connection and cleans sessions after a write failure")
-        var server = make_server()
+        var server = make_server("terminates_the_connection_and_cleans_ses")
         val outcome = server.serve(MemoryTransport.with_failed_writes([
             "OPEN as=alice credential=alice-secret", "PING session=1"
         ]))
@@ -284,14 +299,14 @@ describe "DB server tier — connection lifecycle":
     it "refuses to work for a session that was never opened":
         # @req REQ-SSPEC-SYSTEM
         step("refuses to work for a session that was never opened")
-        var server = make_server()
+        var server = make_server("refuses_to_work_for_a_session_that_was_n")
         val reply = server.handle_message("BEGIN session=99")
         assert_contains(reply, "code=no_session")
 
     it "refuses to work for a session that has been closed":
         # @req REQ-SSPEC-SYSTEM
         step("refuses to work for a session that has been closed")
-        var server = make_server()
+        var server = make_server("refuses_to_work_for_a_session_that_has_b")
         server.handle_message("OPEN as=alice credential=alice-secret")
         assert_equal(server.handle_message("CLOSE session=1"), "OK")
         assert_contains(server.handle_message("BEGIN session=1"), "code=no_session")
@@ -299,19 +314,19 @@ describe "DB server tier — connection lifecycle":
     it "discards an abandoned transaction when the connection closes":
         # @req REQ-SSPEC-SYSTEM
         step("discards an abandoned transaction when the connection closes")
-        var server = make_server()
+        var server = make_server("discards_an_abandoned_transaction_when_t")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("PUT session=1 tbl=users id=ghost name=nobody")
         server.handle_message("CLOSE session=1")
         # Absolute oracle: the store itself never received the row.
         val store = server.store
-        assert_nil(store_read(store, "users", "ghost"))
+        assert_true(row_absent(store, "users", "ghost"))
 
     it "answers every message on a connection driven by the transport port":
         # @req REQ-SSPEC-SYSTEM
         step("answers every message on a connection driven by the transport port")
-        var server = make_server()
+        var server = make_server("answers_every_message_on_a_connection_dr")
         var channel = MemoryTransport.with_messages([
             "OPEN as=alice credential=alice-secret",
             "PING session=1",
@@ -323,13 +338,14 @@ describe "DB server tier — connection lifecycle":
         expect(outcome.served).to_equal(3)
         expect(served_channel.sent_count()).to_equal(3)
         expect(replies[0]).to_equal("OK session=1")
+        expect(replies[2]).to_equal("OK")
 
 describe "DB server tier — request framing is fail-closed":
 
     it "rejects an unknown operation instead of executing anything":
         # @req REQ-SSPEC-SYSTEM
         step("rejects an unknown operation instead of executing anything")
-        var server = make_server()
+        var server = make_server("rejects_an_unknown_operation_instead_of")
         val reply = server.handle_message("DROPTABLE session=1 tbl=users")
         assert_contains(reply, "code=malformed")
         assert_contains(reply, "unknown op")
@@ -337,7 +353,7 @@ describe "DB server tier — request framing is fail-closed":
     it "rejects an unterminated quote instead of crashing":
         # @req REQ-SSPEC-SYSTEM
         step("rejects an unterminated quote instead of crashing")
-        var server = make_server()
+        var server = make_server("rejects_an_unterminated_quote_instead_of")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         val reply = server.handle_message('PUT session=1 tbl=users id="oops name=x')
@@ -365,7 +381,7 @@ describe "DB server tier — request framing is fail-closed":
     it "rejects a non-numeric session id":
         # @req REQ-SSPEC-SYSTEM
         step("rejects a non-numeric session id")
-        var server = make_server()
+        var server = make_server("rejects_a_non_numeric_session_id")
         val reply = server.handle_message("BEGIN session=notanumber")
         assert_contains(reply, "code=malformed")
 
@@ -397,7 +413,7 @@ describe "DB server tier — transaction isolation between two sessions":
     it "hides one session's uncommitted write from the other session":
         # @req REQ-SSPEC-SYSTEM
         step("hides one session's uncommitted write from the other session")
-        var server = make_server()
+        var server = make_server("hides_one_session_s_uncommitted_write_fr")
         server.handle_message("OPEN as=alice credential=alice-secret")   # session 1, read+write
         server.handle_message("OPEN as=bob credential=bob-secret")     # session 2, read-only
         server.handle_message("BEGIN session=1")
@@ -416,7 +432,7 @@ describe "DB server tier — transaction isolation between two sessions":
         # Absolute oracle, independent of the server's own read path:
         # the underlying store holds nothing.
         val store = server.store
-        assert_nil(store_read(store, "users", "u1"))
+        assert_true(row_absent(store, "users", "u1"))
 
     it "shows the write to the other session once it is committed":
         # @req REQ-SSPEC-SYSTEM
@@ -425,7 +441,7 @@ describe "DB server tier — transaction isolation between two sessions":
         # peer read path.  If that path were simply incapable of observing a
         # row, this assertion would fail too — so the "not_found" above cannot
         # be a false green.
-        var server = make_server()
+        var server = make_server("shows_the_write_to_the_other_session_onc")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("OPEN as=bob credential=bob-secret")
         server.handle_message("BEGIN session=1")
@@ -444,7 +460,7 @@ describe "DB server tier — transaction isolation between two sessions":
         # is still open — and assert that the isolation oracle now REPORTS the
         # leak.  This proves the two assertions in the isolation test above are
         # capable of failing.
-        var server = make_server()
+        var server = make_server("would_go_red_if_an_uncommitted_write_rea")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("OPEN as=bob credential=bob-secret")
         server.handle_message("BEGIN session=1")
@@ -476,13 +492,13 @@ describe "DB server tier — transaction isolation between two sessions":
     it "discards a rolled-back transaction entirely":
         # @req REQ-SSPEC-SYSTEM
         step("discards a rolled-back transaction entirely")
-        var server = make_server()
+        var server = make_server("discards_a_rolled_back_transaction_entir")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("OPEN as=bob credential=bob-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("PUT session=1 tbl=users id=u1 name=ada")
         assert_equal(server.handle_message("ROLLBACK session=1"), "OK")
-        assert_nil(store_read(server.store, "users", "u1"))
+        assert_true(row_absent(server.store, "users", "u1"))
         assert_contains(
             server.handle_message("GET session=2 tbl=users id=u1 col=name"),
             "code=not_found"
@@ -491,7 +507,7 @@ describe "DB server tier — transaction isolation between two sessions":
     it "keeps two concurrent transactions from seeing each other's writes":
         # @req REQ-SSPEC-SYSTEM
         step("keeps two concurrent transactions from seeing each other's writes")
-        var server = make_server()
+        var server = make_server("keeps_two_concurrent_transactions_from_s")
         server.handle_message("OPEN as=alice credential=alice-secret")   # session 1
         server.handle_message("OPEN as=alice credential=alice-secret")   # session 2, same principal
         server.handle_message("BEGIN session=1")
@@ -518,7 +534,7 @@ describe "DB server tier — transaction isolation between two sessions":
     it "aborts a commit whose row was changed underneath it":
         # @req REQ-SSPEC-SYSTEM
         step("aborts a commit whose row was changed underneath it")
-        var server = make_server()
+        var server = make_server("aborts_a_commit_whose_row_was_changed_un")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("OPEN as=alice credential=alice-secret")
         # Seed a committed row.
@@ -544,7 +560,7 @@ describe "DB server tier — transaction isolation between two sessions":
     it "requires an open transaction before any write":
         # @req REQ-SSPEC-SYSTEM
         step("requires an open transaction before any write")
-        var server = make_server()
+        var server = make_server("requires_an_open_transaction_before_any")
         server.handle_message("OPEN as=alice credential=alice-secret")
         assert_contains(
             server.handle_message("PUT session=1 tbl=users id=u1 name=ada"),
@@ -556,7 +572,7 @@ describe "DB server tier — transaction isolation between two sessions":
     it "refuses to nest transactions on one session":
         # @req REQ-SSPEC-SYSTEM
         step("refuses to nest transactions on one session")
-        var server = make_server()
+        var server = make_server("refuses_to_nest_transactions_on_one_sess")
         server.handle_message("OPEN as=alice credential=alice-secret")
         assert_equal(server.handle_message("BEGIN session=1"), "OK")
         assert_contains(server.handle_message("BEGIN session=1"), "code=txn_open")
@@ -564,7 +580,7 @@ describe "DB server tier — transaction isolation between two sessions":
     it "makes a committed delete invisible":
         # @req REQ-SSPEC-SYSTEM
         step("makes a committed delete invisible")
-        var server = make_server()
+        var server = make_server("makes_a_committed_delete_invisible")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("PUT session=1 tbl=users id=u1 name=ada")
@@ -572,7 +588,7 @@ describe "DB server tier — transaction isolation between two sessions":
         server.handle_message("BEGIN session=1")
         server.handle_message("DEL session=1 tbl=users id=u1")
         server.handle_message("COMMIT session=1")
-        assert_nil(store_read(server.store, "users", "u1"))
+        assert_true(row_absent(server.store, "users", "u1"))
 
 # ============================================================================
 # @manual_section Capability-checked access
@@ -583,19 +599,19 @@ describe "DB server tier — capability-checked access is deny-wins":
     it "refuses a write from a read-only principal":
         # @req REQ-SSPEC-SYSTEM
         step("refuses a write from a read-only principal")
-        var server = make_server()
+        var server = make_server("refuses_a_write_from_a_read_only_princip")
         server.handle_message("OPEN as=bob credential=bob-secret")
         server.handle_message("BEGIN session=1")
         val reply = server.handle_message("PUT session=1 tbl=users id=u1 name=eve")
         assert_contains(reply, "code=denied")
         # Nothing was staged, so committing changes nothing.
         server.handle_message("COMMIT session=1")
-        assert_nil(store_read(server.store, "users", "u1"))
+        assert_true(row_absent(server.store, "users", "u1"))
 
     it "refuses every data reach from a principal with no grants":
         # @req REQ-SSPEC-SYSTEM
         step("refuses every data reach from a principal with no grants")
-        var server = make_server()
+        var server = make_server("refuses_every_data_reach_from_a_principa")
         server.handle_message("OPEN as=mallory credential=mallory-secret")
         server.handle_message("BEGIN session=1")
         assert_contains(
@@ -610,7 +626,7 @@ describe "DB server tier — capability-checked access is deny-wins":
     it "refuses a table the principal was never granted":
         # @req REQ-SSPEC-SYSTEM
         step("refuses a table the principal was never granted")
-        var server = make_server()
+        var server = make_server("refuses_a_table_the_principal_was_never")
         server.handle_message("OPEN as=bob credential=bob-secret")   # read on users only
         server.handle_message("BEGIN session=1")
         assert_contains(
@@ -621,7 +637,7 @@ describe "DB server tier — capability-checked access is deny-wins":
     it "refuses an unregistered principal before data reach":
         # @req REQ-SSPEC-SYSTEM
         step("refuses an unregistered principal before data reach")
-        var server = make_server()
+        var server = make_server("refuses_an_unregistered_principal_before")
         assert_equal(
             server.handle_message("OPEN as=stranger credential=guess"),
             "ERR code=auth msg=\"authentication failed\""
@@ -631,7 +647,7 @@ describe "DB server tier — capability-checked access is deny-wins":
     it "refuses a data operation that names no table":
         # @req REQ-SSPEC-SYSTEM
         step("refuses a data operation that names no table")
-        var server = make_server()
+        var server = make_server("refuses_a_data_operation_that_names_no_t")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         # An absent table is never read as "unrestricted".
@@ -671,7 +687,7 @@ describe "DB server tier — bounded batch and range requests":
     it "accounts for multibyte UTF-8 values in encoded responses":
         # @req REQ-SSPEC-SYSTEM
         step("accounts for multibyte UTF-8 values in encoded responses")
-        var server = make_server()
+        var server = make_server("accounts_for_multibyte_utf_8_values_in_e")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("BATCH_PUT session=1 tbl=users ids=u1,u2 name=猫")
@@ -685,7 +701,7 @@ describe "DB server tier — bounded batch and range requests":
     it "rejects an invalid commit identity before durability work":
         # @req REQ-SSPEC-SYSTEM
         step("rejects an invalid commit identity before durability work")
-        var server = make_server()
+        var server = make_server("rejects_an_invalid_commit_identity_befor")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         assert_contains(server.handle_message("COMMIT session=1 commit_id=bad/id"), "code=malformed")
@@ -693,7 +709,7 @@ describe "DB server tier — bounded batch and range requests":
     it "applies one capability and transaction boundary to a bounded batch":
         # @req REQ-SSPEC-SYSTEM
         step("applies one capability and transaction boundary to a bounded batch")
-        var server = make_server()
+        var server = make_server("applies_one_capability_and_transaction_b")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         assert_equal(server.handle_message("BATCH_PUT session=1 tbl=users ids=u1,u2 name=batched"), "OK queued=2")
@@ -703,7 +719,7 @@ describe "DB server tier — bounded batch and range requests":
     it "rejects an oversized batch before touching the transaction":
         # @req REQ-SSPEC-SYSTEM
         step("rejects an oversized batch before touching the transaction")
-        var server = make_server()
+        var server = make_server("rejects_an_oversized_batch_before_touchi")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         var ids: [text] = []
@@ -714,7 +730,7 @@ describe "DB server tier — bounded batch and range requests":
     it "returns a bounded ordered key range":
         # @req REQ-SSPEC-SYSTEM
         step("returns a bounded ordered key range")
-        var server = make_server()
+        var server = make_server("returns_a_bounded_ordered_key_range")
         server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("BATCH_PUT session=1 tbl=users ids=u3,u1,u2 name=x")
