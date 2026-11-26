@@ -2156,9 +2156,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     ), // module, packed name, grid_xyz, block_xyz, args_ptr
     RuntimeFuncSpec::new(
         "rt_cuda_launch_kernel_ex",
-        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
         &[I64],
-    ), // module, name_ptr, name_len, grid_xyz, block_xyz, shared, stream, args_ptr
+    ), // module, name (C string), grid_xyz, block_xyz, shared, stream, args_ptr
     RuntimeFuncSpec::new("rt_cuda_sync", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_get_error_string", &[I64], &[I64]),
     // =========================================================================
