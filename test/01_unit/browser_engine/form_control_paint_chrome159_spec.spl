@@ -21,9 +21,9 @@ count as a paint difference. Chrome / base 0251987783a / this change:
 | fact                                   | Chrome            | base              | now      |
 |----------------------------------------|-------------------|-------------------|----------|
 | checkbox, px differing by > 8 (of 169) | 0                 | 52                | 0        |
-| checked checkbox, same                 | 0                 | 169               | 25       |
+| checked checkbox, same                 | 0                 | 169               | 0        |
 | check mark ink box (red >= 160)        | c2-10 r2-9        | c2-10 r2-10       | = Chrome |
-| radio / checked radio, px differing    | 0 / 0             | 76 / 143          | 0 / 26   |
+| radio / checked radio, px differing    | 0 / 0             | 76 / 143          | 0 / 0    |
 | disabled checkbox ring, fill           | d1d1d1 f8f8f8     | 2563eb f8fafc     | = Chrome |
 | select arrow, px differing (12 x 9)    | 0                 | 44                | 4        |
 | select arrow ink box from right / top  | c-12--5 r7-11     | c-13--7 r7-10     | = Chrome |
@@ -42,9 +42,7 @@ count as a paint difference. Chrome / base 0251987783a / this change:
 | K=4 grip ink                           | c-40--12 r-40--12 n170 | none         | = Chrome |
 
 Open (not pinned here): Chrome rounds the native frame (outer radius 2.5 px,
-so the four corner px are page colour) -- the frame is square here; the
-checked marks differ from Chrome by 25 / 26 edge px at scale 1 (Skia's small
-stroke is slightly bolder than its exact area); the control font is carried as
+so the four corner px are page colour) -- the frame is square here; the control font is carried as
 13 px, so `Simple` ends one column early (42, Chrome 43).
 """
 
@@ -56,6 +54,9 @@ Traceability: REQ-WEB-FORM-CHROME-PAINT-001 — native form-control parts paint 
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
 }
 
 val CSS_W: i32 = 300
@@ -86,6 +87,21 @@ val PAGE_A: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" 
     "<div><input value=\"Simple\" disabled></div>" +
     "<div><button>Go</button></div>" +
     "<div><button disabled>Go</button></div>" +
+    "</body></html>"
+
+# The catalog's padded, bordered style on a checkbox and radio. Chrome 159
+# paints them pixel-identical to the plain controls at k = 1 and 4.
+val C_H: i32 = 180
+val PAGE_C: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
+    "*{{box-sizing:border-box}}" +
+    "body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';width:300px;color:#172033}}" +
+    "div{{height:44px;padding:6px 0 0 10px;overflow:hidden}}" +
+    "input{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}" +
+    "</style></head><body>" +
+    "<div><input type=\"checkbox\"></div>" +
+    "<div><input type=\"checkbox\" checked></div>" +
+    "<div><input type=\"radio\"></div>" +
+    "<div><input type=\"radio\" checked></div>" +
     "</body></html>"
 
 val PAGE_B: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
@@ -433,9 +449,9 @@ describe "Checkbox and radio parts at device scale 1 (Chrome 159)":
     it "AC-2: the check mark and the radio dot are Chrome's shapes":
         step("Chrome 159: white ink of the mark spans columns 2..10, rows 2..9")
         expect(_a1("cb_on.mark")).to_equal("c2-10 r2-9")
-        step("Pixels off Chrome by more than 8: 25 of 169 (base 169), 26 of 169 (base 143)")
-        expect(_a1("cb_on.mm").to_int()).to_be_less_than(26)
-        expect(_a1("rd_on.mm").to_int()).to_be_less_than(27)
+        step("Pixels off Chrome by more than 8: 0 of 169 (exact-area model: 25 and 26)")
+        expect(_a1("cb_on.mm")).to_equal("0")
+        expect(_a1("rd_on.mm")).to_equal("0")
 
     it "AC-3: disabled parts take Chrome's greys":
         expect(_a1("cb_dis")).to_equal("d1d1d1 f8f8f8")
@@ -501,3 +517,119 @@ describe "Form-control chrome at device scale 4 (Chrome 159)":
         expect(_b4("s_ta.grip")).to_equal("c-40--12 r-40--12 n170")
         step("Chrome 159: the value's first ink row is 45 of the 133 row field")
         expect(_b4("s_in.text").starts_with("r45-")).to_be(true)
+
+# Chrome-reference mismatch of each styled control of PAGE_C at k = 1, and
+# at k = 4 the pixels that differ from the plain control of PAGE_A (whose
+# divs 0, 1, 4 and 5 are the same four controls).
+fn _styled_checkables(k: i32) -> [i32]:
+    val w = CSS_W * k
+    val styled = _render(PAGE_C, C_H, k)
+    var out: [i32] = []
+    if k == 1:
+        val refs = [CB_REF, CB_ON_REF, RD_REF, RD_ON_REF]
+        var n = 0
+        while n < 4:
+            val b = _bbox(styled, w, n * 44, n * 44 + 44)
+            out.push(_mismatch(styled, w, b[0], b[1], 13, refs[n]))
+            n = n + 1
+        return out
+    val plain = _render(PAGE_A, A4_H, k)
+    val plain_div = [0, 1, 4, 5]
+    var n = 0
+    while n < 4:
+        val bs = _bbox(styled, w, n * 44 * k, (n + 1) * 44 * k)
+        val bp = _bbox(plain, w, plain_div[n] * 44 * k, (plain_div[n] + 1) * 44 * k)
+        var diff = 0
+        var y = 0
+        while y <= bp[3] - bp[1]:
+            var x = 0
+            while x <= bp[2] - bp[0]:
+                if styled[(bs[1] + y) * w + bs[0] + x] != plain[(bp[1] + y) * w + bp[0] + x]:
+                    diff = diff + 1
+                x = x + 1
+            y = y + 1
+        out.push(diff)
+        n = n + 1
+    out
+
+describe "A padded, bordered checkbox / radio paints no author box (Chrome 159)":
+    it "AC-12: at k = 1 the styled controls equal Chrome's 13 x 13 pixels":
+        step("base: the radios show the #94a3b8 author border (48 / 74 px off)")
+        expect(_styled_checkables(1)).to_equal([0, 0, 0, 0])
+
+    it "AC-13: at k = 4 the styled controls equal the plain ones":
+        expect(_styled_checkables(4)).to_equal([0, 0, 0, 0])
+
+# The same no-author-box rule under a positioned ancestor (the raster's
+# relative-root and positive-z passes), next to what it must NOT remove: an
+# author outline, and the author box of an `appearance:none` checkbox.
+# Chrome 159 at k = 1: the outline is 152 #2563eb px; the toggle is a
+# 30 x 16 #22c55e pill (336 px).
+val D_H: i32 = 180
+val PAGE_D: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
+    "*{{box-sizing:border-box}}" +
+    "body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';width:300px;color:#172033}}" +
+    "div{{height:44px;padding:6px 0 0 10px;overflow:hidden}}" +
+    "input{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}" +
+    "</style></head><body>" +
+    "<div><label style=\"position:relative\"><input type=\"radio\"></label></div>" +
+    "<div><span style=\"position:relative;z-index:1\"><input type=\"checkbox\"></span></div>" +
+    "<div><input type=\"checkbox\" style=\"outline:2px solid #2563eb;outline-offset:2px\"></div>" +
+    "<div><input type=\"checkbox\" style=\"appearance:none;width:30px;height:16px;padding:0;border-radius:8px;background:#22c55e;border:1px solid #15803d\"></div>" +
+    "</body></html>"
+
+var g_d_ir: [u32] = []
+var g_d_raster: [u32] = []
+
+fn _d_paths():
+    if g_d_ir.len() == 0:
+        g_d_ir = _render(PAGE_D, D_H, 1)
+        g_d_raster = simple_web_layout_render_html_software_pixels(PAGE_D, CSS_W, D_H)
+
+fn _off(a: u32, b: u32) -> bool:
+    var dr = _r(a) - _r(b)
+    var dg = _g(a) - _g(b)
+    var db = _b(a) - _b(b)
+    if dr < 0:
+        dr = 0 - dr
+    if dg < 0:
+        dg = 0 - dg
+    if db < 0:
+        db = 0 - db
+    dr > 8 or dg > 8 or db > 8
+
+# [Draw IR vs raster differing px, Draw IR px near `color`, raster px near `color`] in div n.
+fn _d_div(n: i32, color: u32) -> [i32]:
+    _d_paths()
+    var diff = 0
+    var ir_c = 0
+    var rs_c = 0
+    var y = n * 44
+    while y < n * 44 + 44:
+        var x = 0
+        while x < CSS_W:
+            val i = y * CSS_W + x
+            if _off(g_d_ir[i], g_d_raster[i]):
+                diff = diff + 1
+            if not _off(g_d_ir[i], color):
+                ir_c = ir_c + 1
+            if not _off(g_d_raster[i], color):
+                rs_c = rs_c + 1
+            x = x + 1
+        y = y + 1
+    [diff, ir_c, rs_c]
+
+describe "The checkable author-box skip in every paint pass (Chrome 159)":
+    it "AC-14: under a relative or a positive-z ancestor both paths paint no author border":
+        step("base: the raster's relative-root pass still paints the #94a3b8 border (48 px)")
+        expect(_d_div(0, 0xff94a3b8u32)[0]).to_equal(0)
+        expect(_d_div(1, 0xff94a3b8u32)[0]).to_equal(0)
+
+    it "AC-15: an author outline on a checkbox stays, as Chrome's 152 px":
+        step("base: Draw IR zeroed the outline with the author border")
+        expect(_d_div(2, 0xff2563ebu32)).to_equal([0, 152, 152])
+
+    it "AC-16: an appearance:none checkbox keeps its author box and draws no native part":
+        step("base: both paths dropped the #22c55e pill. The two paths still differ by 44 px on the 8 px radius edge, as on a plain span -- a raster rounded-rect gap, not this rule")
+        expect(_d_div(3, 0xff22c55eu32).slice(1, 3)).to_equal([336, 336])
+        expect(_d_div(3, 0xff767676u32)[1]).to_equal(0)

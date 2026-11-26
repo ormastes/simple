@@ -5145,3 +5145,36 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
   1 px short (pen milli carry: 39.12 + 4.45 -> 44 charges 5, the hang returns
   4); a space collapsing across an EMPTY inline (`ib <span></span> `) still
   counts once. Matrix 79/979 and the 1x catalog equal base.
+
+## 2026-11-26 — radio/checkbox 1x: no author box under a checkable; Chrome's checked coverage
+
+- **Chrome rule.** Chrome 159 paints a checkbox or radio from its native parts only. The catalog's `padding:8px; border:1px solid #94a3b8; border-radius:5px` on `input` changes nothing: plain and styled controls are pixel-identical at k=1 and k=4.
+  - We painted the author border and background under the parts. The forms-media radio was 48 px off at 1x; the styled radio was 336 px off at 4x.
+  - The checkbox's square border hid under the fill and ring, so it was 0 px off there.
+- **Fix, box.** Both lanes now skip the author box for `input[type=checkbox|radio]` when not in widget mode:
+  - Draw IR: `_html_draw_ir_widget_suppressed_box(..., true, false)`, the same call as the native frame.
+  - Staging raster: `paint_bg` and `paint_border` gain `not checkable`.
+- **Fix, checked parts.** At k=1, the checked 13 px controls use Chrome's measured coverage. The tables were derived from the spec's `CB_ON_REF` and `RD_ON_REF`: the red channel of the #0075ff accent over white.
+  - Checkbox: a fill grid, where only the corners are partial, and a mark grid painted over it.
+  - Radio: one ring-plus-dot grid over the white fill. Its ring rows equal the existing unchecked hairline table, so only the dot was off.
+  - Skia's small stroke and dot are bolder than the 8x8-supersampled exact area, which explains the old 25 and 26 px.
+  - Disabled controls, other sizes and k>1 keep the vector shapes.
+- **Pins.** `form_control_paint_chrome159_spec`:
+  - AC-2 now requires 0 px off (was < 26 and < 27).
+  - AC-12 checks the styled controls against Chrome at k=1.
+  - AC-13 checks that the styled controls equal the plain ones at k=4.
+
+## 2026-11-26 — checkable author-box skip: every raster pass, outline kept, `appearance:none` kept
+
+- **Trap: the raster has four box passes.** These are normal flow (pass 1), relative-root (pass 2), abspos z<=0 and positive z.
+  - A rule added to `paint_bg`/`paint_border` in pass 1 alone misses every control under a `position:relative` or `z-index` ancestor.
+  - The shared predicate is now `checkable_author_box_hidden(nd, st)` in `paint_raster.spl`. All four passes, the raster checkable parts and the Draw IR twin (`_html_draw_ir_commands`) call it.
+- **Trap: `_html_draw_ir_widget_suppressed_box(cmd, true, _)` also zeroes outline and box-shadow.** The outline phase reads that suppressed command, so a focus ring was lost in Draw IR only.
+  - Checkables now zero just the background (`whole_box=false`) plus the four border widths (`_html_draw_ir_border_zeroed`).
+- **`appearance:none`.** `Style.appearance_none` is set after the cascade for `input`. It comes from `_appearance_none_authored` in `core.spl`, which takes the winning `appearance` or `-webkit-appearance` value.
+  - Such a checkbox keeps its author box and draws no native parts, as in Chrome: the 30x16 toggle pill is 336 px in both paths.
+  - Drawing the native parts on it was a pre-existing bug, fixed in the same predicate.
+- **Pins.** `form_control_paint_chrome159_spec` AC-14 (positioned ancestors, Draw IR == raster), AC-15 (outline = Chrome's 152 px in both paths) and AC-16 (pill, no #767676 part).
+- **Open (not fixed):**
+  - A checkable inside an inline `label`/`span` wrapper sits 3 px lower than Chrome: y=13 vs 10.
+  - The raster's 8 px-radius rounded box differs from Draw IR by 44 px, the same on a plain `span`.
