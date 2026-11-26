@@ -1,7 +1,7 @@
 # Phase Ladder linux-x86_64: phase 1->2 fails with stage1 SIGSEGV in HIR (not OOM)
 
 - Date: 2026-11-26
-- Status: open
+- Status: open (diagnostics landed; one phase-1 blocker fixed, verification-pending; phase 2 still unproven)
 - Severity: P1 (blocks every Phase 3+ RC, so Whole Test Lanes refuses to run)
 - Lane: `.github/workflows/phase-ladder.yml` -> `phase-ladder-rung.yml`, `rung1 / rung 1 linux-x86_64`, GitHub-hosted `ubuntu-24.04` (16 GB RAM)
 
@@ -61,3 +61,36 @@ phase-ladder: phase 2 build failed
    check stack depth (worker thread stack size) against null-deref.
 3. Make the ladder keep `/var/crash` or core files in the diagnostics artifact,
    so the next CI crash carries a backtrace.
+
+## Update 2026-11-26 (lane segv12)
+
+- **Diagnostics landed (PR #11845, merge `c91663afb69`).** On linux lanes the
+  rung now installs gdb, sets `core_pattern` to `build/ladder/cores`, and runs
+  the Climb step under `ulimit -c unlimited`. On failure it writes
+  `evidence/backtraces/<core>.bt.txt` (`thread apply all bt full`) into the
+  diagnostics artifact. No gate changed.
+- **Run 45736111889** (linux-x86_64 only, max_rung=1, branch at 15b1bbe7): no
+  qualified compiler was found, so phase 1 was built with the Rust seed and
+  failed before phase 2. Only `hir_match_coverage.spl` failed:
+  `cannot infer field type while lowering walk_expr: struct 'ANY' field
+  'sites'`. That came from 3968df8e894, which retired the
+  `walk_hir_expr<MatchSiteScan>` workaround. No core was written because
+  nothing crashed.
+- **Fix PR #11850 (merge `6eaf8fc945f`) restores the annotation.** It is
+  verification-pending. Run 45739034803 then got **rung 1 linux-x86_64 to
+  success** (phase 1 built).
+- **Run 45739034803 rung 2** (job 139647914474, phase 2 by stage1): the log
+  stops at 02:32:25 in HIR, module 291 of 1630, with no error line. The
+  annotation is "The hosted runner lost communication with the server". Every
+  post-step was skipped, so there are no artifacts and the job log cannot be
+  fetched. This is the same signature as run 45547756300 and rung 2 of
+  45659415417: the runner VM dies (most likely memory or swap starvation of
+  the 16 GB host with 53 GiB swap). It is not a process SIGSEGV, so a core or
+  gdb backtrace cannot be captured this way.
+- **Still open:** the module-480 SIGSEGV has not recurred under diagnostics,
+  and phase 2 has not passed. Next steps:
+  1. Add an in-job RSS/`/proc/meminfo` sampler that writes to the step log
+     and kills the build (rc!=0, a loud failure) before the VM starves, so the
+     artifact steps still run.
+  2. Rerun phase 2 at a lower `selfhost` thread count to tell starvation
+     apart from the SIGSEGV.
