@@ -56,6 +56,7 @@ quarantine move is no-replace; launch qualification rejects an unavailable
 client authority.
 
 Open (P2, next increment):
+- release_pin vs a same-owner concurrent ingest_pinned: ingest returns ok for a ref the release then deletes. Lanes must not release a pin they still ingest into.- release_pin is not atomic across owners (`dir_remove_all` order); rename the pin dir aside before deleting.- A GC move-then-restore can make `open` briefly return `missing` on a reused object; a GC that moves the winner mid-publish yields a spurious `publish-winner-unreadable`.- `_ISV1_MAX_REFS` is per call; total refs per pin are unbounded. Base-key refs from lost races over-retain.
 - Staged publishes do not fsync.
 - Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot.
 - `substring(..., byte_len())` on non-ASCII hostile lines in doc/record decode: confirm `substring` clamps (fail-closed) or reject non-ASCII first.
