@@ -411,7 +411,17 @@ Each default is what the lanes assume. Default, owner may override.
   and the review-only lanes N2 FreeBSD jail candidate (#12017), N1 Linux over
   `linux_process_owner` (#12020) and N3 macOS over Seatbelt (#12021). N1-N3 are unverified
   and claim no capability.
-- Open: N4 SimpleOS (QEMU real-firmware lane, then board); Docker through `api_v2`
-  needs a native host identity (seed refuses); N1 holds no cgroup parent (likely
-  `ENOTSUP`); W2 hardcodes the Windows directory instead of reading `SystemRoot`; `storage.*` still imports `io.*` directly;
-  seed `export use ... as` alias bug.
+- Cleanups landed (2026-11-26/27):
+  - W2 reads `SystemRoot` (#12033).
+  - The N1 cgroup parent (#12034).
+  - Storage reaches the host through SOSIX (#12039).
+  - N4 SimpleOS containment mapping, source only (`doc/08_tracking/bug/container_n4_qemu_board_unverified_2026-11-26.md`).
+  - Seed alias fix and strict braced-`use` check, opt-in via `SIMPLE_STRICT_USE=1` (#12067), plus 5 census sites fixed (#12085).
+  - Variant gate counts export lists (#12068).
+  - Same-id race fixed: a view-exists loser keeps the winner's view (#12069), and the view dir is claimed with an exclusive mkdir (#12070).
+- Open:
+  - N4 run on QEMU real firmware, then the board. This host has no QEMU.
+  - Docker through `api_v2` needs a native host identity; the seed refuses it.
+  - A same-id loser's journal still lists the winner's `owned_paths`.
+  - The strict-use default stays opt-in until the census in `doc/08_tracking/bug/strict_use_default_blocked_by_unprovided_imports_2026-11-27.md` is empty.
+  - The JIT lane does not run the unprovided-use check (`doc/08_tracking/bug/seed_jit_lane_unprovided_braced_use_not_checked_2026-11-27.md`).
