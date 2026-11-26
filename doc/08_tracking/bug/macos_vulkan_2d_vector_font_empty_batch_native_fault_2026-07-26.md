@@ -1,6 +1,6 @@
 # macOS Vulkan 2D vector-font empty-batch native fault
 
-Status: open, live evidence blocked (2026-11-04: device present, batched evidence never promoted; see last section)
+Status: fix-implemented-verification-pending (2026-11-27 W2-4: host compositor empty-batch/empty-text guards added; macOS Vulkan/Metal hardware verification pending)
 
 ## 2026-09-22 delegated continuation: truncated producer receipt
 
@@ -806,3 +806,11 @@ the rerun set. Status: fix-implemented-verification-pending.
   - `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_flush_promotion_spec.spl` — 3/3 passed
 - Fixed the underlying macOS MoltenVK portability/discovery defects in `instance.rs`, `device.rs`, and `gpu.rs` (`VK_KHR_portability_enumeration` + `VK_KHR_portability_subset` + Homebrew `MoltenVK_icd.json` discovery) and the `_gpu_draw_text_fallback` dirty/mirror-invalidation gap in `backend_vulkan_helpers.spl`.
 - Full native-compiled live window/Metal-device attestation remains gated on the admitted macOS self-hosted compiler build and non-sandboxed `MTLDevice` access.
+
+## W2-4 Update (2026-11-27) — Host compositor empty-batch & empty-text guards (`fix-implemented-verification-pending`)
+
+- **Compositor guards:**
+  - `src/os/compositor/host_compositor_core.spl`: added `host_wm_draw_ir_composition_nonempty(composition)` rejecting empty compositions or compositions whose batches hold zero draw commands (while still allowing borderless empty batches alongside non-empty chrome/desktop/content batches); enforced in `host_wm_draw_ir_result_valid`, `_render_frame_engine2d_attempt` prior to native/CPU dispatch, and after CPU local recompose; guarded `host_compositor_draw_taskbar` against calling `backend.draw_text` when `win.title == ""`.
+  - `src/os/compositor/compositor_engine2d.spl`: added early return in `Engine2dCompositorBackend.draw_text` when `text_str.len() == 0` so empty text draws cannot dispatch empty vector-font batches.
+- **Host specs:** Added `test/01_unit/os/compositor/host_compositor_empty_batch_guard_spec.spl` (`5 total, 5 passed, 0 failed`) and re-ran `wm_coverage_closure_spec.spl` (`12/12`), `host_compositor_core_coverage_closure_spec.spl` (`12/12`), `compositor_engine2d_surface_spec.spl` (`10/10`).
+- **Waiting-for:** macOS hardware verification on an admitted self-hosted compiler with real Vulkan/MoltenVK / Metal `MTLDevice` vector-font execution and live frame capture.

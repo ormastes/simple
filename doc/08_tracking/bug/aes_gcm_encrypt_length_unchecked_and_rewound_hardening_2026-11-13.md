@@ -2,7 +2,7 @@
 
 - **ID:** aes_gcm_encrypt_length_unchecked_and_rewound_hardening_2026-11-13
 - **Severity:** P2 (fail-open crypto input handling)
-- **Status:** open (decrypt side and canonical restore fixed; encrypt side open)
+- **Status:** fix-implemented-verification-pending (2026-11-27 W2-4: baremetal decrypt stub status-prefix encoding + record13 key/IV guards fixed; QEMU baremetal verification & out-of-scope runtime/lib follow-ups pending)
 - **Found by:** lane work/aesgcm-copies-20261113 (follow-up to PR #8878)
 - **Related:** `aes128_gcm_verification_blocked_by_env_access_parse_2026-08-25.md`
 
@@ -149,3 +149,17 @@ Specs:
      change, before the baseline edit, measured new=3969 and stale=5610.
    - So this change adds 0 new rows and 5 stale ones. Those 5, plus the 7
      stale since #8890, are the 12 rows removed above.
+
+## W2-4 Update (2026-11-27) — Baremetal decrypt status-prefix encoding & `record13` key/IV guards (`fix-implemented-verification-pending`)
+
+- **Baremetal stub fix (Open Item #2):** Updated `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`:
+  - `rt_tls13_aes128_gcm_decrypt` now emits the canonical status-prefixed `[u8]` encoding matching `src/compiler_rust/runtime/src/value/aes.rs` and `src/lib/nogc_sync_mut/sffi/host.spl`: `[]` on invalid input/overflow/OOM (`!ciphertext` checked directly alongside `!key || !nonce || !aad || !tag`, matching `rt_tls13_aes128_gcm_encrypt`'s `!plaintext` check), `[0x00]` on authentication tag mismatch, and `[0x01, ...pt]` on success.
+  - `_tls_copy_runtime_bytes` and `_tls_materialize_runtime_bytes` check `arr->hdr.object_type != HEAP_ARRAY`, validate `uint64_t raw_len = arr->len` against `1ULL << 20` before narrowing to `uint32_t`, and read bytes via `_rt_bytes_get(arr, i)` so `BYTE_PACKED` `[u8]` inputs are decoded accurately; `_tls_runtime_array_from_bytes` initializes `gc_flags = 0` and `reserved = 0`; `_tls_aes128_gcm_decrypt_raw` uses a constant-time XOR `tag_diff` comparison.
+- **`record13` guard fix (Open Item #3):** Added 12-byte IV guard to `record13_make_nonce` and explicit key (`16`/`32` bytes) and IV (`12` bytes) guards to `record13_encrypt`, `record13_decrypt`, `record13_encrypt_chacha20_poly1305`, and `record13_decrypt_chacha20_poly1305` in `src/os/tls13/record13.spl`.
+- **Verification:**
+  - `test/01_unit/os/tls13/record13_iv_length_guard_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed`
+  - `test/01_unit/os/tls13/record13_checked_seal_spec.spl --mode=interpreter` -> `21 total, 21 passed, 0 failed`
+  - `test/01_unit/os/tls13/chacha20_poly1305_cipher_suite_spec.spl --mode=interpreter` -> `14 total, 14 passed, 0 failed`
+  - `sh test/01_unit/os/tls13/rt_tls13_aes128_gcm_decrypt_stub_test.shs` (`clang`) -> `PASS rt_tls13_aes128_gcm_decrypt host C harness (5 test groups)`
+  - `clang --target=x86_64-unknown-none -ffreestanding -fno-builtin -fno-stack-protector -mno-red-zone -fno-pic -c examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` -> `rc=0`
+- **Waiting-for / Out-of-scope follow-ups:** SimpleOS x86_64 QEMU runtime verification of `rt_tls13_aes128_gcm_decrypt` remains pending; items #4 (NVFS C runtime backing in `src/runtime/**`), #5 (`unsafe` caller blocks in `src/lib/**`), and #6 (`check-raw-sffi-unsafe-ratchet.shs`) are outside W2-4 ownership scope.

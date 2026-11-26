@@ -1,6 +1,6 @@
 # Bug: Baremetal --entry-closure imported-class instantiation FAULT
 
-- **Status:** INVESTIGATING (root-cause candidates verified in binary artifacts; fix pending probe confirmation)
+- **Status:** fix-implemented-verification-pending (2026-11-27 W2-4: findings 1-3 & `probe_events_len` `pub` fixed in source; host specs PASS; waiting-for QEMU CLASSOK serial probe)
 - **Date:** 2026-07-06
 - **Where seen:** `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl:14-17` — instantiating a class imported from a shared module (e.g. `os.gui.shortcut.ShortcutHandler`) inside an x86_64 `--entry-closure` baremetal kernel faults at runtime. Workaround so far: procedural duplication (the 3603-line WM), factory free-functions in the defining module (`create_fb_engine`), and integer action codes instead of shared enums (arm64 `wm_entry_io`).
 - **Impact:** blocks sharing `src/os/compositor` classes (`HostCompositor`, `CompositorBackend` trait impls) into the QEMU guest WM.
@@ -224,3 +224,11 @@ kernel build). The 2026-11-07 static re-verification (findings 1-3 do not
 reproduce) and the 2026-11-12 probe-spec fix (6/6 PASS) stand as the latest
 evidence. The status header (OPEN / INVESTIGATING) is accurate; no code
 change.
+
+## W2-4 Update (2026-11-27) — Host runtime contract verified; `fix-implemented-verification-pending`
+
+- **Source verification:** `src/app/cli/native_build_main.spl` contains zero `--mode=interpreter` worker argument injection; `examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s:323-328` calls `__simple_call_module_inits`; `probe_events_len` in `src/os/gui/class_probe.spl:33` is `pub`.
+- **Host unit specs:**
+  - Added `test/01_unit/os/gui/class_probe_imported_class_spec.spl` exercising `ShortcutHandler` (`alt_held` press/release + `Alt+F4` -> `WmAction.Close`) and `ProbeCounter` + `probe_events_len()` -> `2 total, 2 passed, 0 failed`.
+  - Re-ran `test/01_unit/compiler/50.mir/entry_closure_imported_class_probe_symbols_spec.spl --mode=interpreter` -> `6 total, 6 passed, 0 failed`.
+- **Waiting-for:** native x86_64 `--entry-closure` build and QEMU `CLASSOK` serial probe of `examples/09_embedded/simple_os/arch/x86_64/class_fault_probe_entry.spl` (and a compiler-lane MIR field-map ordering investigation if S3 still fails under QEMU).

@@ -1,0 +1,119 @@
+"""
+## Purpose and audience
+Purpose: Prove host compositor empty DrawIR composition/batch and empty text-draw guards fail closed without dispatching native empty batches.
+Audience: SimpleOS compositor and rendering maintainers.
+"""
+# @req: REQ-OS-COMPOSITOR-001
+# @cover src/os/compositor/host_compositor_core.spl
+# @cover src/os/compositor/compositor_engine2d.spl
+
+use std.spec.{describe, it, expect, step}
+use common.ui.draw_ir.{
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.host_compositor_core.{
+    HostedWindow,
+    host_compositor_draw_taskbar,
+    host_wm_draw_ir_composition_nonempty,
+    host_wm_draw_ir_result_valid
+}
+
+fn _empty_embedding():
+    draw_ir_embedding_config("web", "body", 0, 0, 4, 4, 0, 1000, true)
+
+fn _nonempty_composition():
+    val emb = _empty_embedding()
+    draw_ir_composition("nonempty", "hosted-web", "software", [
+        draw_ir_batch("chrome", "software", emb, [
+            draw_ir_rect("fill", 0, 0, 4, 4, 0xFF2563EBu32)
+        ])
+    ])
+
+describe "host compositor empty-batch and empty-text guards":
+    it "rejects zero-batch compositions and compositions where all batches have zero commands":
+        step("Verify zero-batch and zero-command compositions fail host_wm_draw_ir_composition_nonempty")
+        val emb = _empty_embedding()
+        val no_batches = draw_ir_composition("empty", "hosted-web", "software", [])
+        val only_empty_batch = draw_ir_composition("empty-batch", "hosted-web", "software", [
+            draw_ir_batch("b0", "software", emb, [])
+        ])
+        expect(host_wm_draw_ir_composition_nonempty(no_batches)).to_equal(false)
+        expect(host_wm_draw_ir_composition_nonempty(only_empty_batch)).to_equal(false)
+
+    it "accepts mixed compositions that include a borderless empty batch alongside non-empty batches":
+        step("Verify borderless empty batch plus non-empty batch remains valid")
+        val emb = _empty_embedding()
+        val mixed = draw_ir_composition("mixed", "hosted-web", "software", [
+            draw_ir_batch("borderless", "software", emb, []),
+            draw_ir_batch("chrome", "software", emb, [
+                draw_ir_rect("fill", 0, 0, 4, 4, 0xFF112233u32)
+            ])
+        ])
+        expect(host_wm_draw_ir_composition_nonempty(mixed)).to_equal(true)
+
+    it "causes host_wm_draw_ir_result_valid to fail closed for empty compositions even with a valid pixel result":
+        step("Verify host_wm_draw_ir_result_valid rejects empty compositions")
+        var raster = Engine2dCompositorBackend.create_named(4, 4, "software")
+        val valid_comp = _nonempty_composition()
+        val res = raster.render_draw_ir_composition_resources(valid_comp, [])
+        expect(host_wm_draw_ir_result_valid(valid_comp, res, 16)).to_equal(true)
+
+        val emb = _empty_embedding()
+        val empty_comp = draw_ir_composition("empty", "hosted-web", "software", [])
+        val zero_cmd_comp = draw_ir_composition("zero-cmd", "hosted-web", "software", [
+            draw_ir_batch("b0", "software", emb, [])
+        ])
+        expect(host_wm_draw_ir_result_valid(empty_comp, res, 16)).to_equal(false)
+        expect(host_wm_draw_ir_result_valid(zero_cmd_comp, res, 16)).to_equal(false)
+        raster.shutdown()
+
+    it "skips empty strings in Engine2dCompositorBackend.draw_text without invalidating frame state":
+        step("Verify empty draw_text is a no-op while non-empty draw_text executes")
+        var raster = Engine2dCompositorBackend.create_named(32, 32, "software")
+        val emb = draw_ir_embedding_config("web", "body", 0, 0, 32, 32, 0, 1000, true)
+        val comp = draw_ir_composition("rect-32", "hosted-web", "software", [
+            draw_ir_batch("b0", "software", emb, [
+                draw_ir_rect("fill", 0, 0, 32, 32, 0xFF2563EBu32)
+            ])
+        ])
+        val res = raster.render_draw_ir_composition_resources(comp, [])
+        expect(res.fallback_required).to_equal(false)
+        expect(raster.frame_provenance()).to_contain("completed=true")
+
+        raster.draw_text(4, 4, "", 0xFFFFFFFFu32, 0xFF2563EBu32)
+        expect(raster.frame_provenance()).to_contain("completed=true")
+
+        raster.draw_text(4, 4, "A", 0xFFFFFFFFu32, 0xFF2563EBu32)
+        expect(raster.frame_provenance()).to_contain("completed=false")
+        raster.shutdown()
+
+    it "skips taskbar title draw_text when HostedWindow.title is empty":
+        step("Verify host_compositor_draw_taskbar handles empty-title windows without text dispatch")
+        var raster = Engine2dCompositorBackend.create_named(240, 160, "software")
+        val theme = wm_chrome_theme()
+        val empty_win = HostedWindow(
+            id: 1,
+            owner_port: 0,
+            title: "",
+            x: 10,
+            y: 10,
+            w: 100,
+            h: 80,
+            content: "",
+            process_id: 0,
+            app_id: "/sys/apps/empty",
+            minimized: false,
+            focused: true
+        )
+        host_compositor_draw_taskbar(raster, [empty_win], 240, 160, theme)
+        val px_empty = raster.get_pixel_buffer()
+        expect(px_empty.len()).to_equal(240 * 160)
+        # Taskbar item 0 center at (120, 160 - 62 + 20) = (120, 118) has uniform focused background color when no empty-title draw occurs
+        val center_idx = 118 * 240 + 120
+        expect(px_empty[center_idx]).to_equal(theme.title_focused)
+        raster.shutdown()

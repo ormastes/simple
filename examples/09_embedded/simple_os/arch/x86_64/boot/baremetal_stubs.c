@@ -10539,17 +10539,17 @@ static void _tls_hmac_sha256(const uint8_t *key, uint32_t key_len, const uint8_t
 
 static uint8_t *_tls_copy_runtime_bytes(RuntimeValue rv, uint32_t *out_len)
 {
-    const uint32_t SIMPLEOS_TLS_RUNTIME_BYTE_CAP = 1U << 20;
+    const uint64_t SIMPLEOS_TLS_RUNTIME_BYTE_CAP = 1ULL << 20;
     *out_len = 0;
     if (!IS_HEAP(rv)) return NULL;
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(rv);
-    if (!arr || arr->hdr.type != HEAP_ARRAY) return NULL;
-    uint32_t len = arr->len;
-    if (len > SIMPLEOS_TLS_RUNTIME_BYTE_CAP) return NULL;
-    RuntimeValue *items = runtime_array_items(arr);
+    if (!arr || arr->hdr.object_type != HEAP_ARRAY) return NULL;
+    uint64_t raw_len = arr->len;
+    if (raw_len > SIMPLEOS_TLS_RUNTIME_BYTE_CAP) return NULL;
+    uint32_t len = (uint32_t)raw_len;
     uint8_t *buf = (uint8_t *)malloc(len > 0 ? len : 1);
     if (!buf) return NULL;
-    for (uint32_t i = 0; i < len; i++) buf[i] = _rv_byte(items[i]);
+    for (uint32_t i = 0; i < len; i++) buf[i] = _rt_bytes_get(arr, i);
     *out_len = len;
     return buf;
 }
@@ -10561,22 +10561,24 @@ static int _tls_materialize_runtime_bytes(RuntimeValue rv,
                                           uint8_t **out_heap,
                                           uint32_t *out_len)
 {
+    const uint64_t SIMPLEOS_TLS_RUNTIME_BYTE_CAP = 1ULL << 20;
     *out_data = NULL;
     *out_heap = NULL;
     *out_len = 0;
     if (!IS_HEAP(rv)) return 0;
     RuntimeArray *arr = (RuntimeArray *)DECODE_PTR(rv);
-    if (!arr || arr->hdr.type != HEAP_ARRAY) return 0;
-    uint32_t len = arr->len;
+    if (!arr || arr->hdr.object_type != HEAP_ARRAY) return 0;
+    uint64_t raw_len = arr->len;
+    if (raw_len > SIMPLEOS_TLS_RUNTIME_BYTE_CAP) return 0;
+    uint32_t len = (uint32_t)raw_len;
     if (len <= stack_cap) {
-        RuntimeValue *items = runtime_array_items(arr);
-        for (uint32_t i = 0; i < len; i++) stack_buf[i] = _rv_byte(items[i]);
+        for (uint32_t i = 0; i < len; i++) stack_buf[i] = _rt_bytes_get(arr, i);
         *out_data = stack_buf;
         *out_len = len;
         return 1;
     }
     *out_heap = _tls_copy_runtime_bytes(rv, out_len);
-    if (!*out_heap && *out_len != 0U) return 0;
+    if (!*out_heap) return 0;
     *out_data = *out_heap;
     return 1;
 }
@@ -10663,6 +10665,8 @@ static RuntimeValue _tls_runtime_array_from_bytes(const uint8_t *buf, uint32_t l
     RuntimeArray *out = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!out) return NIL_VALUE;
     out->hdr.type = HEAP_ARRAY;
+    out->hdr.gc_flags = 0;
+    out->hdr.reserved = 0;
     out->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     out->len = len;
     out->cap = len;
@@ -11810,7 +11814,11 @@ static int _tls_aes128_gcm_decrypt_raw(const uint8_t key[16], const uint8_t nonc
     _tls_gcm_ghash(h, aad, aad_len, ciphertext, ct_len, s);
     _tls_aes128_encrypt_block_raw(key, j0, ej0);
     for (uint32_t i = 0; i < 16U; i++) expected_tag[i] = (uint8_t)(s[i] ^ ej0[i]);
-    if (memcmp(expected_tag, tag, 16) != 0) return -1;
+    uint8_t tag_diff = 0U;
+    for (uint32_t i = 0; i < 16U; i++) {
+        tag_diff |= (uint8_t)(expected_tag[i] ^ tag[i]);
+    }
+    if (tag_diff != 0U) return -1;
 
     uint8_t counter[16];
     memcpy(counter, j0, 16);
@@ -11908,20 +11916,30 @@ RuntimeValue rt_tls13_aes128_gcm_decrypt(RuntimeValue key_rv, RuntimeValue nonce
     uint8_t *ciphertext = _tls_copy_runtime_bytes(ciphertext_rv, &ct_len);
     uint8_t *aad = _tls_copy_runtime_bytes(aad_rv, &aad_len);
     uint8_t *tag = _tls_copy_runtime_bytes(tag_rv, &tag_len);
-    uint8_t *plaintext = NULL;
-    RuntimeValue out = NIL_VALUE;
+    uint8_t *framed = NULL;
+    /* Status-prefixed encoding matching runtime/src/value/aes.rs and
+     * sffi/host.spl (tls13_aes128_gcm_decrypt_decode):
+     *   []           -> invalid input
+     *   [0x00]       -> tag mismatch (authentication failure)
+     *   [0x01, ..pt] -> authenticated plaintext (pt may be empty) */
+    RuntimeValue out = _tls_runtime_array_from_bytes((const uint8_t *)"", 0U);
 
-    if (!key || !nonce || !aad || !tag || (!ciphertext && ct_len != 0) ||
-        key_len != 16U || nonce_len != 12U || tag_len != 16U) {
+    if (!key || !nonce || !ciphertext || !aad || !tag ||
+        key_len != 16U || nonce_len != 12U || tag_len != 16U ||
+        ct_len > UINT32_MAX - 1U) {
         goto cleanup;
     }
 
-    plaintext = (uint8_t *)malloc(ct_len > 0 ? ct_len : 1U);
-    if (!plaintext) goto cleanup;
-    if (_tls_aes128_gcm_decrypt_raw(key, nonce, ciphertext, ct_len, aad, aad_len, tag, plaintext) != 0) {
+    uint32_t out_len = 1U + ct_len;
+    framed = (uint8_t *)malloc(out_len);
+    if (!framed) goto cleanup;
+    if (_tls_aes128_gcm_decrypt_raw(key, nonce, ciphertext, ct_len, aad, aad_len, tag, framed + 1U) != 0) {
+        uint8_t status_fail = 0x00U;
+        out = _tls_runtime_array_from_bytes(&status_fail, 1U);
         goto cleanup;
     }
-    out = _tls_runtime_array_from_bytes(plaintext, ct_len);
+    framed[0] = 0x01U;
+    out = _tls_runtime_array_from_bytes(framed, out_len);
 
 cleanup:
     if (key) free(key);
@@ -11929,7 +11947,7 @@ cleanup:
     if (ciphertext) free(ciphertext);
     if (aad) free(aad);
     if (tag) free(tag);
-    if (plaintext) free(plaintext);
+    if (framed) free(framed);
     return out;
 }
 
@@ -11944,7 +11962,7 @@ RuntimeValue rt_tls13_aes128_gcm_encrypt(RuntimeValue key_rv, RuntimeValue nonce
     uint8_t *ciphertext = NULL;
     RuntimeValue out = NIL_VALUE;
 
-    if (!key || !nonce || !aad || (!plaintext && pt_len != 0) ||
+    if (!key || !nonce || !plaintext || !aad ||
         key_len != 16U || nonce_len != 12U) {
         goto cleanup;
     }
