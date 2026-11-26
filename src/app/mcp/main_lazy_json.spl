@@ -50,8 +50,6 @@ fn SB_L() -> text:
 fn SB_R() -> text:
     "]"
 
-val _JSON_HEX_UPPER = "0123456789ABCDEF"
-
 fn _json_ctrl_escape_byte(b: i64) -> text:
     if b == 10:
         return r"\n"
@@ -59,9 +57,10 @@ fn _json_ctrl_escape_byte(b: i64) -> text:
         return r"\r"
     if b == 9:
         return r"\t"
+    val hex = "0123456789ABCDEF"
     val hi = b / 16
     val lo = b % 16
-    r"\u00" + _JSON_HEX_UPPER.substring(hi, hi + 1) + _JSON_HEX_UPPER.substring(lo, lo + 1)
+    r"\u00" + hex.substring(hi, hi + 1) + hex.substring(lo, lo + 1)
 
 # Single-pass JSON string escaper. Deliberately does NOT chain `.replace()`:
 # the chained form left raw control characters in the payload and, on the
@@ -389,7 +388,13 @@ fn strip_ansi(s: text) -> text:
     var i = 0
     while i < blen:
         val b = s.byte_at(i)
-        if in_csi:
+        if b == 27:
+            if not in_csi and not after_esc and i > run_start:
+                parts.push(s.substring(run_start, i))
+            in_csi = false
+            after_esc = true
+            run_start = i + 1
+        elif in_csi:
             # CSI ends at the first byte in 0x40..0x7E ('@'..'~')
             if b >= 64 and b <= 126:
                 in_csi = false
@@ -398,12 +403,12 @@ fn strip_ansi(s: text) -> text:
             after_esc = false
             if b == 91:
                 in_csi = true
-            run_start = i + 1
-        elif b == 27:
-            if i > run_start:
-                parts.push(s.substring(run_start, i))
-            after_esc = true
-            run_start = i + 1
+                run_start = i + 1
+            elif b >= 32 and b <= 126:
+                run_start = i + 1
+            else:
+                # Preserve C0 bytes and multi-byte UTF-8 lead bytes intact
+                run_start = i
         i = i + 1
     if not in_csi and not after_esc and run_start < blen:
         parts.push(s.substring(run_start, blen))

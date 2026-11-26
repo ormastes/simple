@@ -68,7 +68,12 @@ bytes is consistent with that.
    `_mcp_read_line` / `_mcp_read_chars` previously built the message with one
    `result + ch` per byte, so an n-byte request retained n^2/2 bytes. Replaced
    with linear `rt_stdin_read_line_text()` / `rt_stdin_read_chars_text(count)`
-   (`runtime_native.c:4022,4043`, matching `src/app/md_lsp/md_lsp_main.spl`).
+   (`runtime_native.c:4022,4043`, matching `src/app/md_lsp/md_lsp_main.spl`),
+   plus a 64 MiB `Content-Length` cap (`_MCP_MAX_CONTENT_LENGTH`) and short-read
+   EOF guard (`body.byte_len() < content_length`). Note: these are C-runtime
+   primitives (Windows binary stdio mode set by `rt_win_set_binary_stdio`), not
+   registered in the Rust seed interpreter (`src/compiler_rust/.../interpreter_extern`),
+   matching `md_lsp_main.spl` / `tui_shell.spl`.
 3. **`_ctx_stats_bump`, `src/app/mcp/main_lazy_ctx_tools.spl:481` (fixed in follow-up).**
    Two to three load + atomic rewrites of `stats.sdn` per call using the
    generic per-character `parse_sdn_table`. Replaced `_ctx_load_stats()` with a

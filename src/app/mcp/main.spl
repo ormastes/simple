@@ -22,6 +22,10 @@ use app.protocol.mcp_request_envelope.{mcp_parse_request_envelope_v1}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write, stderr_flush}
 use .mcp_log_options
 
+# Linear stdio framing primitives in src/runtime/runtime_native.c (matching
+# src/app/md_lsp/md_lsp_main.spl). Note: C-runtime-only ABI — not registered in
+# the Rust seed interpreter (src/compiler_rust/.../interpreter_extern/mod.rs);
+# MCP server runs via the native-compiled binary.
 extern fn rt_stdin_read_line_text() -> text
 extern fn rt_stdin_read_chars_text(n: i64) -> text
 use app.protocol.wire_stdout.{wire_stdout_write as print_raw}
@@ -288,6 +292,10 @@ fn _mcp_strip_line_end(line: text) -> text:
 fn _mcp_parse_decimal_raw(s: text) -> i64:
     frame_parse_decimal(s)
 
+# Hard cap on a single Content-Length frame (64 MiB, matching _CTX_CAPTURE_HARD_MAX_BYTES)
+# so a corrupt header cannot ask rt_stdin_read_chars_text to malloc gigabytes upfront.
+const _MCP_MAX_CONTENT_LENGTH: i64 = 67108864
+
 fn _mcp_read_message() -> text:
     var content_length = 0
     while true:
@@ -308,10 +316,13 @@ fn _mcp_read_message() -> text:
             var len_str = line.replace("Content-Length:", "")
             len_str = len_str.trim()
             content_length = _mcp_parse_decimal_raw(len_str)
-    if content_length <= 0:
+    if content_length <= 0 or content_length > _MCP_MAX_CONTENT_LENGTH:
         return ""
     _MCP_TRANSPORT_MODE = "framed"
-    _mcp_read_chars(content_length)
+    val body = _mcp_read_chars(content_length)
+    if body.byte_len() < content_length:
+        return ""
+    body
 
 fn _mcp_write_message(body: text):
     if _MCP_TRANSPORT_MODE == "jsonl":

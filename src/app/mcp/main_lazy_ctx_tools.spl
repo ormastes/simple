@@ -449,6 +449,12 @@ pub fn ctx_index_text(raw_content: text, source: text) -> CtxChunkCount:
 # Stats (key/value SDN)
 # ---------------------------------------------------------------------------
 
+fn _ctx_unquote_stats_cell(cell: text) -> text:
+    val c = cell.trim()
+    if c.byte_len() >= 2 and c.starts_with("\"") and c.ends_with("\""):
+        return c.substring(1, c.byte_len() - 1)
+    c
+
 fn _ctx_load_stats() -> Dict<text, i64>:
     var d: Dict<text, i64> = {}
     val path = _ctx_stats_path()
@@ -456,17 +462,24 @@ fn _ctx_load_stats() -> Dict<text, i64>:
         return d
     for line in file_read(path).split("\n"):
         val t = line.trim()
-        if t == "" or t.starts_with("#") or t.starts_with("ctx_stats"):
+        if t == "" or t.starts_with("#") or t == "ctx_stats" or t.starts_with("ctx_stats ") or t.starts_with("ctx_stats|"):
             continue
-        val comma = t.index_of(",") ?? -1
-        if comma <= 0:
+        var k = ""
+        var comma: i64 = -1
+        if t.starts_with("\""):
+            val close = t.index_of("\"", 1) ?? -1
+            if close < 0:
+                continue
+            k = t.substring(1, close).trim()
+            comma = t.index_of(",", close + 1) ?? -1
+        else:
+            comma = t.index_of(",") ?? -1
+            if comma > 0:
+                k = t.substring(0, comma).trim()
+        if comma <= 0 or k == "":
             continue
-        var k = t.substring(0, comma).trim()
-        if k.len() >= 2 and k.starts_with("\"") and k.ends_with("\""):
-            k = k.substring(1, k.byte_len() - 1)
-        val v_str = t.substring(comma + 1).trim()
-        if k != "":
-            d[k] = v_str.to_int() ?? 0
+        val v_str = _ctx_unquote_stats_cell(t.substring(comma + 1))
+        d[k] = v_str.to_int() ?? 0
     d
 
 fn _ctx_save_stats(d: Dict<text, i64>) -> bool:
