@@ -8,6 +8,7 @@
 use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_pointer_bits}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{CloseHandle, WaitForSingleObject, GetExitCodeProcess, TerminateProcess}
 use std.nogc_sync_mut.io.windows_process_text.windows_process_wide_linear_v1
+use std.common.char_from_code_pure.{char_from_code}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_write_u8, volatile_write_u16, volatile_write_u32}
 
 @abi("system")
@@ -34,6 +35,9 @@ extern fn EqualSid(left: i64, right: i64) -> i32
 @abi("system")
 @unsafe(reason: "Win64 SID byte length", capabilities: [ffi, raw_ptr])
 extern fn GetLengthSid(sid: i64) -> u32
+@abi("system")
+@unsafe(reason: "Win64 SID to owned SDDL text", capabilities: [ffi, raw_ptr])
+extern fn ConvertSidToStringSidW(sid: i64, text_out: i64) -> i32
 @abi("system")
 @unsafe(reason: "Win64 release of an OS-allocated security object", capabilities: [ffi, raw_ptr])
 extern fn LocalFree(allocation: i64) -> i64
@@ -264,3 +268,20 @@ pub fn sec_label_rid_v1(path: text) -> i64:
     sec_free_v1(slots)
     sec_free_v1(wide)
     rid
+
+# SDDL text of a SID ("" on failure). Only ASCII SID text is expected.
+pub fn sec_sid_text_v1(sid: i64) -> text:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return ""
+    var out = ""
+    if ConvertSidToStringSidW(sid, slot) != 0:
+        val wide = windows_abi_read_ptr(slot)
+        var index = 0
+        while index < 256:
+            val unit = volatile_read_u16(wide + index * 2)
+            if unit == 0 or unit > 127: break
+            out = out + char_from_code(unit)
+            index = index + 1
+        sec_local_free_v1(wide)
+    sec_free_v1(slot)
+    out

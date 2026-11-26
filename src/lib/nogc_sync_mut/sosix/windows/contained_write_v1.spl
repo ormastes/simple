@@ -1,10 +1,9 @@
-#![allow(primitive_api)]
 # Contained write and read grants: Windows variant (architecture 4.4).
 # Write grant: low mandatory label plus an inheritable modify ACE for the scope SID on an
 # EMPTY directory. Read grant: one read+execute ACE for the fixed reader SID per object.
-use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_list, dir_is_real_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_is_real_no_follow, rt_dir_list}
 use std.nogc_sync_mut.io.path_identity_abi.GetFileAttributesW
-use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{sosix_windows_scope_sid_v1, sosix_windows_reader_sid_v1, sosix_windows_dacl_grants_world_write_v1}
+use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{sosix_windows_scope_sid_v1, sosix_windows_reader_sid_v1, sosix_windows_dacl_grants_world_write_v1, SosixWindowsAclV1}
 use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_is_win64_v1, sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_read_ptr_v1, sec_u8_v1, sec_u16_v1, sec_u32_v1, sec_put_u8_v1, sec_put_u16_v1, sec_put_u32_v1, sec_wide_v1, sec_sid_from_text_v1, sec_sid_len_v1, sec_sid_equal_v1, sec_set_entries_v1, sec_access_entry_v1, sec_get_dacl_v1, sec_set_dacl_label_v1, sec_set_dacl_v1}
 
 # FILE_GENERIC_READ|FILE_GENERIC_EXECUTE and modify (read, write, execute, delete).
@@ -83,14 +82,16 @@ pub fn sosix_fs_grant_contained_write_v1(empty_dir: text, scope: text) -> text:
     val scope_text = sosix_windows_scope_sid_v1(scope)
     if scope_text.is_err(): return scope_text.unwrap_err()
     if not is_dir(empty_dir) or not dir_is_real_no_follow(empty_dir): return "grant-target-missing"
-    if dir_list(empty_dir).len() != 0: return "grant-target-not-empty"
+    val entries = _list(empty_dir)
+    if entries.is_err(): return entries.unwrap_err()
+    if entries.unwrap().len() != 0: return "grant-target-not-empty"
     val slot = sec_alloc_v1(8)
     if slot == 0: return "grant-alloc-failed"
     val descriptor = sec_get_dacl_v1(_native(empty_dir), slot)
     if descriptor == 0:
         sec_free_v1(slot)
         return "grant-dacl-read-failed"
-    val verdict = sosix_windows_dacl_grants_world_write_v1(sec_read_ptr_v1(slot))
+    val verdict = sosix_windows_dacl_grants_world_write_v1(SosixWindowsAclV1(sec_read_ptr_v1(slot)))
     sec_local_free_v1(descriptor)
     sec_free_v1(slot)
     if verdict.is_err(): return "grant-dacl-read-failed"
@@ -142,6 +143,8 @@ pub fn sosix_fs_grant_contained_read_v1(tree: text) -> text:
     if not is_dir(tree) or not dir_is_real_no_follow(tree): return "grant-target-missing"
     val reader = sec_sid_from_text_v1(sosix_windows_reader_sid_v1())
     if reader == 0: return "grant-alloc-failed"
+    # ponytail: the attribute check and the later ACE write are not atomic; a same-user race that
+    # swaps an entry for a junction in between is pre-start only and not defended here.
     var pending: [text] = [tree]
     var visited = 0
     var reason = ""
@@ -157,8 +160,12 @@ pub fn sosix_fs_grant_contained_read_v1(tree: text) -> text:
             else:
                 reason = _grant_read_one(current, reader)
                 if reason == "" and (attributes & _ATTR_DIRECTORY) != 0:
-                    for child in dir_list(current):
-                        pending.push(_join(current, child))
+                    val children = _list(current)
+                    if children.is_err():
+                        reason = children.unwrap_err()
+                    else:
+                        for child in children.unwrap():
+                            pending.push(_join(current, child))
     sec_local_free_v1(reader)
     reason
 
@@ -166,3 +173,11 @@ fn _join(parent: text, child: text) -> text:
     val base = parent.replace("\\", "/")
     if base.ends_with("/"): return "{base}{child}"
     "{base}/{child}"
+
+# Entry names of a directory; an unlistable directory is a refusal, never an empty one.
+fn _list(path: text) -> Result<[text], text>:
+    var listed: [text]? = nil
+    unsafe(capabilities: [ffi]):
+        listed = rt_dir_list(_native(path))
+    if listed.is_none(): return Err("grant-target-unlistable")
+    Ok(listed.unwrap())

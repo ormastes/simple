@@ -1,6 +1,5 @@
-use std.spec.*
-use std.nogc_sync_mut.env.platform.{detect_os}
-use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{sosix_windows_restricted_token_open_v1, sosix_windows_restricted_token_close_v1, sosix_windows_scope_sid_v1, sosix_windows_reader_sid_v1}
+use std.spec.{describe, it, expect, only_on_windows}
+use std.nogc_sync_mut.sosix.windows.restricted_identity_v1.{sosix_windows_restricted_token_open_v1, sosix_windows_restricted_token_close_v1, sosix_windows_scope_sid_v1, sosix_windows_reader_sid_v1, SosixWindowsTokenV1}
 use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_run_as_token_v1}
 
 val _CMD = "C:\Windows\System32\cmd.exe"
@@ -18,11 +17,10 @@ describe "windows restricted identity":
     it "refuses an invalid scope":
         expect(sosix_windows_scope_sid_v1("").is_err()).to_equal(true)
         expect(sosix_windows_scope_sid_v1("Bad Scope").is_err()).to_equal(true)
-        if detect_os() == "windows":
-            expect(sosix_windows_restricted_token_open_v1("Bad Scope").is_err()).to_equal(true)
 
-    it "opens a restricted token whose integrity and restricting SIDs read back, then closes once":
-        expect(detect_os()).to_equal("windows")
+        expect(sosix_windows_restricted_token_open_v1("Bad Scope").is_err()).to_equal(true)
+
+    only_on_windows "opens a restricted token whose integrity and restricting SIDs read back, then closes once":
         val opened = sosix_windows_restricted_token_open_v1("scope-a")
         expect(opened.is_ok()).to_equal(true)
         val token = opened.unwrap()
@@ -30,11 +28,17 @@ describe "windows restricted identity":
         expect(sosix_windows_restricted_token_close_v1(token).value).to_equal(true)
         expect(sosix_windows_restricted_token_close_v1(token).value).to_equal(false)
 
-    it "starts a trivial child under the restricted token (smoke, no 0xC0000142)":
-        expect(detect_os()).to_equal("windows")
+    only_on_windows "starts a trivial child under the restricted token (smoke, no 0xC0000142)":
         val token = sosix_windows_restricted_token_open_v1("scope-a").unwrap()
         val code = sec_run_as_token_v1(token.value, "{_CMD} /c exit 0", "C:\Windows", 20000)
         expect(code).to_equal(0)
         val code7 = sec_run_as_token_v1(token.value, "{_CMD} /c exit 7", "C:\Windows", 20000)
         expect(code7).to_equal(7)
         expect(sosix_windows_restricted_token_close_v1(token).value).to_equal(true)
+
+    only_on_windows "answers false for a double close and for a handle it never issued":
+        val token = sosix_windows_restricted_token_open_v1("scope-a").unwrap()
+        expect(sosix_windows_restricted_token_close_v1(token).value).to_equal(true)
+        expect(sosix_windows_restricted_token_close_v1(token).value).to_equal(false)
+        val foreign = SosixWindowsTokenV1(4)
+        expect(sosix_windows_restricted_token_close_v1(foreign).value).to_equal(false)
