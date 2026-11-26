@@ -1,6 +1,6 @@
 # WM content-kind render runtime gate
 
-Status: RED — focused probe exists; no admitted native execution yet.
+Status: fix-implemented-verification-pending — shell routes through the shared frame executor; Linux host pixel evidence 2026-11-26; SimpleOS guest gate outstanding.
 
 ## Current source truth
 
@@ -74,3 +74,32 @@ must render and present nonempty content successfully before qualification.
 Keep this bug open pending that evidence. Hosted remote GUI-frame production
 remains a separate unresolved owner boundary; no universal BrowserRenderer
 route is accepted as proof of GUI dispatch.
+
+## 2026-11-26 Linux aarch64 host run (lane wm-lane-20261126)
+
+Base `origin/release/1.0.0` 79445b063c4, seed
+`/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple` (11-26 release
+head, vulkan feature). `DesktopShell.run(executor)` calls
+`render_baremetal_frame(executor)`; no `render_all()` remains on the shell loop.
+
+First run of the 2026-11-03 regression spec on any host:
+`simple test test/01_unit/os/compositor/wm_shell_content_dispatch_spec.spl`
+-> 6 executed, 4 passed, 2 failed (`array index out of bounds: index is 2 but
+length is 2`; pixel `0xff5a7fb5` where `0xff102030` was expected).
+
+Root cause is the spec fixture, not the shell: it requested 52x80 windows, but
+`Compositor.create_window` widens every window to
+`WM_WINDOW_MIN_WIDTH x WM_WINDOW_MIN_HEIGHT` (160x120, since 2026-08-09), so
+the 44x44 pixel content no longer matched the 152x84 content area and
+`attach_window_pixel_content` correctly refused it. The fixture now uses
+160x120 windows on a 480x240 (mixed scene) / 160x240 (executor) display.
+
+After: 6/6 pass. Frame evidence from the real `Engine2dWmFrameExecutor` (CPU
+Engine2D backend + `FramebufferDriver`) readback: exactly 152*84 = 12768
+pixels carry the pixel-surface color, bounding box (4,42)-(155,125), i.e. the
+full content rect under the 4px border and 32px title bar and nothing else.
+The spec now asserts that count and box.
+
+Still open: the SimpleOS guest frame/provenance gate (QEMU lane, not run here)
+and a live hosted GUI-frame producer (see
+`wm_host_external_content_owner_2026-07-29.md`).
