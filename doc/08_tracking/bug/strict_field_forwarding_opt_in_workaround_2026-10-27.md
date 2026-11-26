@@ -1,25 +1,22 @@
-# SIMPLE_STRICT_FIELD_FORWARDING opt-in is a workaround
+# SIMPLE_STRICT_FIELD_FORWARDING opt-in is a workaround (RETIRED)
 
-Bug id: `strict-field-forwarding-opt-in-20261027`. Date: 2026-10-27. Status: open.
+Bug id: `strict-field-forwarding-opt-in-20261027`. Date: 2026-10-27. Status: closed (2026-11-26).
 Req: REQ-SELFHOST-ACCESSOR-001/002. Owner: compiler 20.hir lane.
 
-## Workaround
-`src/compiler/20.hir/hir_lowering/_Expressions/accessor_forwarding.spl` keeps the
+## Resolution (2026-11-26)
+- Audited `src/compiler` for undefined field reads on typed receivers and repaired the three remaining sites:
+  - `src/compiler/90.tools/leak_check/types.spl` & `main.spl`: added `warn_threshold_kb`, `fail_threshold_kb`, `rss_budget_kb`, `sample_ms` to `LeakCheckConfig` and `max_rss_kb` to `LeakCheckResult` (fixing the 8 HIR strict-field-forwarding errors in `src/compiler/90.tools/leak_check/growth_runner.spl`).
+  - `src/compiler/35.semantics/error_formatter.spl`: replaced `span.column` with `span.col` (matching `std.common.diagnostics.span.Span`).
+  - `src/compiler/90.tools/stats/tag_classifier.spl`: replaced `item.file` with `item.file_path` (matching `DocItem` and `src/app/stats/tag_classifier.spl`).
+- Removed `# @workaround bug=strict-field-forwarding-opt-in-20261027`, `_strict_field_forwarding_state`, `strict_field_forwarding_enabled`, `strict_field_forwarding_reset`, `env_get_opt("SIMPLE_STRICT_FIELD_FORWARDING")`, `warn_undefined_field`, and `accessor_warned_keys` from `src/compiler/20.hir/hir_lowering/_Expressions/accessor_forwarding.spl`, `types.spl`, and `context_helpers.spl`.
+- `lower_accessor_read` now unconditionally emits the hard error `no field \`{name}\` on type and no get_/is_ accessor{hint}` with `accessor_suggestion` hints.
+- Updated `accessor_forwarding_strict_opt_in_spec.spl`, `accessor_getter_forwarding_spec.spl`, `wa_src_lane3_workarounds_spec.spl`, `hir_lowering_begin_module_reset_and_traits_spec.spl`, and `scripts/check/census-undefined-field-reads.spl`.
+
+## Historical Workaround (2026-10-27)
+`src/compiler/20.hir/hir_lowering/_Expressions/accessor_forwarding.spl` previously kept the
 undefined-field hard error behind `SIMPLE_STRICT_FIELD_FORWARDING=1`
 (`# @workaround bug=strict-field-forwarding-opt-in-20261027 ...` on the state var),
-because `src/compiler` itself may read fields that exist nowhere. Default (flag off)
-now emits a compiler WARNING, never an error:
-
-    [W-HIR-FIELD-001] undefined field `x` at <file>:<line>; no get_/is_ accessor forwards it[; did you mean field `f` / method `get_f`?]
-
-Deduped by file+line+name. Emitted through `HirLowering.warning` (recovered
-diagnostic channel, same as `[W-ANY-COMPILE-001]`).
-
-## Removal plan
-1. Run the sweep below with the full module graph and fix every flagged read in `src/compiler`.
-2. Make the strict check unconditional (warning becomes the error) and delete
-   `strict_field_forwarding_enabled`, `_state`, `_reset`, the env read and the spec's flag cases.
-3. Delete this doc and the `@workaround` tag.
+emitting `[W-HIR-FIELD-001]` warnings by default until `src/compiler` was audited.
 
 ## Census (2026-10-27)
 Method: one `simple run` process looping `parse_full_frontend` + `HirLowering.with_filename`

@@ -1,8 +1,8 @@
 # Accessor forwarding for field reads (REQ-SELFHOST-ACCESSOR-001).
 # `recv.x` with no real field `x` lowers to `get_x()`, `is_x()` or `x()` on a
-# fully-known owner type (seed parity). The undefined-field hard error is
-# opt-in via SIMPLE_STRICT_FIELD_FORWARDING=1, read once. Without the flag the
-# fall-through is a W-HIR-FIELD-001 warning (REQ-SELFHOST-ACCESSOR-002).
+# fully-known owner type (seed parity). An undefined field on a known owner
+# with no matching accessor is an unconditional hard error with a "did you mean"
+# hint (REQ-SELFHOST-ACCESSOR-002).
 
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
@@ -10,15 +10,6 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering._Expressions.expression_support.{_hir_expr_symbol_or_invalid}
-use std.nogc_sync_mut.io_runtime.{env_get_opt}
-
-# @workaround bug=strict-field-forwarding-opt-in-20261027 reason=src-compiler-has-undefined-field-reads
-var _strict_field_forwarding_state: i64 = 0
-
-fn strict_field_forwarding_enabled() -> bool:
-    if _strict_field_forwarding_state == 0:
-        _strict_field_forwarding_state = if (env_get_opt("SIMPLE_STRICT_FIELD_FORWARDING") ?? "") == "1": 1 else: 2
-    _strict_field_forwarding_state == 1
 
 fn accessor_edit_distance(a: text, b: text) -> i64:
     val n = a.len()
@@ -40,10 +31,6 @@ fn accessor_edit_distance(a: text, b: text) -> i64:
             cur = cur.push(best)
         prev = cur
     prev[m]
-
-# Test hook: forget the cached flag so the next read re-queries the environment.
-fn strict_field_forwarding_reset():
-    _strict_field_forwarding_state = 0
 
 impl HirLowering:
     @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in owner_field_table_lacks", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
@@ -99,10 +86,8 @@ impl HirLowering:
                             has_type_: has_returned,
                             type_: returned,
                             span: span)
-        if strict_field_forwarding_enabled():
-            self.error("no field `{name}` on type and no get_/is_ accessor", span)
-        else:
-            self.warn_undefined_field(name, owner_id, span)
+        val hint = self.accessor_suggestion(owner_id, name)
+        self.error("no field `{name}` on type and no get_/is_ accessor{hint}", span)
         None
 
     @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in accessor_suggestion", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
@@ -140,15 +125,6 @@ impl HirLowering:
         if parts.len() == 0:
             return ""
         "; did you mean " + parts.join(" / ") + "?"
-
-    me warn_undefined_field(name: text, owner_id: i64, span: Span):
-        # Deduped by file+line+name, per lowering run.
-        val key = "accwarn:{self.module_filename}:{span.line}:{name}"
-        if self.accessor_warned_keys.contains(key):
-            return
-        self.accessor_warned_keys = self.accessor_warned_keys.push(key)
-        val hint = self.accessor_suggestion(owner_id, name)
-        self.warning("[W-HIR-FIELD-001] undefined field `{name}` at {self.module_filename}:{span.line}; no get_/is_ accessor forwards it{hint}", span)
 
     me accessor_is_instance_method(owner_id: i64, cand: text) -> bool:
         if val mid = self.symbols.lookup_method_in_type_raw(owner_id, cand):

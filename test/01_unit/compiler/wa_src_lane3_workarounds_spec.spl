@@ -6,12 +6,12 @@
 # 3. RETIRED: parser_unsafe_call_argument_context_2026-10-30 (lockless_map_i64.spl)
 # 4. KEPT-WITH-REASON: phase3_global_pool_generic_inference_workaround_2026_10_10 (types.spl)
 # 5. KEPT-WITH-REASON: seed_nested_call_rfind_missing_2026-11-15 (lint_star_import.spl)
-# 6. KEPT-WITH-REASON: strict-field-forwarding-opt-in-20261027 (accessor_forwarding.spl)
+# 6. RETIRED: strict-field-forwarding-opt-in-20261027 (accessor_forwarding.spl)
 # 7. RETIRED: pure_simple_nested_extern_registration_2026_10_12 (parallel.spl)
 
 use std.common.crypto.sha256.{sha256_bytes}
 use std.common.string_core.{text_to_bytes}
-use std.io_runtime.{env_get, env_set_process, file_read}
+use std.io_runtime.{file_read}
 use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64}
 use std.nogc_sync_mut.sffi.transient.{
     transient_scope_begin, transient_scope_pause, transient_scope_end}
@@ -27,8 +27,6 @@ use compiler.frontend.frontend_advisory_preprocess_port_v1.{
     frontend_transformed_source_identity_v1}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
-use compiler.hir.hir_lowering._Expressions.accessor_forwarding.{
-    strict_field_forwarding_reset}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{
     module_surface_canonical_digest_v1}
 use compiler.mir.mir.*
@@ -214,27 +212,22 @@ describe "WA-S3 workaround retirements and gated guards":
         val expected_fix = "use compiler.frontend.frontend_advisory_preprocess_port_v1.{" + "frontend_transformed_source_identity_v1}"
         expect(fixes[0].replacements[0].new_text).to_equal(expected_fix)
 
-    it "6. keeps SIMPLE_STRICT_FIELD_FORWARDING opt-in default-warn and strict-error behavior":
-        val prev_strict = env_get("SIMPLE_STRICT_FIELD_FORWARDING") ?? ""
-        val snippet = "class Inner:\n    x: i64\n\nclass Outer:\n    inner: Inner\n    me get_val() -> i64:\n        self.inner.x\n\nfn probe(o: Outer) -> i64:\n    o.missing_field\n"
+    it "6. retires SIMPLE_STRICT_FIELD_FORWARDING opt-in and enforces unconditional strict undefined-field error":
+        val af_src = file_read("src/compiler/20.hir/hir_lowering/_Expressions/accessor_forwarding.spl")
+        expect(af_src.contains("@workaround bug=strict-field-forwarding-opt-in-20261027")).to_equal(false)
+        expect(af_src.contains("SIMPLE_STRICT_FIELD_FORWARDING")).to_equal(false)
 
-        env_set_process("SIMPLE_STRICT_FIELD_FORWARDING", "")
-        strict_field_forwarding_reset()
-        val default_res = _wa_lane3_compile_to_mir(snippet, "wa_lane3_bug6_default.spl")
+        val bad_snippet = "class Inner:\n    x: i64\n\nclass Outer:\n    inner: Inner\n    me get_val() -> i64:\n        self.inner.x\n\nfn probe(o: Outer) -> i64:\n    o.missing_field\n"
+        val bad_res = _wa_lane3_compile_to_mir(bad_snippet, "wa_lane3_bug6_strict.spl")
+        expect(bad_res.parse_errors).to_equal(0)
+        expect(bad_res.hir_error_messages.len()).to_equal(1)
+        expect(bad_res.hir_error_messages[0]).to_contain("no field `missing_field` on type and no get_/is_ accessor")
 
-        env_set_process("SIMPLE_STRICT_FIELD_FORWARDING", "1")
-        strict_field_forwarding_reset()
-        val strict_res = _wa_lane3_compile_to_mir(snippet, "wa_lane3_bug6_strict.spl")
-
-        env_set_process("SIMPLE_STRICT_FIELD_FORWARDING", prev_strict)
-        strict_field_forwarding_reset()
-
-        expect(default_res.parse_errors).to_equal(0)
-        expect(default_res.hir_error_messages.len()).to_equal(1)
-        expect(default_res.hir_error_messages[0]).to_start_with("[W-HIR-FIELD-001]")
-        expect(strict_res.parse_errors).to_equal(0)
-        expect(strict_res.hir_error_messages.len()).to_equal(1)
-        expect(strict_res.hir_error_messages[0]).to_contain("no field `missing_field` on type and no get_/is_ accessor")
+        val good_snippet = "class Inner:\n    x: i64\n\nclass Outer:\n    inner: Inner\n    me get_val() -> i64:\n        self.inner.x\n\nfn probe(o: Outer) -> i64:\n    o.val\n"
+        val good_res = _wa_lane3_compile_to_mir(good_snippet, "wa_lane3_bug6_good.spl")
+        expect(good_res.parse_errors).to_equal(0)
+        expect(good_res.hir_errors).to_equal(0)
+        expect(good_res.mir_errors).to_equal(0)
 
     it "7. retires top-level rt_cpu_count hoist in parallel.spl cleanly across frontend, skeleton, HIR, and MIR":
         val single = ParallelConfig.single_threaded()
