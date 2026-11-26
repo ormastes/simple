@@ -14,7 +14,7 @@ use compiler.hir.hir_types.{HirTypeKind}
 # Effect inference methods are in inference_effects.spl.
 
 use compiler.hir.hir.*
-use compiler.hir.hir_definitions.{HirBlock, HirStmt, HirParam}
+use compiler.hir.hir_definitions.{HirBlock, HirStmt, HirParam, HirConst}
 use compiler.frontend.core.lexer.*
 use compiler.types.dim_constraints.*
 use compiler.traits.traits.*
@@ -793,6 +793,41 @@ impl HmInferContext:
         self.bind_poly(fn_.name, scheme)
         self.bind_poly(fn_.symbol.id.to_text(), scheme)
 
+    me _bind_module_constants(module: HirModule):
+        """Bind module-level constants/globals into env so functions referencing them infer."""
+        val const_keys = module.constants.keys()
+        var pending_consts: [HirConst] = []
+        var pending_vars: [HirType] = []
+        var const_idx = 0
+        while const_idx < const_keys.len():
+            val raw_const = module.constants[const_keys[const_idx]]
+            if raw_const.?:
+                val const_: HirConst = raw_const
+                val bound_ty = match const_.type_.kind:
+                    case HirTypeKind.Infer(_, _):
+                        val fresh = self.fresh_var(const_.span)
+                        pending_consts.push(const_)
+                        pending_vars.push(fresh)
+                        fresh
+                    case _:
+                        const_.type_
+                self.bind_mono(const_.name, bound_ty)
+                self.bind_mono(const_.symbol.id.to_text(), bound_ty)
+            const_idx = const_idx + 1
+        var p_idx = 0
+        while p_idx < pending_consts.len():
+            val const_ = pending_consts[p_idx]
+            val bound_ty = pending_vars[p_idx]
+            match self.synthesize_expr(const_.value):
+                case Ok(inferred):
+                    val _ = self.unify(bound_ty, inferred)
+                    val resolved = self.resolve(bound_ty)
+                    self.bind_mono(const_.name, resolved)
+                    self.bind_mono(const_.symbol.id.to_text(), resolved)
+                case Err(_):
+                    ()
+            p_idx = p_idx + 1
+
     me infer_module(module: HirModule):
         """Infer types for all functions in a module."""
         # Register symbol mutability from module symbol table for narrowing
@@ -832,6 +867,11 @@ impl HmInferContext:
                 self.bind_poly(fn_.name, scheme)
                 self.bind_poly(fn_.symbol.id.to_text(), scheme)
             decl_idx = decl_idx + 1
+
+        self._bind_module_constants(module)
+        # Refresh module_env_vars after binding module constants (unannotated globals
+        # introduce level-0 variables that generalize must not quantify).
+        self.module_env_vars = self.env_free_var_ids()
 
         var infer_idx = 0
         while infer_idx < fn_keys.len():

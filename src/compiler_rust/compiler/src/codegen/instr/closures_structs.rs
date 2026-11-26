@@ -144,6 +144,51 @@ fn unique_unqualified_rebind<'a>(hits: &[&'a str], lookup_name: &str, source: &s
     }
 }
 
+fn resolve_declared_text_hash_func_id<M: Module>(ctx: &InstrContext<'_, M>, arg_count: usize) -> Option<FuncId> {
+    for owner in ["text", "String", "string"] {
+        let qualified = format!("{owner}.hash");
+        let sanitized = format!("{owner}_dot_hash");
+        if let Some(id) = resolve_unique_module_qualified_func(ctx, &qualified)
+            .or_else(|| resolve_unique_module_qualified_func(ctx, &sanitized))
+            .or_else(|| ctx.func_ids.get(&qualified).copied())
+            .or_else(|| ctx.func_ids.get(&sanitized).copied())
+        {
+            return Some(id);
+        }
+        let wanted = arg_count + 1;
+        let candidates: Vec<_> = ctx.func_ids.iter_method_suffix("hash").collect();
+        let fitting: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|(_, id)| crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, **id).1 == wanted)
+            .collect();
+        let pool = if fitting.is_empty() { &candidates } else { &fitting };
+        if let Some((_, id)) = pool.iter().find(|(k, _)| qualified_method_owner_matches(owner, k, "hash")) {
+            return Some(**id);
+        }
+    }
+    None
+}
+
+fn resolve_declared_text_hash_import<M: Module>(ctx: &InstrContext<'_, M>) -> Option<String> {
+    for owner in ["text", "String", "string"] {
+        for key in [
+            format!("{owner}.hash"),
+            format!("{owner}__hash"),
+            format!("{owner}_dot_hash"),
+            format!("{}_hash", owner.to_lowercase()),
+        ] {
+            if let Some(mapped) = ctx.use_map.get(&key).or_else(|| ctx.import_map.get(&key)) {
+                return Some(mapped.clone());
+            }
+        }
+        if let Some(mapped) = resolve_unique_module_qualified_import(ctx, &format!("{owner}.hash")) {
+            return Some(mapped);
+        }
+    }
+    None
+}
+
 pub(crate) fn strip_erased_receiver_qualifier(lookup_name: &str) -> &str {
     match lookup_name.split_once('.') {
         Some(("void", method)) if !method.contains('.') => method,
@@ -968,7 +1013,15 @@ pub(crate) fn compile_method_call_static<M: Module>(
             _
         ))
     );
-    let prefer_builtin_first = lookup_name.contains('.') && allow_qualified_builtin;
+    // primitive_receiver_trait_impl_dispatch_2026-08-07 Defect A:
+    // Qualified `<text|str|String|string>.hash` must check user/trait
+    // `impl ... for text` in func_ids/use_map/import_map before falling back
+    // to `rt_hash_text` at the end of `compile_method_call_static`.
+    let is_qualified_text_hash = matches!(
+        lookup_name.rsplit_once('.'),
+        Some(("text" | "str" | "String" | "string", "hash"))
+    );
+    let prefer_builtin_first = lookup_name.contains('.') && allow_qualified_builtin && !is_qualified_text_hash;
 
     // Only run builtin lowering first for qualified builtin scalar/string
     // receivers like `i64.to_float`. For bare names like `bitmap.get(...)`,
@@ -1276,6 +1329,13 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 );
             }
             picked.map(|(_, v)| **v)
+        })
+        .or_else(|| {
+            if is_qualified_text_hash && lookup_name.starts_with("str.") {
+                resolve_declared_text_hash_func_id(ctx, args.len())
+            } else {
+                None
+            }
         });
 
     if let Some(error) = method_resolution_error {
@@ -1483,7 +1543,13 @@ pub(crate) fn compile_method_call_static<M: Module>(
 
         let suffix_resolved_storage;
         if resolved_name.is_none() && !ambiguous_unqualified {
-            suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name);
+            suffix_resolved_storage = resolve_unique_module_qualified_import(ctx, lookup_name).or_else(|| {
+                if is_qualified_text_hash && lookup_name.starts_with("str.") {
+                    resolve_declared_text_hash_import(ctx)
+                } else {
+                    None
+                }
+            });
             resolved_name = suffix_resolved_storage.as_deref();
         }
 
@@ -1934,6 +2000,113 @@ mod tests {
         assert!(!is_bare_builtin_collection_method("join", 0));
         assert!(!is_bare_builtin_collection_method("join", 2));
         assert_eq!(builtin_method_result_type("join", None), Some(TypeId::STRING));
+    }
+
+    #[test]
+    fn qualified_text_hash_prefers_declared_trait_impl_over_rt_hash_text() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, LocalKind, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+
+        let mut text_hash_impl = MirFunction::new(
+            "text.hash".to_string(),
+            TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        text_hash_impl.new_vreg();
+        text_hash_impl.params.push(MirLocal {
+            name: "self".to_string(),
+            ty: TypeId::STRING,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        let sentinel = text_hash_impl.new_vreg();
+        let impl_block = text_hash_impl.block_mut(BlockId(0)).unwrap();
+        impl_block.instructions.push(MirInst::ConstInt {
+            dest: sentinel,
+            value: 4242,
+        });
+        impl_block.terminator = Terminator::Return(Some(sentinel));
+
+        let make_caller = |fn_name: &str, method_name: &str| {
+            let mut caller = MirFunction::new(
+                fn_name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            let recv = caller.new_vreg();
+            let result = caller.new_vreg();
+            let block = caller.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstString {
+                dest: recv,
+                value: "hello".to_string(),
+            });
+            block.instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result),
+                receiver: recv,
+                func_name: method_name.to_string(),
+                args: Vec::new(),
+            });
+            block.terminator = Terminator::Return(Some(result));
+            caller
+        };
+
+        let mut module = MirModule::new();
+        module.functions.push(text_hash_impl);
+        module.functions.push(make_caller("text_caller", "text.hash"));
+        module.functions.push(make_caller("str_caller", "str.hash"));
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            assert_eq!(jit.call_i64_void("text_caller").expect("text_caller"), 4242);
+            assert_eq!(jit.call_i64_void("str_caller").expect("str_caller"), 4242);
+        }
+    }
+
+    #[test]
+    fn qualified_text_hash_falls_back_to_rt_hash_text_when_no_impl_declared() {
+        use crate::codegen::JitCompiler;
+        use crate::mir::{BlockId, MirFunction, MirInst, MirModule, Terminator};
+
+        let make_caller = |fn_name: &str, method_name: &str| {
+            let mut caller = MirFunction::new(
+                fn_name.to_string(),
+                TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            let recv = caller.new_vreg();
+            let result = caller.new_vreg();
+            let block = caller.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstString {
+                dest: recv,
+                value: "hello".to_string(),
+            });
+            block.instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result),
+                receiver: recv,
+                func_name: method_name.to_string(),
+                args: Vec::new(),
+            });
+            block.terminator = Terminator::Return(Some(result));
+            caller
+        };
+
+        let mut module = MirModule::new();
+        module.functions.push(make_caller("text_fallback", "text.hash"));
+        module.functions.push(make_caller("str_fallback", "str.hash"));
+
+        let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+        jit.compile_module(&module).expect("module must JIT-compile");
+        unsafe {
+            assert_eq!(
+                jit.call_i64_void("text_fallback").expect("text_fallback"),
+                -6615550055289275125i64
+            );
+            assert_eq!(
+                jit.call_i64_void("str_fallback").expect("str_fallback"),
+                -6615550055289275125i64
+            );
+        }
     }
 }
 
