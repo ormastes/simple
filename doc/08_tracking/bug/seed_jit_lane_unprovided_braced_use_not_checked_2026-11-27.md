@@ -1,6 +1,6 @@
 # Seed JIT lane does not check unprovided braced `use` names (2026-11-27)
 
-**Status:** fixed (2026-11-27)
+**Status:** partially fixed (2026-11-27): direct provided-set check on the JIT lane; re-exposed-import census class still unchecked there (lenient)
 **Area:** Rust seed, HIR lowering / Cranelift JIT entry lane
 **Found by:** `scripts/check/check-undefined-import-run-exit-code.shs` (unreached shape)
 
@@ -67,3 +67,20 @@ importer path text differs (dedup key includes the path).
 Verified: `check-undefined-import-run-exit-code.shs` PASS (4 fixtures, incl.
 unreached shape), `check-use-warning-oracle-deployed.shs` PASS, container sweep
 54/54 on both seed 27e and 27f.
+
+### Follow-up after review (seed 27g)
+
+- Typed top-level `val X: T = ..` (`Pattern::Typed`) was missed by
+  `locally_defined_names`, giving false `[use-warning]` / strict errors on the
+  JIT lane (11 on `lint_entry.spl --help`, strict rc 1 on `info/main.spl`).
+  Fixed with `pattern_bound_names` (Identifier/Mut/Move/Typed/Tuple/Array);
+  unit test `typed_and_destructured_top_level_val_is_provided`; gate fixture
+  added to `check-undefined-import-run-exit-code.shs`.
+- Wrong-owner resolution: the JIT resolver and the interpreter's
+  `resolve_module_path` can pick different files for the same `std.X` import
+  (family roots, e.g. `std.sffi.dynamic` from a nogc_sync_mut importer). Fail
+  safe chosen: the JIT-side check re-resolves with the interpreter's resolver
+  and skips (no warning, no error) unless both give the same file.
+- Remaining leniency: the re-exposed-import census class (names a module
+  surfaces only through imports the JIT lane cannot evaluate; MultiUse /
+  CommonUse modules, `__init__.spl` packages) stays unchecked on the JIT lane.
