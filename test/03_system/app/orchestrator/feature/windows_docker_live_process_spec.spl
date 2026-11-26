@@ -6,11 +6,12 @@
 # The interpreter lane is opt-in (SIMPLE_DOCKER_HOSTED_LIVE=1) and refuses when
 # DOCKER_*/proxy variables are set in the parent environment.
 use std.spec.*
+use std.nogc_sync_mut.io.env_ops.host_os
 use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
 use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
 use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
-use std.nogc_sync_mut.sosix.host.{env_get, sosix_env_set}
+use std.nogc_sync_mut.sosix.host.{env_get, sosix_env_set, secure_temp_dir, dir_remove_all, file_is_regular_no_follow}
 use std.nogc_sync_mut.sosix.process.sosix_process_run_bounded
 
 val LIVE_DOCKER = "C:\Program Files\Docker\docker.exe"
@@ -35,13 +36,22 @@ fn live_request() -> WindowsDockerRequestV1:
 
 describe "Windows Docker live process-isolation lifecycle":
     it "runs cmd /c echo in nanoserver ltsc2025 and removes the container":
+        val previous = env_get("SIMPLE_DOCKER_HOSTED_LIVE")
         sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", "1")
-        val info = sosix_process_run_bounded(LIVE_DOCKER, ["--host", LIVE_PIPE, "info", "--format", "{{{{.ID}}}}"], 60000, 65536)
-        val unreachable = info.2 != 0 and (info.1.contains("docker_engine") or info.1.contains("pipe") or info.1.contains("daemon"))
+        val have_docker = host_os() == "windows" and file_is_regular_no_follow(LIVE_DOCKER)
+        val temp = env_get("TEMP")
+        val probe_config = secure_temp_dir(if temp != "": temp else: "C:\Windows\Temp", "simple-docker-probe-")
+        val info = if have_docker and probe_config.is_ok():
+            sosix_process_run_bounded(LIVE_DOCKER, ["--host", LIVE_PIPE, "--config", probe_config.unwrap(), "info", "--format", "{{{{.ID}}}}"], 60000, 65536)
+        else: ("", "docker.exe missing or no probe config dir", -2)
+        if probe_config.is_ok(): dir_remove_all(probe_config.unwrap())
+        val unreachable = not have_docker or (info.2 != 0 and (info.1.contains("//./pipe/docker_engine") or info.1.contains("The system cannot find the file specified")))
         if unreachable:
             step("SKIP: Windows Docker engine pipe unreachable")
+            sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
             skip("docker engine pipe unreachable")
         else:
+            if info.2 != 0: sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
             expect(info.2).to_equal(0)
             val policy = live_policy(info.0.trim())
             var provider = WindowsDockerRuntimeProviderV1.new(policy)
@@ -59,6 +69,7 @@ describe "Windows Docker live process-isolation lifecycle":
             val logs = if waited.status == "ok": provider.logs(request) else: waited
             # Always remove, whatever happened above.
             val destroyed = if created.status == "ok": provider.destroy(request, true) else: created
+            sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
             expect(prepared.status).to_equal("ok")
             expect(created.status).to_equal("ok")
             expect(started.status).to_equal("ok")

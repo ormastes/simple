@@ -71,15 +71,18 @@ Provider: `std.nogc_async_mut.container.providers.windows.docker_runtime_v1`
   (`process_run_bounded_environment_v1`), which refuses interpreter/JIT
   ("requires the matching native C provider"); `windows_command_owner_v2`
   refuses too (canonical-thread guard). Spec runners are interpreted, so the
-  live lane never ran. Fix: `_execute_hosted_v1` (non-AOT only) runs
-  `docker.exe --host <pipe> --config <temp> ...` through SOSIX
-  `sosix_process_run_bounded`, rechecking the launch deadline before the effect.
-  The AOT-native clean-environment path is unchanged and remains the product lane.
-- **Gap (named, not filled)**: the hosted path inherits the parent environment
-  (neutralised for DOCKER_HOST/CONTEXT/CONFIG by `--host`/`--config`); and the
-  full `WindowsSimpleContainerAdapterV2.open` cannot run here (needs native
-  boot incarnation; host observation is `machine-boot-counter-v1`, interpreter
-  refuses `windows_host_identity_v1`), so the run goes through the provider the
-  adapter delegates to, not the adapter itself.
+  live lane never ran. Fix: a non-AOT branch inside `_execute` (native AOT never
+  takes it). It is OFF unless `SIMPLE_DOCKER_HOSTED_LIVE=1` (read via SOSIX).
+  It refuses when any `DOCKER_*`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` or
+  `ALL_PROXY` variable is set (SOSIX `run_bounded` cannot replace the
+  environment), and runs `docker.exe --host <pipe> --config <dir>` with a fresh
+  owner-only empty config dir (`secure_temp_dir`), removed on every path;
+  failed cleanup reports `docker-hosted-config-dir-cleanup-unproven`.
+  Limit (`# ponytail:` in code): the launch deadline is rechecked before
+  `process_run_bounded`, not after its private slot wait.
+- **Gap (named, not filled)**: the full `WindowsSimpleContainerAdapterV2.open`
+  cannot run here (needs native boot incarnation; host observation is
+  `machine-boot-counter-v1`, interpreter refuses `windows_host_identity_v1`),
+  so the run goes through the provider the adapter delegates to.
 - `native-build` of a driver with the Nov-25 seed did not finish in 35+ min
   (compiler runs interpreted); do not use it as the live-spec route.
