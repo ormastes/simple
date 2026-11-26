@@ -11,9 +11,11 @@ use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
 use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
-use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
-    llvm_ir_builder_build}
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, LlvmIRTextAccum, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
+    llvm_ir_builder_build, llvm_ir_text_accum_new, llvm_ir_text_accum_push, llvm_ir_text_accum_finish}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
+use std.common.binary_io.{f64_to_bits}
+use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits}
 
 extern fn rt_env_get(key: text) -> text?
 
@@ -72,6 +74,25 @@ fn llvm_c_abi_clobbers(arch: text) -> [text]:
         return ["ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
                 "ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7", "ft8", "ft9", "ft10", "ft11", "fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"]
     []
+
+val MIR_LLVM_CONST_ARRAY_LOOP_THRESHOLD: i64 = 16
+val CONST_ARRAY_KIND_NONE: i64 = 0
+val CONST_ARRAY_KIND_SCALAR_I64: i64 = 1
+val CONST_ARRAY_KIND_BOXED_TEXT: i64 = 2
+val CONST_ARRAY_KIND_RAW_STR_PTR: i64 = 3
+
+fn llvm_sign_extend_bits_to_i64(value: i64, width: i64) -> i64:
+    """Sign-extend a narrow integer bit pattern (8, 16, or 32 bits) to i64."""
+    if width == 8:
+        val low = value & 255
+        return if (low & 128) != 0: low - 256 else: low
+    if width == 16:
+        val low = value & 65535
+        return if (low & 32768) != 0: low - 65536 else: low
+    if width == 32:
+        val low = value & 4294967295
+        return if (low & 2147483648) != 0: low - 4294967296 else: low
+    value
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -144,6 +165,10 @@ impl MirToLlvm:
                 self.remember_function_return_type("rt_array_push", "i8")
                 self.remember_function_param_types("rt_array_push", ["ptr", "i64"])
                 self.unknown_func_decls["rt_array_push"] = true
+                val const_array_kind = self.classify_const_array_kind(operands)
+                if const_array_kind != CONST_ARRAY_KIND_NONE:
+                    self.emit_const_array_with_loop(dest_name, operands, const_array_kind)
+                    return
                 self.builder.emit("  {dest_name} = call ptr @rt_array_new(i64 {operands.len()})")
                 for i in 0..operands.len():
                     val raw_elem = self.translate_operand_at(operands, i)
@@ -258,6 +283,244 @@ impl MirToLlvm:
             self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
             self.builder.emit_store(elem_ty, elem_val, elem_ptr)
         self.builder.emit_load(dest_name, agg_ty, agg_ptr)
+
+    me emit_module_constant_global(decl: text):
+        """Append one module-level constant global declaration through the active sink."""
+        if self.bootstrap_string_globals_active:
+            llvm_bootstrap_string_globals_add(decl)
+        else:
+            self.string_globals = self.string_globals.push(decl)
+
+    me const_array_elem_kind_at(operands: [MirOperand], index: i64) -> i64:
+        """Classify a single operand by index without copying enum payload values."""
+        if index < 0 or index >= operands.len():
+            return CONST_ARRAY_KIND_NONE
+        val operand = operands[index]
+        match operand.kind:
+            case Const(const_val, const_ty):
+                val is_func_ptr = match const_ty.kind:
+                    case FuncPtr(_): true
+                    case _: false
+                if is_func_ptr:
+                    return CONST_ARRAY_KIND_NONE
+                val is_boxed_str = self.is_boxed_text_literal_type(const_ty)
+                val llvm_ty = self.valid_llvm_type(self.llvm_type_text(const_ty))
+                match const_val:
+                    case Str(_):
+                        if is_boxed_str:
+                            return CONST_ARRAY_KIND_BOXED_TEXT
+                        if llvm_ty == "ptr":
+                            return CONST_ARRAY_KIND_RAW_STR_PTR
+                        return CONST_ARRAY_KIND_NONE
+                    case Int(_):
+                        if llvm_ty == "ptr" or is_integer_type(llvm_ty) or llvm_ty == "i1":
+                            return CONST_ARRAY_KIND_SCALAR_I64
+                        return CONST_ARRAY_KIND_NONE
+                    case Bool(_):
+                        if is_integer_type(llvm_ty) or llvm_ty == "i1":
+                            return CONST_ARRAY_KIND_SCALAR_I64
+                        return CONST_ARRAY_KIND_NONE
+                    case Float(_):
+                        if llvm_ty == "double" or llvm_ty == "float":
+                            return CONST_ARRAY_KIND_SCALAR_I64
+                        return CONST_ARRAY_KIND_NONE
+                    case FloatLexeme(_):
+                        if llvm_ty == "double" or llvm_ty == "float":
+                            return CONST_ARRAY_KIND_SCALAR_I64
+                        return CONST_ARRAY_KIND_NONE
+                    case MirConstValue.Zero:
+                        if llvm_ty != "void":
+                            return CONST_ARRAY_KIND_SCALAR_I64
+                        return CONST_ARRAY_KIND_NONE
+                    case _:
+                        return CONST_ARRAY_KIND_NONE
+            case _:
+                return CONST_ARRAY_KIND_NONE
+
+    me classify_const_array_kind(operands: [MirOperand]) -> i64:
+        """Return homogeneous constant-array kind when N >= threshold, else NONE."""
+        val count = operands.len()
+        if count < MIR_LLVM_CONST_ARRAY_LOOP_THRESHOLD:
+            return CONST_ARRAY_KIND_NONE
+        val first_kind = self.const_array_elem_kind_at(operands, 0)
+        if first_kind == CONST_ARRAY_KIND_NONE:
+            return CONST_ARRAY_KIND_NONE
+        var i = 1
+        while i < count:
+            if self.const_array_elem_kind_at(operands, i) != first_kind:
+                return CONST_ARRAY_KIND_NONE
+            i = i + 1
+        first_kind
+
+    me const_array_scalar_word_at(operands: [MirOperand], index: i64) -> i64:
+        """Encode scalar constant element `index` to the exact i64 word stored by store_field_bits_verbatim."""
+        if index < 0 or index >= operands.len():
+            return 0
+        val operand = operands[index]
+        match operand.kind:
+            case Const(const_val, const_ty):
+                val llvm_ty = self.valid_llvm_type(self.llvm_type_text(const_ty))
+                val is_unsigned = self.is_unsigned_mir_kind(const_ty.kind)
+                match const_val:
+                    case Int(v):
+                        if llvm_ty == "ptr":
+                            return if self.native_int() == "i32": v & 4294967295 else: v
+                        if llvm_ty == "i1":
+                            return if (v & 1) != 0: 1 else: 0
+                        if llvm_ty == "i8":
+                            return if is_unsigned: v & 255 else: llvm_sign_extend_bits_to_i64(v, 8)
+                        if llvm_ty == "i16":
+                            return if is_unsigned: v & 65535 else: llvm_sign_extend_bits_to_i64(v, 16)
+                        if llvm_ty == "i32":
+                            return if is_unsigned: v & 4294967295 else: llvm_sign_extend_bits_to_i64(v, 32)
+                        return v
+                    case Bool(b):
+                        return if b: 1 else: 0
+                    case Float(v):
+                        if llvm_ty == "float":
+                            return llvm_sign_extend_bits_to_i64(math_f64_round_to_f32_bits(v), 32)
+                        return f64_to_bits(v) as i64
+                    case FloatLexeme(dec):
+                        val scalar: f64 = dec.to_float()
+                        if llvm_ty == "float":
+                            return llvm_sign_extend_bits_to_i64(math_f64_round_to_f32_bits(scalar), 32)
+                        return f64_to_bits(scalar) as i64
+                    case MirConstValue.Zero:
+                        return 0
+                    case _:
+                        return 0
+            case _:
+                return 0
+
+    me const_array_str_value_at(operands: [MirOperand], index: i64) -> text:
+        """Read string constant payload at `index` without copying operand enums across calls."""
+        if index < 0 or index >= operands.len():
+            return ""
+        val operand = operands[index]
+        match operand.kind:
+            case Const(const_val, _):
+                match const_val:
+                    case Str(value): value
+                    case _: ""
+            case _: ""
+
+    me emit_const_scalar_array_global(operands: [MirOperand], table_name: text, elem_align: i64):
+        """Emit `[N x i64]` constant global table in O(N) time."""
+        val count = operands.len()
+        val accum = llvm_ir_text_accum_new()
+        llvm_ir_text_accum_push(accum, "{table_name} = private unnamed_addr constant [{count} x i64] [")
+        var i = 0
+        while i < count:
+            if i > 0:
+                llvm_ir_text_accum_push(accum, ", ")
+            val word = self.const_array_scalar_word_at(operands, i)
+            llvm_ir_text_accum_push(accum, "i64 {word}")
+            i = i + 1
+        llvm_ir_text_accum_push(accum, "], align {elem_align}")
+        self.emit_module_constant_global(llvm_ir_text_accum_finish(accum))
+
+    me emit_const_str_array_globals(operands: [MirOperand], boxed: bool, ptrs_name: text, lens_name: text, ptr_align: i64, len_align: i64):
+        """Emit constant string globals plus `[N x ptr]` (and `[N x i64]` lengths when boxed) in O(N) time."""
+        val count = operands.len()
+        val strs_accum = llvm_ir_text_accum_new()
+        val ptrs_accum = llvm_ir_text_accum_new()
+        var lens_accum = LlvmIRTextAccum(sb: 0)
+        llvm_ir_text_accum_push(ptrs_accum, "{ptrs_name} = private unnamed_addr constant [{count} x ptr] [")
+        if boxed:
+            lens_accum = llvm_ir_text_accum_new()
+            llvm_ir_text_accum_push(lens_accum, "{lens_name} = private unnamed_addr constant [{count} x i64] [")
+        var i = 0
+        while i < count:
+            val text_val = self.const_array_str_value_at(operands, i)
+            val str_id = self.string_counter
+            self.string_counter = self.string_counter + 1
+            val str_global = "@.str.{str_id}"
+            val escaped = escape_llvm_string(text_val)
+            val byte_len = escaped_string_byte_len(text_val)
+            val arr_len = byte_len + 1
+            if i > 0:
+                llvm_ir_text_accum_push(strs_accum, "\n")
+                llvm_ir_text_accum_push(ptrs_accum, ", ")
+                if boxed:
+                    llvm_ir_text_accum_push(lens_accum, ", ")
+            llvm_ir_text_accum_push(strs_accum, "{str_global} = private unnamed_addr constant [{arr_len} x i8] c\"{escaped}\\00\"")
+            llvm_ir_text_accum_push(ptrs_accum, "ptr {str_global}")
+            if boxed:
+                llvm_ir_text_accum_push(lens_accum, "i64 {byte_len}")
+            i = i + 1
+        llvm_ir_text_accum_push(ptrs_accum, "], align {ptr_align}")
+        self.emit_module_constant_global(llvm_ir_text_accum_finish(strs_accum))
+        self.emit_module_constant_global(llvm_ir_text_accum_finish(ptrs_accum))
+        if boxed:
+            llvm_ir_text_accum_push(lens_accum, "], align {len_align}")
+            self.emit_module_constant_global(llvm_ir_text_accum_finish(lens_accum))
+
+    me emit_const_array_with_loop(dest_name: text, operands: [MirOperand], array_kind: i64):
+        """Lower a large constant Array aggregate to static global table(s) and an O(1)-IR phi loop."""
+        val count = operands.len()
+        val idx_ty = self.native_int()
+        val i64_align = natural_alignment("i64")
+        val ptr_align = if idx_ty == "i32": 4 else: natural_alignment("ptr")
+        val table_id = self.string_counter
+        self.string_counter = self.string_counter + 1
+        var table_name = "@.arr.{table_id}"
+        var lens_name = ""
+        val boxed_str = array_kind == CONST_ARRAY_KIND_BOXED_TEXT
+
+        if array_kind == CONST_ARRAY_KIND_SCALAR_I64:
+            self.emit_const_scalar_array_global(operands, table_name, i64_align)
+        else:
+            table_name = "@.arr_ptrs.{table_id}"
+            if boxed_str:
+                val lens_id = self.string_counter
+                self.string_counter = self.string_counter + 1
+                lens_name = "@.arr_lens.{lens_id}"
+                self.remember_function_return_type("rt_string_new_literal", "i64")
+                self.remember_function_param_types("rt_string_new_literal", ["ptr", "i64"])
+                self.unknown_func_decls["rt_string_new_literal"] = true
+            self.emit_const_str_array_globals(operands, boxed_str, table_name, lens_name, ptr_align, i64_align)
+
+        val pre_label = self.builder.fresh_label("arr_pre")
+        val loop_label = self.builder.fresh_label("arr_loop")
+        val done_label = self.builder.fresh_label("arr_done")
+        val idx_phi = self.builder.fresh_local()
+        val next_idx = self.builder.fresh_local()
+
+        self.builder.emit("  {dest_name} = call ptr @rt_array_new(i64 {count})")
+        self.builder.emit("  br label %{pre_label}")
+        self.builder.emit_label(pre_label)
+        self.builder.emit("  br label %{loop_label}")
+        self.builder.emit_label(loop_label)
+        self.builder.emit("  {idx_phi} = phi {idx_ty} [ 0, %{pre_label} ], [ {next_idx}, %{loop_label} ]")
+
+        var push_val = ""
+        if array_kind == CONST_ARRAY_KIND_SCALAR_I64:
+            val elem_ptr = self.builder.fresh_local()
+            push_val = self.builder.fresh_local()
+            self.builder.emit("  {elem_ptr} = getelementptr inbounds [{count} x i64], ptr {table_name}, {idx_ty} 0, {idx_ty} {idx_phi}")
+            self.builder.emit("  {push_val} = load i64, ptr {elem_ptr}, align {i64_align}")
+        else:
+            val ptr_gep = self.builder.fresh_local()
+            val raw_ptr = self.builder.fresh_local()
+            self.builder.emit("  {ptr_gep} = getelementptr inbounds [{count} x ptr], ptr {table_name}, {idx_ty} 0, {idx_ty} {idx_phi}")
+            self.builder.emit("  {raw_ptr} = load ptr, ptr {ptr_gep}, align {ptr_align}")
+            if boxed_str:
+                val len_gep = self.builder.fresh_local()
+                val byte_len_val = self.builder.fresh_local()
+                push_val = self.builder.fresh_local()
+                self.builder.emit("  {len_gep} = getelementptr inbounds [{count} x i64], ptr {lens_name}, {idx_ty} 0, {idx_ty} {idx_phi}")
+                self.builder.emit("  {byte_len_val} = load i64, ptr {len_gep}, align {i64_align}")
+                self.builder.emit("  {push_val} = call i64 @rt_string_new_literal(ptr {raw_ptr}, i64 {byte_len_val})")
+            else:
+                push_val = self.builder.fresh_local()
+                self.builder.emit("  {push_val} = ptrtoint ptr {raw_ptr} to i64")
+
+        self.builder.emit("  call i8 @rt_array_push(ptr {dest_name}, i64 {push_val})")
+        self.builder.emit("  {next_idx} = add nuw nsw {idx_ty} {idx_phi}, 1")
+        val cond = self.builder.fresh_local()
+        self.builder.emit("  {cond} = icmp ult {idx_ty} {next_idx}, {count}")
+        self.builder.emit("  br i1 {cond}, label %{loop_label}, label %{done_label}")
+        self.builder.emit_label(done_label)
 
     me llvm_get_field_impl(dest: LocalId, base: MirOperand, field: i64):
         val dest_id = self.local_id_value(dest)
@@ -612,6 +875,11 @@ impl MirToLlvm:
                     case _: None
             case _: None
 
+    me llvm_phi_incoming_block_label(pred_block_id: i64) -> text:
+        """Resolve the LLVM exit label (with `%`) for a predecessor MIR block."""
+        val exit_label = self.builder.mir_block_exit_label(pred_block_id)
+        "%{exit_label}"
+
     me emit_ssa_phi_intrinsic(dest: LocalId?, args: [MirOperand]) -> bool:
         # Decay-safe optional access on dest (see translate_call in
         # core_codegen.spl): dest may arrive as a bare LocalId, so no
@@ -637,7 +905,9 @@ impl MirToLlvm:
         val else_raw = self.translate_operand_at(args, 3)
         val then_val = self.value_as_type(then_raw, then_ty, phi_ty)
         val else_val = self.value_as_type(else_raw, else_ty, phi_ty)
-        self.builder.emit("  {dest_name} = phi {phi_ty} [ {then_val}, %bb{then_id} ], [ {else_val}, %bb{else_id} ]")
+        val then_label = self.llvm_phi_incoming_block_label(then_id)
+        val else_label = self.llvm_phi_incoming_block_label(else_id)
+        self.builder.emit("  {dest_name} = phi {phi_ty} [ {then_val}, {then_label} ], [ {else_val}, {else_label} ]")
         true
 
     me llvm_intrinsic_impl(dest: LocalId?, name: text, args: [MirOperand]):

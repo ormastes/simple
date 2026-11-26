@@ -1,0 +1,426 @@
+# @req REQ-SSPEC-UNIT
+# bug: stage2_codegen_large_array_literal_2026-11-02
+# bug: gui_8k_native_renderer_artifact_build_timeout_2026-08-13
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.backend.{MirToLlvm}
+use compiler.backend.mir_to_llvm.{llvm_first_duplicate_ssa_def}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn line_occurrences(ir: text, needle: text) -> i64:
+    var count = 0
+    for line in ir.split("\n"):
+        if line.contains(needle):
+            count = count + 1
+    count
+
+fn build_array_module(
+    fn_name: text,
+    elem_type: MirType,
+    operands: [MirOperand],
+    extra_locals: [MirLocal] = [],
+    extra_insts: [MirInst] = []
+) -> MirModule:
+    val arr_type = MirType(kind: MirTypeKind.Array(elem_type, operands.len()))
+    var locals: [MirLocal] = []
+    for loc in extra_locals:
+        locals.push(loc)
+    locals.push(MirLocal(id: LocalId(id: 10), name: Some("arr"), type_: arr_type, kind: LocalKind.Temp, is_ghost: false))
+
+    var insts: [MirInst] = []
+    for inst in extra_insts:
+        insts.push(inst)
+    insts.push(MirInst(
+        kind: MirInstKind.Aggregate(LocalId(id: 10), AggregateKind.Array(elem_type), operands),
+        span: nil
+    ))
+
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 401),
+        name: fn_name,
+        signature: MirSignature(params: [], return_type: arr_type, is_variadic: false),
+        locals: locals,
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: insts,
+                terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 10))))
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    MirModule(name: "test.llvm." + fn_name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn make_i64_operands(count: i64) -> [MirOperand]:
+    var ops: [MirOperand] = []
+    var i = 0
+    while i < count:
+        ops.push(mir_operand_const_int(i * 3 - 7))
+        i = i + 1
+    ops
+
+fn make_text_operands(count: i64) -> [MirOperand]:
+    val str_type = MirType(kind: MirTypeKind.Opaque("str"))
+    var ops: [MirOperand] = []
+    var i = 0
+    while i < count:
+        val item = if i == 0: "A\0é" elif i == 1: "" else: "entry_{i}"
+        ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(item), str_type)))
+        i = i + 1
+    ops
+
+describe "MirToLlvm large constant array lowering":
+    """Verifies constant-table + O(1) loop lowering, SSA block tracking, target alignment, and fallbacks."""
+
+    it "keeps small (< 16) constant arrays on the inline push path":
+        step("lower a 4-element constant [i64] array")
+        val ops = make_i64_operands(4)
+        val mod = build_array_module("small_arr", MirType.i64(), ops)
+        val ir = MirToLlvm.create("test.llvm.small_arr", CodegenTarget.X86_64, nil).translate_module(mod)
+
+        expect(llvm_first_duplicate_ssa_def(ir)).to_equal("")
+        expect(line_occurrences(ir, "call i8 @rt_array_push")).to_equal(4)
+        expect(ir.contains("@.arr.")).to_equal(false)
+        expect(ir.contains("phi ")).to_equal(false)
+
+    it "lowers large constant [i64] arrays to a static global table and O(1) phi loop":
+        step("lower a 256-element constant [i64] array")
+        val ops = make_i64_operands(256)
+        val mod = build_array_module("large_i64_arr", MirType.i64(), ops)
+        val ir = MirToLlvm.create("test.llvm.large_i64_arr", CodegenTarget.X86_64, nil).translate_module(mod)
+
+        expect(llvm_first_duplicate_ssa_def(ir)).to_equal("")
+        expect(ir).to_contain("@.arr.0 = private unnamed_addr constant [256 x i64] [i64 -7, i64 -4,")
+        expect(ir).to_contain("call ptr @rt_array_new(i64 256)")
+        expect(ir).to_contain("phi i64 [ 0, %arr_pre_")
+        expect(ir).to_contain("getelementptr inbounds [256 x i64], ptr @.arr.0, i64 0, i64")
+        expect(line_occurrences(ir, "call i8 @rt_array_push")).to_equal(1)
+
+    it "preserves exact bit patterns for bool, char, narrow int, and f64 constant arrays":
+        step("lower 16+ element constant bool, char, u8, and f64 arrays")
+        var bool_ops: [MirOperand] = []
+        var char_ops: [MirOperand] = []
+        var u8_ops: [MirOperand] = []
+        var f64_ops: [MirOperand] = []
+        val char_ty = MirType(kind: MirTypeKind.Char)
+        val u8_ty = MirType(kind: MirTypeKind.U8)
+        var i = 0
+        while i < 16:
+            bool_ops.push(mir_operand_const_bool((i % 2) == 0))
+            char_ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(65 + i), char_ty)))
+            u8_ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(200 + i), u8_ty)))
+            f64_ops.push(mir_operand_const_float(1.5))
+            i = i + 1
+
+        val bool_ir = MirToLlvm.create("test.llvm.bool_arr", CodegenTarget.X86_64, nil).translate_module(
+            build_array_module("bool_arr", MirType.bool(), bool_ops))
+        expect(llvm_first_duplicate_ssa_def(bool_ir)).to_equal("")
+        expect(bool_ir).to_contain("[16 x i64] [i64 1, i64 0,")
+        expect(line_occurrences(bool_ir, "call i8 @rt_array_push")).to_equal(1)
+
+        val char_ir = MirToLlvm.create("test.llvm.char_arr", CodegenTarget.X86_64, nil).translate_module(
+            build_array_module("char_arr", char_ty, char_ops))
+        expect(llvm_first_duplicate_ssa_def(char_ir)).to_equal("")
+        expect(char_ir).to_contain("[16 x i64] [i64 65, i64 66,")
+        expect(line_occurrences(char_ir, "call i8 @rt_array_push")).to_equal(1)
+
+        val u8_ir = MirToLlvm.create("test.llvm.u8_arr", CodegenTarget.X86_64, nil).translate_module(
+            build_array_module("u8_arr", u8_ty, u8_ops))
+        expect(llvm_first_duplicate_ssa_def(u8_ir)).to_equal("")
+        expect(u8_ir).to_contain("[16 x i64] [i64 200, i64 201,")
+        expect(line_occurrences(u8_ir, "call i8 @rt_array_push")).to_equal(1)
+
+        val f64_ir = MirToLlvm.create("test.llvm.f64_arr", CodegenTarget.X86_64, nil).translate_module(
+            build_array_module("f64_arr", MirType.f64(), f64_ops))
+        expect(llvm_first_duplicate_ssa_def(f64_ir)).to_equal("")
+        # 1.5 IEEE-754 binary64 bits = 0x3FF8000000000000 = 4609434218613702656
+        expect(f64_ir).to_contain("[16 x i64] [i64 4609434218613702656,")
+        expect(line_occurrences(f64_ir, "call i8 @rt_array_push")).to_equal(1)
+
+    it "lowers large constant [text] arrays to constant string tables and a bounded phi loop":
+        step("lower a 64-element constant [text] array including NUL and UTF-8 bytes")
+        val str_type = MirType(kind: MirTypeKind.Opaque("str"))
+        val ops = make_text_operands(64)
+        val mod = build_array_module("large_text_arr", str_type, ops)
+        val ir = MirToLlvm.create("test.llvm.large_text_arr", CodegenTarget.X86_64, nil).translate_module(mod)
+
+        expect(llvm_first_duplicate_ssa_def(ir)).to_equal("")
+        expect(ir).to_contain("@.arr_ptrs.0 = private unnamed_addr constant [64 x ptr]")
+        expect(ir).to_contain("@.arr_lens.1 = private unnamed_addr constant [64 x i64] [i64 4, i64 0,")
+        expect(ir).to_contain("c\"A\\00é\\00\"")
+        expect(ir).to_contain("call ptr @rt_array_new(i64 64)")
+        expect(line_occurrences(ir, "call i64 @rt_string_new_literal")).to_equal(1)
+        expect(line_occurrences(ir, "call i8 @rt_array_push")).to_equal(1)
+
+    it "falls back safely when a large array contains a non-constant operand":
+        step("lower a 32-element [i64] array with one runtime Copy operand")
+        var ops = make_i64_operands(31)
+        ops.push(mir_operand_copy(LocalId(id: 1)))
+        val dyn_local = MirLocal(id: LocalId(id: 1), name: Some("dyn"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
+        val dyn_inst = MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(999), MirType.i64()), span: nil)
+        val mod = build_array_module("mixed_arr", MirType.i64(), ops, [dyn_local], [dyn_inst])
+        val ir = MirToLlvm.create("test.llvm.mixed_arr", CodegenTarget.X86_64, nil).translate_module(mod)
+
+        expect(llvm_first_duplicate_ssa_def(ir)).to_equal("")
+        expect(ir.contains("@.arr.")).to_equal(false)
+        expect(ir.contains("phi ")).to_equal(false)
+        expect(line_occurrences(ir, "call i8 @rt_array_push")).to_equal(32)
+
+    it "handles multiple large constant arrays in one basic block with distinct SSA labels":
+        step("emit two 20-element constant arrays in the same basic block")
+        val ops_a = make_i64_operands(20)
+        val ops_b = make_text_operands(20)
+        val i64_arr_ty = MirType(kind: MirTypeKind.Array(MirType.i64(), 20))
+        val str_ty = MirType(kind: MirTypeKind.Opaque("str"))
+        val text_arr_ty = MirType(kind: MirTypeKind.Array(str_ty, 20))
+        val fn_ = MirFunction(
+            symbol: SymbolId(id: 402),
+            name: "two_large_arrs",
+            signature: MirSignature(params: [], return_type: text_arr_ty, is_variadic: false),
+            locals: [
+                MirLocal(id: LocalId(id: 1), name: Some("a"), type_: i64_arr_ty, kind: LocalKind.Temp, is_ghost: false),
+                MirLocal(id: LocalId(id: 2), name: Some("b"), type_: text_arr_ty, kind: LocalKind.Temp, is_ghost: false)
+            ],
+            blocks: [
+                MirBlock(
+                    id: BlockId.entry(),
+                    label: Some("entry"),
+                    instructions: [
+                        MirInst(kind: MirInstKind.Aggregate(LocalId(id: 1), AggregateKind.Array(MirType.i64()), ops_a), span: nil),
+                        MirInst(kind: MirInstKind.Aggregate(LocalId(id: 2), AggregateKind.Array(str_ty), ops_b), span: nil)
+                    ],
+                    terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 2))))
+                )
+            ],
+            entry_block: BlockId.entry(),
+            span: Span.empty(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            gpu_target: "",
+            gpu_backend_order: "",
+            is_export_c: false,
+            export_name: "",
+            has_driver_manifest_attr: false,
+            driver_manifest_attr: nil,
+            has_vhdl_metadata: false,
+            vhdl_metadata: vhdl_hardware_metadata_default(),
+            has_fast_math: false)
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[fn_.symbol] = fn_
+        val mod = MirModule(name: "test.llvm.two_large_arrs", functions: functions, statics: {}, constants: {}, types: {})
+        val ir = MirToLlvm.create("test.llvm.two_large_arrs", CodegenTarget.X86_64, nil).translate_module(mod)
+
+        expect(llvm_first_duplicate_ssa_def(ir)).to_equal("")
+        expect(line_occurrences(ir, "arr_pre_")).to_equal(6)
+        expect(line_occurrences(ir, "arr_loop_")).to_equal(8)
+        expect(line_occurrences(ir, "arr_done_")).to_equal(4)
+        expect(line_occurrences(ir, "call i8 @rt_array_push")).to_equal(2)
+
+    context "CFG phi tracking, 32-bit targets, and heterogeneous fallbacks":
+        """Verifies split-block __simple_ssa_phi predecessors, 32-bit alignment, and mixed-kind fallback."""
+
+        it "updates __simple_ssa_phi incoming label when a branch splits via a large constant array":
+            step("build a diamond CFG where bb1 emits a 20-element [i64] loop and bb3 joins with __simple_ssa_phi")
+            val ops_20 = make_i64_operands(20)
+            val i64_arr_ty = MirType(kind: MirTypeKind.Array(MirType.i64(), 20))
+            val fn_split = MirFunction(
+                symbol: SymbolId(id: 403),
+                name: "diamond_split_phi",
+                signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+                locals: [
+                    MirLocal(id: LocalId(id: 1), name: Some("cond"), type_: MirType.bool(), kind: LocalKind.Temp, is_ghost: false),
+                    MirLocal(id: LocalId(id: 2), name: Some("arr"), type_: i64_arr_ty, kind: LocalKind.Temp, is_ghost: false),
+                    MirLocal(id: LocalId(id: 5), name: Some("joined"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
+                ],
+                blocks: [
+                    MirBlock(
+                        id: BlockId(id: 0),
+                        label: Some("entry"),
+                        instructions: [
+                            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Bool(true), MirType.bool()), span: nil)
+                        ],
+                        terminator: MirTerminator.If(mir_operand_copy(LocalId(id: 1)), BlockId(id: 1), BlockId(id: 2))
+                    ),
+                    MirBlock(
+                        id: BlockId(id: 1),
+                        label: Some("then_arr"),
+                        instructions: [
+                            MirInst(kind: MirInstKind.Aggregate(LocalId(id: 2), AggregateKind.Array(MirType.i64()), ops_20), span: nil)
+                        ],
+                        terminator: MirTerminator.Goto(BlockId(id: 3))
+                    ),
+                    MirBlock(
+                        id: BlockId(id: 2),
+                        label: Some("else_plain"),
+                        instructions: [],
+                        terminator: MirTerminator.Goto(BlockId(id: 3))
+                    ),
+                    MirBlock(
+                        id: BlockId(id: 3),
+                        label: Some("join"),
+                        instructions: [
+                            MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 5)), "__simple_ssa_phi", [
+                                mir_operand_const_int(1),
+                                mir_operand_const_int(10),
+                                mir_operand_const_int(2),
+                                mir_operand_const_int(20)
+                            ]), span: nil)
+                        ],
+                        terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 5))))
+                    )
+                ],
+                entry_block: BlockId(id: 0),
+                span: Span.empty(),
+                generic_params: [],
+                is_generic_template: false,
+                specialization_of: nil,
+                type_bindings: {},
+                layout_phase: nil,
+                is_kernel: false,
+                gpu_target: "",
+                gpu_backend_order: "",
+                is_export_c: false,
+                export_name: "",
+                has_driver_manifest_attr: false,
+                driver_manifest_attr: nil,
+                has_vhdl_metadata: false,
+                vhdl_metadata: vhdl_hardware_metadata_default(),
+                has_fast_math: false)
+            val fn_plain = MirFunction(
+                symbol: SymbolId(id: 404),
+                name: "diamond_plain_phi_next_fn",
+                signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+                locals: [
+                    MirLocal(id: LocalId(id: 1), name: Some("cond"), type_: MirType.bool(), kind: LocalKind.Temp, is_ghost: false),
+                    MirLocal(id: LocalId(id: 4), name: Some("joined"), type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)
+                ],
+                blocks: [
+                    MirBlock(
+                        id: BlockId(id: 0),
+                        label: Some("entry"),
+                        instructions: [
+                            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Bool(false), MirType.bool()), span: nil)
+                        ],
+                        terminator: MirTerminator.If(mir_operand_copy(LocalId(id: 1)), BlockId(id: 1), BlockId(id: 2))
+                    ),
+                    MirBlock(
+                        id: BlockId(id: 1),
+                        label: Some("then_plain"),
+                        instructions: [],
+                        terminator: MirTerminator.Goto(BlockId(id: 3))
+                    ),
+                    MirBlock(
+                        id: BlockId(id: 2),
+                        label: Some("else_plain"),
+                        instructions: [],
+                        terminator: MirTerminator.Goto(BlockId(id: 3))
+                    ),
+                    MirBlock(
+                        id: BlockId(id: 3),
+                        label: Some("join"),
+                        instructions: [
+                            MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 4)), "__simple_ssa_phi", [
+                                mir_operand_const_int(1),
+                                mir_operand_const_int(100),
+                                mir_operand_const_int(2),
+                                mir_operand_const_int(200)
+                            ]), span: nil)
+                        ],
+                        terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 4))))
+                    )
+                ],
+                entry_block: BlockId(id: 0),
+                span: Span.empty(),
+                generic_params: [],
+                is_generic_template: false,
+                specialization_of: nil,
+                type_bindings: {},
+                layout_phase: nil,
+                is_kernel: false,
+                gpu_target: "",
+                gpu_backend_order: "",
+                is_export_c: false,
+                export_name: "",
+                has_driver_manifest_attr: false,
+                driver_manifest_attr: nil,
+                has_vhdl_metadata: false,
+                vhdl_metadata: vhdl_hardware_metadata_default(),
+                has_fast_math: false)
+            var functions: Dict<SymbolId, MirFunction> = {}
+            functions[fn_split.symbol] = fn_split
+            functions[fn_plain.symbol] = fn_plain
+            val mod = MirModule(name: "test.llvm.diamond_split_phi", functions: functions, statics: {}, constants: {}, types: {})
+            val ir = MirToLlvm.create("test.llvm.diamond_split_phi", CodegenTarget.X86_64, nil).translate_module(mod)
+
+            expect(llvm_first_duplicate_ssa_def(ir)).to_equal("")
+            expect(ir).to_contain("phi i64 [ 10, %arr_done_")
+            expect(ir).to_contain("[ 20, %bb2 ]")
+            expect(ir.contains("[ 10, %bb1 ]")).to_equal(false)
+            expect(ir).to_contain("phi i64 [ 100, %bb1 ], [ 200, %bb2 ]")
+
+        it "uses i32 loop induction and 8-byte i64 alignment on 32-bit targets":
+            step("lower 32-element [i64] and [text] arrays targeting 32-bit X86 and Arm")
+            val i64_ops = make_i64_operands(32)
+            val str_ty = MirType(kind: MirTypeKind.Opaque("str"))
+            val text_ops = make_text_operands(32)
+
+            val x86_i64_ir = MirToLlvm.create("test.llvm.x86_i64", CodegenTarget.X86, nil).translate_module(
+                build_array_module("x86_i64", MirType.i64(), i64_ops))
+            expect(llvm_first_duplicate_ssa_def(x86_i64_ir)).to_equal("")
+            expect(x86_i64_ir).to_contain("phi i32 [ 0, %arr_pre_")
+            expect(x86_i64_ir).to_contain("getelementptr inbounds [32 x i64], ptr @.arr.0, i32 0, i32")
+            expect(x86_i64_ir).to_contain("], align 8")
+            expect(x86_i64_ir).to_contain("load i64, ptr")
+            expect(x86_i64_ir).to_contain(", align 8")
+
+            val arm_text_ir = MirToLlvm.create("test.llvm.arm_text", CodegenTarget.Arm, nil).translate_module(
+                build_array_module("arm_text", str_ty, text_ops))
+            expect(llvm_first_duplicate_ssa_def(arm_text_ir)).to_equal("")
+            expect(arm_text_ir).to_contain("phi i32 [ 0, %arr_pre_")
+            expect(arm_text_ir).to_contain("@.arr_ptrs.0 = private unnamed_addr constant [32 x ptr]")
+            expect(arm_text_ir).to_contain("load ptr, ptr %t")
+            expect(arm_text_ir).to_contain(", align 4")
+            expect(arm_text_ir).to_contain("@.arr_lens.1 = private unnamed_addr constant [32 x i64]")
+            expect(arm_text_ir).to_contain("load i64, ptr %t")
+            expect(arm_text_ir).to_contain(", align 8")
+
+        it "falls back to inline pushes when a large array mixes constant element kinds":
+            step("mix 19 scalar Int constants and 1 Opaque(str) constant in a 20-element array")
+            var ops = make_i64_operands(19)
+            val str_ty = MirType(kind: MirTypeKind.Opaque("str"))
+            ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("tail"), str_ty)))
+            val mod = build_array_module("hetero_arr", MirType.i64(), ops)
+            val ir = MirToLlvm.create("test.llvm.hetero_arr", CodegenTarget.X86_64, nil).translate_module(mod)
+
+            expect(llvm_first_duplicate_ssa_def(ir)).to_equal("")
+            expect(ir.contains("@.arr.")).to_equal(false)
+            expect(ir.contains("@.arr_ptrs.")).to_equal(false)
+            expect(ir.contains("phi ")).to_equal(false)
+            expect(line_occurrences(ir, "call i8 @rt_array_push")).to_equal(20)
