@@ -56,7 +56,9 @@ Rules:
    rule 1 forbids `@cfg(os=)` in level-0 files once a variant exists, and the
    `variants/` resolver hook it points to is not implemented, so P2 adds a
    one-line exception to that rule for body-free import-switch facades. There
-   is no resolver lane.
+   is no resolver lane. `scripts/check/check-platform-variant-dirs.shs` matches
+   only `@cfg(`, so an `@when(os=)` switch is not flagged and P1 can land
+   before P2's exception.
 3. A variant reports what it enforces through `SosixContainSupportV1`. The runtime
    never infers support from the OS name.
 4. An unsupported axis is refused before a child exists
@@ -179,10 +181,12 @@ pub struct SosixContainCanaryV1:
     id: text
     expected: text                     # "allow" | "deny"
     observed: text                     # "allow" | "deny" | "not-run"
+    control: text                      # same op on the allowed target, same run: "allow" | "deny" | "not-run" | "none"
 
 pub struct SosixContainQualifyRequestV1:
-    probe_program: text                # canary executable (performs one attempt, prints the outcome)
-    probe_digest: text
+    probe_program: text                # executable that runs the probe script
+    probe_digest: text                 # sha256 of probe_program
+    probe_script: text                 # the repo canary probe; its sha256 is checked against a pinned constant
     work_dir: text                     # empty scratch directory the op owns for the run
     scope: text
     wall: SosixContainMillisV1
@@ -192,14 +196,21 @@ pub struct SosixContainQualifyResultV1:
     evidence_digest: text              # "" when nothing ran
     reason: text                       # "" = ran to completion
 
+pub const SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1 = "launch-exit-code"        # allow
 pub const SOSIX_CONTAIN_CANARY_OWN_WRITE_V1 = "own-dir-write"            # allow
 pub const SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1 = "lower-read-exec"    # allow
+pub const SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1 = "tree-empty-after-cancel" # allow
 pub const SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1 = "lower-overwrite"        # deny
 pub const SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1 = "user-private-write"   # deny
 pub const SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1 = "other-scope-write"     # deny
 pub const SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1 = "other-scope-process-open"   # deny
+pub const SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1 = "process-limit-spawn"  # deny
 
-# True only if every planned id is present once and observed == expected.
+# One canary passes when it is present exactly once, observed == expected, and
+# (for a deny canary) control == "allow". A deny without a successful positive
+# control is a failure, so a broken probe cannot read as "denied".
+pub fn sosix_contain_canary_pass_v1(result: SosixContainQualifyResultV1, id: text) -> SosixContainFlagV1
+# True only if all nine pass.
 pub fn sosix_contain_canaries_pass_v1(result: SosixContainQualifyResultV1) -> SosixContainFlagV1
 
 pub enum SosixContainAdmissionV1:
@@ -359,16 +370,38 @@ from `sha256(scope)` under one fixed prefix that P1 chooses and records; it
 names no account.
 
 This is unproven on this host. The mechanism counts as working only when
-`sosix_contain_qualify_v1` returns all six canaries as expected:
+`sosix_contain_qualify_v1` returns all nine canaries passing. Every deny canary
+carries a positive control: the same operation, in the same probe run, on a
+target that must be allowed.
 
-| Canary id | Attempt | Expected |
-|---|---|---|
-| `own-dir-write` | write a file in own granted directory | allow |
-| `lower-read-exec` | read and execute a linked base file whose store ACL is user-only | allow |
-| `lower-overwrite` | overwrite a linked base file | deny |
-| `user-private-write` | write into the user's `LocalLow` | deny |
-| `other-scope-write` | write into a directory granted to a different scope | deny |
-| `other-scope-process-open` | open a process of a different scope for write | deny |
+| Canary id | Attempt | Expected | Positive control |
+|---|---|---|---|
+| `launch-exit-code` | probe exits with a requested non-zero code and the op reads it back | allow | none |
+| `own-dir-write` | write a file in own granted directory | allow | none |
+| `lower-read-exec` | read and execute a linked base file | allow | none |
+| `tree-empty-after-cancel` | cancel while the probe has live children; job reports no process | allow | none |
+| `lower-overwrite` | overwrite the linked base file | deny | overwrite a file in own directory |
+| `user-private-write` | write into the user's `LocalLow` | deny | write in own directory |
+| `other-scope-write` | write into a directory granted to a second scope | deny | write in own directory |
+| `other-scope-process-open` | open a live second-scope process for terminate, VM read and VM write | deny (all three) | the same three opens on the probe's own child succeed |
+| `process-limit-spawn` | spawn one process beyond the job limit | deny | spawns within the limit succeed |
+
+Setup is done by the op, not the probe: it forces a user-only DACL on the
+linked file before applying the read grant (so `lower-read-exec` is not
+satisfied by an inherited Users ACE), and it starts a real second-scope process
+that stays alive for the process canary. Root processes are created with an
+explicit security descriptor {scope SID, user, SYSTEM}, not only the token
+default DACL.
+
+The probe is a repo file, `src/lib/nogc_sync_mut/sosix/contain_canary_probe.spl`.
+The op checks its sha256 against `SOSIX_CONTAIN_CANARY_PROBE_SHA256_V1` (a
+constant in the facade, pinned by a P2 spec) and returns
+`containment-qualify-probe-digest-mismatch` with no canary run otherwise.
+
+`evidence_digest` = sha256 of the canonical line set: `sosix-contain-qualify-v1`,
+`support.mechanism`, host OS build string, volume serial of `work_dir`, `scope`,
+`probe_digest`, the probe script sha256, then `id:expected:observed:control` for
+each canary in plan order. It is `""` when any canary is `not-run`.
 
 Side effect, not claimed as a guarantee: files readable only by the user SID
 become unreadable to the child.
@@ -405,16 +438,23 @@ security descriptor across all its names, so labelling a tree that contains link
 would make store objects writable by every container.
 
 `grant_contained_write` also refuses a directory whose existing or inherited
-ACEs already give Everyone or Users write (`grant-target-world-writable`): the
-restricting list contains both, so any child could write there.
+ACEs already give Everyone, Users or the caller's logon SID write
+(`grant-target-world-writable`): the restricting list contains all three, so
+any child could write there.
 
 `grant_contained_read` exists because the restricted access check applies to
 read and execute too, and a hard link carries the store object's DACL. A store
 under the user profile or `%TEMP%` has a user-only ACL, so `lower/` would be
 unreadable. The op adds one read+execute ACE for the fixed reader SID to the
 directory tree and every file under it (bounded count, idempotent, never a
-write ACE, never a label change). It deliberately reaches the shared store
-objects through the links; one ACE per object ever, shared by all containers.
+write ACE, never a label change). The walk does not follow or descend into
+reparse points (junctions, symlinks); it skips them and never touches their
+targets. It deliberately reaches the shared store objects through the links;
+one ACE per object ever, shared by all containers. The ACE is permanent for the
+object's life and is not removed at dematerialize: other live containers link
+the same object, and the SID exists only inside restricted container tokens,
+so it grants nothing to ordinary processes. It disappears when GC deletes the
+object. An ACL change does not alter the object's bytes or key.
 Off Windows it returns `contained-read-unimplemented-<os>`. P1 owns it; the
 runtime (P4) calls it on `lower/` after materialization, so P3 is unchanged.
 A failure is a refusal before start, `rootfs-read-grant-failed`.
@@ -527,9 +567,11 @@ pub struct PureContainerRunV1:
     journal: ContainerLifecycleJournalV1
 
 pub struct PureContainerQualifyV1:
-    state_root: text                   # scratch for canary runs
-    probe_program: text                # canary/probe executable
+    state_root: text                   # canary scratch is created under it
+    view_root: text                    # the pair the evidence is bound to
+    probe_program: text
     probe_digest: text
+    probe_script: text
     memory_probe: SosixContainMemoryProbeV1
 
 pub fn pure_container_qualify_v1(request: PureContainerQualifyV1) -> PureContainerEvidenceV1
@@ -539,9 +581,22 @@ pub fn pure_container_run_v1(spec: PureContainerSpecV1) -> PureContainerRunV1
 Evidence comes first and from a separate call. `pure_container_qualify_v1` calls
 `sosix_contain_qualify_v1` (the canaries; it never goes through
 `sosix_contain_start_v1` or admission, so nothing is circular) and
-`sosix_contain_memory_cap_evidence_v1`. It sets `write_confinement_observed`
-from `sosix_contain_canaries_pass_v1`, `launch_observed` and `cleanup_observed`
-from the canary run, `memory_cap_enforced` from the memory evidence, and sets `evidence_revision` to `pure:<sha256 of the canary and memory
+`sosix_contain_memory_cap_evidence_v1`, then hands both to the one pure
+producer of evidence, `pure_container_evidence_from_qualify_v1` (P0). No other
+code sets an evidence field:
+
+| Evidence field | Produced from |
+|---|---|
+| `launch_observed` | canary `launch-exit-code` passes |
+| `cleanup_observed` | canary `tree-empty-after-cancel` passes |
+| `write_confinement_observed` | the five deny canaries and `own-dir-write`, `lower-read-exec` all pass |
+| `memory_cap_enforced` | `SosixContainMemoryEvidenceV1.enforced` |
+| `roots_digest` | sha256 of `state_root`, newline, `view_root` |
+| `evidence_revision` | see below |
+
+The shared `SandboxObservedCapabilityV1.qualification` (§7 table) is
+`sosix_contain_canaries_pass_v1`; there is no second canary set or second
+qualification path. That producer sets `evidence_revision` to `pure:<sha256 of the canary and memory
 digests>`, always non-empty once it has run, even when nothing is affirmed
 (lane E's `unaffirmed:` precedent). `base_fully_linked` is false in qualify
 output and is set per run by the materializer.
@@ -553,6 +608,15 @@ requirement reaches `isolation-kind-mismatch`.
 
 A `restricted` run with `spec.evidence.write_confinement_observed` false is
 refused before any effect: `write-confinement-unqualified`.
+
+Evidence lifetime: it is bound to the `state_root`/`view_root` pair it was
+produced for (`roots_digest`; a run with different roots is refused
+`evidence-roots-mismatch`), and qualify refuses when `work_dir`, `state_root`
+and `view_root` are not on one volume. It is valid for the calling process
+only: it is never persisted, and a new process, a reboot or an OS update
+means qualifying again. The host build and volume serial inside
+`evidence_digest` make a stale copy detectable in logs; v1 does not re-check
+them at run time.
 
 Order: `sosix_contain_support_v1` -> build report from support and
 `spec.evidence` -> `container_capability_v1_admission_reason` -> the
@@ -589,7 +653,7 @@ The runtime owns no private state machine, directory layout or grant model:
 | `guarantees.cleanup` | `QualifiedTreeAbsence` only if `kill_all_descendants` and `cleanup_observed`; else `NoCleanupGuarantee` |
 | `hard_memory_limit` | qualified only with `memory_cap_enforced` evidence |
 | `hard_cpu_limit` | unqualified until throughput is measured |
-| `qualification` | from `sandbox_canary_status_v1` |
+| `qualification` | `sosix_contain_canaries_pass_v1` over the qualify result |
 
   On Windows in increment 1 this yields `NoFileGuarantee` and
   `NoNetworkGuarantee`, so both existing evidence profiles

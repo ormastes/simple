@@ -111,6 +111,32 @@ pub fn pure_container_capability_report_v1(support: SosixContainSupportV1,
   evidence.memory_cap_enforced.value`.
 - Specs: `test/01_unit/lib/common/contracts/sosix/containment_v1_spec.spl`,
   `test/01_unit/lib/common/contracts/container/pure_backend_v1_spec.spl`.
+- Changed 2026-11-26 (review round 3), exact delta against round 2:
+  - `SosixContainCanaryV1` gains `control: text` (last field).
+  - `SosixContainQualifyRequestV1` gains `probe_script: text` after `probe_digest`.
+  - Three more ids: `SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1 = "launch-exit-code"`,
+    `SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1 = "tree-empty-after-cancel"`,
+    `SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1 = "process-limit-spawn"` (nine total).
+  - New `sosix_contain_canary_pass_v1(result: SosixContainQualifyResultV1,
+    id: text) -> SosixContainFlagV1`; `sosix_contain_canaries_pass_v1` now
+    requires all nine, and a deny canary needs `control == "allow"`.
+  - `PureContainerEvidenceV1` gains `roots_digest: text` before
+    `evidence_revision`.
+  - New in `pure_backend_v1.spl`, the only producer of evidence fields:
+
+```simple
+pub fn pure_container_evidence_from_qualify_v1(qualify: SosixContainQualifyResultV1,
+        memory_enforced: ContainerCapabilityFlagV1, memory_digest: text,
+        host_os: text, host_arch: text, guest_abi: text, root_view_kind: text,
+        roots_digest: text) -> PureContainerEvidenceV1
+```
+
+    Field mapping is the table in architecture §7. `base_fully_linked` is false
+    here. `evidence_revision` = `pure:` + sha256 of `qualify.evidence_digest`,
+    `memory_digest` and `roots_digest`; it is `pure:unaffirmed` when
+    `qualify.evidence_digest` is empty.
+  - Acceptance adds: a deny canary with `control` other than `allow` fails; each
+    evidence field follows only its listed canaries.
 - Changed 2026-11-26 (review round 2), all in P0's two files:
   `containment_v1.spl` adds `SosixContainCanaryV1`,
   `SosixContainQualifyRequestV1`, `SosixContainQualifyResultV1`, the six
@@ -152,6 +178,11 @@ pub fn pure_container_capability_report_v1(support: SosixContainSupportV1,
   scope SID}, and the token default DACL is {scope SID, user, SYSTEM}. Write
   grant also refuses `grant-target-world-writable`. No existing signature
   changed in this round.
+- Round 3, behaviour only: the world-writable refusal also covers the caller's
+  logon SID; the read-grant walk skips reparse points and never touches their
+  targets; the reader ACE is permanent (architecture §4.4).
+  `check-platform-variant-dirs.shs` matches only `@cfg(`, so P1's `@when(os=)`
+  facade lands without waiting for P2's rule exception.
 - First step is now a restricted-launch smoke: start a trivial child with the
   token (plain `CreateProcessAsUserW`, no job) and see exit code 0, not
   `0xC0000142`. If it cannot be made to start, stop and report.
@@ -205,6 +236,11 @@ fn windows_process_admit_contained_v1(request: WindowsProcessRequestV1,
   `containment-volume-no-acl` refusal, and `sosix_contain_qualify_v1`
   (architecture §4.2/§4.3; the other four variants return
   `containment-qualify-unimplemented-<os>`). `start` does not consult canaries.
+  P2 also owns the probe `src/lib/nogc_sync_mut/sosix/contain_canary_probe.spl`,
+  the constant `SOSIX_CONTAIN_CANARY_PROBE_SHA256_V1` in the facade, and a spec
+  example that the constant equals the file's sha256. Qualify does the setup
+  itself: user-only DACL forced on the linked file, a live second-scope
+  process, explicit security descriptor on root processes.
 - `sosix/{linux,freebsd,macos,simpleos}/containment_v1.spl`: `support` =
   `sosix_contain_support_none_v1("<os>-unimplemented")`; `start` returns
   `RejectedBeforeStart("containment-unimplemented-<os>")`; poll/cancel/collect
@@ -216,9 +252,9 @@ fn windows_process_admit_contained_v1(request: WindowsProcessRequestV1,
 - Acceptance: exit code and stdout file of a trivial child are returned;
   `network: "none"` is `RejectedBeforeStart` and no process was created;
   a process limit of 2 makes the third spawn fail; cancel yields `tree_empty`
-  with children running; `sosix_contain_qualify_v1` returns the six canaries
-  of architecture §4.3 as expected, with the store placed under `%TEMP%`
-  (user-only ACL); memory evidence is `enforced`
+  with children running; `sosix_contain_qualify_v1` returns the nine canaries
+  of architecture §4.3 passing, each deny with `control: "allow"`; an altered
+  probe script gives `containment-qualify-probe-digest-mismatch` and no canary; memory evidence is `enforced`
   with the fixture lane E measured; existing
   `windows_process_owner` specs still pass. CPU rate is set-and-read-back only;
   throughput is not measured in this increment.
@@ -279,17 +315,18 @@ pub fn rootfs_dematerialize_v1(view: StorageViewV1) -> text   # "" = lower remov
 - `pure_sandbox_observed_v1.spl`:
   `pub fn pure_container_observed_capability_v1(support: SosixContainSupportV1,
   evidence: PureContainerEvidenceV1) -> SandboxObservedCapabilityV1`.
-  Field mapping is the table in architecture §7.
-  Qualified only from `sandbox_canary_status_v1` over the Windows canaries
-  (base-file write denied, granted-dir write allowed, process limit hit,
-  descendants gone after cancel).
+  Field mapping is the table in architecture §7. `qualification` comes from
+  `sosix_contain_canaries_pass_v1`. P4 runs no canaries of its own and sets no
+  evidence field: `pure_container_qualify_v1` only calls the two SOSIX ops and
+  `pure_container_evidence_from_qualify_v1`.
 - Spec: `test/03_system/app/container/feature/pure_simple_container_v1_spec.spl`,
   fixture `test/fixtures/container/pure_probe.spl`, mirror under `doc/06_spec/`.
 - Acceptance: a run over a two-file base exits 0, reads a `lower/` file, writes
   an `upper/` file, fails to overwrite the `lower/` file, and leaves no view
   directory and no pin; `network: "none"` returns `rejected` with no view
   created; a `restricted` run with evidence lacking
-  `write_confinement_observed` returns `write-confinement-unqualified`; a
+  `write_confinement_observed` returns `write-confinement-unqualified`;
+  evidence produced for other roots returns `evidence-roots-mismatch`; a
   `lower/` read works with the store under `%TEMP%`; with qualify evidence a requirement for `native-container` returns
   `rejected` with `isolation-kind-mismatch`, and with empty evidence the same
   requirement returns `capability-evidence-missing`; the journal ends
@@ -351,12 +388,11 @@ Each default is what the lanes assume. Default, owner may override.
    increment 1.** `isolation_kind` plus the SOSIX refusal is fail-closed today.
    R2 adds the fields when a caller needs to require one without the other.
 
-## Resume state (2026-11-26, after Fable review round 2)
+## Resume state (2026-11-26, after Fable review round 3)
 
-- Round 2 applied: canaries moved to a dedicated `sosix_contain_qualify_v1` op
-  (no cycle with `start`); reader-SID read grant for `lower/`; logon SID and
-  default DACL on the token; per-lane `FILE.md` entries; variation binding
-  resolved.
+- Round 3 applied: qualify result is the single producer of evidence (nine
+  canaries, positive controls, pinned probe); evidence bound to its roots;
+  reader ACE and reparse-point rules stated.
 - Signature changes against running lanes are listed under P0 and P1. P3 is
   unchanged.
 - Landed outside this plan: lane E #11914, lane C #11901, remaining-work docs
