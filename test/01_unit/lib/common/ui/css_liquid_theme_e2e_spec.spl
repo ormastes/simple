@@ -1,0 +1,128 @@
+# CSS Liquid Theme end-to-end verification specification.
+#
+# Covers:
+# - Theme package validation across aetheric_dark, fluid_light, and fluid_dark
+# - Alias resolution (liquid / liquid_light / simple_liquid_light / glass_obsidian_light / liquid_dark / simple_liquid_dark)
+# - Exact snapshot parity between generated static snapshots and load_theme_package()
+# - Semantic chrome palette & close button mapping (no accent/close collisions)
+# - CSS variable indirection resolution in apply_wm_css_theme_text and SimpleTheme.from_css
+# - Liquid glass design token presets (fluid_light, fluid_dark, liquid_blur)
+# - SimpleOS WM theme bootstrap by id and translucent liquid-glass compositor rendering
+#
+# @cover src/lib/nogc_sync_mut/ui/theme_package.spl
+# @cover src/lib/common/ui/generated/fluid_dark_theme_snapshot.spl
+# @cover src/lib/common/ui/generated/fluid_light_theme_snapshot.spl
+# @cover src/lib/common/ui/wm_theme_css.spl
+# @cover src/lib/common/ui/simple_theme.spl
+# @cover src/lib/common/ui/glass/tokens.spl
+# @cover src/os/compositor/simpleos_wm_theme_bootstrap.spl
+# @cover src/os/compositor/wm_scene.spl
+# @tag: unit, ui, theme, liquid, css, compositor
+
+use std.spec.*
+use app.io.mod.{file_read}
+use nogc_sync_mut.ui.theme_package.{resolve_theme_alias, load_theme_package, theme_package_render_snapshot, validate_default_theme_package}
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use common.ui.generated.fluid_dark_theme_snapshot.{fluid_dark_theme_render_snapshot}
+use common.ui.wm_chrome_theme.{wm_chrome_theme, wm_chrome_colors_from_render_snapshot, reset_wm_chrome_theme}
+use common.ui.wm_theme_css.{apply_wm_css_theme_text}
+use common.ui.simple_theme.{SimpleTheme}
+use common.ui.glass.tokens.{GlassDesignTokens, GlassBlurTokens}
+use os.compositor.simpleos_wm_theme_bootstrap.{install_generated_simpleos_wm_theme_by_id}
+use os.compositor.wm_scene.{standard_wm_scene, wm_scene_direct_rect_pixels}
+
+describe "CSS Liquid Theme E2E":
+
+    it "validates default theme packages without unresolved tokens or missing assets":
+        val issues = validate_default_theme_package()
+        expect(issues.len()).to_equal(0)
+
+    it "resolves liquid light and dark theme aliases cleanly":
+        expect(resolve_theme_alias("fluid_light")).to_equal("fluid_light")
+        expect(resolve_theme_alias("liquid")).to_equal("fluid_light")
+        expect(resolve_theme_alias("liquid_light")).to_equal("fluid_light")
+        expect(resolve_theme_alias("simple_liquid_light")).to_equal("fluid_light")
+        expect(resolve_theme_alias("glass_obsidian_light")).to_equal("fluid_light")
+        expect(resolve_theme_alias("fluid_dark")).to_equal("fluid_dark")
+        expect(resolve_theme_alias("liquid_dark")).to_equal("fluid_dark")
+        expect(resolve_theme_alias("simple_liquid_dark")).to_equal("fluid_dark")
+
+    it "keeps generated fluid_light and fluid_dark snapshots in exact package parity":
+        val light_pkg = theme_package_render_snapshot("fluid_light")
+        val light_gen = fluid_light_theme_render_snapshot()
+        expect(light_gen.id).to_equal("fluid_light")
+        expect(light_gen.source_manifest_sha256).to_equal(light_pkg.source_manifest_sha256)
+        expect(light_gen.material_sha256).to_equal(light_pkg.material_sha256)
+        expect(light_gen.composed_css).to_equal(light_pkg.composed_css)
+        expect(light_gen.material.window_fill_rgba).to_equal(light_pkg.material.window_fill_rgba)
+        expect(light_gen.material.backdrop_blur_px).to_equal(24)
+        expect(light_gen.material.corner_radius_px).to_equal(20)
+        expect(light_gen.semantic.error_rgba).to_equal(0xFFBA1A1Au32)
+
+        val dark_pkg = theme_package_render_snapshot("fluid_dark")
+        val dark_gen = fluid_dark_theme_render_snapshot()
+        expect(dark_gen.id).to_equal("fluid_dark")
+        expect(dark_gen.source_manifest_sha256).to_equal(dark_pkg.source_manifest_sha256)
+        expect(dark_gen.material_sha256).to_equal(dark_pkg.material_sha256)
+        expect(dark_gen.composed_css).to_equal(dark_pkg.composed_css)
+        expect(dark_gen.material.window_fill_rgba).to_equal(dark_pkg.material.window_fill_rgba)
+        expect(dark_gen.material.backdrop_blur_px).to_equal(24)
+        expect(dark_gen.material.corner_radius_px).to_equal(20)
+        expect(dark_gen.semantic.error_rgba).to_equal(0xFFFF5F57u32)
+
+    it "derives distinct semantic red close controls from fluid snapshots":
+        val light_colors = wm_chrome_colors_from_render_snapshot(fluid_light_theme_render_snapshot())
+        expect(light_colors.close_button).to_equal(0xFFBA1A1Au32)
+        expect(light_colors.close_button == light_colors.accent).to_be(false)
+
+        val dark_colors = wm_chrome_colors_from_render_snapshot(fluid_dark_theme_render_snapshot())
+        expect(dark_colors.close_button).to_equal(0xFFFF5F57u32)
+        expect(dark_colors.close_button == dark_colors.accent).to_be(false)
+
+    it "applies fluid_light and fluid_dark base CSS overrides and rejects unrelated CSS":
+        reset_wm_chrome_theme()
+        val light_css = file_read("config/themes/fluid_light/base.css")
+        val applied_light = apply_wm_css_theme_text(light_css)
+        expect(applied_light).to_be(true)
+        expect(wm_chrome_theme().accent).to_equal(0xFF0058BCu32)
+
+        val dark_css = file_read("config/themes/fluid_dark/base.css")
+        val applied_dark = apply_wm_css_theme_text(dark_css)
+        expect(applied_dark).to_be(true)
+        expect(wm_chrome_theme().accent).to_equal(0xFF4DA3FFu32)
+
+        val ignored = apply_wm_css_theme_text("body { margin: 0; padding: 0; }")
+        expect(ignored).to_be(false)
+        reset_wm_chrome_theme()
+
+    it "resolves CSS var() references and exposes liquid GlassDesignTokens presets":
+        val css = file_read("config/themes/fluid_dark/base.css")
+        val parsed = SimpleTheme.from_css("fluid_dark", css)
+        val body_bg = parsed.resolve_token("--ui-body-background")
+        expect(body_bg).to_contain("linear-gradient(")
+        expect(body_bg.contains("var(--app-background-image)")).to_be(false)
+
+        val light_tokens = GlassDesignTokens.fluid_light()
+        val dark_tokens = GlassDesignTokens.fluid_dark()
+        val blur = GlassBlurTokens.liquid_blur()
+        expect(light_tokens.blur.surface_blur).to_equal(24)
+        expect(dark_tokens.blur.surface_blur).to_equal(24)
+        expect(blur.surface_blur).to_equal(24)
+
+    it "bootstraps SimpleOS liquid_dark theme and renders translucent liquid-glass scene pixels":
+        reset_wm_chrome_theme()
+        val installed = install_generated_simpleos_wm_theme_by_id("liquid_dark")
+        expect(installed.id).to_equal("fluid_dark")
+        expect(wm_chrome_theme().accent).to_equal(0xFF4DA3FFu32)
+
+        val scene = standard_wm_scene(640, 480)
+        val pixels = wm_scene_direct_rect_pixels(scene)
+        expect(pixels.len()).to_equal(640 * 480)
+
+        # Background pixel at (5, 5) uses fluid_dark desktop fill (#080d17 -> 0xFF080D17)
+        val bg_px = pixels[5 * 640 + 5]
+        # Window interior glass pixel inside panel (x=48..528, y=76..416) at (120, 120)
+        val panel_px = pixels[120 * 640 + 120]
+        expect(panel_px == bg_px).to_be(false)
+        # Ensure active frame leaves no leftover global state
+        reset_wm_chrome_theme()
