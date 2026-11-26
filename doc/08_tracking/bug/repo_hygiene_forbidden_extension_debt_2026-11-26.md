@@ -83,7 +83,7 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `scripts/check/check-simpleos-arm64-unified-firmware-contract.py` | 80 | 1 |
 | `scripts/bootstrap/hello-sanity-buildrunner-worker.py` | 81 | 1 |
 | `test/fixtures/devhub/native_minio_binary_put/verify_loopback.py` | 85 | 1 |
-| `scripts/bootstrap/adaptive-executable-batch.py` | 97 | 1 |
+| `scripts/bootstrap/adaptive-executable-batch.py` | 97 | BLOCKED (2026-11-26) on the commit-headroom probe: the driver calls the Windows-only `available_commit_bytes` (ctypes `GetPerformanceInfo`), which needs an owner decision (PowerShell CIM vs a new SFFI) before it can leave Python. It still imports `lib/executable_batch_policy.py`, so that file is retained; its policy half is ported to `executable_batch_policy.spl`. Port the driver, then delete both `.py` files. |
 | `scripts/check/check-seed-startup.py` | 56 | 2 |
 | `scripts/bootstrap/hello-sanity-matrix-windows.py` | 60 | 2 |
 | `scripts/bootstrap/capture-ladder-scv-evidence.py` | 68 | 2 |
@@ -147,16 +147,16 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `doc/08_tracking/bug/evidence/target_profile_2026_11_14/formal-stages1-3.sh` | 124 | KEEP (2026-11-26, dead-rest lane): retained formal-gate evidence, linked by compile_target_profile_optimization_coupling_2026_11_14.md; deleting it breaks provenance |
 | `doc/08_tracking/bug/evidence/target_profile_2026_11_14/run_probe.py` | 36 | KEEP (2026-11-26, dead-rest lane): retained evidence script, cited by bug/research docs as provenance; deleting it breaks those links |
 | `scripts/bootstrap/cache-identity-model-check.py` | 128 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/bootstrap/lib/executable_batch_policy.py` | 95 | live, kept: imported or driven by a live tool (executable_batch_policy, adaptive-executable-batch.py, lib/executable-batch-lease.shs) or a live .shs caller; port with that tool |
+| `scripts/bootstrap/lib/executable_batch_policy.py` | 95 | policy half ported 2026-11-26 to `scripts/bootstrap/lib/executable_batch_policy.spl` (spec `test/01_unit/scripts/executable_batch_policy_spec.spl`); this `.py` is RETAINED only because the blocked driver `adaptive-executable-batch.py` imports it (and `available_commit_bytes` lives here). Delete with the driver. |
 | `scripts/bootstrap/tests/archive-root-exclusions-test.py` | 82 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/authority-generation-retention-test.py` | 109 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/bootstrap-test-wave-test.py` | 168 | recent, owner active (touched since 2026-11-23); left in place |
 | `scripts/bootstrap/tests/bounded-error-summary-test.py` | 84 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/bounded-live-diagnostics-test.py` | 198 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/collect-windows-phase2-objects-test.py` | 255 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
-| `scripts/bootstrap/tests/executable-batch-lease-test.py` | 39 | live, kept: imported or driven by a live tool (executable_batch_policy, adaptive-executable-batch.py, lib/executable-batch-lease.shs) or a live .shs caller; port with that tool |
-| `scripts/bootstrap/tests/executable-batch-owner-test.py` | 61 | live, kept: imported or driven by a live tool (executable_batch_policy, adaptive-executable-batch.py, lib/executable-batch-lease.shs) or a live .shs caller; port with that tool |
-| `scripts/bootstrap/tests/executable-batch-test.py` | 25 | live, kept: imported or driven by a live tool (executable_batch_policy, adaptive-executable-batch.py, lib/executable-batch-lease.shs) or a live .shs caller; port with that tool |
+| `scripts/bootstrap/tests/executable-batch-lease-test.py` | 39 | ported 2026-11-26 to `test/01_unit/scripts/executable_batch_lease_spec.spl`; `.py` deleted. |
+| `scripts/bootstrap/tests/executable-batch-owner-test.py` | 61 | ported 2026-11-26 to `test/01_unit/scripts/executable_batch_policy_spec.spl` (ancestry and preflight cases); `.py` deleted. Not ported: the empty-manifest case (drives the Python driver) and the Windows PowerShell observer case; re-add both with the driver port. |
+| `scripts/bootstrap/tests/executable-batch-test.py` | 25 | ported 2026-11-26 to `test/01_unit/scripts/executable_batch_policy_spec.spl`; `.py` deleted. |
 | `scripts/bootstrap/tests/freebsd-command-telemetry-test.py` | 211 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/full-inventory-selection-test.py` | 92 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |
 | `scripts/bootstrap/tests/hello-sanity-matrix-env-test.py` | 77 | deleted 2026-11-26: no live reference (docs-only or none); never run by CI |

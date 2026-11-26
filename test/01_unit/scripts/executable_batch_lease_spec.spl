@@ -1,0 +1,48 @@
+# @cover scripts/bootstrap/lib/executable-batch-lease.shs 80%
+"""
+## Purpose and audience
+Purpose: exercise the real `executable_batch_release_owned_lease` shell helper
+(port of the former `executable-batch-lease-test.py`): a lease is removed only
+when this process owns it and the RSS receipt is quiescent with no observer
+errors. Never launches a compiler. Needs POSIX sh; otherwise pending.
+Audience: maintainers of `scripts/bootstrap/lib/executable-batch-lease.shs`.
+"""
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
+
+fn run_sh(cmd: text) -> (text, text, i64):
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    process_run(sh_bin, sh_args)
+
+fn has_posix_shell() -> bool:
+    val (sh_bin, _args) = resolve_shell_argv("true")
+    is_posix_shell_argv(sh_bin)
+
+# One case: write lease + receipt, call the helper, print whether the lease survived.
+fn case_script(owned: text, quiet: text, errors: text) -> text:
+    "d=$(mktemp -d); printf 'owner\\n' > \"$d/writer.lease\"; printf 'quiescent={quiet}\\nobserver_errors={errors}\\n' > \"$d/rss.env\"; . scripts/bootstrap/lib/executable-batch-lease.shs; executable_batch_release_owned_lease \"$d/writer.lease\" \"$d/rss.env\" 1 {owned}; if [ -e \"$d/writer.lease\" ]; then echo RETAINED; else echo RELEASED; fi; rm -rf \"$d\""
+
+describe "executable-batch-lease.shs":
+    it "releases the lease only when owned and quiescent with zero observer errors":
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available")
+        else:
+            step("not quiescent keeps the lease")
+            val (a, _e1, c1) = run_sh(case_script("1", "0", "0"))
+            expect(c1).to_equal(0)
+            expect(a).to_contain("RETAINED")
+            step("observer errors keep the lease")
+            val (b, _e2, c2) = run_sh(case_script("1", "1", "1"))
+            expect(c2).to_equal(0)
+            expect(b).to_contain("RETAINED")
+            step("not owned keeps the lease")
+            val (c, _e3, c3) = run_sh(case_script("0", "1", "0"))
+            expect(c3).to_equal(0)
+            expect(c).to_contain("RETAINED")
+            step("owned + quiescent releases it")
+            val (d, _e4, c4) = run_sh(case_script("1", "1", "0"))
+            expect(c4).to_equal(0)
+            expect(d).to_contain("RELEASED")

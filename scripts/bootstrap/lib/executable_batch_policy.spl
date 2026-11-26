@@ -1,0 +1,343 @@
+# Diagnostic executable admission; RSS estimates are not enforced memory limits.
+# Pure-Simple port of the former executable_batch_policy.py (policy part).
+# The Windows-only available_commit_bytes probe stays with the Python driver
+# (adaptive-executable-batch.py) until its commit-headroom probe is decided.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_whitespace.{split_whitespace}
+
+struct BatchConfig:
+    max_executables: i64
+    headroom_bytes: i64
+    minimum_estimate_bytes: i64
+    rss_to_commit_safety_factor: i64
+
+# Fields of a `*.rss.env` receipt; an absent key is "".
+struct RssReceipt:
+    quiescent: text
+    observer_errors: text
+    status: text
+
+# has_result=false is the Python `None`; has_compile_exit=false is a missing/None compile_exit.
+struct ChildResult:
+    has_result: bool
+    has_compile_exit: bool
+    terminal_status: text
+    sanity_pass: bool
+
+struct OptionPair:
+    key: text
+    value: i64
+
+struct Target:
+    producer_sha256: text
+    source: text
+    backend: text
+    entry: text
+    options: [OptionPair]
+
+struct SavedSuccess:
+    identity: text
+    binary_sha256: text
+    binary_linked: bool
+    sanity_pass: bool
+    closure: text
+
+fn may_start(active: i64, observations: [i64], free_commit: i64, config: BatchConfig) -> bool:
+    val maximum = config.max_executables
+    assert maximum >= 1 and maximum <= 20 and active >= 0
+    if active >= maximum:
+        return false
+    # With no measurement, admit one task only. Unknown memory never means 20.
+    if observations.len() == 0:
+        return active == 0 and free_commit >= config.headroom_bytes
+    var peak = 0
+    for o in observations:
+        if o > peak:
+            peak = o
+    var estimate = peak * config.rss_to_commit_safety_factor
+    if estimate < config.minimum_estimate_bytes:
+        estimate = config.minimum_estimate_bytes
+    var ramp = observations.len() + 1
+    if ramp > maximum:
+        ramp = maximum
+    active < ramp and free_commit >= config.headroom_bytes + estimate * (active + 1)
+
+fn closed_rss(r: RssReceipt) -> bool:
+    r.quiescent == "1" and r.observer_errors == "0" and (r.status == "complete" or r.status == "interrupted")
+
+fn outcome(exit_code: i64, result: ChildResult, receipts: [RssReceipt]) -> text:
+    # A crash without process-tree closure stops admission, never assumes reap.
+    if not result.has_result or not result.has_compile_exit:
+        return "BLOCKED_UNVERIFIED_CHILD"
+    if receipts.len() == 0:
+        return "BLOCKED_UNVERIFIED_CHILD"
+    for r in receipts:
+        if not closed_rss(r):
+            return "BLOCKED_UNVERIFIED_CHILD"
+    if exit_code != 0 and (result.terminal_status.starts_with("LINKED") or result.sanity_pass):
+        return "BLOCKED_CHILD_RESULT_MISMATCH"
+    "CONTINUE"
+
+# JSON string literal, byte-identical to Python json.dumps for ASCII input.
+# ponytail: non-ASCII is not \uXXXX-escaped (Python ensure_ascii); targets are ASCII paths/hashes.
+fn json_str(s: text) -> text:
+    var out = "\""
+    var i = 0
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if c == "\"":
+            out = out + "\\\""
+        elif c == "\\":
+            out = out + "\\\\"
+        elif c == "\n":
+            out = out + "\n"
+        elif c == "\r":
+            out = out + "\r"
+        elif c == "\t":
+            out = out + "\t"
+        else:
+            out = out + c
+        i = i + 1
+    out + "\""
+
+# sha256 of sorted-key compact JSON over the target identity fields.
+fn identity(t: Target) -> text:
+    var pairs: [OptionPair] = []
+    for p in t.options:
+        var at = pairs.len()
+        var j = 0
+        while j < pairs.len():
+            if p.key < pairs[j].key:
+                at = j
+                break
+            j = j + 1
+        var next: [OptionPair] = []
+        var k = 0
+        while k < pairs.len():
+            if k == at:
+                next.push(p)
+            next.push(pairs[k])
+            k = k + 1
+        if at == pairs.len():
+            next.push(p)
+        pairs = next
+    var opts = ""
+    var n = 0
+    while n < pairs.len():
+        if n > 0:
+            opts = opts + ","
+        val v = pairs[n].value
+        opts = opts + json_str(pairs[n].key) + ":" + "{v}"
+        n = n + 1
+    val body = "{{\"backend\":" + json_str(t.backend) + ",\"entry\":" + json_str(t.entry) + ",\"options\":{{" + opts + "}},\"producer_sha256\":" + json_str(t.producer_sha256) + ",\"source\":" + json_str(t.source) + "}}"
+    sha256_text(body)
+
+fn reusable_success(saved: SavedSuccess, target: Target, binary_sha: text) -> bool:
+    saved.identity == identity(target) and saved.binary_sha256 == binary_sha and saved.binary_linked and saved.sanity_pass and saved.closure == "CLOSED"
+
+struct EnvPair:
+    key: text
+    value: text
+
+struct PreflightRequest:
+    command: [text]
+    has_preflight_command: bool
+    preflight_command: [text]
+    cwd: text
+    environment: [EnvPair]
+
+struct Invocation:
+    command: [text]
+    cwd: text
+    environment: [EnvPair]
+
+# Inherited environment overlaid with the request's own entries (request wins).
+fn request_environment(request: PreflightRequest, inherited: [EnvPair]) -> [EnvPair]:
+    var merged: [EnvPair] = []
+    for e in inherited:
+        var overridden = false
+        for r in request.environment:
+            if r.key == e.key:
+                overridden = true
+        if not overridden:
+            merged.push(e)
+    for r in request.environment:
+        merged.push(r)
+    merged
+
+fn preflight_invocation(request: PreflightRequest, inherited: [EnvPair]) -> Invocation:
+    var command: [text] = []
+    if request.has_preflight_command:
+        command = request.preflight_command
+    else:
+        for c in request.command:
+            command.push(c)
+        command.push("--preflight")
+    Invocation(command: command, cwd: request.cwd, environment: request_environment(request, inherited))
+
+struct OwnerConfig:
+    global_job_budget: i64
+    admission_root: text
+    parent_collector_receipt: text
+    collector_path: text
+    collector_sha256: text
+
+struct OwnerLaunch:
+    owner_pid: i64
+    collector_pid: i64
+    threads: i64
+    reservation: text
+    request: text
+    request_sha256: text
+
+struct OwnerReservation:
+    owner_pid: i64
+    owner_start_utc: text
+    threads: i64
+    schema: text
+    total_job_budget: i64
+    receipt_path: text
+    helper_sha256: text
+
+struct OwnerRequest:
+    threads: i64
+    command: [text]
+    config_json_sha256: text
+
+struct ProcessRow:
+    pid: i64
+    parent_pid: i64
+    start_utc: text
+    command_line: text
+
+# ponytail: paths are slash-folded and casefolded, NOT resolve()d (Python
+# pathlib.resolve also made relative tokens absolute). The driver passes absolute
+# paths; resolve in the caller if a relative token must match.
+fn norm_path(p: text) -> text:
+    var s = p.replace("\\", "/").lower()
+    while s.len() > 1 and s.ends_with("/"):
+        s = s.substring(0, s.len() - 1)
+    s
+
+fn parent_dir(p: text) -> text:
+    val s = norm_path(p)
+    var i = s.len() - 1
+    while i >= 0:
+        if s.substring(i, i + 1) == "/":
+            return s.substring(0, i)
+        i = i - 1
+    "."
+
+fn is_absolute_path(p: text) -> bool:
+    val s = p.replace("\\", "/")
+    s.starts_with("/") or (s.len() > 2 and s.substring(1, 3) == ":/")
+
+fn is_boundary(c: text) -> bool:
+    c == " " or c == "\t" or c == "\""
+
+# helper path appears as its own token (start/space/quote before, end/space/quote after).
+fn command_names_helper(command: text, helper: text) -> bool:
+    var i = 0
+    while i + helper.len() <= command.len():
+        if command.substring(i, i + helper.len()) == helper:
+            val before_ok = i == 0 or is_boundary(command.substring(i - 1, i))
+            val end = i + helper.len()
+            val after_ok = end == command.len() or is_boundary(command.substring(end, end + 1))
+            if before_ok and after_ok:
+                return true
+        i = i + 1
+    false
+
+# "--flag value" as adjacent whitespace tokens.
+fn has_flag_value(command: text, flag: text, value: text) -> bool:
+    val toks = split_whitespace(command)
+    var i = 0
+    while i + 1 < toks.len():
+        if toks[i] == flag and toks[i + 1] == value:
+            return true
+        i = i + 1
+    false
+
+fn find_row(rows: [ProcessRow], pid: i64) -> i64:
+    var i = 0
+    while i < rows.len():
+        if rows[i].pid == pid:
+            return i
+        i = i + 1
+    -1
+
+# Reject stale receipts and PID reuse; metadata comes from a pinned observer.
+# Returns "" when valid, otherwise the first violated rule (the Python asserts).
+# ISO-8601 UTC stamps of equal width compare correctly as text.
+fn validate_owned_ancestry(config: OwnerConfig, launch: OwnerLaunch, reservation: OwnerReservation, request: OwnerRequest, rows: [ProcessRow], batch_pid: i64, runner_path: text, packet_path: text, hash_file: fn(text) -> text) -> text:
+    val owner = reservation.owner_pid
+    val collector = launch.collector_pid
+    if launch.owner_pid != owner or owner == collector:
+        return "Launch owner mismatch"
+    if launch.threads != reservation.threads or reservation.threads != request.threads or request.threads != 20:
+        return "Thread budget mismatch"
+    if reservation.schema != "diagnostic-downstream-reservation/1":
+        return "Reservation schema mismatch"
+    if reservation.total_job_budget != config.global_job_budget:
+        return "Job budget mismatch"
+    if parent_dir(launch.reservation) != norm_path(config.admission_root):
+        return "Reservation outside admission root"
+    if norm_path(reservation.receipt_path) != norm_path(config.parent_collector_receipt):
+        return "Collector receipt mismatch"
+    if hash_file(launch.request) != launch.request_sha256:
+        return "Launch request changed"
+    if request.config_json_sha256 != hash_file(packet_path + "/config.json"):
+        return "Packet config changed"
+    if not is_absolute_path(config.collector_path):
+        return "Collector pin requires an absolute path"
+    val helper_hash = hash_file(config.collector_path)
+    if helper_hash != config.collector_sha256 or config.collector_sha256 != reservation.helper_sha256:
+        return "Collector helper changed"
+    val runner = norm_path(runner_path)
+    val packet = norm_path(packet_path)
+    var has_runner = false
+    var has_packet = false
+    for tok in request.command:
+        if norm_path(tok) == runner:
+            has_runner = true
+        if norm_path(tok) == packet:
+            has_packet = true
+    if not (has_runner and has_packet):
+        return "Request command is not bound to runner and packet"
+    val owner_at = find_row(rows, owner)
+    if owner_at < 0:
+        return "Reservation owner is no longer live"
+    if rows[owner_at].start_utc != reservation.owner_start_utc:
+        return "Owner PID was reused"
+    var current = batch_pid
+    var seen: [i64] = []
+    var found_collector = false
+    var step_no = 0
+    while step_no < 32:
+        val at = find_row(rows, current)
+        if at < 0 or seen.contains(current):
+            return "Incomplete or cyclic ancestry"
+        val row = rows[at]
+        seen.push(current)
+        if current == collector:
+            val command = row.command_line.replace("\\", "/").lower()
+            if not command_names_helper(command, norm_path(config.collector_path)):
+                return "Collector command mismatch"
+            if not has_flag_value(command, "--timeout-seconds", "0"):
+                return "Collector command mismatch"
+            if not has_flag_value(command, "--root-exit-policy", "terminate-job"):
+                return "Collector command mismatch"
+            found_collector = true
+        if current == owner:
+            if not found_collector:
+                return "Caller is not under the recorded collector"
+            return ""
+        val pat = find_row(rows, row.parent_pid)
+        if pat < 0:
+            return "Live parent missing"
+        if rows[pat].start_utc > row.start_utc:
+            return "Ancestor PID was reused after child creation"
+        current = row.parent_pid
+        step_no = step_no + 1
+    "Owner is not in bounded live ancestry"
