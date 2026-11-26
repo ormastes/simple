@@ -220,3 +220,22 @@ Review-only lanes never set `launch_qualified` or a non-empty `evidence_revision
    switch in the level-0 facade the intended selection form?
 5. Should network and PID isolation become explicit report fields (R2), or stay
    expressed through `isolation_kind`?
+
+## Resume state (2026-11-26, paused for host reboot)
+
+- Not yet done in this plan: the owner requirement to REUSE and SHARE the
+  SimpleOS container code and the macOS container code
+  (`providers/macos/**`, `doc/04_architecture/macos_simpleos_guest_container.md`,
+  `doc/01_research/os/security/llm_role_cspace_container_design.md`). Add a
+  "Shared vs per-host" table to the architecture doc (each existing file:
+  shared / per-host / superseded) and an extraction lane ahead of the
+  backend lanes if shared code must move first.
+- This plan and the architecture doc have had no Fable review yet; review,
+  fix, then push and land.
+- Related lanes outside this plan: Lane C landed (#11901); remaining-work docs
+  landed (#11909); Lane E (Windows job-object memory cap,
+  `work/container-inc3-win-memcap-20261126`, head `4f9811507ef`) needs its
+  round-3 Fable re-review, then push and land.
+- After reboot: start the `docker` service, `docker version`, pull
+  `mcr.microsoft.com/windows/nanoserver:ltsc2025`, smoke-test
+  `docker run --isolation=process`.
