@@ -596,9 +596,8 @@ code sets an evidence field:
 
 The shared `SandboxObservedCapabilityV1.qualification` (§7 table) is
 `sosix_contain_canaries_pass_v1`; there is no second canary set or second
-qualification path. That producer sets `evidence_revision` to `pure:<sha256 of the canary and memory
-digests>`, always non-empty once it has run, even when nothing is affirmed
-(lane E's `unaffirmed:` precedent). `base_fully_linked` is false in qualify
+qualification path. That producer sets `evidence_revision` to `pure:` + sha256 of the qualify `evidence_digest`, `memory_digest` and `roots_digest` joined by newlines,
+or `pure:unaffirmed` when the qualify digest is empty (lane E's `unaffirmed:` precedent). `base_fully_linked` is false in qualify
 output and is set per run by the materializer.
 
 `pure_container_run_v1` never produces evidence for its own admission. With an
@@ -611,7 +610,7 @@ refused before any effect: `write-confinement-unqualified`.
 
 Evidence lifetime: it is bound to the `state_root`/`view_root` pair it was
 produced for (`roots_digest`; a run with different roots is refused
-`evidence-roots-mismatch`), and qualify refuses when `work_dir`, `state_root`
+`evidence-roots-mismatch`, checked after `capability-evidence-missing` and before every other mismatch reason), and qualify refuses when `work_dir`, `state_root`
 and `view_root` are not on one volume. It is valid for the calling process
 only: it is never persisted, and a new process, a reboot or an OS update
 means qualifying again. The host build and volume serial inside
