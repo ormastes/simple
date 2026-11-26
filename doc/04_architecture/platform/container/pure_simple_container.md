@@ -1,6 +1,6 @@
 # Pure-Simple container runtime
 
-Date: 2026-11-26. Baseline: `release/1.0.0` @ `38f6249feef`.
+Date: 2026-11-26. Baseline: `release/1.0.0` @ `790371966e6` (lane E landed, #11914).
 Status: proposed architecture. Nothing here is implemented or measured unless a
 line says so. Plan: `doc/03_plan/platform/container/pure_simple_container_plan.md`.
 
@@ -49,11 +49,15 @@ Rules:
 2. Host selection follows `doc/04_architecture/platform/platform_variant_directory_rule.md`:
    bodies under `sosix/<os>/`, canonical names (`macos`, not `mac`), an identical
    public API in every variant, and a typed refusal where a host is not implemented.
-   No new resolver. The level-0 facade holds exactly one
-   `@when(os="windows"): ... @elif(os="linux"): ... @end` import switch (the same
-   form `nogc_sync_mut/container/machine_authority_cleanup_v1.spl` uses) and
-   nothing else host-specific. These are the first code files in the `sosix/<os>/`
-   skeleton, so the switch form is an owner question (plan §6).
+   Recommended binding: each level-0 facade is one
+   `@when(os="windows"): export use ... @elif(os="linux"): ... @end` import
+   switch (the form `nogc_sync_mut/container/machine_authority_cleanup_v1.spl`
+   uses) and contains no body and no other host test. That directory rule's §3
+   rule 1 forbids `@cfg(os=)` in level-0 files once a variant exists, and the
+   `variants/` resolver hook it points to is not implemented, so the switch
+   needs a one-line exception in that rule. The alternative is to implement the
+   resolver hook first. The owner chooses (plan §6 Q4); until then P2 and P1
+   use the switch.
 3. A variant reports what it enforces through `SosixContainSupportV1`. The runtime
    never infers support from the OS name.
 4. An unsupported axis is refused before a child exists
@@ -75,7 +79,8 @@ New files (N) and edited existing files (E). Everything else is reused unchanged
 | `src/lib/nogc_sync_mut/sosix/windows/security_abi_v1.spl` | N | advapi32 externs for token and label |
 | `src/lib/nogc_sync_mut/sosix/readonly_share_v1.spl` | N | Read-only link; portable body over `io/file_ops`, no host switch |
 | `src/lib/nogc_sync_mut/sosix/contained_write_v1.spl` | N | Facade: contained-write grant |
-| `src/lib/nogc_sync_mut/sosix/windows/contained_write_v1.spl` | N | Windows body: low mandatory label on a directory |
+| `src/lib/nogc_sync_mut/sosix/windows/contained_write_v1.spl` | N | Windows body: low label + scope-SID ACE on a directory |
+| `src/lib/nogc_sync_mut/sosix/{linux,freebsd,macos,simpleos}/contained_write_v1.spl` | N | Same function name; typed refusal |
 | `src/lib/nogc_sync_mut/io/windows_process_owner.spl` | E | One internal admit core taking token + process-count + CPU-rate extras; existing entry points forward unchanged |
 | `src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl` | E | `CreateProcessAsUserW`, job basic-limit and CPU-rate offsets |
 | `src/lib/nogc_sync_mut/storage/rootfs_materialize_v1.spl` | N | Base manifest -> read-only hardlink tree |
@@ -87,15 +92,16 @@ New files (N) and edited existing files (E). Everything else is reused unchanged
 | `src/lib/common/container_policy/attempt_dir_plan_v1.spl` | N (extracted) | Attempt directory plan moved out of `seatbelt_provider_v1` (§9) |
 | `src/lib/common/contracts/container/sandbox_canary_v1.spl` | N (extracted) | Canary plan/result/status moved out of `seatbelt_capabilities_v1` (§9) |
 | `src/lib/nogc_async_mut/container/providers/macos/{seatbelt_provider_v1,seatbelt_capabilities_v1}.spl` | E | Forward to the extracted modules; public names and error strings unchanged |
-| `src/lib/common/contracts/container/sandbox_capability_v1.spl`, `src/lib/common/container_policy/sandbox_policy_decode_v1.spl` | E | Add backend id `simple-pure-process`; the decoder's backend choice list (`:284`) is the one hard check |
+| `src/lib/common/contracts/container/backend_identity_v1.spl` | E | Add the backend and engine ids (P0); `pure_backend_v1` constants alias them |
+| `src/lib/nogc_sync_mut/io/windows_memory_cap_probe_v1.spl` | E | Remove the duplicate report builder (P4) |
 
 Reused as is: `capability_report_v1`, `lifecycle_journal_v1`, `runtime_v1`
 (phases and `RuntimeOperationV1`), `storage_view_v1` create/save/load/destroy,
 `immutable_store_v1` pins and GC, `io/file_ops.{file_hardlink, file_seal_readonly}`,
 the whole suspended-create/job/kill-on-close/stdio/poll/cancel/collect sequence in
-`windows_process_owner`, `sosix/darwin_sandbox_v1`, `providers/macos/seatbelt_profile_v1`,
-and (once landed) lane E's `windows_memory_cap_probe_v1` as the only source of the
-Windows `memory_hard_limit` verdict.
+`windows_process_owner`, `sosix/darwin_sandbox_v1`, and lane E's landed
+`windows_memory_cap_probe_v1` (probe run and verdict) as the only source of the
+Windows `memory_hard_limit` evidence, reached through the SOSIX op in §4.2.
 
 Not touched in increment 1: `api_v2.spl`, `service_v2.spl`, and every
 `providers/**` leaf except the two macOS files S0 turns into forwards.
@@ -137,6 +143,7 @@ pub struct SosixContainRequestV1:
     stderr_path: text
     limits: SosixContainLimitsV1
     identity: text
+    scope: text                        # container identity; names the per-container write principal / cgroup / jail
     network: text
     readonly_dirs: [text]              # must stay unwritable by the child
     writable_dirs: [text]              # already granted by sosix_fs_grant_contained_write_v1
@@ -192,7 +199,10 @@ could write through a hard link into a store object all containers share),
 `readonly_dirs`), `containment-network-isolation-unsupported` (network `none`),
 `containment-pid-isolation-unsupported`, `containment-root-remap-unsupported`.
 A wall deadline with `kill_all_descendants` false is
-`containment-deadline-unsupported`.
+`containment-deadline-unsupported`. `identity: "restricted"` with an empty or
+non-identifier `scope` is `containment-request-invalid`. There is no
+read-confinement request field in v1: its absence is reported, not requested
+(§6).
 
 ### 4.2 Launch — `std.nogc_sync_mut.sosix.containment_v1`
 
@@ -208,22 +218,65 @@ pub fn sosix_contain_collect_v1(lease: SosixContainLeaseV1) -> Result<SosixConta
 
 | Axis | Windows (increment 1) | Linux | FreeBSD | macOS |
 |---|---|---|---|---|
-| Owner reused | `io/windows_process_owner` | `io/linux_process_owner`, `linux_process_replace_*` | new jail owner | `sosix/darwin_sandbox_v1`, `seatbelt_profile_v1` |
+| Owner reused | `io/windows_process_owner` | `io/linux_process_owner`, `linux_process_replace_*`, `io/linux_container_containment_v1` (retirement evidence) | none: FreeBSD is served by the existing `jail_runtime_v1` sibling backend, see below | `sosix/darwin_sandbox_v1`; SBPL from the emitter after N3 moves it to `common/` |
 | Memory | Job `JOB_OBJECT_LIMIT_JOB_MEMORY` (commit) | cgroup v2 `memory.max` | `rctl jail:<n>:memoryuse:deny` | none aggregate (`RLIMIT_AS` is per process) -> unsupported |
 | Process count | Job `ActiveProcessLimit` | `pids.max` | `rctl maxproc:deny` | `RLIMIT_NPROC` is per UID -> unsupported |
 | CPU rate | `JobObjectCpuRateControlInformation` hard cap | `cpu.max` | `rctl pcpu:deny` | none (`RLIMIT_CPU` is CPU seconds) -> unsupported |
 | Kill descendants | `KILL_ON_JOB_CLOSE`, no breakaway | `cgroup.kill` | `jail_remove` | process group only -> false |
-| Write confinement | restricted token at low integrity | mount namespace, read-only bind | jail path + `nullfs -o ro` | Seatbelt `deny file-write*` |
-| Read confinement | no (AppContainer, increment 2) | `pivot_root` | jail path | Seatbelt `deny file-read*` allowlist |
+| Write confinement | low integrity + restricting SIDs + per-scope grant ACE (§4.3); true only while its four canaries pass | mount namespace, read-only bind | jail path + `nullfs -o ro` | Seatbelt `deny file-write*` |
+| Read confinement | not claimed (AppContainer, increment 2) | `pivot_root` | jail path | Seatbelt `deny file-read*` allowlist |
 | Network | no | `CLONE_NEWNET` | jail without `ip4`/`ip6` or `vnet` | Seatbelt `deny network*` |
 | PID isolation | no | `CLONE_NEWPID` | jail | no |
 | Root remap | no | `pivot_root` | jail `path` | no |
 | Unprivileged | yes | yes if user namespaces and cgroup delegation are available | no (root or delegated broker) | yes |
 | `memory_accounting` | `job-commit` | `cgroup` | `jail-rss` | `` |
 
+The FreeBSD column is a capability mapping only. No new jail owner is added:
+the FreeBSD route is the existing `providers/freebsd/jail_runtime_v1.spl`
+(ocijail, delegated authority), selected as a sibling backend like Docker (§10).
+`sosix/freebsd/containment_v1.spl` stays a typed refusal.
+
+Layering for the later variants: a SOSIX variant imports only `sosix/**`,
+`io/**` and `common/**`, never `container/providers/**` or `src/os/**`.
+So N3 first moves the pure SBPL emitter `seatbelt_profile_v1` to
+`common/container_policy/` (forward left behind), and the SimpleOS body lives
+in `src/os/sosix/` behind the existing SimpleOS SOSIX provider binding, while
+`lib/.../sosix/simpleos/containment_v1.spl` stays a refusal on hosted targets.
+
+The Windows variant also refuses, before any child exists, a `lower`,
+`readonly_dirs` or `writable_dirs` path on a volume without persistent ACLs
+(`GetVolumeInformationW` lacks `FILE_PERSISTENT_ACLS`, e.g. FAT/exFAT):
+`containment-volume-no-acl`. Labels and ACEs enforce nothing there.
+
+Memory-cap evidence is a SOSIX op in the same facade, so host-neutral code never
+imports `io/windows_memory_cap_probe_v1`:
+
+```simple
+# std.nogc_sync_mut.sosix.containment_v1 (types defined in the facade, not in the P0 contract)
+pub struct SosixContainMemoryProbeV1:
+    program: text
+    program_digest: text
+    under_args: [text]
+    over_args: [text]
+    cap: SosixContainBytesV1
+    work_dir: text
+    wall: SosixContainMillisV1
+pub struct SosixContainMemoryEvidenceV1:
+    enforced: SosixContainFlagV1
+    evidence_digest: text
+    reason: text
+pub fn sosix_contain_memory_cap_evidence_v1(probe: SosixContainMemoryProbeV1) -> SosixContainMemoryEvidenceV1
+```
+
+Windows runs lane E's `windows_memory_cap_probe_run_v1` three times (under, over,
+uncapped baseline) and returns `enforced` only for `windows_memory_cap_verdict_v1`
+= `Enforced`. Other hosts return `enforced` false with
+`memory-cap-probe-unimplemented-<os>`.
+
 Windows launch sequence, all inside the existing admit core: validate and pin the
 executable -> create job -> set extended limits (`KILL_ON_JOB_CLOSE | JOB_MEMORY |
-ACTIVE_PROCESS`) and CPU rate, read each back -> open restricted token ->
+ACTIVE_PROCESS`) and CPU rate, read each back -> open restricted token for
+`request.scope` ->
 `CreateProcessAsUserW` suspended with an explicit handle list and the given
 environment block -> assign to job -> resume. A restricted copy of the caller's
 own primary token needs no privilege. Any failure after create terminates the job
@@ -235,13 +288,39 @@ Windows-only (no facade; only `sosix/windows/containment_v1` imports it).
 
 ```simple
 pub unit SosixWindowsTokenV1: i64
-pub fn sosix_windows_restricted_token_open_v1() -> Result<SosixWindowsTokenV1, text>
+pub fn sosix_windows_restricted_token_open_v1(scope: text) -> Result<SosixWindowsTokenV1, text>
 pub fn sosix_windows_restricted_token_close_v1(token: SosixWindowsTokenV1) -> SosixContainFlagV1
+pub fn sosix_windows_scope_sid_v1(scope: text) -> Result<text, text>   # SDDL SID string, deterministic per scope
 ```
 
-`OpenProcessToken` -> `CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)` ->
+`OpenProcessToken` -> `CreateRestrictedToken(DISABLE_MAX_PRIVILEGE, restricting
+SIDs = {Everyone S-1-1-0, Users S-1-5-32-545, scope SID})` ->
 `SetTokenInformation(TokenIntegrityLevel, S-1-16-4096)`. Reads back the integrity
-level; a mismatch closes the token and returns `Err`.
+level and `TokenRestrictedSids`; a mismatch closes the token and returns `Err`.
+
+Low integrity alone is not write confinement: a low child can write every
+low-labelled object (the user's `LocalLow`, another container's `upper/` or
+scratch). The restricting SIDs close that. A restricted token passes an access
+check only if the restricting list is granted the access too, so the child can
+write only where the label is low **and** the DACL grants write to Everyone,
+Users or its own scope SID. `LocalLow` grants the user SID only; another
+container's directories grant a different scope SID. The scope SID is derived
+from `sha256(scope)` under one fixed prefix that P1 chooses and records; it
+names no account.
+
+This is unproven on this host. `write_confinement` is true only while these
+canaries pass in P2's spec, and the variant reports false otherwise (the
+runtime then refuses every `restricted` request):
+
+| Canary | Expected |
+|---|---|
+| write a file in own granted directory | allow |
+| overwrite a `lower/` hard link | deny |
+| write into the user's `LocalLow` | deny |
+| write into a directory granted to a different scope | deny |
+
+Side effect, not claimed as a guarantee: files readable only by the user SID
+become unreadable to the child.
 
 ### 4.4 Read-only sharing and write grant
 
@@ -254,17 +333,15 @@ pub struct SosixFsShareV1:
 pub fn sosix_fs_link_readonly_v1(source: text, destination: text,
         allow_copy: SosixContainFlagV1) -> SosixFsShareV1
 
-# std.nogc_sync_mut.sosix.contained_write_v1
-pub fn sosix_fs_grant_contained_write_v1(empty_dir: text) -> text   # "" = granted
-
-# std.nogc_sync_mut.sosix.windows.contained_write_v1 (body behind the facade)
-pub fn sosix_windows_grant_low_write_v1(empty_dir: text) -> text
+# std.nogc_sync_mut.sosix.contained_write_v1, and the same name in every
+# std.nogc_sync_mut.sosix.<os>.contained_write_v1 variant behind it
+pub fn sosix_fs_grant_contained_write_v1(empty_dir: text, scope: text) -> text   # "" = granted
 ```
 
 | Op | Windows | Linux / FreeBSD / macOS |
 |---|---|---|
 | `link_readonly` | `file_hardlink` (`CreateHardLinkW`, already in `io/file_ops`). `file_seal_readonly` answers false on Windows by design and is not required: the object keeps its medium integrity label, so a low-integrity child cannot open it for write | `file_hardlink` + `file_seal_readonly` (0444); the launch variant adds the read-only mount or Seatbelt rule |
-| `grant_contained_write` | Low mandatory label `(OI)(CI)` on the directory via `SetNamedSecurityInfoW` | returns `""`; the launch variant makes `writable_dirs` writable |
+| `grant_contained_write` | Low mandatory label `(OI)(CI)` plus an inheritable modify ACE for the scope SID, via `SetNamedSecurityInfoW` | typed refusal `contained-write-unimplemented-<os>` until that host's lane defines its grant; never "granted" by default |
 
 `link_readonly` has one portable body: it links, then seals where the host can
 seal, and it never branches on the OS. It returns `copied` only when `allow_copy.value` and the link failed
@@ -273,6 +350,9 @@ seal, and it never branches on the OS. It returns `copied` only when `allow_copy
 (`grant-target-not-empty`). That check is load-bearing: a hard link shares one
 security descriptor across all its names, so labelling a tree that contains links
 would make store objects writable by every container.
+
+A `copied` fallback file is a new file under `lower/`. It inherits that
+directory's medium label and has no scope ACE, so it is as unwritable as a link.
 
 ## 5. Windows rootfs
 
@@ -320,7 +400,8 @@ Fail-closed reporting uses two layers, because `ContainerCapabilityReportV1` v1
 has no network or PID field:
 
 1. Launch: `sosix_contain_request_reason_v1` refuses `network: "none"`,
-   `private_pids`, `root_dir` and read confinement before any child exists.
+   `private_pids` and `root_dir` before any child exists. Read confinement has
+   no request field; its absence shows as `filesystem_confinement` false.
 2. Admission: `pure_container_capability_report_v1` builds the report from
    `SosixContainSupportV1` plus measured evidence. On Windows:
 
@@ -330,13 +411,19 @@ has no network or PID field:
 | `client_authority` | `user` | `support.unprivileged` |
 | `filesystem_confinement` | false | needs read and write confinement together |
 | `memory_accounting` | `job-commit` | `support.memory_accounting` |
-| `memory_hard_limit` | true only with lane E's `Enforced` verdict | never from `support` alone |
+| `memory_hard_limit` | true only with `sosix_contain_memory_cap_evidence_v1(...).enforced` | never from `support` alone |
 | `memory_limit_update`, `memory_reclaim`, `durable_recovery`, `process_checkpoint`, `explicit_shared_memory` | false | not implemented |
 | `readonly_file_backing_reuse` | true only if every base file was `linked` | materializer result |
 | `ephemeral_cleanup` | true only if `tree_empty` and view destroy were both observed | runtime evidence |
 | `filesystem_save_load` | true | `storage_view_v1` |
 | `launch_qualified` | true only after a real contained launch returned its exit code on this host | runtime evidence |
-| `evidence_revision` | non-empty only when evidence was measured | empty makes any constrained requirement fail `capability-evidence-missing` |
+| `evidence_revision` | non-empty only when evidence was measured | empty makes any constrained requirement fail `capability-evidence-missing`, which is checked before every mismatch reason |
+
+There is one report builder for this backend,
+`pure_container_capability_report_v1`. Lane E's
+`windows_container_capability_report_v1` (`io/windows_memory_cap_probe_v1.spl:177`)
+builds an overlapping report; P4 removes it and moves its spec onto the verdict
+plus the single builder.
 
 A v2 report with explicit `network_isolation` and `pid_isolation` fields is a
 named gap, not part of this design (plan §6).
@@ -360,6 +447,7 @@ pub struct PureContainerSpecV1:
     identity: text
     network: text
     requirement: ContainerCapabilityRequirementV1
+    evidence: PureContainerEvidenceV1  # from pure_container_qualify_v1; empty = unqualified
     extra_grants: [PlannedGrantV1]     # shared filesystem_plan_v1 grants beyond lower/upper
 
 pub struct PureContainerRunV1:
@@ -370,11 +458,35 @@ pub struct PureContainerRunV1:
     report: ContainerCapabilityReportV1
     journal: ContainerLifecycleJournalV1
 
+pub struct PureContainerQualifyV1:
+    state_root: text                   # scratch for canary runs
+    probe_program: text                # canary/probe executable
+    probe_digest: text
+    memory_probe: SosixContainMemoryProbeV1
+
+pub fn pure_container_qualify_v1(request: PureContainerQualifyV1) -> PureContainerEvidenceV1
 pub fn pure_container_run_v1(spec: PureContainerSpecV1) -> PureContainerRunV1
 ```
 
-Order: build report -> `container_capability_v1_admission_reason` -> journal
-`created` -> `storage_view_v1_create` -> materialize `lower/` -> grant `upper/` ->
+Evidence comes first and from a separate call. `pure_container_qualify_v1` runs
+the canaries (§4.3 and plan P4) through `sosix_contain_start_v1` directly, with
+no admission step, and calls `sosix_contain_memory_cap_evidence_v1`. It sets
+`launch_observed`, `cleanup_observed` and `memory_cap_enforced` from what it
+saw and sets `evidence_revision` to `pure:<sha256 of the canary and memory
+digests>`, always non-empty once it has run, even when nothing is affirmed
+(lane E's `unaffirmed:` precedent). `base_fully_linked` is false in qualify
+output and is set per run by the materializer.
+
+`pure_container_run_v1` never produces evidence for its own admission. With an
+empty `spec.evidence` any constrained requirement fails
+`capability-evidence-missing`; with qualify output, a `native-container`
+requirement reaches `isolation-kind-mismatch`.
+
+Order: `sosix_contain_support_v1` -> build report from support and
+`spec.evidence` -> `container_capability_v1_admission_reason` -> journal
+`created` -> `storage_view_v1_create` -> materialize `lower/` -> if a base file
+was copied and the requirement needs `readonly_file_backing_reuse`, refuse and
+clean up -> grant `upper/` and scratch to `scope = container_id` ->
 journal `starting` -> `sosix_contain_start_v1` -> poll to terminal -> collect ->
 journal `stopped` -> remove `lower/`, release pin, `storage_view_v1_destroy` ->
 journal `destroyed`. Every failure after `created` walks the journal's cleanup
@@ -451,8 +563,9 @@ nothing new until N4, which is unscheduled.
 | `common/contracts/container/filesystem_policy_v1.spl` | shared | Its model is "access isolation over real host paths, not namespace virtualization", which is the Windows restricted-token model |
 | `common/container_policy/filesystem_plan_v1.spl` | shared | Pure grant/deny planner; `canonical_path_within_v1` already takes `case_insensitive`, as NTFS needs |
 | `common/container_policy/requirements_match_v1.spl`, `diagnostics_v1.spl` | shared | Policy-vs-observed admission with stable diagnostics |
-| `common/contracts/container/sandbox_capability_v1.spl` | shared, one edit | `SandboxObservedCapabilityV1` and `SandboxPolicyV1` are portable, but only the Seatbelt backend id is named and `sandbox_policy_decode_v1.spl:284` accepts only it. S0 adds `simple-pure-process` in both. The `SCMAC-*` codes and the `simple-container-seatbelt-policy-v1` schema id stay, because renaming breaks stored policies |
-| `common/container_policy/sandbox_policy_decode_v1.spl`, `endpoint_network_decode_v1.spl` | shared, one edit | Strict SDN decoders; no host call |
+| `common/contracts/container/sandbox_capability_v1.spl` | shared, unchanged | `SandboxObservedCapabilityV1` and `SandboxPolicyV1` values are portable and are built in code by the pure runtime. Not edited |
+| `common/contracts/container/backend_identity_v1.spl` | shared, one edit (P0) | The one place a backend id is defined; P0 adds `simple-pure-process` / `simple-pure-container-v1` here |
+| `common/container_policy/sandbox_policy_decode_v1.spl`, `simple_container_seatbelt_policy_v1_schema.sdn`, `endpoint_network_decode_v1.spl` | shared, unchanged | The decoder (`:284`) and the schema SDN both pin `backend: "macos-seatbelt-process"`. An SDN policy document for the pure backend needs both changed together and is a later lane; increment 1 does not decode one |
 | `common/contracts/container/{runtime_v1,host_capability_v1}.spl` | shared | Already used by the Windows, FreeBSD, macOS and SimpleOS leaves |
 | `common/contracts/container/{capability_report_v1,lifecycle_journal_v1}.spl` | shared | Landed in increment 1; no provider leaf emits a report yet (only `storage_view_v1` and lane E's probe use them). This backend is the first runtime consumer |
 | `common/oci/bundle_check_v1.spl` | shared | SimpleOS `oci_import` already delegates to it |
@@ -472,6 +585,22 @@ nothing new until N4, which is unscheduled.
 | `native_admission_v1.spl`, `native_sandbox_provider_v1.spl` | per-host | Signed App Sandbox helper route, a different engine (`macos-native-sandbox-v1`) |
 | `worker_protocol_v1.spl` | per-host for now | The HMAC frame protocol is neutral, but the pure backend launches in-process and has no worker. Extract when a second consumer exists |
 | `sosix/darwin_sandbox_v1.spl` | per-host | Becomes the body the `sosix/macos/containment_v1.spl` variant calls (lane N3) |
+
+### Linux, FreeBSD and Windows leaves
+
+| File | Verdict | Reason |
+|---|---|---|
+| `providers/linux/oci_runtime_v1.spl` and the `engine_*`, `oci_*`, `request_*`, `installed_*`, `whole_inventory_*` files | per-host sibling backend | Podman OCI engine adapter (`linux-podman`). Not on the pure path |
+| `providers/linux/{containment_v1,containment_observer_v1,containment_inspect_v1,containment_profile_v1,cleanup_scope_v1}.spl` | per-host | Bind OCI observations to a retained native snapshot |
+| `io/linux_container_containment_v1.spl` | per-host; reused by N1 | Pinned cgroup + namespace observation owner. N1 uses it for `tree_empty` and retirement evidence and adds no second observer |
+| `providers/linux/{agent_workspace_*,workspace_*,fresh_epoch_*,local_mounts_v5,user_mapping_v3,execution_user_v2}.spl` | per-host | Linux agent-workspace and fresh-epoch lifecycle of the V2/V3 API |
+| `providers/linux/host_capability_v1.spl` | per-host adapter | Copies the OCI probe into shared `ContainerHostCapabilityV1`; the pattern A1 repeats for `ContainerCapabilityReportV1` |
+| `providers/linux/simple_container_adapter_v2.spl`, `providers/windows/simple_container_adapter_v2.spl` | per-host | The two cases of `SimpleContainerOwnerV2`. A1 adds the pure case beside them |
+| `providers/freebsd/jail_runtime_v1.spl` | per-host sibling backend, reused | Existing FreeBSD route over ocijail with delegated authority. No pure jail owner is added |
+| `providers/windows/docker_*.spl`, `host_observation_v2.spl`, `runtime_operation_projection_v1.spl`, `primary_*` | per-host sibling backend | Docker process-isolation route (§10) |
+| `providers/windows/hcs_runtime_v1.spl` | superseded | Its own header calls it a historical containerd/runhcs intent builder; Docker is canonical |
+| `container/shared/{request_digest_v1,request_record_v1,configuration_*,logs_capture_v1}.spl` | shared | Already host-neutral. `request_digest_v1` is the digest form for canary evidence |
+| `io/windows_process_owner.spl`, `io/windows_memory_cap_probe_v1.spl` | per-host | Reached only through the Windows SOSIX variant |
 
 ### SimpleOS
 

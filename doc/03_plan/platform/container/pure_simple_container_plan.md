@@ -1,6 +1,6 @@
 # Lane plan — pure-Simple container, increment 1 (Windows)
 
-Date: 2026-11-26. Base: `release/1.0.0` @ `38f6249feef`.
+Date: 2026-11-26. Base: `release/1.0.0` @ `790371966e6`.
 Architecture and every signature: `doc/04_architecture/platform/container/pure_simple_container.md`
 (§4 SOSIX, §5 rootfs, §7 runtime). Lanes code against those signatures, not
 against each other's files. A renamed or reshaped signature is a merge blocker.
@@ -8,17 +8,17 @@ against each other's files. A renamed or reshaped signature is a merge blocker.
 ## 1. Lanes
 
 Each lane has its own worktree and `work/<topic>` branch, one worker, and owns its
-files exclusively. P0 lands first (pure, small). P1, P2 and P3 then run in
-parallel. P4 integrates.
+files exclusively. P0 lands first (pure, small). S0, P1 and P3 then run in
+parallel. P2 is serial after P1 (it imports P1's token module). P4 integrates.
 
 | Lane | Owns | Depends on |
 |---|---|---|
-| S0 extraction | new `src/lib/common/contracts/container/{contained_lifecycle_v1,sandbox_canary_v1}.spl`, new `src/lib/common/container_policy/attempt_dir_plan_v1.spl`; edits to `providers/macos/{seatbelt_provider_v1,seatbelt_capabilities_v1}.spl`, `common/contracts/container/sandbox_capability_v1.spl` and `common/container_policy/sandbox_policy_decode_v1.spl`; three specs | none |
-| P0 contract | `src/lib/common/contracts/sosix/containment_v1.spl`, `src/lib/common/contracts/container/pure_backend_v1.spl`, their two specs | none |
-| P1 Windows identity + write grant | `src/lib/nogc_sync_mut/sosix/windows/{security_abi_v1,restricted_identity_v1,contained_write_v1}.spl`, `src/lib/nogc_sync_mut/sosix/contained_write_v1.spl`, two specs | P0 |
-| P2 contained launch | `src/lib/nogc_sync_mut/io/windows_process_owner.spl` (edit), `src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl` (edit), `src/lib/nogc_sync_mut/sosix/containment_v1.spl`, `src/lib/nogc_sync_mut/sosix/{windows,linux,freebsd,macos,simpleos}/containment_v1.spl`, every `src/lib/nogc_sync_mut/sosix/**/FILE.md` edit (P1's entries included), one spec, fixtures | P0; P1 merged before the `restricted` examples run |
+| S0 extraction | new `src/lib/common/contracts/container/{contained_lifecycle_v1,sandbox_canary_v1}.spl`, new `src/lib/common/container_policy/attempt_dir_plan_v1.spl`; edits to `providers/macos/{seatbelt_provider_v1,seatbelt_capabilities_v1}.spl` only; three specs | none |
+| P0 contract | `src/lib/common/contracts/sosix/containment_v1.spl`, `src/lib/common/contracts/container/pure_backend_v1.spl`, `src/lib/common/contracts/container/backend_identity_v1.spl` (add the backend and engine ids), their specs | none |
+| P1 Windows identity + write grant | `src/lib/nogc_sync_mut/sosix/windows/{security_abi_v1,restricted_identity_v1,contained_write_v1}.spl`, `src/lib/nogc_sync_mut/sosix/contained_write_v1.spl`, `src/lib/nogc_sync_mut/sosix/{linux,freebsd,macos,simpleos}/contained_write_v1.spl` (refusals), two specs | P0 |
+| P2 contained launch | `src/lib/nogc_sync_mut/io/windows_process_owner.spl` (edit), `src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl` (edit), `src/lib/nogc_sync_mut/sosix/containment_v1.spl`, `src/lib/nogc_sync_mut/sosix/{windows,linux,freebsd,macos,simpleos}/containment_v1.spl`, every `src/lib/nogc_sync_mut/sosix/**/FILE.md` edit (P2 adds the entries for P1's and P3's files too), one spec, fixtures | P0; serial after P1 merged |
 | P3 rootfs | `src/lib/nogc_sync_mut/sosix/readonly_share_v1.spl`, `src/lib/nogc_sync_mut/storage/rootfs_materialize_v1.spl`, `src/lib/nogc_sync_mut/storage/storage_view_v1.spl` (add one fn), `src/lib/nogc_sync_mut/storage/immutable_store_v1.spl` (add one fn), two specs | P0 |
-| P4 runtime | `src/lib/nogc_sync_mut/container/pure_runtime_v1.spl`, `src/lib/common/contracts/container/pure_sandbox_observed_v1.spl`, system spec, fixture, generated spec mirror | S0 and P0–P3 merged; inc-3 lane E landed for a true `memory_hard_limit` |
+| P4 runtime | `src/lib/nogc_sync_mut/container/pure_runtime_v1.spl`, `src/lib/common/contracts/container/pure_sandbox_observed_v1.spl`, system spec, fixture, generated spec mirror | S0 and P0–P3 merged. Also owns the edit of `io/windows_memory_cap_probe_v1.spl` and its spec (remove the duplicate builder) |
 
 S0 runs in parallel with P0–P3; only P4 imports its modules. S0 does not change
 any P0 file, name or signature. No lane edits `api_v2.spl`, `service_v2.spl`,
@@ -60,9 +60,11 @@ pub fn sandbox_canary_status_v1(plan: [SandboxCanaryPlanV1],
   the Darwin 103-byte socket check. `seatbelt_capability_status_v1` keeps its
   manifest identity checks and calls `sandbox_canary_status_v1` for the canary
   comparison. `SEATBELT_*` constants alias the new ones.
-- `sandbox_capability_v1.spl`: add `SANDBOX_BACKEND_SIMPLE_PURE_V1 =
-  "simple-pure-process"`; add it to the backend choice list at
-  `sandbox_policy_decode_v1.spl:284` (the only hard check).
+- ~~`sandbox_capability_v1.spl`: add~~ `SANDBOX_BACKEND_SIMPLE_PURE_V1 =
+  "simple-pure-process"`: WITHDRAWN. S0 does not edit
+  `sandbox_capability_v1.spl` or `sandbox_policy_decode_v1.spl`. The backend id
+  lives only in `backend_identity_v1.spl` (P0), and the decoder plus its schema
+  SDN pin the Seatbelt backend together (architecture §9).
 - `container_attempt_dir_plan_v1` does not call `seatbelt_path_check_v1` (that
   requires a leading `/`). It applies the host-independent checks listed in
   architecture §9; the Seatbelt forward runs its own check first.
@@ -105,6 +107,13 @@ pub fn pure_container_capability_report_v1(support: SosixContainSupportV1,
   evidence.memory_cap_enforced.value`.
 - Specs: `test/01_unit/lib/common/contracts/sosix/containment_v1_spec.spl`,
   `test/01_unit/lib/common/contracts/container/pure_backend_v1_spec.spl`.
+- Changed 2026-11-26 (review round): `SosixContainRequestV1` gains
+  `scope: text` after `identity`; `restricted` with an empty or non-identifier
+  `scope` is `containment-request-invalid`. `PURE_CONTAINER_BACKEND_V1` and
+  `PURE_CONTAINER_ENGINE_V1` alias new constants in `backend_identity_v1.spl`
+  (`CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1`,
+  `CONTAINER_ENGINE_SIMPLE_PURE_CONTAINER_V1`), which P0 adds with their enum
+  cases.
 - Changed 2026-11-26 after P0 started: §4.1 gained one reason,
   `containment-readonly-requires-restricted`, checked second (right after
   `containment-request-invalid`): non-empty `readonly_dirs` with `identity`
@@ -122,15 +131,27 @@ pub fn pure_container_capability_report_v1(support: SosixContainSupportV1,
   `windows_process_owner_abi.spl`, and reuses that module's heap and pointer
   helpers. Reuse `OpenProcessToken` and `GetTokenInformation` where already
   declared (`windows_local_process_principal_v1`, `windows_machine_policy_abi_v1`).
-- The facade `sosix/contained_write_v1.spl` is one import switch: Windows binds
-  `sosix_windows_grant_low_write_v1`; every other OS returns `""`.
+- Changed 2026-11-26 (review round), three signatures:
+  `sosix_windows_restricted_token_open_v1(scope: text)`; new
+  `sosix_windows_scope_sid_v1(scope: text) -> Result<text, text>`;
+  `sosix_fs_grant_contained_write_v1(empty_dir: text, scope: text)`. The Windows
+  body is no longer named `sosix_windows_grant_low_write_v1`: every variant file
+  exports the one name `sosix_fs_grant_contained_write_v1`.
+- The facade `sosix/contained_write_v1.spl` is one import switch over the five
+  variant files. Non-Windows variants return
+  `contained-write-unimplemented-<os>`, never `""`.
+- The token carries restricting SIDs {Everyone, Users, scope SID}; the grant adds
+  the low label and an inheritable modify ACE for the scope SID (architecture
+  §4.3). If restricting SIDs cannot be made to work under the seed, stop and
+  report; do not fall back to label-only.
 - Specs: `test/01_unit/lib/nogc_sync_mut/sosix/restricted_identity_v1_spec.spl`,
   `test/01_unit/lib/nogc_sync_mut/sosix/contained_write_v1_spec.spl`.
 - First step: an extern-resolution smoke under the seed binary. If advapi32
   externs do not resolve there, stop and report; do not add C.
-- Acceptance: token opens, integrity read-back is low, close returns true and a
-  second close returns false; grant on an empty directory returns `""` and the
-  label reads back low; grant on a directory holding one file returns
+- Acceptance: token opens, integrity read-back is low and the restricted-SID
+  list reads back with the scope SID, close returns true and a second close
+  returns false; two scopes give two different SIDs and one scope always the
+  same; grant on an empty directory returns `""` and the label reads back low; grant on a directory holding one file returns
   `grant-target-not-empty`; grant on a missing path is refused.
 
 ### P2 — contained launch
@@ -151,7 +172,10 @@ fn windows_process_admit_contained_v1(request: WindowsProcessRequestV1,
   behaviour and the readback checks stay byte-for-byte equivalent.
 - `sosix/windows/containment_v1.spl` maps the §4.2 API onto that core, the
   existing poll/cancel/collect, `windows_process_peak_memory_v1` and P1's token.
-  `support` is the Windows column of §4.2.
+  `support` is the Windows column of §4.2. It also implements
+  `sosix_contain_memory_cap_evidence_v1` over lane E's probe and verdict
+  (not over `windows_container_capability_report_v1`), and the
+  `containment-volume-no-acl` refusal.
 - `sosix/{linux,freebsd,macos,simpleos}/containment_v1.spl`: `support` =
   `sosix_contain_support_none_v1("<os>-unimplemented")`; `start` returns
   `RejectedBeforeStart("containment-unimplemented-<os>")`; poll/cancel/collect
@@ -163,8 +187,9 @@ fn windows_process_admit_contained_v1(request: WindowsProcessRequestV1,
 - Acceptance: exit code and stdout file of a trivial child are returned;
   `network: "none"` is `RejectedBeforeStart` and no process was created;
   a process limit of 2 makes the third spawn fail; cancel yields `tree_empty`
-  with children running; under `restricted` the write probe fails on a
-  medium-label file and succeeds in a granted directory; existing
+  with children running; the four write canaries of architecture §4.3 give
+  allow / deny / deny / deny under `restricted`; memory evidence is `enforced`
+  with the fixture lane E measured; existing
   `windows_process_owner` specs still pass. CPU rate is set-and-read-back only;
   throughput is not measured in this increment.
 
@@ -202,6 +227,9 @@ pub fn rootfs_materialize_v1(view: StorageViewV1, allow_copy: ViewFlagV1) -> Roo
 pub fn rootfs_dematerialize_v1(view: StorageViewV1) -> text   # "" = lower removed, pin released
 ```
 
+  `ViewFlagV1`, `ViewCountV1`, `ViewBytesV1` and `StoreFlagV1` are declared
+  without `pub`; P3 owns both files and makes them `pub` (names unchanged) so
+  these public signatures and P4's spec type are legal.
   Pin before link, owner `pure-container`, pin id = view id. A failure part-way
   removes the partial `lower/` and releases the pin.
 - Specs: `test/01_unit/lib/nogc_sync_mut/sosix/readonly_share_v1_spec.spl`,
@@ -215,7 +243,8 @@ pub fn rootfs_dematerialize_v1(view: StorageViewV1) -> text   # "" = lower remov
 
 ### P4 — runtime
 
-- `pure_runtime_v1.spl`: architecture §7. It uses S0's lifecycle and attempt-dir
+- `pure_runtime_v1.spl`: architecture §7, including `pure_container_qualify_v1`
+  and the evidence-first order. It uses S0's lifecycle and attempt-dir
   modules and `filesystem_plan_v1` grants, and defines none of its own.
 - `pure_sandbox_observed_v1.spl`:
   `pub fn pure_container_observed_capability_v1(support: SosixContainSupportV1,
@@ -229,9 +258,11 @@ pub fn rootfs_dematerialize_v1(view: StorageViewV1) -> text   # "" = lower remov
 - Acceptance: a run over a two-file base exits 0, reads a `lower/` file, writes
   an `upper/` file, fails to overwrite the `lower/` file, and leaves no view
   directory and no pin; `network: "none"` returns `rejected` with no view
-  created; a requirement for `native-container` returns `rejected` with
-  `isolation-kind-mismatch`; the journal ends `destroyed`. Without lane E merged
-  the report's `memory_hard_limit` is false and a requirement for it is refused.
+  created; with qualify evidence a requirement for `native-container` returns
+  `rejected` with `isolation-kind-mismatch`, and with empty evidence the same
+  requirement returns `capability-evidence-missing`; the journal ends
+  `destroyed`; `windows_container_capability_report_v1` no longer exists and the
+  lane E spec passes on the single builder.
 
 ## 3. Gate for every lane
 
@@ -242,6 +273,9 @@ pub fn rootfs_dematerialize_v1(view: StorageViewV1) -> text   # "" = lower remov
 - No `extern`, `@when`, or `io.windows_*` import outside `sosix/**` and the two
   edited `io/` owner files (grep in review).
 - A function a lane cannot finish is `fail("unimplemented: <name>")`.
+- Every lane adds its new `.spl` paths to `src/lib/source_inventory.lock` in the
+  same commit (one sorted line each). Lines are disjoint across lanes; the merge
+  owner resolves any adjacency conflict by keeping both.
 - Fable review before the PR; land by PR to `release/1.0.0`.
 
 ## 4. Increment 2 (not scheduled)
@@ -252,9 +286,9 @@ N1–N3 cannot run here: source plus Fable/Opus review only, no capability claim
 | Lane | Files | Check |
 |---|---|---|
 | N1 Linux | `sosix/linux/containment_v1.spl` | review-only |
-| N2 FreeBSD | `sosix/freebsd/containment_v1.spl` | review-only |
-| N3 macOS | `sosix/macos/containment_v1.spl` over `sosix/darwin_sandbox_v1` and `seatbelt_profile_v1` | review-only |
-| N4 SimpleOS | `sosix/simpleos/containment_v1.spl` over `os/sosix/process_launch_provider_v1` and `os/services/container/runtime_provider_v1`; maps `ResourceDomain` `mem`/`pids` and names the other fields as gaps | QEMU real-firmware lane, then board |
+| N2 FreeBSD | none in SOSIX: bind the existing `providers/freebsd/jail_runtime_v1.spl` into A1's selection; no new jail owner | review-only |
+| N3 macOS | move pure `seatbelt_profile_v1` to `common/container_policy/` (forward left), then `sosix/macos/containment_v1.spl` over `sosix/darwin_sandbox_v1` | review-only |
+| N4 SimpleOS | body in `src/os/sosix/` over `process_launch_provider_v1` and `os/services/container/runtime_provider_v1` (lib SOSIX never imports `src/os`); maps `ResourceDomain` `mem`/`pids` and names the other fields as gaps | QEMU real-firmware lane, then board |
 | W2 AppContainer | `sosix/windows/app_container_v1.spl`, identity `app-sandbox` | Windows: read and network denial measured |
 | A1 selection + API wiring | `backend_select_v1.spl` (pure or Docker on Windows by capability admission, architecture §10), Docker probe -> `ContainerCapabilityReportV1` adapter, `api_v2.spl` owner case, async adapter | Windows, both backends live |
 | R2 report v2 | `capability_report_v2.spl` with `network_isolation`, `pid_isolation` | pure |
@@ -278,18 +312,25 @@ Each default is what the lanes assume. Default, owner may override.
    Increment 1 confines writes only; W2 adds read and network denial.
 3. Split `lower/` + `upper/` with no union? **Default: yes** for increment 1. A
    union needs bindflt/HCS, which is the Docker backend's job.
-4. Is one `@when(os=)` import switch in the level-0 facade the intended
-   selection form? **Default: yes.** It is the form already used in
-   `machine_authority_cleanup_v1.spl`, and it adds no resolver.
+4. How is the host variant bound? The directory rule forbids `@cfg(os=)` in
+   level-0 files and its `variants/` resolver hook is unimplemented.
+   - **Option A (default):** one `@when(os=)` import switch per facade, no body.
+     Costs a one-line exception in the directory rule; nothing blocks P1/P2.
+   - **Option B:** implement the resolver hook in a new lane V0 so `sosix/<os>/`
+     files resolve by target triple. No rule exception; P1's facade and P2 wait
+     on V0, and it touches the compiler driver.
 5. Network and PID isolation as explicit report fields? **Default: not in
    increment 1.** `isolation_kind` plus the SOSIX refusal is fail-closed today.
    R2 adds the fields when a caller needs to require one without the other.
 
-## Resume state (2026-11-26, after host reboot)
+## Resume state (2026-11-26, after Fable review round 1)
 
-- Done: shared-vs-per-host review (architecture §9), extraction lane S0, Docker
-  sibling note (architecture §10), defaults for §6.
-- Open: no Fable review of these two docs yet; review, fix, then push and land.
-- Related lanes outside this plan: Lane C landed (#11901); remaining-work docs
-  landed (#11909); Lane E (`work/container-inc3-win-memcap-20261126`) needs its
-  round-3 re-review, then push and land.
+- Review fixes applied in one commit: evidence-first admission and
+  `pure_container_qualify_v1`; memory evidence through a SOSIX op and one report
+  builder; restricting-SID write confinement with canaries; one
+  `contained_write` name with refusals off Windows; provider leaves added to
+  the shared-vs-per-host table; P2 serial after P1.
+- Signature changes against running lanes are listed in P0 and P1 above. S0
+  lost two edits. P3 has no signature change (units become `pub`).
+- Landed outside this plan: lane E #11914, lane C #11901, remaining-work docs
+  #11909. Open: re-review of these two docs, then push and land.
