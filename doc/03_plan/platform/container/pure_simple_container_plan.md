@@ -13,20 +13,62 @@ parallel. P4 integrates.
 
 | Lane | Owns | Depends on |
 |---|---|---|
+| S0 extraction | new `src/lib/common/contracts/container/{contained_lifecycle_v1,sandbox_canary_v1}.spl`, new `src/lib/common/container_policy/attempt_dir_plan_v1.spl`; edits to `providers/macos/{seatbelt_provider_v1,seatbelt_capabilities_v1}.spl` and `common/contracts/container/sandbox_capability_v1.spl`; three specs | none |
 | P0 contract | `src/lib/common/contracts/sosix/containment_v1.spl`, `src/lib/common/contracts/container/pure_backend_v1.spl`, their two specs | none |
 | P1 Windows identity + write grant | `src/lib/nogc_sync_mut/sosix/windows/{security_abi_v1,restricted_identity_v1,contained_write_v1}.spl`, `src/lib/nogc_sync_mut/sosix/contained_write_v1.spl`, two specs | P0 |
-| P2 contained launch | `src/lib/nogc_sync_mut/io/windows_process_owner.spl` (edit), `src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl` (edit), `src/lib/nogc_sync_mut/sosix/containment_v1.spl`, `src/lib/nogc_sync_mut/sosix/{windows,linux,freebsd,macos}/containment_v1.spl`, every `src/lib/nogc_sync_mut/sosix/**/FILE.md` edit (P1's entries included), one spec, fixtures | P0; P1 merged before the `restricted` examples run |
+| P2 contained launch | `src/lib/nogc_sync_mut/io/windows_process_owner.spl` (edit), `src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl` (edit), `src/lib/nogc_sync_mut/sosix/containment_v1.spl`, `src/lib/nogc_sync_mut/sosix/{windows,linux,freebsd,macos,simpleos}/containment_v1.spl`, every `src/lib/nogc_sync_mut/sosix/**/FILE.md` edit (P1's entries included), one spec, fixtures | P0; P1 merged before the `restricted` examples run |
 | P3 rootfs | `src/lib/nogc_sync_mut/sosix/readonly_share_v1.spl`, `src/lib/nogc_sync_mut/storage/rootfs_materialize_v1.spl`, `src/lib/nogc_sync_mut/storage/storage_view_v1.spl` (add one fn), `src/lib/nogc_sync_mut/storage/immutable_store_v1.spl` (add one fn), two specs | P0 |
-| P4 runtime | `src/lib/nogc_sync_mut/container/pure_runtime_v1.spl`, system spec, fixture, generated spec mirror | P0–P3 merged; inc-3 lane E landed for a true `memory_hard_limit` |
+| P4 runtime | `src/lib/nogc_sync_mut/container/pure_runtime_v1.spl`, `src/lib/common/contracts/container/pure_sandbox_observed_v1.spl`, system spec, fixture, generated spec mirror | S0 and P0–P3 merged; inc-3 lane E landed for a true `memory_hard_limit` |
 
-No lane edits `api_v2.spl`, `service_v2.spl`, `providers/**`, or
-`capability_report_v1.spl`.
+S0 runs in parallel with P0–P3; only P4 imports its modules. S0 does not change
+any P0 file, name or signature. No lane edits `api_v2.spl`, `service_v2.spl`,
+`capability_report_v1.spl`, or (S0 excepted) `providers/**`.
 
 ## 2. Lane detail
 
 Run specs with `C:/dev/keep/seeds/simple-local-20261125.exe test <spec>`. Every
 Windows example returns early unless `is_windows()`; a skipped example is not
 evidence, so the acceptance lines below are measured on this host.
+
+### S0 — extract shared code from the macOS leaf (pure; move, not copy)
+
+Architecture §9 names what moves and why.
+
+```simple
+# std.common.contracts.container.contained_lifecycle_v1
+pub const CONTAINED_STATE_VALIDATED_V1 = "validated"   # ... all ten states, same text values
+pub fn contained_lifecycle_next_v1(state: text, event: text) -> Result<text, text>   # Err("invalid-transition-<state>-<event>")
+pub fn contained_runtime_phase_v1(state: text) -> text
+
+# std.common.container_policy.attempt_dir_plan_v1
+pub unit ContainerAttemptNumberV1: i64
+pub struct ContainerAttemptDirPlanV1:   # the ten fields of SeatbeltAttemptDirPlanV1
+pub fn container_attempt_key_v1(workload_uid: text, attempt: ContainerAttemptNumberV1) -> Result<text, text>
+pub fn container_attempt_dir_plan_v1(state_root: text, attempt_key: text) -> Result<ContainerAttemptDirPlanV1, text>
+
+# std.common.contracts.container.sandbox_canary_v1
+pub struct SandboxCanaryPlanV1:      # id, expected, requirement
+pub struct SandboxCanaryResultV1:    # id, observed, evidence_digest
+pub struct SandboxCanaryStatusV1:    # status, missing, reason
+pub fn sandbox_canary_status_v1(plan: [SandboxCanaryPlanV1],
+        results: [SandboxCanaryResultV1]) -> SandboxCanaryStatusV1
+```
+
+- The Seatbelt functions become forwards. `seatbelt_lifecycle_next_v1` maps the
+  error to its existing `seatbelt-invalid-transition-` text.
+  `seatbelt_attempt_dir_plan_v1` keeps the `SCMAC-*` prefixes, the path check and
+  the Darwin 103-byte socket check. `seatbelt_capability_status_v1` keeps its
+  manifest identity checks and calls `sandbox_canary_status_v1` for the canary
+  comparison. `SEATBELT_*` constants alias the new ones.
+- `sandbox_capability_v1.spl`: add `SANDBOX_BACKEND_SIMPLE_PURE_V1 =
+  "simple-pure-process"` and admit it wherever the Seatbelt id is checked.
+- Specs: `test/01_unit/lib/common/contracts/container/contained_lifecycle_v1_spec.spl`,
+  `test/01_unit/lib/common/contracts/container/sandbox_canary_v1_spec.spl`,
+  `test/01_unit/lib/common/container_policy/attempt_dir_plan_v1_spec.spl`.
+- Acceptance: the existing specs under
+  `test/01_unit/lib/nogc_async_mut/container/providers/macos/` pass unmodified
+  (they are pure, so they run on Windows); no state-machine, dir-plan or
+  canary-compare body remains in the two macOS files (grep in review).
 
 ### P0 — contract (pure)
 
@@ -102,7 +144,7 @@ fn windows_process_admit_contained_v1(request: WindowsProcessRequestV1,
 - `sosix/windows/containment_v1.spl` maps the §4.2 API onto that core, the
   existing poll/cancel/collect, `windows_process_peak_memory_v1` and P1's token.
   `support` is the Windows column of §4.2.
-- `sosix/{linux,freebsd,macos}/containment_v1.spl`: `support` =
+- `sosix/{linux,freebsd,macos,simpleos}/containment_v1.spl`: `support` =
   `sosix_contain_support_none_v1("<os>-unimplemented")`; `start` returns
   `RejectedBeforeStart("containment-unimplemented-<os>")`; poll/cancel/collect
   return `Err`. No silent success.
@@ -165,7 +207,14 @@ pub fn rootfs_dematerialize_v1(view: StorageViewV1) -> text   # "" = lower remov
 
 ### P4 — runtime
 
-- `pure_runtime_v1.spl`: architecture §7.
+- `pure_runtime_v1.spl`: architecture §7. It uses S0's lifecycle and attempt-dir
+  modules and `filesystem_plan_v1` grants, and defines none of its own.
+- `pure_sandbox_observed_v1.spl`:
+  `pub fn pure_container_observed_capability_v1(support: SosixContainSupportV1,
+  evidence: PureContainerEvidenceV1) -> SandboxObservedCapabilityV1`.
+  Qualified only from `sandbox_canary_status_v1` over the Windows canaries
+  (base-file write denied, granted-dir write allowed, process limit hit,
+  descendants gone after cancel).
 - Spec: `test/03_system/app/container/feature/pure_simple_container_v1_spec.spl`,
   fixture `test/fixtures/container/pure_probe.spl`, mirror under `doc/06_spec/`.
 - Acceptance: a run over a two-file base exits 0, reads a `lower/` file, writes
@@ -195,9 +244,10 @@ N1–N3 cannot run here: source plus Fable/Opus review only, no capability claim
 |---|---|---|
 | N1 Linux | `sosix/linux/containment_v1.spl` | review-only |
 | N2 FreeBSD | `sosix/freebsd/containment_v1.spl` | review-only |
-| N3 macOS | `sosix/macos/containment_v1.spl` | review-only |
+| N3 macOS | `sosix/macos/containment_v1.spl` over `sosix/darwin_sandbox_v1` and `seatbelt_profile_v1` | review-only |
+| N4 SimpleOS | `sosix/simpleos/containment_v1.spl` over `os/sosix/process_launch_provider_v1` and `os/services/container/runtime_provider_v1`; `container_namespace.spl` calls shared `canonical_path_within_v1` | QEMU real-firmware lane, then board |
 | W2 AppContainer | `sosix/windows/app_container_v1.spl`, identity `app-sandbox` | Windows: read and network denial measured |
-| A1 API wiring | `api_v2.spl` owner case, async adapter | Windows |
+| A1 selection + API wiring | `backend_select_v1.spl` (pure or Docker on Windows by capability admission, architecture §10), `api_v2.spl` owner case, async adapter | Windows, both backends live |
 | R2 report v2 | `capability_report_v2.spl` with `network_isolation`, `pid_isolation` | pure |
 
 Host mapping for N1–N3 is the table in architecture §4.2.
@@ -207,35 +257,30 @@ Host mapping for N1–N3 is the table in architecture §4.2.
 Windows claims need a run log from this host. A stub host reports nothing.
 Review-only lanes never set `launch_qualified` or a non-empty `evidence_revision`.
 
-## 6. Owner questions
+## 6. Owner questions, with recommended defaults
 
-1. This backend runs a job-contained host process on Windows and reports
-   `native-sandbox`. Is that accepted beside the Docker/HCS route, given the
-   earlier "never a bare host process" wording and the Windows→Docker engine
-   mapping?
-2. Restricted low-integrity token first, AppContainer in increment 2: accepted?
-   Increment 1 confines writes only.
-3. Split `lower/` + `upper/` with no union: accepted for increment 1?
-4. The `sosix/<os>/` skeleton has no code yet. Is the single `@when(os=)` import
-   switch in the level-0 facade the intended selection form?
-5. Should network and PID isolation become explicit report fields (R2), or stay
-   expressed through `isolation_kind`?
+Each default is what the lanes assume. Default, owner may override.
 
-## Resume state (2026-11-26, paused for host reboot)
+1. Is a job-contained host process reporting `native-sandbox` accepted on
+   Windows beside Docker/HCS? **Default: yes.** It is a sibling backend with a
+   weaker, honestly reported kind. Docker stays the `native-container` route
+   and neither replaces the other (architecture §10).
+2. Restricted low-integrity token first, AppContainer later? **Default: yes.**
+   Increment 1 confines writes only; W2 adds read and network denial.
+3. Split `lower/` + `upper/` with no union? **Default: yes** for increment 1. A
+   union needs bindflt/HCS, which is the Docker backend's job.
+4. Is one `@when(os=)` import switch in the level-0 facade the intended
+   selection form? **Default: yes.** It is the form already used in
+   `machine_authority_cleanup_v1.spl`, and it adds no resolver.
+5. Network and PID isolation as explicit report fields? **Default: not in
+   increment 1.** `isolation_kind` plus the SOSIX refusal is fail-closed today.
+   R2 adds the fields when a caller needs to require one without the other.
 
-- Not yet done in this plan: the owner requirement to REUSE and SHARE the
-  SimpleOS container code and the macOS container code
-  (`providers/macos/**`, `doc/04_architecture/macos_simpleos_guest_container.md`,
-  `doc/01_research/os/security/llm_role_cspace_container_design.md`). Add a
-  "Shared vs per-host" table to the architecture doc (each existing file:
-  shared / per-host / superseded) and an extraction lane ahead of the
-  backend lanes if shared code must move first.
-- This plan and the architecture doc have had no Fable review yet; review,
-  fix, then push and land.
+## Resume state (2026-11-26, after host reboot)
+
+- Done: shared-vs-per-host review (architecture §9), extraction lane S0, Docker
+  sibling note (architecture §10), defaults for §6.
+- Open: no Fable review of these two docs yet; review, fix, then push and land.
 - Related lanes outside this plan: Lane C landed (#11901); remaining-work docs
-  landed (#11909); Lane E (Windows job-object memory cap,
-  `work/container-inc3-win-memcap-20261126`, head `4f9811507ef`) needs its
-  round-3 Fable re-review, then push and land.
-- After reboot: start the `docker` service, `docker version`, pull
-  `mcr.microsoft.com/windows/nanoserver:ltsc2025`, smoke-test
-  `docker run --isolation=process`.
+  landed (#11909); Lane E (`work/container-inc3-win-memcap-20261126`) needs its
+  round-3 re-review, then push and land.

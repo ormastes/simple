@@ -70,7 +70,7 @@ New files (N) and edited existing files (E). Everything else is reused unchanged
 | `src/lib/common/contracts/container/pure_backend_v1.spl` | N | Backend ids; `SosixContainSupportV1` + evidence -> `ContainerCapabilityReportV1` |
 | `src/lib/nogc_sync_mut/sosix/containment_v1.spl` | N | Facade: start, poll, cancel, collect, support |
 | `src/lib/nogc_sync_mut/sosix/windows/containment_v1.spl` | N | Windows body: job + restricted token launch |
-| `src/lib/nogc_sync_mut/sosix/{linux,freebsd,macos}/containment_v1.spl` | N | Typed-refusal bodies until their lanes |
+| `src/lib/nogc_sync_mut/sosix/{linux,freebsd,macos,simpleos}/containment_v1.spl` | N | Typed-refusal bodies until their lanes |
 | `src/lib/nogc_sync_mut/sosix/windows/restricted_identity_v1.spl` | N | Restricted low-integrity token open/close |
 | `src/lib/nogc_sync_mut/sosix/windows/security_abi_v1.spl` | N | advapi32 externs for token and label |
 | `src/lib/nogc_sync_mut/sosix/readonly_share_v1.spl` | N | Read-only link; portable body over `io/file_ops`, no host switch |
@@ -82,6 +82,12 @@ New files (N) and edited existing files (E). Everything else is reused unchanged
 | `src/lib/nogc_sync_mut/storage/storage_view_v1.spl` | E | Add `storage_view_v1_base_entries` (read-only listing) |
 | `src/lib/nogc_sync_mut/storage/immutable_store_v1.spl` | E | Add `immutable_store_v1_link_object` |
 | `src/lib/nogc_sync_mut/container/pure_runtime_v1.spl` | N | Host-neutral runtime |
+| `src/lib/common/contracts/container/pure_sandbox_observed_v1.spl` | N | `SosixContainSupportV1` + evidence -> shared `SandboxObservedCapabilityV1` |
+| `src/lib/common/contracts/container/contained_lifecycle_v1.spl` | N (extracted) | Attempt state machine moved out of `seatbelt_provider_v1` (§9) |
+| `src/lib/common/container_policy/attempt_dir_plan_v1.spl` | N (extracted) | Attempt directory plan moved out of `seatbelt_provider_v1` (§9) |
+| `src/lib/common/contracts/container/sandbox_canary_v1.spl` | N (extracted) | Canary plan/result/status moved out of `seatbelt_capabilities_v1` (§9) |
+| `src/lib/nogc_async_mut/container/providers/macos/{seatbelt_provider_v1,seatbelt_capabilities_v1}.spl` | E | Forward to the extracted modules; public names and error strings unchanged |
+| `src/lib/common/contracts/container/sandbox_capability_v1.spl` | E | Admit backend id `simple-pure-process` beside `macos-seatbelt-process` |
 
 Reused as is: `capability_report_v1`, `lifecycle_journal_v1`, `runtime_v1`
 (phases and `RuntimeOperationV1`), `storage_view_v1` create/save/load/destroy,
@@ -91,7 +97,8 @@ the whole suspended-create/job/kill-on-close/stdio/poll/cancel/collect sequence 
 and (once landed) lane E's `windows_memory_cap_probe_v1` as the only source of the
 Windows `memory_hard_limit` verdict.
 
-Not touched in increment 1: `api_v2.spl`, `service_v2.spl`, every `providers/**` leaf.
+Not touched in increment 1: `api_v2.spl`, `service_v2.spl`, and every
+`providers/**` leaf except the two macOS files S0 turns into forwards.
 
 ## 4. SOSIX extensions
 
@@ -343,6 +350,7 @@ pub struct PureContainerSpecV1:
     identity: text
     network: text
     requirement: ContainerCapabilityRequirementV1
+    extra_grants: [PlannedGrantV1]     # shared filesystem_plan_v1 grants beyond lower/upper
 
 pub struct PureContainerRunV1:
     status: text                       # "exited" | "rejected" | "cleanup-unproven"
@@ -362,6 +370,19 @@ journal `stopped` -> remove `lower/`, release pin, `storage_view_v1_destroy` ->
 journal `destroyed`. Every failure after `created` walks the journal's cleanup
 actions; `Unknown` admission returns `cleanup-unproven` and keeps the journal.
 
+The runtime owns no private state machine, directory layout or grant model:
+
+- phase changes go through `contained_lifecycle_next_v1` (the machine the macOS
+  Seatbelt leaf already uses) and are projected to `runtime_v1` phases;
+- `upper/` is laid out by `container_attempt_dir_plan_v1` (`home`, `tmp`,
+  `output`, `workspace`), and `USERPROFILE`/`TEMP`/`HOME`/`TMPDIR` point there;
+- `extra_grants` are `PlannedGrantV1` values from `filesystem_plan_v1`. A grant
+  with `Write` becomes a `writable_dirs` entry, any other a `readonly_dirs`
+  entry. Overlap with a protected root is already refused by that planner;
+- when the caller holds a `SandboxPolicyV1`, admission also runs the shared
+  `sandbox_requirements_match_v1` against
+  `pure_container_observed_capability_v1(support, evidence)`.
+
 Async wiring into `api_v2.spl` and a `SimpleContainerOwnerV2` case is increment 2.
 
 ## 8. Risks
@@ -376,3 +397,88 @@ Async wiring into `api_v2.spl` and a `SimpleContainerOwnerV2` case is increment 
   reads the setting back and refuses on mismatch.
 - `storage_view_v1` open items (junction swap between walk and open, stale handle
   after destroy) apply unchanged to `lower/` creation.
+
+## 9. Shared vs per-host
+
+Reviewed: `providers/macos/**`, `common/container_policy/**`, the portable
+contracts under `common/contracts/container/`, `src/os/services/container/**`,
+`src/os/kernel/loader/container_namespace.spl`, `src/os/kernel/ipc/cspace_spawn.spl`,
+`src/os/kernel/scheduler/cspace_delegation.spl`, `src/os/sosix/process_launch_provider_v1.spl`.
+"Shared" means one module that the Windows, macOS and SimpleOS routes all call.
+Code moves; it is never copied. Extraction is lane S0 in the plan.
+
+### Already host-neutral: reuse unchanged
+
+| File | Verdict | Reason |
+|---|---|---|
+| `common/contracts/container/filesystem_policy_v1.spl` | shared | Its model is "access isolation over real host paths, not namespace virtualization", which is the Windows restricted-token model |
+| `common/container_policy/filesystem_plan_v1.spl` | shared | Pure grant/deny planner; `canonical_path_within_v1` already takes `case_insensitive`, as NTFS needs |
+| `common/container_policy/requirements_match_v1.spl`, `diagnostics_v1.spl` | shared | Policy-vs-observed admission with stable diagnostics |
+| `common/contracts/container/sandbox_capability_v1.spl` | shared, one edit | `SandboxObservedCapabilityV1` and `SandboxPolicyV1` are portable, but only the Seatbelt backend id is named. S0 adds `simple-pure-process`. The `SCMAC-*` codes and the `simple-container-seatbelt-policy-v1` schema id stay, because renaming breaks stored policies |
+| `common/container_policy/sandbox_policy_decode_v1.spl`, `endpoint_network_decode_v1.spl` | shared | Strict SDN decoders; no host call |
+| `common/contracts/container/{capability_report_v1,lifecycle_journal_v1,runtime_v1,host_capability_v1}.spl` | shared | Already used by every leaf |
+| `common/oci/bundle_check_v1.spl` | shared | SimpleOS `oci_import` already delegates to it |
+| `common/storage/object_record_v1.spl`, `common/hash/hash_policy_v1.spl` | shared | Object identity for the hosted store and the SimpleOS layer store |
+
+### macOS
+
+| File | Verdict | Reason |
+|---|---|---|
+| `seatbelt_provider_v1.spl`: `seatbelt_lifecycle_next_v1`, `seatbelt_runtime_phase_v1`, state constants | extract to `contained_lifecycle_v1.spl` | Nothing in the machine is Darwin-specific. The Seatbelt names stay as forwards that keep the `seatbelt-` error prefix |
+| `seatbelt_provider_v1.spl`: `SeatbeltAttemptDirPlanV1`, `seatbelt_attempt_key_v1`, `seatbelt_attempt_dir_plan_v1` | extract to `attempt_dir_plan_v1.spl` | Layout and key rules are neutral. The Darwin `sun_path` 103-byte check stays in the Seatbelt forward |
+| `seatbelt_provider_v1.spl`: `MacOsSeatbeltAdapterV1`, launch plan, attempt policy | per-host | Seatbelt effect ordering and SBPL grants |
+| `seatbelt_capabilities_v1.spl`: canary plan/result types, expected-vs-observed status | extract to `sandbox_canary_v1.spl` | "Qualified only when every planned canary has a recorded native result" is the rule Windows needs too |
+| `seatbelt_capabilities_v1.spl`: the fixed Seatbelt canary list, manifest, probe transcript parser | per-host | Darwin build, helper digest and profile digest are Seatbelt facts |
+| `seatbelt_profile_v1.spl` | per-host | SBPL emitter. It is the macOS counterpart of the Windows token + label step; both consume the same `PlannedGrantV1` list |
+| `executable_preflight_v1.spl` | per-host | Mach-O. A Windows PE preflight would be its sibling behind the same `RuntimeValidationV1` |
+| `native_admission_v1.spl`, `native_sandbox_provider_v1.spl` | per-host | Signed App Sandbox helper route, a different engine (`macos-native-sandbox-v1`) |
+| `worker_protocol_v1.spl` | per-host for now | The HMAC frame protocol is neutral, but the pure backend launches in-process and has no worker. Extract when a second consumer exists |
+| `sosix/darwin_sandbox_v1.spl` | per-host | Becomes the body the `sosix/macos/containment_v1.spl` variant calls (lane N3) |
+
+### SimpleOS
+
+| File | Verdict | Reason |
+|---|---|---|
+| `os/services/container/runtime_provider_v1.spl`, `container_runtime.spl` | per-host | Scheduler-task launch with a kernel-supplied context. They become the body of the `sosix/simpleos/containment_v1.spl` variant (lane N4) |
+| `os/sosix/process_launch_provider_v1.spl` | per-host | Existing SimpleOS SOSIX launch adapter; N4 composes it |
+| `os/services/container/container_manager.spl` | per-host | Userland ECS policy owner. Its `ResourceDomain {cpu, mem, io, pids}` is the same quantity set as `SosixContainLimitsV1`; N4 converts at the variant boundary, with no second limits type |
+| `os/kernel/loader/container_namespace.spl` | per-host; duplicate logic removed in N4 | Kernel enforcement stays MDSOC-only. `container_view_allows_path` is a second path-prefix test beside `canonical_path_within_v1`; N4 makes it call the shared function after confirming identical boundary behaviour |
+| `os/services/container/container_storage.spl` | per-host | In-memory layer/COW/GC model with no host filesystem. Shares identity through `object_record_v1` and `hash_policy_v1`, not through code |
+| `os/services/container/oci_import.spl` | per-host edge | Already a thin adapter over shared `bundle_check_v1` |
+| `os/kernel/ipc/cspace_spawn.spl`, `os/kernel/scheduler/cspace_delegation.spl` | per-host | Capability-space attenuation is the SimpleOS enforcement mechanism; no hosted OS has an equivalent. It is how a SimpleOS variant can affirm confinement flags the hosted variants cannot |
+| `os/kernel/replay/checkpoint/container_{checkpoint,restore}.spl` | per-host | Only SimpleOS can affirm `process_checkpoint` |
+| `os/services/container/macos_simpleos_guest_dispatch_v1.spl`, `common/contracts/container/guest_v1.spl`, `doc/04_architecture/macos_simpleos_guest_container.md` | superseded | VM route rejected 2026-09-27; not evidence for any backend here |
+
+### Result
+
+```text
+SandboxPolicyV1 -> filesystem_plan_v1 -> PlannedGrantV1[]       shared
+contained_lifecycle_v1, attempt_dir_plan_v1, sandbox_canary_v1  shared (extracted from macOS)
+capability_report_v1, lifecycle_journal_v1, runtime_v1          shared
+                |
+  windows: token + label     macos: SBPL profile     simpleos: cspace + namespace view
+```
+
+## 10. Docker sibling backend on Windows
+
+Docker is installed on this host (engine 29.10.1), so `providers/windows/docker_*`
+with backend `windows-docker-process` is a runnable sibling. The two Windows
+backends share the contract, share no code below it, and do not replace each other:
+
+| | `simple-pure-process` | `windows-docker-process` |
+|---|---|---|
+| `isolation_kind` | `native-sandbox` | `native-container` (HCS process isolation) |
+| Network / PID namespace | no | yes |
+| Needs | nothing installed | Docker service, a Windows base image, engine authority |
+| Shared contract | `ContainerCapabilityReportV1`, `ContainerCapabilityRequirementV1`, `runtime_v1` phases, `lifecycle_journal_v1` | the same |
+
+Selection is data, not an OS `if`. The host variation supplies the list of
+backends that exist on that OS (Windows: pure, Docker; Linux: pure, Podman OCI;
+macOS: pure, Seatbelt, App Sandbox; FreeBSD: pure, jail; SimpleOS: kernel). Each
+backend yields a capability report. The caller's requirement is checked against
+each with `container_capability_v1_admission_reason`; the first admitted backend
+in the caller's stated preference order runs, and no admitted backend is a
+refusal. A workload that requires `native-container` therefore lands on Docker
+on Windows and is refused by the pure backend, with no special case. The
+selector (`backend_select_v1`, one `@when(os=)` import switch for the candidate
+list) is increment 2, lane A1.
