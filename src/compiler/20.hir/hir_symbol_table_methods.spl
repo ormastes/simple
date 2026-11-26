@@ -10,6 +10,13 @@ use std.env.{env_get}
 
 # Stage 3 closure must bind the runtime symbol directly for scope lookup.
 extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool
+@unsafe(reason: "observe whether a transient scope is active before re-homing Scope(0)", capabilities: [ffi])
+extern fn rt_transient_array_scope_state_v1() -> i64
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _hir_scope0_transient_active_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _hir_scope0_transient_active_v1() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_state_v1() == 1
 
 fn _hir_symbol_owner_module(path: text) -> text:
     hir_symbol_owner_module(path)
@@ -84,7 +91,29 @@ impl SymbolTable:
         val version: i64 = scope.binding_versions_v1[name]
         version
 
+    pub me rehome_root_scope_for_active_transient_v1():
+        """Re-allocate Scope(0) inside the active transient scope so graph walks
+        from `scopes` or `HirModule` descend into `Scope(0).binding_versions_v1`
+        even when `SymbolTable.new()` or `reset_module()` ran before
+        `rt_transient_array_scope_begin()`."""
+        if not _hir_scope0_transient_active_v1():
+            return
+        if not self.scopes.has(0):
+            return
+        val root: Scope = self.scopes[0]
+        self.scopes[0] = Scope(
+            id: root.id,
+            parent: root.parent,
+            kind: root.kind,
+            symbols: root.symbols,
+            binding_versions_v1: root.binding_versions_v1
+        )
+
     me advance_binding_version_v1(scope_id: i64, name: text):
+        if scope_id == 0 and self.scopes.has(0):
+            val root: Scope = self.scopes[0]
+            if root.binding_versions_v1.len() == 0:
+                self.rehome_root_scope_for_active_transient_v1()
         val previous = self.binding_version_v1(scope_id, name)
         if previous < 0 or previous == 9223372036854775807:
             panic("lexical binding version is invalid or exhausted")

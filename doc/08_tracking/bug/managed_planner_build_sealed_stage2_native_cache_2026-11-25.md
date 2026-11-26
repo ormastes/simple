@@ -1,6 +1,10 @@
 # Managed planner build fails on warm rerun: SIMPLE_HIR_CACHE_DIR points into sealed stage2-native-cache (2026-11-25)
 
-Status: OPEN (local workaround applied; harness fix pending)
+Status: FIXED by PR #11605 (option 1: `adm_run_planner_build` exports
+`SIMPLE_HIR_CACHE_DIR="$adm_dir/planner-hir-cache"`). The local chmod
+workaround applied to pinned-e803fa9762cd is retired: that pinned tree was
+superseded by pinned-008177e5a830 (lane v7, 2026-11-26) and is no longer
+used by any lane, so there is nothing left to re-seal.
 Lane: `--full-bootstrap --stop-after-stage2 --produce-managed-receipt=self-host-convergence-check`
 on release/1.0.0 @ e803fa9762c (aarch64-unknown-linux-gnu, llvm)
 
@@ -35,14 +39,15 @@ pool tries to create its invocation ledger (`queue-<pid>-N`,
 fails. The cold path never sees this because the seal happens after the
 first planner build.
 
-## Workaround (this session, to be removed)
+## Workaround (applied 2026-11-25, retired 2026-11-26)
 
 `chmod -R u+w <output>/stage3/<triple>/stage2-native-cache` before the warm
-rerun. Content is untouched (mode bits only); the worker-pool ledger dirs
-are transient. Tracked here per the bug-linked workaround policy; remove
-once the harness fix lands.
+rerun. Content was untouched (mode bits only); the worker-pool ledger dirs
+are transient. No longer needed: the harness fix makes the planner build
+write its ledger outside the sealed cache, and the affected pinned tree is
+out of service.
 
-## Proper fix (pending)
+## Proper fix (landed, PR #11605)
 
 The planner build must not write into the sealed stage2 cache. Either:
 

@@ -1058,6 +1058,18 @@ run_task() {
         fi
         SIMPLE_NATIVE_BUILD_TARGET="$target_c_platform" SIMPLE_BINARY="$compiler_snapshot"
         SIMPLE_PROJECT_ROOT="$source_root" SIMPLE_ABI_POLICY=v1
+        # Bind the admitted Stage2 receipt so the compiler's producer identity
+        # is the stable admitted one (native_build_admitted_abi_identity)
+        # instead of per-process:half-claimed-admission. Without it every unit
+        # child gets a fresh pid-keyed identity, the native object cache can
+        # never hit across units or reruns, and the full-CLI row needs ~18 h
+        # against its 14400 s timeout (lane v6, 2026-11-25: 911/4159 modules
+        # in 4 h). The stage3 lanes already pass this receipt
+        # (stage3-native-build-worker.sh, resume-stage3-from-admitted.sh).
+        SIMPLE_ABI_ADMISSION_RECEIPT=
+        if [ -f "$(dirname "$compiler")/admission.env" ] && [ ! -L "$(dirname "$compiler")/admission.env" ]; then
+          SIMPLE_ABI_ADMISSION_RECEIPT="$(dirname "$compiler")/admission.env"
+        fi
         SIMPLE_RUNTIME_RISCV64_VECTOR=0
         # Per-task watchdog scoping: artifact builds run in the campaign's
         # inherited session alongside co-resident sibling tool builds; without
@@ -1105,7 +1117,7 @@ run_task() {
            SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE_DIR \
            SIMPLE_NATIVE_BUILD_TARGET SIMPLE_BINARY \
            SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_RT_OBJ_CACHE_DIR \
-           SIMPLE_PROJECT_ROOT SIMPLE_ABI_POLICY SIMPLE_RUNTIME_RISCV64_VECTOR \
+           SIMPLE_PROJECT_ROOT SIMPLE_ABI_POLICY SIMPLE_ABI_ADMISSION_RECEIPT SIMPLE_RUNTIME_RISCV64_VECTOR \
            SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP
          bootstrap_phase_c_apply_frontend_policy || exit 88
         # Exact row environment (bootstrap-fable-17, 2026-11-12): the HIR

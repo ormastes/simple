@@ -37,7 +37,6 @@ struct MirLowering:
     """Lowers HIR to MIR."""
     builder: MirBuilder
     symbols: SymbolTable
-    local_map: Dict<i64, LocalId>
     # Native-safe authoritative bindings. Stage4 cannot reliably persist
     # mutations to a Dict stored inside MirLowering.
     local_symbol_ids: [i64]
@@ -685,6 +684,14 @@ struct MirLowering:
     # Complete text values at Simple declarations; C declarations retain the
     # existing pointer adaptation. Keys use the same canonical owner as links.
     callable_text_value_abi: Dict<text, bool> = {}
+    # Named-call parameter rows for providers held only as module surfaces
+    # (PM3 unit lane). Key: bare callable name and "{owner}.{name}"; value:
+    # "name1,name2|101" (param names, then one default flag char per param).
+    # HIR-prescan registry rows stay authoritative: these are consulted only
+    # when bootstrap_fn_param_defaults_lookup misses. Ambiguous keys (two
+    # surface providers, different shapes) refuse in surface_fn_param_ambig_v1.
+    surface_fn_param_rows_v1: Dict<text, text> = {}
+    surface_fn_param_ambig_v1: Dict<text, bool> = {}
     # is_entry_module of the lower_module call in progress. Threaded to the
     # per-function MIR naming fallback instead of relying on its default
     # argument (see function_lowering.spl).
@@ -1015,8 +1022,6 @@ impl MirLowering:
             default_frame = default_frame - 1
         if symbol_id < 0 or local.id < 0:
             return
-        # @workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03 reason=stage2-compiled code round-trips the id through the [i64] index inconsistently (symbol 8 was hashed into bucket 1 of 16 while the lookup probed bucket 8, dump veh_13196); mirror every binding into the runtime-canonicalized Dict so find_local can resolve on an index miss
-        self.local_map[symbol_id] = local
         # A `var` bound straight to its initializer's local (struct/array
         # paths) must not keep that local's presence bit.
         if self.presence_word_locals.contains(local.id) and self.symbol_is_reassignable(symbol_id):
@@ -1053,11 +1058,6 @@ impl MirLowering:
             if self.verification_default_frames[default_frame].contains(symbol_id):
                 return self.verification_default_frames[default_frame][symbol_id]
             default_frame = default_frame - 1
-        # @workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03 reason=see bind_local; the Dict mirror is consulted BEFORE the hashed [i64] index because under the frozen stage2 an index HIT can be a silent alias (ids read back decoded twice, 8 -> 1, so `local_symbol_ids[slot] == symbol_id` matches another symbol's binding) which a mirror asked only after a miss can never catch; every bind_local writes the mirror first, so it is authoritative. The LocalId is bound to a typed local rather than returned from the class-field Dict bracket-read (known frozen-stage2 shape). An entry with id < 0 is the rollback tombstone written by restore_mirror_bindings (Dict.remove has engine-dependent semantics) and means "absent": fall through to the index.
-        if self.local_map.has(symbol_id):
-            val mirrored: LocalId = self.local_map[symbol_id]
-            if mirrored.id >= 0:
-                return mirrored
         val slot = self.local_symbol_slot(symbol_id)
         if slot >= 0:
             return self.local_symbol_values[slot]
@@ -1066,22 +1066,6 @@ impl MirLowering:
             if authoritative_slot >= 0 and authoritative_slot < self.local_symbol_values.len():
                 return self.local_symbol_values[authoritative_slot]
         LocalId(id: -1)
-
-    # @workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03 reason=with the mirror consulted first, every site that rolls the parallel arrays back wholesale (lambda beta-reduction, inline lambda, comprehension variable) must roll the mirror back too, or the enclosing scope would keep resolving to the inner binding. Sites record `mirror_binding` for each symbol before they bind it and call `restore_mirror_bindings` after restoring the arrays; an absent entry round-trips as LocalId(id: -1), which find_local treats as absent.
-    fn mirror_binding(symbol_id: i64) -> LocalId:
-        if self.local_map.has(symbol_id):
-            val mirrored: LocalId = self.local_map[symbol_id]
-            return mirrored
-        LocalId(id: -1)
-
-    me restore_mirror_bindings(syms: [i64], prevs: [LocalId]):
-        # Newest first, so a symbol bound twice inside the window ends on
-        # the value it had before the window opened.
-        var j = syms.len() - 1
-        while j >= 0:
-            if j < prevs.len():
-                self.local_map[syms[j]] = prevs[j]
-            j = j - 1
 
     fn hir_type_mentions_type_param(ty: HirType, symbols: SymbolTable) -> bool:
         """True when a type parameter occurs anywhere in `ty`, under either

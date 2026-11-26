@@ -1969,7 +1969,6 @@ impl MirLowering:
             if default_symbol == None:
                 self.error("match default binding has no resolved symbol", None)
             else:
-                self.local_map[default_symbol.id] = scrut_local
                 self.bind_local(default_symbol.id, scrut_local)
         val def_result = self.lower_block_expected(default_body, expected_type)
         var b_d2 = self.builder
@@ -2113,7 +2112,6 @@ impl MirLowering:
             if default_symbol == None:
                 self.error("match default binding has no resolved symbol", None)
             else:
-                self.local_map[default_symbol.id] = scrut_local
                 self.bind_local(default_symbol.id, scrut_local)
         val def_result = self.lower_block_expected(default_body, expected_type)
         var b_def = self.builder
@@ -2862,6 +2860,10 @@ impl MirLowering:
                 val receiver_type_for_rti = self.method_call_receiver_declared_type_v1(receiver)
                 val (rti_answered, rti_type) = self.rti_enum_match_subject_type(expr, receiver_type_for_rti)
                 if rti_answered:
+                    if val present_rti = rti_type:
+                        if self.hir_type_mentions_type_param(present_rti, self.symbols) and receiver_type_for_rti != None:
+                            if val method_id = wa_method_resolution_symbol_id(resolution):
+                                return self.resolved_method_return_hir_type_v1(method_id, receiver_type_for_rti)
                     return rti_type
                 # ROOT-FIX (native_try_op_on_option_silent_wrong_2026-07-14):
                 # the `resolution.get_symbol_id()` arm below was landed by
@@ -2891,7 +2893,7 @@ impl MirLowering:
                 # lower the call itself, without depending on the
                 # inference-only `resolution` field.
                 if val method_id = wa_method_resolution_symbol_id(resolution):
-                    return self.resolved_call_hir_return_type(method_id)
+                    return self.resolved_method_return_hir_type_v1(method_id, receiver_type_for_rti)
                 # Builtin Option/Result `.unwrap()` / `.expect(msg)` has no
                 # method symbol on the --entry path; its type is the
                 # receiver's own declared payload.
@@ -2915,12 +2917,12 @@ impl MirLowering:
                     match found_receiver_type.kind:
                         case Named(owner_symbol, _):
                             if val owner_method = self.symbols.lookup_method_in_type(owner_symbol, method):
-                                return self.resolved_call_hir_return_type(owner_method)
+                                return self.resolved_method_return_hir_type_v1(owner_method, Some(found_receiver_type))
                             # Trait-object receiver (`self.codegen.compile_module(m)`
                             # with `codegen: Codegen`): the declared trait
                             # signature is the result type every impl shares.
                             if val trait_method = self.symbols.lookup_trait_method(owner_symbol, method):
-                                if val trait_method_ret = self.resolved_call_hir_return_type(trait_method):
+                                if val trait_method_ret = self.resolved_method_return_hir_type_v1(trait_method, Some(found_receiver_type)):
                                     return Some(trait_method_ret)
                             # IMPORTED trait: this table has the trait type but
                             # no method symbols. Use the provider's declared
@@ -2933,7 +2935,7 @@ impl MirLowering:
                     if struct_name != "":
                         val method_key = "{struct_name}::{method}"
                         if self.struct_method_syms != None and self.struct_method_key_present_v1(method_key):
-                            return self.resolved_call_hir_return_type(self.struct_method_syms[method_key])
+                            return self.resolved_method_return_hir_type_v1(self.struct_method_syms[method_key], Some(found_receiver_type))
                 # Static-receiver symbol-table fallback (cross-module inline
                 # class methods -- native_build_cross_module_result_payload_
                 # struct_name_collision_2026-08-09 mechanism #2):
@@ -2956,7 +2958,7 @@ impl MirLowering:
                 if val recv_type_sym = static_recv_sym:
                     val fb = self.symbols.lookup_method_in_type(recv_type_sym, method)
                     if val fallback_method_id = fb:
-                        val rt = self.resolved_call_hir_return_type(fallback_method_id)
+                        val rt = self.resolved_method_return_hir_type_v1(fallback_method_id, receiver_type_for_rti)
                         return rt
             case HirExprKind.Unwrap(unwrap_base):
                 return self.enum_match_unwrapped_type(unwrap_base)
@@ -3363,6 +3365,8 @@ impl MirLowering:
                             if val instantiated = expression_type:
                                 if instantiated != None and hir_type_instantiates_to(retained, instantiated) and not self.function_signature_ownership_proof(instantiated, self.symbols).contains("!unknown"):
                                     return expression_type
+                                if instantiated != None and hir_type_instantiates_to(instantiated, retained) and not self.function_signature_ownership_proof(retained, self.symbols).contains("!unknown"):
+                                    return Some(retained)
                             if (_sffi_env_get("SIMPLE_RTI_DIAGNOSTICS") ?? "") == "1":
                                 # Preserve the rejecting boundary while retaining
                                 # enough semantic evidence to locate a lost owner.
@@ -3652,7 +3656,6 @@ impl MirLowering:
                     self.decode_deep_binding_slot_v1(value_local, pat, slot_hir_type)
                 else:
                     value_local
-                self.local_map[bind_sym.id] = bound_value
                 self.bind_local(bind_sym.id, bound_value)
             case Literal(lit_expr):
                 self.emit_deep_literal_test(value_local, lit_expr, next_block, pat.span, typed_value, nil_optional_slot)
@@ -4138,7 +4141,6 @@ impl MirLowering:
                     irrefutable = true
                 case Binding(bind_sym, _):
                     irrefutable = true
-                    self.local_map[bind_sym.id] = scrut_local
                     self.bind_local(bind_sym.id, scrut_local)
                 case Literal(lit):
                     match lit.kind:
@@ -4270,7 +4272,6 @@ impl MirLowering:
         scrutinee itself (it was previously left unbound)."""
         match arm.pattern.kind:
             case Binding(catch_sym, _):
-                self.local_map[catch_sym.id] = scrut_local
                 self.bind_local(catch_sym.id, scrut_local)
             case _: ()
 
@@ -4399,7 +4400,6 @@ impl MirLowering:
         # never an unbound local (same as the re-own loop below).
         for reowned_sym_id in reowned_binding_syms:
             val reowned_id: i64 = reowned_sym_id
-            self.local_map[reowned_id] = scrut_local
             self.bind_local(reowned_id, scrut_local)
         val scrutinee_enum_type = self.enum_match_subject_type(scrutinee, scrut_local.id)
         var enum_semantic_capture: i64 = -1
@@ -4556,7 +4556,6 @@ impl MirLowering:
                             # HIR defined this symbol as a binding; keep it bound
                             # to the subject (like bind_catch_all_arm) so a body
                             # that names it does not read an unbound local.
-                            self.local_map[own_sym.id] = scrut_local
                             self.bind_local(own_sym.id, scrut_local)
                             own_pat = HirPattern(
                                 kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: own_arm.pattern.span), own_name, None),
@@ -5379,12 +5378,6 @@ impl MirLowering:
                     if result_match_candidate:
                         if enum_variants[ci] == "Ok": result_ok_payload = bound_payload
                         elif enum_variants[ci] == "Err": result_err_payload = bound_payload
-                    self.local_map[bind_syms[0].id] = bound_payload
-                    # 033d79338a1 switched identifier resolution to find_local
-                    # (local_symbol_ids/values via bind_local); enum-match
-                    # binding sites still wrote only local_map, so arm bodies
-                    # saw "undefined variable" for the bound payload. Mirror the
-                    # write into the new binding store.
                     self.bind_local(bind_syms[0].id, bound_payload)
                     var result_payload_is_text = false
                     if result_payload_type != None:
@@ -5428,7 +5421,6 @@ impl MirLowering:
                         val text_res = bp_text.emit_call(text_op, [mir_operand_copy(pl)], MirType(kind: MirTypeKind.Opaque("str")))
                         self.builder = bp_text
                         if val text_local = text_res:
-                            self.local_map[bind_syms[0].id] = text_local
                             self.bind_local(bind_syms[0].id, text_local)
                     elif exact_optional_record:
                         # A failed exact-owner check already recorded a fatal
@@ -5588,10 +5580,8 @@ impl MirLowering:
                             val ttext_res = bp_ttext.emit_call(ttext_op, [mir_operand_copy(gl)], MirType(kind: MirTypeKind.Opaque("str")))
                             self.builder = bp_ttext
                             if val ttext_local = ttext_res:
-                                self.local_map[bind_syms[fi].id] = ttext_local
                                 self.bind_local(bind_syms[fi].id, ttext_local)
                         else:
-                            self.local_map[bind_syms[fi].id] = bound_slot
                             self.bind_local(bind_syms[fi].id, bound_slot)
                     fi = fi + 1
             # Do not copy HirBlock composites through another pushed array:
@@ -7651,22 +7641,8 @@ impl MirLowering:
         acc1
 
     fn lambda_binding_local(symbol_id: i64) -> LocalId:
-        """Resolve a lambda's free variable to its live local.
-
-        Identifier resolution moved to `find_local` (local_symbol_ids via
-        bind_local, 033d79338a1) but the whole lambda machinery -- capture
-        snapshot, beta-reduction, lift -- still read and wrote only the dead
-        `local_map`, so every capturing lambda on the native path either saw
-        "undefined variable" or fell through to E-MIR-EXPR-Lambda. Consult
-        the authoritative store first, then the legacy map. Bug
-        native_capturing_lambda_closure_conversion_2026-08-22.
-        """
-        val found = self.find_local(symbol_id)
-        if found.id >= 0:
-            return found
-        if self.local_map.has(symbol_id):
-            return self.local_map[symbol_id]
-        LocalId(id: -1)
+        """Resolve a lambda's free variable to its live local."""
+        self.find_local(symbol_id)
 
     me snapshot_lambda_capture(lam: HirExpr) -> Dict<i64, LocalId>:
         """Bind-time by-value capture snapshot for `val f = \\x: ...`.
@@ -7745,9 +7721,6 @@ impl MirLowering:
                 val saved_ids = self.local_symbol_ids
                 val saved_values = self.local_symbol_values
                 val saved_index_slots = self.local_symbol_index_slots
-                # @workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03 reason=find_local now consults the local_map mirror before the hashed index, so the overlay and param bindings that bind_local writes into the mirror below must be rolled back after the body is lowered (the parallel arrays are restored wholesale; the mirror has no snapshot), or the enclosing scope would keep resolving the free variable to the frozen capture
-                var rollback_syms: [i64] = []
-                var rollback_prev: [LocalId] = []
                 if self.lambda_capture_snapshot.has(sid):
                     # Re-derive the free-variable list instead of iterating
                     # `snap.keys()`: under the seed interpreter dict keys come
@@ -7763,8 +7736,6 @@ impl MirLowering:
                     while sfi < snap_free.len():
                         val snap_sid = snap_free[sfi]
                         if snap.has(snap_sid):
-                            rollback_syms = rollback_syms.push(snap_sid)
-                            rollback_prev = rollback_prev.push(self.mirror_binding(snap_sid))
                             self.bind_local(snap_sid, snap[snap_sid])
                         sfi = sfi + 1
                 var pi = 0
@@ -7772,15 +7743,12 @@ impl MirLowering:
                     if pi < arg_locals.len():
                         val pid = mir_expr_symbol_id_value(params[pi].symbol)
                         if pid >= 0:
-                            rollback_syms = rollback_syms.push(pid)
-                            rollback_prev = rollback_prev.push(self.mirror_binding(pid))
                             self.bind_local(pid, arg_locals[pi])
                     pi = pi + 1
                 val result = self.lower_expr(body)
                 self.local_symbol_ids = saved_ids
                 self.local_symbol_values = saved_values
                 self.local_symbol_index_slots = saved_index_slots
-                self.restore_mirror_bindings(rollback_syms, rollback_prev)
                 Some(result)
             case _:
                 None
@@ -7790,23 +7758,17 @@ impl MirLowering:
         val saved_ids = self.local_symbol_ids
         val saved_values = self.local_symbol_values
         val saved_index_slots = self.local_symbol_index_slots
-        # @workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03 reason=roll the local_map mirror back with the arrays (see try_inline_lambda_call)
-        var rollback_syms: [i64] = []
-        var rollback_prev: [LocalId] = []
         var pi = 0
         while pi < params.len():
             if pi < arg_locals.len():
                 val pid = mir_expr_symbol_id_value(params[pi].symbol)
                 if pid >= 0:
-                    rollback_syms = rollback_syms.push(pid)
-                    rollback_prev = rollback_prev.push(self.mirror_binding(pid))
                     self.bind_local(pid, arg_locals[pi])
             pi = pi + 1
         val result = self.lower_expr(body)
         self.local_symbol_ids = saved_ids
         self.local_symbol_values = saved_values
         self.local_symbol_index_slots = saved_index_slots
-        self.restore_mirror_bindings(rollback_syms, rollback_prev)
         result
 
     me lower_iife_call(params: [HirParam], body: HirExpr, args: [HirCallArg]) -> LocalId:
@@ -9755,9 +9717,7 @@ impl MirLowering:
         # try_inline_lambda_call below keeps beta-reducing it as before.
         if is_direct:
             val callee_sid = mir_expr_symbol_id_value(direct_symbol)
-            if self.local_map.has(callee_sid) and not self.lambda_bindings.has(callee_sid):
-                is_direct = false
-            elif self.find_local(callee_sid).id >= 0 and not self.lambda_bindings.has(callee_sid):
+            if self.find_local(callee_sid).id >= 0 and not self.lambda_bindings.has(callee_sid):
                 is_direct = false
 
         # A module-global function-pointer SLOT is not a call target bound at
@@ -10115,7 +10075,7 @@ impl MirLowering:
             if _sffi_enum_discriminant(arg_kind) == named_var_disc:
                 match arg_kind:
                     case HirExprKind.NamedVar(symbol, name):
-                        if not self.local_map.has(mir_expr_symbol_id_value(symbol)):
+                        if self.find_local(mir_expr_symbol_id_value(symbol)).id < 0:
                             val function_operand = self.named_function_operand(name)
                             if function_operand != None:
                                 arg_operands = arg_operands.push(function_operand.unwrap())
@@ -10154,8 +10114,8 @@ impl MirLowering:
                                 match arg_kind:
                                     case HirExprKind.NamedVar(ref_symbol, _):
                                         val ref_key = mir_expr_symbol_id_value(ref_symbol)
-                                        if self.local_map.has(ref_key):
-                                            val var_local = self.local_map[ref_key]
+                                        val var_local = self.find_local(ref_key)
+                                        if var_local.id >= 0:
                                             var b_mut_ref = self.builder
                                             val ref_local = b_mut_ref.emit_ref(MirPlace.local_place(var_local), MirBorrowKind.Mutable, MirType(kind: MirTypeKind.Ref(self.lower_type(ref_inner), true)))
                                             self.builder = b_mut_ref

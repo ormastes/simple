@@ -253,3 +253,17 @@ This is the implementation behind the `mail` skill. All but `smtp.bash` and `pop
 | `test/02_integration/app/mcp_native_stdio_protocol_test.py` | 30 | zero-ref test; may test live code |
 | `test/fixtures/database/sqlcipher4/gen_boundary_oracles.py` | 24 | cited only from doc/ or the baseline |
 | `test/scripts/test_prepare_mail_config_helper.py` | 52 | zero-ref test; may test live code |
+
+## Coordinator default decisions, applied 2026-11-26 (not owner-signed)
+
+- **(d) bootstrap scripts:** the 4 files are now exempted in
+  `scan_forbidden_extension_files` (same mechanism as the other bootstrap scripts), not renamed. Because they are
+  no longer scanned, their baseline rows (`resume-stage2/3/4`) were removed. A re-sealed row
+  would itself be reported stale once the path is exempt. The reason (bootstrap rule, `.claude/rules/bootstrap.md`) is recorded beside the
+  exemption. `stage3-native-build-worker.sh` had no baseline row. CLAUDE.md and `bootstrap.md` updated.
+- **Mail CLI `*.bash` (8 files):** baselined with exact hashes under the reason "mail skill runtime; port
+  tracked in todo", time-boxed to 2027-01-31; todo 467 tracks the port. The gate does not enforce the date.
+- **Likely-dead list (114 files above):** nothing deleted. Every row in the "Mentioned only in docs, or only by
+  stem" table is recorded as **owner-review**.
+- **CI:** the failing "Mail host fixtures" step is a missing producer variable, see
+  `mail_cli_portability_producer_unset_2026-11-26.md`.

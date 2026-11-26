@@ -1,0 +1,319 @@
+# StorageViewV1: host copy-on-write storage view over ImmutableStoreV1. Real temp
+# dirs under build/test-artifacts (never mocks): path policy, quota, volumes,
+# save/load, clone sharing, destroy, and the lifecycle journal.
+# Design: doc/05_design/platform/container/simple_container_improvement.md
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.storage.storage_view_v1.{ViewBytesV1, ViewFlagV1,
+    storage_view_v1_create, storage_view_v1_open, storage_view_v1_add_volume,
+    storage_view_v1_write, storage_view_v1_read, storage_view_v1_save, storage_view_v1_load,
+    storage_view_v1_clone, storage_view_v1_destroy}
+use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, StoreGenerationV1}
+use std.common.contracts.container.lifecycle_journal_v1.{lifecycle_journal_v1_decode,
+    LIFECYCLE_PHASE_V1_CREATED, LIFECYCLE_PHASE_V1_DESTROYED}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.storage.storage_view_v1.{_sv_merged_count_error}
+use app.io.file_ops.{path_absolute}
+
+fn _hex(b: [u8]) -> text:
+    var s = ""
+    val digits = "0123456789abcdef"
+    for x in b:
+        val v = x.to_i64()
+        s = s + digits[v / 16] + digits[v % 16]
+    s
+
+fn _temp(tag: text) -> text:
+    dir_create_all("build/test-artifacts")
+    val owned = secure_temp_dir_raw("build/test-artifacts", "sv-" + tag + "-")
+    expect(owned == "").to_equal(false)
+    path_absolute(owned).replace("\\", "/")
+
+fn _store(base: text) -> text:
+    val root = base + "/store"
+    expect(immutable_store_v1_init(root)).to_equal("")
+    root
+
+fn _cleanup(root: text):
+    val parent = path_absolute("build/test-artifacts").replace("\\", "/") + "/"
+    expect(root.starts_with(parent)).to_equal(true)
+    expect(dir_remove_all(root)).to_equal(true)
+
+fn _count_objects(root: text) -> i64:
+    var count: i64 = 0
+    val objects_dir = root + "/objects"
+    for shard in dir_list(objects_dir):
+        val shard_path = objects_dir + "/" + shard.trim()
+        if not is_dir(shard_path):
+            continue
+        for entry in dir_list(shard_path):
+            if entry.trim().ends_with(".obj"):
+                count = count + 1
+    count
+
+fn _new_view(base: text, store: text, id: text, quota: i64):
+    val made = storage_view_v1_create(store, base + "/views", id, "", StoreGenerationV1(0), ViewBytesV1(quota))
+    expect(made.reason).to_equal("")
+    expect(made.status).to_equal("ok")
+    made.view
+
+describe "storage_view_v1 path policy":
+    it "rejects unauthorized writes and leaves an outside sentinel unchanged":
+        val base = _temp("policy")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vol_dir = base + "/vol"
+        expect(dir_create_all(vol_dir)).to_equal(true)
+        val added = storage_view_v1_add_volume(view, "ro", vol_dir, ViewFlagV1(false))
+        expect(added.status).to_equal("ok")
+        val sentinel = base + "/views/v1/x"
+        expect(file_write_bytes(sentinel, "sentinel".bytes())).to_equal(true)
+        val payload = "evil".bytes()
+        val escapes = ["../x", "C:/x", "a\\b", "f:ads", "/abs", "a/../../x"]
+        for p in escapes:
+            val r = storage_view_v1_write(added.view, p, payload)
+            expect(r.status).to_equal("rejected")
+            expect(r.reason).to_equal("path-escape")
+        val unauthorized = ["CON", "con.txt", "a/NUL", "COM1", "lpt9.x", "", ".", "a//b", "a/", "a.", "a ", "a/./b"]
+        for p in unauthorized:
+            val r = storage_view_v1_write(added.view, p, payload)
+            expect(r.status).to_equal("rejected")
+            expect(r.reason).to_equal("path-unauthorized")
+        val ro = storage_view_v1_write(added.view, "ro/file.txt", payload)
+        expect(ro.status).to_equal("rejected")
+        expect(ro.reason).to_equal("volume-readonly")
+        expect(file_exists(vol_dir + "/file.txt")).to_equal(false)
+        val kept = file_read_regular_no_follow_bounded(sentinel, 100)
+        expect(kept.unwrap()).to_equal("sentinel")
+        expect(file_exists(base + "/views/v1/upper/evil")).to_equal(false)
+        _cleanup(base)
+
+    it "writes a writable volume through to the host dir":
+        val base = _temp("vol")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vol_dir = base + "/vol"
+        expect(dir_create_all(vol_dir)).to_equal(true)
+        val added = storage_view_v1_add_volume(view, "data", vol_dir, ViewFlagV1(true))
+        expect(added.status).to_equal("ok")
+        expect(storage_view_v1_write(added.view, "data/sub/f.txt", "hi".bytes()).status).to_equal("ok")
+        val back = storage_view_v1_read(added.view, "data/sub/f.txt")
+        expect(back.status).to_equal("ok")
+        expect(_hex(back.bytes)).to_equal(_hex("hi".bytes()))
+        # The meta survives a reopen, so the volume is still routed.
+        val reopened = storage_view_v1_open(store, base + "/views", "v1")
+        expect(reopened.status).to_equal("ok")
+        expect(storage_view_v1_read(reopened.view, "data/sub/f.txt").status).to_equal("ok")
+        _cleanup(base)
+
+describe "storage_view_v1 quota":
+    it "accepts an exact fit, rejects one more byte without touching disk, and delta-accounts overwrites":
+        val base = _temp("quota")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 10)
+        val fit = storage_view_v1_write(view, "a.txt", "0123456789".bytes())
+        expect(fit.status).to_equal("ok")
+        expect(fit.used.value).to_equal(10)
+        val over = storage_view_v1_write(view, "b.txt", "x".bytes())
+        expect(over.status).to_equal("rejected")
+        expect(over.reason).to_equal("quota-exceeded")
+        expect(file_exists(base + "/views/v1/upper/b.txt")).to_equal(false)
+        val replace = storage_view_v1_write(view, "a.txt", "abcdefghij".bytes())
+        expect(replace.status).to_equal("ok")
+        val grow = storage_view_v1_write(view, "a.txt", "abcdefghijk".bytes())
+        expect(grow.status).to_equal("rejected")
+        expect(grow.reason).to_equal("quota-exceeded")
+        val kept = storage_view_v1_read(view, "a.txt")
+        expect(_hex(kept.bytes)).to_equal(_hex("abcdefghij".bytes()))
+        _cleanup(base)
+
+    it "rejects a payload far beyond the quota and a negative quota":
+        val base = _temp("quota2")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 4)
+        var big: [u8] = []
+        for i in 0..4096:
+            big.push(65)
+        val r = storage_view_v1_write(view, "big.bin", big)
+        expect(r.status).to_equal("rejected")
+        expect(r.reason).to_equal("quota-exceeded")
+        val bad = storage_view_v1_create(store, base + "/views", "v2", "", StoreGenerationV1(0), ViewBytesV1(-1))
+        expect(bad.status).to_equal("rejected")
+        expect(bad.reason).to_equal("quota-invalid")
+        _cleanup(base)
+
+describe "storage_view_v1 destroy":
+    it "removes the upper, keeps saved root objects and volume dirs, and is idempotent":
+        val base = _temp("destroy")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vol_dir = base + "/vol"
+        expect(dir_create_all(vol_dir)).to_equal(true)
+        val added = storage_view_v1_add_volume(view, "data", vol_dir, ViewFlagV1(true))
+        expect(storage_view_v1_write(added.view, "data/keep.txt", "vol".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_write(added.view, "f.txt", "upper".bytes()).status).to_equal("ok")
+        val saved = storage_view_v1_save(added.view, "main", StoreGenerationV1(0))
+        expect(saved.status).to_equal("ok")
+        val objects_before = _count_objects(store)
+        val first = storage_view_v1_destroy(added.view)
+        expect(first.status).to_equal("ok")
+        expect(is_dir(base + "/views/v1/upper")).to_equal(false)
+        expect(_count_objects(store)).to_equal(objects_before)
+        expect(file_exists(vol_dir + "/keep.txt")).to_equal(true)
+        expect(file_exists(store + "/roots/main.sdn")).to_equal(true)
+        val second = storage_view_v1_destroy(added.view)
+        expect(second.status).to_equal("ok")
+        expect(storage_view_v1_open(store, base + "/views", "v1").reason).to_equal("view-destroyed")
+        expect(storage_view_v1_write(added.view, "z.txt", "z".bytes()).status).to_equal("rejected")
+        val journal_text = file_read_regular_no_follow_bounded(base + "/views/v1/journal.sdn", 65536)
+        expect(lifecycle_journal_v1_decode(journal_text.unwrap()).phase).to_equal(LIFECYCLE_PHASE_V1_DESTROYED)
+        _cleanup(base)
+
+    it "leaves the journal in phase created until destroy runs":
+        val base = _temp("journal")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val journal_text = file_read_regular_no_follow_bounded(base + "/views/v1/journal.sdn", 65536)
+        val journal = lifecycle_journal_v1_decode(journal_text.unwrap())
+        expect(journal.phase).to_equal(LIFECYCLE_PHASE_V1_CREATED)
+        expect(journal.container_id).to_equal("v1")
+        expect(journal.owned_paths.len()).to_equal(1)
+        expect(journal.owned_paths[0]).to_equal(base + "/views/v1/upper")
+        expect(is_dir(base + "/views/v1/upper")).to_equal(true)
+        expect(storage_view_v1_destroy(view).status).to_equal("ok")
+        expect(is_dir(base + "/views/v1/upper")).to_equal(false)
+        _cleanup(base)
+
+describe "storage_view_v1 save, load and clone":
+    it "round-trips bytes through save and load with an empty upper":
+        val base = _temp("saveload")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(view, "a/b.txt", "hello".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_write(view, "c.bin", "world".bytes()).status).to_equal("ok")
+        val saved = storage_view_v1_save(view, "main", StoreGenerationV1(0))
+        expect(saved.reason).to_equal("")
+        expect(saved.status).to_equal("ok")
+        expect(saved.generation.value).to_equal(1)
+        expect(saved.files.value).to_equal(2)
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        expect(loaded.reason).to_equal("")
+        expect(loaded.status).to_equal("ok")
+        expect(dir_list(base + "/views/v2/upper").len()).to_equal(0)
+        expect(_hex(storage_view_v1_read(loaded.view, "a/b.txt").bytes)).to_equal(_hex("hello".bytes()))
+        expect(_hex(storage_view_v1_read(loaded.view, "c.bin").bytes)).to_equal(_hex("world".bytes()))
+        expect(storage_view_v1_read(loaded.view, "nope").status).to_equal("missing")
+        # An upper write shadows the base; a second save merges over it.
+        expect(storage_view_v1_write(loaded.view, "c.bin", "WORLD".bytes()).status).to_equal("ok")
+        val again = storage_view_v1_save(loaded.view, "main", StoreGenerationV1(1))
+        expect(again.status).to_equal("ok")
+        expect(again.generation.value).to_equal(2)
+        val third = storage_view_v1_load(store, base + "/views", "v3", "main")
+        expect(third.status).to_equal("ok")
+        expect(_hex(storage_view_v1_read(third.view, "a/b.txt").bytes)).to_equal(_hex("hello".bytes()))
+        expect(_hex(storage_view_v1_read(third.view, "c.bin").bytes)).to_equal(_hex("WORLD".bytes()))
+        _cleanup(base)
+
+    it "rejects a save with a stale expected generation":
+        val base = _temp("stale")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(view, "a.txt", "one".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(view, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        expect(storage_view_v1_write(view, "a.txt", "two".bytes()).status).to_equal("ok")
+        val stale = storage_view_v1_save(view, "main", StoreGenerationV1(0))
+        expect(stale.status).to_equal("rejected")
+        expect(stale.reason).to_equal("root-exists")
+        val wrong = storage_view_v1_save(view, "main", StoreGenerationV1(5))
+        expect(wrong.status).to_equal("rejected")
+        expect(wrong.reason).to_equal("root-generation-mismatch")
+        val ok = storage_view_v1_save(view, "main", StoreGenerationV1(1))
+        expect(ok.status).to_equal("ok")
+        _cleanup(base)
+
+    it "clones without copying objects and isolates clone writes from the source":
+        val base = _temp("clone")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(view, "a.txt", "shared".bytes()).status).to_equal("ok")
+        val saved = storage_view_v1_save(view, "main", StoreGenerationV1(0))
+        expect(saved.status).to_equal("ok")
+        val src = storage_view_v1_load(store, base + "/views", "src", "main")
+        expect(src.status).to_equal("ok")
+        val objects_before = _count_objects(store)
+        val cloned = storage_view_v1_clone(src.view, "dup")
+        expect(cloned.reason).to_equal("")
+        expect(cloned.status).to_equal("ok")
+        expect(_count_objects(store)).to_equal(objects_before)
+        expect(cloned.view.base_manifest_key).to_equal(src.view.base_manifest_key)
+        expect(cloned.view.base_generation.value).to_equal(src.view.base_generation.value)
+        expect(_hex(storage_view_v1_read(cloned.view, "a.txt").bytes)).to_equal(_hex("shared".bytes()))
+        expect(storage_view_v1_write(cloned.view, "a.txt", "changed".bytes()).status).to_equal("ok")
+        expect(_hex(storage_view_v1_read(cloned.view, "a.txt").bytes)).to_equal(_hex("changed".bytes()))
+        expect(_hex(storage_view_v1_read(src.view, "a.txt").bytes)).to_equal(_hex("shared".bytes()))
+        # A dirty source cannot be cloned.
+        expect(storage_view_v1_write(src.view, "b.txt", "dirty".bytes()).status).to_equal("ok")
+        val dirty = storage_view_v1_clone(src.view, "dup2")
+        expect(dirty.status).to_equal("rejected")
+        expect(dirty.reason).to_equal("clone-dirty-upper")
+        _cleanup(base)
+
+describe "storage_view_v1 hardening":
+    it "refuses reads and writes through a pre-existing junction in a volume":
+        val base = _temp("junction")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vol_dir = base + "/vol"
+        val outside = base + "/outside"
+        expect(dir_create_all(vol_dir)).to_equal(true)
+        expect(dir_create_all(outside)).to_equal(true)
+        expect(file_write_bytes(outside + "/secret.txt", "secret".bytes())).to_equal(true)
+        val made = process_run("cmd", ["/c", "mklink", "/J", (vol_dir + "/link").replace("/", "\\"), outside.replace("/", "\\")])
+        expect(made.2).to_equal(0)
+        val added = storage_view_v1_add_volume(view, "data", vol_dir, ViewFlagV1(true))
+        expect(added.status).to_equal("ok")
+        val read = storage_view_v1_read(added.view, "data/link/secret.txt")
+        expect(read.status).to_equal("rejected")
+        expect(read.reason).to_equal("path-escape")
+        val wrote = storage_view_v1_write(added.view, "data/link/new.txt", "evil".bytes())
+        expect(wrote.status).to_equal("rejected")
+        expect(wrote.reason).to_equal("path-escape")
+        expect(file_exists(outside + "/new.txt")).to_equal(false)
+        # Remove only the junction itself; the target dir must survive.
+        process_run("cmd", ["/c", "rmdir", (vol_dir + "/link").replace("/", "\\")])
+        expect(file_exists(outside + "/secret.txt")).to_equal(true)
+        _cleanup(base)
+
+    it "rejects reserved device names as view ids and root names":
+        val base = _temp("reserved")
+        val store = _store(base)
+        val made = storage_view_v1_create(store, base + "/views", "CON", "", StoreGenerationV1(0), ViewBytesV1(10))
+        expect(made.status).to_equal("rejected")
+        expect(made.reason).to_equal("view-id-invalid")
+        val view = _new_view(base, store, "v1", 100)
+        val saved = storage_view_v1_save(view, "nul.txt", StoreGenerationV1(0))
+        expect(saved.status).to_equal("rejected")
+        expect(saved.reason).to_equal("root-name-invalid")
+        _cleanup(base)
+
+    it "rejects a write that case-collides with a base path":
+        val base = _temp("casecol")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 100)
+        expect(storage_view_v1_write(view, "Readme.txt", "a".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(view, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        expect(loaded.status).to_equal("ok")
+        val clash = storage_view_v1_write(loaded.view, "README.txt", "b".bytes())
+        expect(clash.status).to_equal("rejected")
+        expect(clash.reason).to_equal("path-case-collision")
+        expect(storage_view_v1_write(loaded.view, "Readme.txt", "c".bytes()).status).to_equal("ok")
+        _cleanup(base)
+
+    it "rejects a merged entry count above the manifest decode cap":
+        # A real 4096-entry base is too slow on the interpreter; the save path
+        # calls this same check before any ingest.
+        expect(_sv_merged_count_error(4096)).to_equal("")
+        expect(_sv_merged_count_error(4097)).to_equal("manifest-too-many-entries")

@@ -39,6 +39,12 @@ pub struct StoreOpenV1:
     reason: text
     bytes: [u8]
 
+pub struct StoreRootHeadV1:
+    status: text            # "ok" | "missing" | "corrupt"
+    reason: text
+    generation: StoreGenerationV1
+    keys: [text]
+
 pub struct StoreGcV1:
     status: text        # "ok" | "rejected" | "partial"
     reason: text
@@ -717,6 +723,35 @@ pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
     atomic_write_bytes(path, replaced.bytes())
     ""
 
+fn _isv1_root_head_result(status: text, reason: text, generation: i64, keys: [text]) -> StoreRootHeadV1:
+    StoreRootHeadV1(status: status, reason: reason, generation: StoreGenerationV1(generation), keys: keys)
+
+# Read-only head of a root: follows the claim chain past a lagging pointer and
+# returns the head's generation and validated keys, in published order.
+pub fn immutable_store_v1_root_head(root: text, name: text) -> StoreRootHeadV1:
+    if root == "":
+        return _isv1_root_head_result("corrupt", "store-root-empty", 0, [])
+    if not _isv1_name_valid(name):
+        return _isv1_root_head_result("corrupt", "root-name-invalid", 0, [])
+    val path = _isv1_root_path(root, name)
+    if not file_exists(path):
+        return _isv1_root_head_result("missing", "root-missing", 0, [])
+    val pointer_text = match file_read_regular_no_follow_bounded(path, _ISV1_MAX_ROOT_BYTES):
+        case Ok(value): value
+        case Err(_): return _isv1_root_head_result("corrupt", "root-unreadable", 0, [])
+    val head_text = match _isv1_root_head_text(root, name, pointer_text):
+        case Ok(value): value
+        case Err(reason): return _isv1_root_head_result("corrupt", reason, 0, [])
+    val doc = match _isv1_doc_decode(head_text, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
+        case Ok(value): value
+        case Err(reason): return _isv1_root_head_result("corrupt", "root-corrupt: {reason}", 0, [])
+    if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
+        return _isv1_root_head_result("corrupt", "root-corrupt", 0, [])
+    val generation = _isv1_doc_generation(doc)
+    if generation < 0:
+        return _isv1_root_head_result("corrupt", "root-corrupt", 0, [])
+    _isv1_root_head_result("ok", "", generation, doc.keys)
+
 # Generation of a root doc, or -1 when it is not a valid v1 root doc.
 fn _isv1_root_doc_generation(source: text) -> i64:
     val doc = match _isv1_doc_decode(source, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
@@ -812,13 +847,14 @@ pub fn immutable_store_v1_release_pin(root: text, pin_id: text, owner: text) -> 
     if not is_dir(pin_dir):
         return "pin-missing"
     val owner_path = pin_dir + "/owner"
-    if not file_exists(owner_path):
-        return "pin-corrupt"
-    val existing = match file_read_regular_no_follow_bounded(owner_path, 512):
-        case Ok(value): value
-        case Err(_): return "pin-unreadable"
-    if existing != owner:
-        return "pin-owner-mismatch"
+    # A dir with no owner file (half-created or half-removed) holds no committed
+    # owner, so it is releasable; GC still counts its refs until it is removed.
+    if file_exists(owner_path):
+        val existing = match file_read_regular_no_follow_bounded(owner_path, 512):
+            case Ok(value): value
+            case Err(_): return "pin-unreadable"
+        if existing != owner:
+            return "pin-owner-mismatch"
     if not dir_remove_all(pin_dir):
         return "pin-remove-failed"
     ""

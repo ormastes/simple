@@ -4259,7 +4259,149 @@ impl MirLowering:
                         ()
         []
 
+    fn lookup_owner_type_param_names_v1(owner_sym: SymbolId) -> [text]:
+        val canonical = mir_class_identity_raw(self.symbols, owner_sym.id)
+        if canonical != "" and self.struct_type_param_names.has(canonical):
+            return self.struct_type_param_names[canonical]
+        if val sym_raw = self.symbols.get_symbol_raw(owner_sym.id):
+            val sym: HirSymbol = sym_raw
+            val layout_key = self.composite_layout_key(sym)
+            if layout_key != "" and self.struct_type_param_names.has(layout_key):
+                return self.struct_type_param_names[layout_key]
+            if self.struct_type_param_names.has(sym.name):
+                return self.struct_type_param_names[sym.name]
+            if sym.name.contains("::"):
+                val parts = sym.name.split("::")
+                if parts.len() > 0:
+                    val bare = parts[parts.len() - 1]
+                    if self.struct_type_param_names.has(bare):
+                        return self.struct_type_param_names[bare]
+        []
+
+    me instantiate_method_return_hir_v1(method_id: SymbolId, raw_return: HirType, receiver_type: HirType?) -> HirType:
+        if receiver_type == None:
+            return raw_return
+        if not self.hir_type_mentions_type_param(raw_return, self.symbols):
+            return raw_return
+        val recv_ty: HirType = receiver_type.unwrap()
+        var owner_sym = SymbolId(id: -1)
+        var type_args: [HirType] = []
+        match recv_ty.kind:
+            case HirTypeKind.Named(sym, args):
+                owner_sym = sym
+                type_args = args
+            case _: return raw_return
+        if type_args.len() == 0:
+            return raw_return
+        match raw_return.kind:
+            case HirTypeKind.TypeParam(_, _):
+                if val m_raw = self.symbols.get_symbol_raw(method_id.id):
+                    val m_sym: HirSymbol = m_raw
+                    val owner_key = self.erased_method_owner_name_v1(m_sym.name)
+                    if owner_key != "" and (bootstrap_fn_ret_err_shape_lookup(owner_key + "#erased-ret-veto") ?? "") == "1":
+                        return raw_return
+            case _: ()
+        val names = self.lookup_owner_type_param_names_v1(owner_sym)
+        if names.len() == 0:
+            return raw_return
+        self.substitute_struct_type_params(raw_return, names, type_args)
+
+    me resolved_method_return_hir_type_v1(method_id: SymbolId, receiver_type: HirType?) -> HirType?:
+        val raw_ret = self.resolved_call_hir_return_type(method_id)
+        if val ret_ty = raw_ret:
+            return Some(self.instantiate_method_return_hir_v1(method_id, ret_ty, receiver_type))
+        None
+
+    me resolve_method_receiver_hir_type_v1(receiver_local: LocalId?, receiver_expr: HirExpr?) -> HirType?:
+        var fallback: HirType? = None
+        if val rl = receiver_local:
+            if val local_ty = self.find_local_hir_type(rl.id):
+                match local_ty.kind:
+                    case HirTypeKind.Named(_, args):
+                        if args.len() > 0:
+                            return Some(local_ty)
+                    case _: ()
+                fallback = Some(local_ty)
+        if val re = receiver_expr:
+            if val expr_ty = self.enum_match_expr_type(re):
+                match expr_ty.kind:
+                    case HirTypeKind.Named(_, args):
+                        if args.len() > 0:
+                            return Some(expr_ty)
+                    case _: ()
+                if fallback == None:
+                    fallback = Some(expr_ty)
+        fallback
+
+    me coerce_erased_bare_method_result_v1(local: LocalId, raw_return: HirType, inst_return: HirType) -> LocalId:
+        var was_bare_param = false
+        match raw_return.kind:
+            case HirTypeKind.TypeParam(_, _): was_bare_param = true
+            case _: ()
+        if not was_bare_param:
+            return local
+        if self.hir_type_mentions_type_param(inst_return, self.symbols):
+            return local
+        if self.is_runtime_value_local(local.id):
+            return local
+        val mir_ty = self.local_mir_type_of(local) ?? MirType.unit()
+        if mir_ty.kind != MirTypeKind.I64:
+            return local
+        match inst_return.kind:
+            case HirTypeKind.Float(bits):
+                var b = self.builder
+                if bits == 32:
+                    val wide = b.emit_bitcast(mir_operand_copy(local), MirType.f64())
+                    val narrow = b.emit_cast(mir_operand_copy(wide), MirType.f32())
+                    self.builder = b
+                    return narrow
+                val fp = b.emit_bitcast(mir_operand_copy(local), MirType.f64())
+                self.builder = b
+                return fp
+            case HirTypeKind.Bool:
+                var b = self.builder
+                val raw_true = b.emit_const_int(1)
+                val tagged_true = b.emit_const_int(11)
+                val is_raw = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(raw_true), MirType.bool())
+                val is_tagged = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(tagged_true), MirType.bool())
+                val flag = b.emit_binop(MirBinOp.BitOr, mir_operand_copy(is_raw), mir_operand_copy(is_tagged), MirType.bool())
+                self.builder = b
+                return flag
+            case HirTypeKind.Str:
+                return self.decode_runtime_value(local, MirType(kind: MirTypeKind.Opaque("str")))
+            case HirTypeKind.Int(bits, _):
+                if bits < 64:
+                    var b = self.builder
+                    val narrowed = b.emit_cast(mir_operand_copy(local), self.lower_type(inst_return))
+                    self.builder = b
+                    return narrowed
+            case _: ()
+        local
+
+    me remember_method_call_hir_return_operands_v1(local: LocalId, symbol: SymbolId, operands: [MirOperand], receiver_expr: HirExpr?) -> LocalId:
+        var recv_local: LocalId? = None
+        if operands.len() > 0:
+            match operands[0].kind:
+                case MirOperandKind.Copy(rl) | MirOperandKind.Move(rl):
+                    recv_local = Some(rl)
+                case _: ()
+        self.remember_method_call_hir_return_v1(local, symbol, recv_local, receiver_expr)
+
+    me remember_method_call_hir_return_v1(local: LocalId, symbol: SymbolId, receiver_local: LocalId?, receiver_expr: HirExpr?) -> LocalId:
+        val raw_ret = self.resolved_call_hir_return_type(symbol)
+        if val ret_ty = raw_ret:
+            val recv_ty = self.resolve_method_receiver_hir_type_v1(receiver_local, receiver_expr)
+            val inst_ty = self.instantiate_method_return_hir_v1(symbol, ret_ty, recv_ty)
+            val coerced = self.coerce_erased_bare_method_result_v1(local, ret_ty, inst_ty)
+            self.remember_call_hir_return_with_override_v1(coerced, symbol, Some(inst_ty))
+            return coerced
+        self.remember_call_hir_return_with_override_v1(local, symbol, None)
+        local
+
     me remember_call_hir_return(local: LocalId, symbol: SymbolId):
+        self.remember_call_hir_return_with_override_v1(local, symbol, None)
+
+    me remember_call_hir_return_with_override_v1(local: LocalId, symbol: SymbolId, override_return: HirType?):
         self.remember_result_err_record_owner(local.id, symbol)
         val optional_call_symbol: HirSymbol? = self.symbols.get_symbol_raw(symbol.id)
         if optional_call_symbol != None:
@@ -4283,7 +4425,7 @@ impl MirLowering:
                         val shape = self.declared_struct_layout_key(raw_shape)
                         if shape != "":
                             self.struct_value_syms[local.id] = shape
-        val return_type = self.resolved_call_hir_return_type(symbol)
+        val return_type = if override_return != None: override_return else: self.resolved_call_hir_return_type(symbol)
         if self.extern_fn_symbols.contains(symbol.id):
             self.extern_result_locals[local.id] = true
         if val found_type = return_type:
@@ -9449,7 +9591,7 @@ impl MirLowering:
                 case HirPatternKind.Wildcard:
                     pattern_supported = true
                 case HirPatternKind.Binding(symbol, _):
-                    self.local_map[symbol.id] = payload
+                    self.bind_local(symbol.id, payload)
                     pattern_supported = true
                 case _:
                     self.error_fatal("catch pattern is not supported by recoverable MIR lowering", Some(clause.span))
