@@ -1,0 +1,834 @@
+# StorageViewV1 — host-side copy-on-write storage view over ImmutableStoreV1.
+# A view is an immutable base (a saved store root's manifest) plus a private
+# writable "upper" directory and optional host volumes. Reads go upper first,
+# then the base manifest; save ingests the upper into the store and publishes
+# a new root generation; clone shares the base without copying bytes.
+#
+# SECURITY SCOPE: this is PATH-POLICY confinement, not kernel confinement. The
+# module rejects hostile relative paths and refuses to traverse symlinks, but a
+# process that can reach the host directories directly is not contained by it.
+# Real isolation belongs to the platform leaf (namespaces/jobs/containers).
+#
+# Limits stated rather than hidden: no whiteouts (a saved view cannot delete a
+# base file), volumes are not part of save/quota, and clone does not carry
+# volumes. Design: doc/05_design/platform/container/simple_container_improvement.md
+
+use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_XXH3_128}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.contracts.container.lifecycle_journal_v1.{ContainerLifecycleJournalV1,
+    ContainerJournalVersionV1, ContainerJournalGenerationV1, ContainerNativeAliveV1,
+    LIFECYCLE_JOURNAL_V1_VERSION, LIFECYCLE_PHASE_V1_CREATED, LIFECYCLE_PHASE_V1_DESTROYED,
+    LIFECYCLE_ACTION_REMOVE_OWNED_PATH_PREFIX_V1, LIFECYCLE_ACTION_REMOVE_OWNED_OBJECT_PREFIX_V1,
+    LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1,
+    lifecycle_journal_v1_encode, lifecycle_journal_v1_decode, lifecycle_recovery_actions_v1}
+use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1,
+    immutable_store_v1_ingest_pinned, immutable_store_v1_open, immutable_store_v1_root_head, StoreRootHeadV1, immutable_store_v1_publish_root,
+    immutable_store_v1_release_pin}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_size_raw,
+    file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
+use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir, dir_walk,
+    dir_is_real_no_follow}
+
+unit ViewBytesV1: i64
+unit ViewFlagV1: bool
+unit ViewCountV1: i64
+export ViewBytesV1, ViewFlagV1, ViewCountV1
+
+pub struct ViewVolumeV1:
+    name: text
+    host_dir: text
+    writable: ViewFlagV1
+
+pub struct StorageViewV1:
+    store: text
+    view_root: text
+    view_id: text
+    base_root: text
+    base_generation: StoreGenerationV1
+    base_manifest_key: text
+    quota: ViewBytesV1
+    volumes: [ViewVolumeV1]
+
+pub struct ViewHandleV1:
+    status: text        # "ok" | "rejected"
+    reason: text
+    view: StorageViewV1
+
+pub struct ViewWriteV1:
+    status: text        # "ok" | "rejected"
+    reason: text
+    used: ViewBytesV1   # upper bytes in use after a successful write
+
+pub struct ViewReadV1:
+    status: text        # "ok" | "missing" | "rejected" | "corrupt"
+    reason: text
+    bytes: [u8]
+
+pub struct ViewSaveV1:
+    status: text        # "ok" | "rejected"
+    reason: text
+    generation: StoreGenerationV1
+    manifest_key: text
+    files: ViewCountV1
+
+pub struct ViewDestroyV1:
+    status: text        # "ok" | "rejected"
+    reason: text
+
+struct SvScanV1:
+    paths: [text]
+    sizes: [i64]
+
+struct SvManifestV1:
+    paths: [text]
+    keys: [text]
+    lens: [i64]
+
+val _SV_MANIFEST_KIND = "container-view-manifest"
+val _SV_META_KIND = "container-view-meta"
+val _SV_PROVIDER = "storage-view-v1"
+val _SV_MAX_FILES: i64 = 4096
+val _SV_MAX_FILE_BYTES: i64 = 268435456
+val _SV_MAX_SIZE_SANE: i64 = 1099511627776
+val _SV_MAX_PATH_BYTES: i64 = 240
+val _SV_MAX_SEGMENTS: i64 = 16
+val _SV_DEFAULT_LOAD_QUOTA: i64 = 67108864
+
+# ---------------------------------------------------------------- helpers
+
+fn _sv_empty_view() -> StorageViewV1:
+    StorageViewV1(store: "", view_root: "", view_id: "", base_root: "",
+        base_generation: StoreGenerationV1(0), base_manifest_key: "",
+        quota: ViewBytesV1(0), volumes: [])
+
+fn _sv_handle_rejected(reason: text) -> ViewHandleV1:
+    ViewHandleV1(status: "rejected", reason: reason, view: _sv_empty_view())
+
+fn _sv_handle_ok(view: StorageViewV1) -> ViewHandleV1:
+    ViewHandleV1(status: "ok", reason: "", view: view)
+
+fn _sv_write_rejected(reason: text) -> ViewWriteV1:
+    ViewWriteV1(status: "rejected", reason: reason, used: ViewBytesV1(0))
+
+fn _sv_read_result(status: text, reason: text) -> ViewReadV1:
+    ViewReadV1(status: status, reason: reason, bytes: [])
+
+fn _sv_save_rejected(reason: text) -> ViewSaveV1:
+    ViewSaveV1(status: "rejected", reason: reason, generation: StoreGenerationV1(0),
+        manifest_key: "", files: ViewCountV1(0))
+
+fn _sv_destroy_result(status: text, reason: text) -> ViewDestroyV1:
+    ViewDestroyV1(status: status, reason: reason)
+
+fn _sv_is_id_byte(b: i64) -> bool:
+    (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 45 or b == 95
+
+fn _sv_id_valid(value: text) -> bool:
+    if value.byte_len() < 1 or value.byte_len() > 64:
+        return false
+    for b in value.bytes():
+        if not _sv_is_id_byte(b):
+            return false
+    true
+
+# Root names follow the store's own name alphabet (plus '.') but never "."/"..".
+fn _sv_root_name_valid(value: text) -> bool:
+    if value == "." or value == "..":
+        return false
+    if value.byte_len() < 1 or value.byte_len() > 128:
+        return false
+    for b in value.bytes():
+        if not (_sv_is_id_byte(b) or b == 46):
+            return false
+    true
+
+fn _sv_normalize_root(root: text) -> text:
+    var out = root.replace("\\", "/")
+    while out.byte_len() > 1 and out.ends_with("/"):
+        out = out.substring(0, out.byte_len() - 1)
+    out
+
+fn _sv_root_valid(root: text) -> bool:
+    if root.byte_len() < 1 or root.byte_len() > 200:
+        return false
+    for b in root.bytes():
+        if b < 33 or b > 126:
+            return false
+    true
+
+fn _sv_view_dir(view_root: text, view_id: text) -> text:
+    view_root + "/" + view_id
+
+fn _sv_upper_dir(view_root: text, view_id: text) -> text:
+    view_root + "/" + view_id + "/upper"
+
+fn _sv_journal_path(view_root: text, view_id: text) -> text:
+    view_root + "/" + view_id + "/journal.sdn"
+
+fn _sv_meta_path(view_root: text, view_id: text) -> text:
+    view_root + "/" + view_id + "/view.sdn"
+
+# ------------------------------------------------------------ path policy
+
+fn _sv_reserved_stem(stem: text) -> bool:
+    val up = stem.trim().to_upper()
+    if up == "CON" or up == "PRN" or up == "AUX" or up == "NUL":
+        return true
+    for n in 1..10:
+        if up == "COM{n}" or up == "LPT{n}":
+            return true
+    false
+
+# "" when `rel` is an acceptable view-relative path, else the reject reason.
+fn _sv_path_error(rel: text) -> text:
+    if rel.byte_len() < 1:
+        return "path-unauthorized"
+    if rel.byte_len() > _SV_MAX_PATH_BYTES:
+        return "path-unauthorized"
+    for b in rel.bytes():
+        if b == 92 or b == 58:
+            return "path-escape"
+        if b < 32 or b == 127 or b > 126:
+            return "path-unauthorized"
+        if b == 60 or b == 62 or b == 34 or b == 124 or b == 63 or b == 42:
+            return "path-unauthorized"
+    if rel.starts_with("/"):
+        return "path-escape"
+    val segs = rel.split("/")
+    if segs.len() > _SV_MAX_SEGMENTS:
+        return "path-unauthorized"
+    for seg in segs:
+        if seg == "..":
+            return "path-escape"
+        if seg == "" or seg == ".":
+            return "path-unauthorized"
+        if seg.ends_with(".") or seg.ends_with(" "):
+            return "path-unauthorized"
+        val dot = seg.index_of(".")
+        var stem = seg
+        if dot >= 0:
+            stem = seg.substring(0, dot)
+        if _sv_reserved_stem(stem):
+            return "path-unauthorized"
+    ""
+
+fn _sv_volume_index(view: StorageViewV1, rel: text) -> i64:
+    val segs = rel.split("/")
+    val first = segs[0].to_lower()
+    for i in 0..view.volumes.len():
+        if view.volumes[i].name.to_lower() == first:
+            return i
+    -1
+
+# ------------------------------------------------------------- SDN docs
+
+fn _sv_sdn_limits() -> SdnStrictLimitsV1:
+    SdnStrictLimitsV1(max_source_bytes: 4194304, max_depth: 6, max_nodes: 65536,
+        max_rows: 0, max_cells: 0, max_columns: 16)
+
+fn _sv_field_text(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key):
+        return Err("field-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("field-text:" + key)
+
+fn _sv_field_int(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key):
+        return Err("field-missing:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("field-int:" + key)
+
+fn _sv_field_rows(fields: Dict<text, SdnValue>, key: text) -> Result<[SdnValue], text>:
+    if not fields.contains_key(key):
+        return Err("field-missing:" + key)
+    match fields[key]:
+        case SdnValue.Array(value): Ok(value)
+        case _: Err("field-array:" + key)
+
+fn _sv_parse_dict(source: text) -> Result<Dict<text, SdnValue>, text>:
+    val parsed = match sdn_parse_strict_v1(source, _sv_sdn_limits()):
+        case Ok(value): value
+        case Err(_): return Err("sdn-syntax")
+    match parsed.value:
+        case SdnValue.Dict(value): Ok(value)
+        case _: Err("sdn-object")
+
+# Manifest: sorted unique entries, no case-insensitive path collisions.
+fn _sv_manifest_encode(paths: [text], keys: Dict<text, text>, lens: Dict<text, i64>) -> Result<text, text>:
+    var sorted_paths: [text] = []
+    for p in paths:
+        sorted_paths.push(p)
+    sorted_paths.sort()
+    var rows: [SdnValue] = []
+    var seen_fold: Dict<text, text> = {}
+    var previous = ""
+    for i in 0..sorted_paths.len():
+        val p = sorted_paths[i]
+        if i > 0 and p == previous:
+            return Err("manifest-duplicate-path")
+        previous = p
+        if _sv_path_error(p) != "":
+            return Err("manifest-path-invalid")
+        val folded = p.to_lower()
+        if seen_fold.contains_key(folded):
+            return Err("path-case-collision")
+        seen_fold[folded] = p
+        if not keys.contains_key(p) or not lens.contains_key(p):
+            return Err("manifest-entry-incomplete")
+        val entry: Dict<text, SdnValue> = {"path": SdnValue.String(p),
+            "key": SdnValue.String(keys[p]), "length": SdnValue.Int(lens[p])}
+        rows.push(SdnValue.Dict(entry))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(_SV_MANIFEST_KIND),
+        "format_version": SdnValue.Int(1), "entries": SdnValue.Array(rows)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn _sv_manifest_decode(source: text) -> Result<SvManifestV1, text>:
+    val fields = _sv_parse_dict(source)?
+    if fields.len() != 3:
+        return Err("manifest-fields")
+    if _sv_field_text(fields, "kind")? != _SV_MANIFEST_KIND:
+        return Err("manifest-kind")
+    if _sv_field_int(fields, "format_version")? != 1:
+        return Err("manifest-version")
+    val rows = _sv_field_rows(fields, "entries")?
+    if rows.len() > _SV_MAX_FILES:
+        return Err("manifest-too-many-entries")
+    var paths: [text] = []
+    var keys: [text] = []
+    var lens: [i64] = []
+    var keymap: Dict<text, text> = {}
+    var lenmap: Dict<text, i64> = {}
+    for row in rows:
+        val entry = match row:
+            case SdnValue.Dict(value): value
+            case _: return Err("manifest-entry-object")
+        if entry.len() != 3:
+            return Err("manifest-entry-fields")
+        val p = _sv_field_text(entry, "path")?
+        val k = _sv_field_text(entry, "key")?
+        val n = _sv_field_int(entry, "length")?
+        if n < 0 or n > _SV_MAX_FILE_BYTES:
+            return Err("manifest-entry-length")
+        paths.push(p)
+        keys.push(k)
+        lens.push(n)
+        keymap[p] = k
+        lenmap[p] = n
+    # Re-encode enforces sorted unique paths, policy-valid paths, no case
+    # collisions, and the canonical byte form in one comparison.
+    val again = _sv_manifest_encode(paths, keymap, lenmap)?
+    if again != source:
+        return Err("manifest-noncanonical")
+    Ok(SvManifestV1(paths: paths, keys: keys, lens: lens))
+
+# Open the manifest object and decode it. Entry objects are not opened here.
+fn _sv_manifest_load(store: text, manifest_key: text) -> Result<SvManifestV1, text>:
+    val opened = immutable_store_v1_open(store, manifest_key)
+    if opened.status != "ok":
+        return Err("manifest-object-" + opened.status + ":" + opened.reason)
+    val source = match io_legacy_utf8(opened.bytes):
+        case Ok(value): value
+        case Err(_): return Err("manifest-not-utf8")
+    _sv_manifest_decode(source)
+
+fn _sv_meta_encode(view: StorageViewV1) -> text:
+    var vols: [SdnValue] = []
+    for v in view.volumes:
+        var w: i64 = 0
+        if v.writable.value:
+            w = 1
+        val row: Dict<text, SdnValue> = {"name": SdnValue.String(v.name),
+            "host_dir": SdnValue.String(v.host_dir), "writable": SdnValue.Int(w)}
+        vols.push(SdnValue.Dict(row))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(_SV_META_KIND),
+        "format_version": SdnValue.Int(1), "view_id": SdnValue.String(view.view_id),
+        "base_root": SdnValue.String(view.base_root),
+        "base_generation": SdnValue.Int(view.base_generation.value),
+        "base_manifest_key": SdnValue.String(view.base_manifest_key),
+        "quota": SdnValue.Int(view.quota.value), "volumes": SdnValue.Array(vols)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn _sv_meta_decode(store: text, view_root: text, source: text) -> Result<StorageViewV1, text>:
+    val fields = _sv_parse_dict(source)?
+    if fields.len() != 8:
+        return Err("meta-fields")
+    if _sv_field_text(fields, "kind")? != _SV_META_KIND:
+        return Err("meta-kind")
+    if _sv_field_int(fields, "format_version")? != 1:
+        return Err("meta-version")
+    val rows = _sv_field_rows(fields, "volumes")?
+    var volumes: [ViewVolumeV1] = []
+    for row in rows:
+        val entry = match row:
+            case SdnValue.Dict(value): value
+            case _: return Err("meta-volume-object")
+        if entry.len() != 3:
+            return Err("meta-volume-fields")
+        val flag = _sv_field_int(entry, "writable")?
+        if flag != 0 and flag != 1:
+            return Err("meta-volume-writable")
+        volumes.push(ViewVolumeV1(name: _sv_field_text(entry, "name")?,
+            host_dir: _sv_field_text(entry, "host_dir")?, writable: ViewFlagV1(flag == 1)))
+    val view = StorageViewV1(store: store, view_root: view_root,
+        view_id: _sv_field_text(fields, "view_id")?,
+        base_root: _sv_field_text(fields, "base_root")?,
+        base_generation: StoreGenerationV1(_sv_field_int(fields, "base_generation")?),
+        base_manifest_key: _sv_field_text(fields, "base_manifest_key")?,
+        quota: ViewBytesV1(_sv_field_int(fields, "quota")?), volumes: volumes)
+    if view.quota.value < 0 or view.base_generation.value < 0:
+        return Err("meta-range")
+    if _sv_meta_encode(view) != source:
+        return Err("meta-noncanonical")
+    Ok(view)
+
+# --------------------------------------------------------------- journal
+
+fn _sv_journal_save(path: text, journal: ContainerLifecycleJournalV1) -> text:
+    val encoded = lifecycle_journal_v1_encode(journal)
+    if encoded == "":
+        return "journal-encode-failed"
+    if not atomic_write_bytes(path, encoded.bytes()):
+        return "journal-write-failed"
+    ""
+
+fn _sv_journal_load(view_root: text, view_id: text) -> Result<ContainerLifecycleJournalV1, text>:
+    val path = _sv_journal_path(view_root, view_id)
+    if not file_exists(path):
+        return Err("journal-missing")
+    val source = match file_read_regular_no_follow_bounded(path, 65536):
+        case Ok(value): value
+        case Err(_): return Err("journal-unreadable")
+    val journal = lifecycle_journal_v1_decode(source)
+    if journal.format_version != ContainerJournalVersionV1(LIFECYCLE_JOURNAL_V1_VERSION):
+        return Err("journal-invalid")
+    if journal.container_id != view_id:
+        return Err("journal-identity")
+    Ok(journal)
+
+# --------------------------------------------------------------- scanning
+
+fn _sv_scan_upper(upper: text) -> Result<SvScanV1, text>:
+    if not dir_is_real_no_follow(upper):
+        return Err("upper-missing")
+    val prefix = upper + "/"
+    var paths: [text] = []
+    var sizes: [i64] = []
+    for raw in dir_walk(upper):
+        val entry = raw.replace("\\", "/")
+        if not entry.starts_with(prefix):
+            return Err("scan-path-unexpected")
+        if paths.len() >= _SV_MAX_FILES:
+            return Err("upper-too-many-files")
+        val rel = entry.substring(prefix.byte_len(), entry.byte_len())
+        val size = file_size_raw(entry)
+        if size < 0 or size > _SV_MAX_SIZE_SANE:
+            return Err("upper-file-size-invalid")
+        paths.push(rel)
+        sizes.push(size)
+    Ok(SvScanV1(paths: paths, sizes: sizes))
+
+# Create each missing directory below `base`, refusing symlinks and files in
+# the way. Returns "" or a reject reason.
+fn _sv_prepare_parents(base: text, segs: [text]) -> text:
+    var current = base
+    for i in 0..(segs.len() - 1):
+        current = current + "/" + segs[i]
+        if is_dir(current):
+            if not dir_is_real_no_follow(current):
+                return "path-escape"
+        elif file_exists(current):
+            return "path-conflict"
+        elif not dir_create_all(current):
+            return "write-failed"
+    ""
+
+fn _sv_write_file(base: text, rel: text, bytes: [u8]) -> text:
+    val segs = rel.split("/")
+    val prep = _sv_prepare_parents(base, segs)
+    if prep != "":
+        return prep
+    val target = base + "/" + rel
+    if is_dir(target):
+        return "path-conflict"
+    if not atomic_write_bytes(target, bytes):
+        return "write-failed"
+    ""
+
+# ------------------------------------------------------------ create/open
+
+fn _sv_create_with(store: text, view_root_in: text, view_id: text, base_root: text,
+        base_generation: i64, base_manifest_key: text, quota: i64) -> ViewHandleV1:
+    val view_root = _sv_normalize_root(view_root_in)
+    if not _sv_id_valid(view_id):
+        return _sv_handle_rejected("view-id-invalid")
+    if not _sv_root_valid(view_root):
+        return _sv_handle_rejected("view-root-invalid")
+    if store == "" or not is_dir(store):
+        return _sv_handle_rejected("store-missing")
+    if quota < 0:
+        return _sv_handle_rejected("quota-invalid")
+    if base_root == "":
+        if base_generation != 0 or base_manifest_key != "":
+            return _sv_handle_rejected("base-generation-invalid")
+    else:
+        if not _sv_root_name_valid(base_root) or base_generation < 1:
+            return _sv_handle_rejected("base-invalid")
+        match _sv_manifest_load(store, base_manifest_key):
+            case Ok(_):
+                pass
+            case Err(reason):
+                return _sv_handle_rejected("base-manifest-invalid: " + reason)
+    val view_dir = _sv_view_dir(view_root, view_id)
+    if is_dir(view_dir) or file_exists(view_dir):
+        return _sv_handle_rejected("view-exists")
+    val upper = _sv_upper_dir(view_root, view_id)
+    if not dir_create_all(view_dir):
+        return _sv_handle_rejected("view-dir-failed")
+    # The journal is durable identity for cleanup: it lands before any other
+    # owned resource exists.
+    val journal = ContainerLifecycleJournalV1(
+        format_version: ContainerJournalVersionV1(LIFECYCLE_JOURNAL_V1_VERSION),
+        container_id: view_id, generation: ContainerJournalGenerationV1(0),
+        provider_id: _SV_PROVIDER, phase: LIFECYCLE_PHASE_V1_CREATED,
+        owned_paths: [upper], owned_objects: [])
+    val journal_reason = _sv_journal_save(_sv_journal_path(view_root, view_id), journal)
+    if journal_reason != "":
+        return _sv_handle_rejected(journal_reason)
+    if not dir_create_all(upper):
+        return _sv_handle_rejected("upper-create-failed")
+    val view = StorageViewV1(store: store, view_root: view_root, view_id: view_id,
+        base_root: base_root, base_generation: StoreGenerationV1(base_generation),
+        base_manifest_key: base_manifest_key, quota: ViewBytesV1(quota), volumes: [])
+    if not atomic_write_bytes(_sv_meta_path(view_root, view_id), _sv_meta_encode(view).bytes()):
+        return _sv_handle_rejected("meta-write-failed")
+    _sv_handle_ok(view)
+
+# Resolve a root name to (generation, manifest key) from the store head.
+fn _sv_base_from_head(store: text, base_root: text) -> Result<StoreRootHeadV1, text>:
+    if not _sv_root_name_valid(base_root):
+        return Err("base-invalid")
+    val head = immutable_store_v1_root_head(store, base_root)
+    if head.status != "ok":
+        return Err(head.reason)
+    if head.keys.len() < 1:
+        return Err("root-empty")
+    Ok(head)
+
+pub fn storage_view_v1_create(store: text, view_root: text, view_id: text, base_root: text,
+        base_generation: StoreGenerationV1, quota: ViewBytesV1) -> ViewHandleV1:
+    if base_root == "":
+        return _sv_create_with(store, view_root, view_id, "", base_generation.value, "", quota.value)
+    val head = match _sv_base_from_head(store, base_root):
+        case Ok(value): value
+        case Err(reason): return _sv_handle_rejected(reason)
+    if head.generation.value != base_generation.value:
+        return _sv_handle_rejected("base-generation-mismatch")
+    _sv_create_with(store, view_root, view_id, base_root, head.generation.value, head.keys[0], quota.value)
+
+pub fn storage_view_v1_open(store: text, view_root_in: text, view_id: text) -> ViewHandleV1:
+    val view_root = _sv_normalize_root(view_root_in)
+    if not _sv_id_valid(view_id) or not _sv_root_valid(view_root):
+        return _sv_handle_rejected("view-id-invalid")
+    val journal = match _sv_journal_load(view_root, view_id):
+        case Ok(value): value
+        case Err(reason): return _sv_handle_rejected(reason)
+    if journal.phase == LIFECYCLE_PHASE_V1_DESTROYED:
+        return _sv_handle_rejected("view-destroyed")
+    val meta_path = _sv_meta_path(view_root, view_id)
+    if not file_exists(meta_path):
+        return _sv_handle_rejected("meta-missing")
+    val source = match file_read_regular_no_follow_bounded(meta_path, 1048576):
+        case Ok(value): value
+        case Err(_): return _sv_handle_rejected("meta-unreadable")
+    val view = match _sv_meta_decode(store, view_root, source):
+        case Ok(value): value
+        case Err(reason): return _sv_handle_rejected(reason)
+    if view.view_id != view_id:
+        return _sv_handle_rejected("meta-identity")
+    if not dir_is_real_no_follow(_sv_upper_dir(view_root, view_id)):
+        return _sv_handle_rejected("upper-missing")
+    _sv_handle_ok(view)
+
+pub fn storage_view_v1_add_volume(view: StorageViewV1, name: text, host_dir: text,
+        writable: ViewFlagV1) -> ViewHandleV1:
+    if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
+        return _sv_handle_rejected("view-id-invalid")
+    if name.contains("/") or _sv_path_error(name) != "":
+        return _sv_handle_rejected("volume-name-invalid")
+    if not _sv_root_valid(_sv_normalize_root(host_dir)):
+        return _sv_handle_rejected("volume-dir-invalid")
+    val dir = _sv_normalize_root(host_dir)
+    if not dir_is_real_no_follow(dir):
+        return _sv_handle_rejected("volume-dir-missing")
+    if _sv_volume_index(view, name) >= 0:
+        return _sv_handle_rejected("volume-exists")
+    val upper = _sv_upper_dir(view.view_root, view.view_id)
+    if not dir_is_real_no_follow(upper):
+        return _sv_handle_rejected("upper-missing")
+    if file_exists(upper + "/" + name):
+        return _sv_handle_rejected("volume-name-conflict")
+    var volumes: [ViewVolumeV1] = []
+    for v in view.volumes:
+        volumes.push(v)
+    volumes.push(ViewVolumeV1(name: name, host_dir: dir, writable: writable))
+    val updated = StorageViewV1(store: view.store, view_root: view.view_root,
+        view_id: view.view_id, base_root: view.base_root,
+        base_generation: view.base_generation, base_manifest_key: view.base_manifest_key,
+        quota: view.quota, volumes: volumes)
+    if not atomic_write_bytes(_sv_meta_path(view.view_root, view.view_id), _sv_meta_encode(updated).bytes()):
+        return _sv_handle_rejected("meta-write-failed")
+    _sv_handle_ok(updated)
+
+# ------------------------------------------------------------- write/read
+
+pub fn storage_view_v1_write(view: StorageViewV1, rel_path: text, bytes: [u8]) -> ViewWriteV1:
+    val policy = _sv_path_error(rel_path)
+    if policy != "":
+        return _sv_write_rejected(policy)
+    if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
+        return _sv_write_rejected("view-id-invalid")
+    if bytes.len() > _SV_MAX_FILE_BYTES:
+        return _sv_write_rejected("file-too-large")
+    val vol = _sv_volume_index(view, rel_path)
+    if vol >= 0:
+        val volume = view.volumes[vol]
+        if not volume.writable.value:
+            return _sv_write_rejected("volume-readonly")
+        val rest_at = rel_path.index_of("/")
+        if rest_at < 0:
+            return _sv_write_rejected("path-unauthorized")
+        val rest = rel_path.substring(rest_at + 1, rel_path.byte_len())
+        if not dir_is_real_no_follow(volume.host_dir):
+            return _sv_write_rejected("volume-dir-missing")
+        val volume_reason = _sv_write_file(volume.host_dir, rest, bytes)
+        if volume_reason != "":
+            return _sv_write_rejected(volume_reason)
+        return ViewWriteV1(status: "ok", reason: "", used: ViewBytesV1(0))
+    val upper = _sv_upper_dir(view.view_root, view.view_id)
+    val scan = match _sv_scan_upper(upper):
+        case Ok(value): value
+        case Err(reason): return _sv_write_rejected(reason)
+    # Delta accounting: an overwrite replaces the old size. Sums are bounded
+    # (<= 4096 files, each <= _SV_MAX_SIZE_SANE) and comparisons are written
+    # as subtractions of non-negative values, so nothing can overflow.
+    val folded = rel_path.to_lower()
+    var used_other: i64 = 0
+    var exists = false
+    for i in 0..scan.paths.len():
+        if scan.paths[i].to_lower() == folded:
+            exists = true
+        else:
+            used_other = used_other + scan.sizes[i]
+    if not exists and scan.paths.len() >= _SV_MAX_FILES:
+        return _sv_write_rejected("upper-too-many-files")
+    val new_len: i64 = bytes.len()
+    val quota = view.quota.value
+    if quota < 0 or new_len > quota or used_other > quota - new_len:
+        return _sv_write_rejected("quota-exceeded")
+    val reason = _sv_write_file(upper, rel_path, bytes)
+    if reason != "":
+        return _sv_write_rejected(reason)
+    ViewWriteV1(status: "ok", reason: "", used: ViewBytesV1(used_other + new_len))
+
+fn _sv_read_base(view: StorageViewV1, rel_path: text) -> ViewReadV1:
+    if view.base_manifest_key == "":
+        return _sv_read_result("missing", "path-missing")
+    val manifest = match _sv_manifest_load(view.store, view.base_manifest_key):
+        case Ok(value): value
+        case Err(reason): return _sv_read_result("corrupt", reason)
+    for i in 0..manifest.paths.len():
+        if manifest.paths[i] == rel_path:
+            val opened = immutable_store_v1_open(view.store, manifest.keys[i])
+            if opened.status != "ok":
+                return _sv_read_result("corrupt", "base-object-" + opened.status + ":" + opened.reason)
+            val got: i64 = opened.bytes.len()
+            if got != manifest.lens[i]:
+                return _sv_read_result("corrupt", "base-length-mismatch")
+            return ViewReadV1(status: "ok", reason: "", bytes: opened.bytes)
+    _sv_read_result("missing", "path-missing")
+
+fn _sv_read_host_file(path: text) -> ViewReadV1:
+    if not file_exists(path):
+        return _sv_read_result("missing", "path-missing")
+    match file_read_regular_no_follow_bounded_bytes(path, _SV_MAX_FILE_BYTES):
+        case Ok(value): ViewReadV1(status: "ok", reason: "", bytes: value)
+        case Err(_): _sv_read_result("corrupt", "read-failed")
+
+pub fn storage_view_v1_read(view: StorageViewV1, rel_path: text) -> ViewReadV1:
+    val policy = _sv_path_error(rel_path)
+    if policy != "":
+        return _sv_read_result("rejected", policy)
+    if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
+        return _sv_read_result("rejected", "view-id-invalid")
+    val vol = _sv_volume_index(view, rel_path)
+    if vol >= 0:
+        val rest_at = rel_path.index_of("/")
+        if rest_at < 0:
+            return _sv_read_result("rejected", "path-unauthorized")
+        val rest = rel_path.substring(rest_at + 1, rel_path.byte_len())
+        return _sv_read_host_file(view.volumes[vol].host_dir + "/" + rest)
+    val upper = _sv_upper_dir(view.view_root, view.view_id)
+    if not dir_is_real_no_follow(upper):
+        return _sv_read_result("rejected", "upper-missing")
+    val path = upper + "/" + rel_path
+    if file_exists(path) and not is_dir(path):
+        return _sv_read_host_file(path)
+    _sv_read_base(view, rel_path)
+
+# ------------------------------------------------------------------ save
+
+fn _sv_save_inner(view: StorageViewV1, root_name: text, expected: StoreGenerationV1,
+        pin_id: text, owner: text) -> ViewSaveV1:
+    val upper = _sv_upper_dir(view.view_root, view.view_id)
+    val scan = match _sv_scan_upper(upper):
+        case Ok(value): value
+        case Err(reason): return _sv_save_rejected(reason)
+    var paths: [text] = []
+    var keymap: Dict<text, text> = {}
+    var lenmap: Dict<text, i64> = {}
+    if view.base_manifest_key != "":
+        val base = match _sv_manifest_load(view.store, view.base_manifest_key):
+            case Ok(value): value
+            case Err(reason): return _sv_save_rejected("base-manifest-invalid: " + reason)
+        for i in 0..base.paths.len():
+            paths.push(base.paths[i])
+            keymap[base.paths[i]] = base.keys[i]
+            lenmap[base.paths[i]] = base.lens[i]
+    # Upper files override base entries of the same path; the manifest encode
+    # below rejects any remaining case-insensitive collision before publishing.
+    for i in 0..scan.paths.len():
+        val rel = scan.paths[i]
+        if _sv_path_error(rel) != "":
+            return _sv_save_rejected("upper-path-invalid")
+        val bytes = match file_read_regular_no_follow_bounded_bytes(upper + "/" + rel, _SV_MAX_FILE_BYTES):
+            case Ok(value): value
+            case Err(_): return _sv_save_rejected("upper-file-unreadable")
+        val got: i64 = bytes.len()
+        if got != scan.sizes[i]:
+            return _sv_save_rejected("upper-file-changed")
+        val ingested = immutable_store_v1_ingest_pinned(view.store, bytes,
+            HASH_POLICY_V1_XXH3_128, pin_id, owner)
+        if ingested.status != "ok":
+            return _sv_save_rejected("ingest-failed: " + ingested.reason)
+        if not keymap.contains_key(rel):
+            paths.push(rel)
+        keymap[rel] = ingested.object_key
+        lenmap[rel] = got
+    val manifest_text = match _sv_manifest_encode(paths, keymap, lenmap):
+        case Ok(value): value
+        case Err(reason): return _sv_save_rejected(reason)
+    val manifest_ingest = immutable_store_v1_ingest_pinned(view.store, manifest_text.bytes(),
+        HASH_POLICY_V1_XXH3_128, pin_id, owner)
+    if manifest_ingest.status != "ok":
+        return _sv_save_rejected("ingest-failed: " + manifest_ingest.reason)
+    # Root lists the manifest key first, then every distinct file key, so GC
+    # keeps the manifest and all objects it names reachable.
+    var root_text = manifest_ingest.object_key + "\n"
+    var seen: Dict<text, bool> = {}
+    seen[manifest_ingest.object_key] = true
+    for p in paths:
+        val k = keymap[p]
+        if not seen.contains_key(k):
+            seen[k] = true
+            root_text = root_text + k + "\n"
+    val published = immutable_store_v1_publish_root(view.store, root_name, root_text, expected)
+    if published != "":
+        return _sv_save_rejected(published)
+    var reason = ""
+    val released = immutable_store_v1_release_pin(view.store, pin_id, owner)
+    if released != "":
+        reason = "pin-release-pending: " + released
+    ViewSaveV1(status: "ok", reason: reason, generation: StoreGenerationV1(expected.value + 1),
+        manifest_key: manifest_ingest.object_key, files: ViewCountV1(paths.len()))
+
+pub fn storage_view_v1_save(view: StorageViewV1, root_name: text, expected: StoreGenerationV1) -> ViewSaveV1:
+    if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
+        return _sv_save_rejected("view-id-invalid")
+    if not _sv_root_name_valid(root_name):
+        return _sv_save_rejected("root-name-invalid")
+    if expected.value < 0:
+        return _sv_save_rejected("root-generation-invalid")
+    _sv_save_inner(view, root_name, expected, "save-" + view.view_id, "view-" + view.view_id)
+
+# ------------------------------------------------------------------ load
+
+pub fn storage_view_v1_load(store: text, view_root: text, view_id: text, root_name: text) -> ViewHandleV1:
+    val head = match _sv_base_from_head(store, root_name):
+        case Ok(value): value
+        case Err(reason): return _sv_handle_rejected(reason)
+    val manifest = match _sv_manifest_load(store, head.keys[0]):
+        case Ok(value): value
+        case Err(reason): return _sv_handle_rejected("manifest-invalid: " + reason)
+    var listed: Dict<text, bool> = {}
+    for k in head.keys:
+        listed[k] = true
+    for i in 0..manifest.paths.len():
+        if not listed.contains_key(manifest.keys[i]):
+            return _sv_handle_rejected("manifest-key-unlisted")
+        val opened = immutable_store_v1_open(store, manifest.keys[i])
+        if opened.status != "ok":
+            return _sv_handle_rejected("object-" + opened.status + ":" + opened.reason)
+        val got: i64 = opened.bytes.len()
+        if got != manifest.lens[i]:
+            return _sv_handle_rejected("object-length-mismatch")
+    _sv_create_with(store, view_root, view_id, root_name, head.generation.value, head.keys[0],
+        _SV_DEFAULT_LOAD_QUOTA)
+
+# ----------------------------------------------------------------- clone
+
+pub fn storage_view_v1_clone(src: StorageViewV1, new_view_id: text) -> ViewHandleV1:
+    if not _sv_id_valid(src.view_id) or not _sv_root_valid(src.view_root):
+        return _sv_handle_rejected("view-id-invalid")
+    val scan = match _sv_scan_upper(_sv_upper_dir(src.view_root, src.view_id)):
+        case Ok(value): value
+        case Err(reason): return _sv_handle_rejected(reason)
+    if scan.paths.len() > 0:
+        return _sv_handle_rejected("clone-dirty-upper")
+    _sv_create_with(src.store, src.view_root, new_view_id, src.base_root,
+        src.base_generation.value, src.base_manifest_key, src.quota.value)
+
+# --------------------------------------------------------------- destroy
+
+pub fn storage_view_v1_destroy(view: StorageViewV1) -> ViewDestroyV1:
+    if not _sv_id_valid(view.view_id) or not _sv_root_valid(view.view_root):
+        return _sv_destroy_result("rejected", "view-id-invalid")
+    val journal = match _sv_journal_load(view.view_root, view.view_id):
+        case Ok(value): value
+        case Err(reason): return _sv_destroy_result("rejected", reason)
+    val upper = _sv_upper_dir(view.view_root, view.view_id)
+    val actions = lifecycle_recovery_actions_v1(journal, ContainerNativeAliveV1(false))
+    for action in actions:
+        if action == LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1:
+            return _sv_destroy_result("rejected", "journal-phase-unknown")
+        if action.starts_with(LIFECYCLE_ACTION_REMOVE_OWNED_OBJECT_PREFIX_V1):
+            return _sv_destroy_result("rejected", "owned-object-unsupported")
+        if action.starts_with(LIFECYCLE_ACTION_REMOVE_OWNED_PATH_PREFIX_V1):
+            val prefix_len = LIFECYCLE_ACTION_REMOVE_OWNED_PATH_PREFIX_V1.byte_len()
+            val owned = action.substring(prefix_len, action.byte_len())
+            # Only the view's own upper dir (inside view_root/<view_id>) is
+            # removable; volumes and saved roots are never journaled here.
+            if owned != upper:
+                return _sv_destroy_result("rejected", "owned-path-outside-view")
+            if is_dir(owned):
+                if not dir_is_real_no_follow(owned):
+                    return _sv_destroy_result("rejected", "owned-path-not-real-dir")
+                if not dir_remove_all(owned) or is_dir(owned):
+                    return _sv_destroy_result("rejected", "owned-path-remove-failed")
+    if actions.len() == 0:
+        return _sv_destroy_result("ok", "")
+    val done = ContainerLifecycleJournalV1(format_version: journal.format_version,
+        container_id: journal.container_id,
+        generation: ContainerJournalGenerationV1(journal.generation.value + 1),
+        provider_id: journal.provider_id, phase: LIFECYCLE_PHASE_V1_DESTROYED,
+        owned_paths: journal.owned_paths, owned_objects: journal.owned_objects)
+    val reason = _sv_journal_save(_sv_journal_path(view.view_root, view.view_id), done)
+    if reason != "":
+        return _sv_destroy_result("rejected", reason)
+    _sv_destroy_result("ok", "")

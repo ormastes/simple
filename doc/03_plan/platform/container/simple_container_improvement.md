@@ -50,6 +50,10 @@ Lane 0 (store API/format hardening, `work/container-inc2-hardening-20261126`) im
 
 Lane A (SCV adapter, `work/container-inc2-scv-adapter-20261126`): `scv_adapter_v1.spl` imports legacy `sha256_<hex>` chunks with identity preserved, projects them back, and `scv gc` pins reachable chunks (generation-based `scv-gc-<g>-<n>` pins, owner `scv`) when `<repo>/.scv/store` exists; repos without it are unchanged. Specs: `test/01_unit/lib/nogc_sync_mut/storage/scv_adapter_v1_spec.spl`.
 
+## Status 2026-11-26 — Increment 2 Lane B
+
+Lane B (`work/container-inc2-storage-view-20261126`) implemented `src/lib/nogc_sync_mut/storage/storage_view_v1.spl` (host copy-on-write view: create/open/add_volume/write/read/save/load/clone/destroy) with `storage_view_v1_spec.spl` (9 examples). Path-policy confinement only, not kernel confinement; no whiteouts; `load` uses a fixed 64 MiB default quota; clone does not carry volumes.
+
 ## Review follow-ups (Fable review 2026-11-26)
 
 Fixed in increment 1: root CAS made atomic via no-replace `roots/<name>.g<N>.claim`
