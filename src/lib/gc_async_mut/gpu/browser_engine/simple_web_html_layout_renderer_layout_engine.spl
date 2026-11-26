@@ -1344,6 +1344,165 @@ fn grid_item_line_extents(styles: [Style], child_index: HtmlChildIndex, i: i32) 
         c = child_index.next_sibling[c]
     [column_extent, row_extent]
 
+# Track count of a column template with an `auto` track beside other tracks
+# (`auto 1fr`, `1fr auto`, `auto auto`, `100px auto`); 0 when the template has
+# no `auto` or is a lone `auto` (block path). `repeat()` / `minmax()` were
+# already expanded by `grid_expand_track_functions`; `minmax(<length>, auto)`
+# never gets here (the list is rejected).
+fn grid_template_auto_track_count(raw: text) -> i32:
+    var n = 0
+    var has_auto = false
+    for part in raw.split(" "):
+        val t = part.trim()
+        if t == "":
+            continue
+        if t == "auto":
+            has_auto = true
+        elif parse_int(if t.starts_with("0+"): t.substring(2, t.byte_len()) else: t) <= 0:
+            return 0
+        n = n + 1
+    if has_auto and n > 1: n else: 0
+
+# Column sizes of a template with `auto` tracks (CSS Grid 12.4-12.7, Chrome
+# 159). An `auto` track or a bare `Nfr` track starts at the widest automatic
+# minimum of the items lying in it alone (CSS Grid 6.6,
+# `flex_zero_basis_floor_w`: min-content, a declared min-width instead, none
+# when the item clips; a fixed-width item counts as its width). A `0+Nfr`
+# token (`minmax(0, Nfr)`) starts at 0. `auto` tracks grow toward their
+# widest max-content item in equal increments while free space lasts; then the
+# `fr` tracks share what is left, else the `auto` tracks share it under
+# justify-content normal, stretch or flex-start (the condition
+# `grid_column_sizes_with_implicit` uses). Lengths read as `grid_track_sizes`
+# reads them.
+# ponytail: a `minmax(<length>, Nfr)` floor is read as the content floor
+# (the length is dropped by `grid_expand_track_functions`, as before), and a
+# spanning item does not size any track. Upgrade: carry the length floor in the
+# token and spread spanning items (CSS Grid 12.5.2).
+fn grid_explicit_auto_column_sizes(
+    nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, st: Style,
+    placements: [i32], column_count: i32, available_w: i32, widths: [i32]
+) -> [i32]:
+    val gap = st.column_gap_px
+    var sizes: [i32] = [0; column_count]
+    var limits: [i32] = [0; column_count]
+    var fr: [i32] = [0; column_count]
+    var fr_floor: [bool] = [false; column_count]
+    var is_auto: [bool] = [false; column_count]
+    var fr_total = 0
+    var auto_count = 0
+    var column = 0
+    for part in st.grid_template_columns.split(" "):
+        val t = part.trim()
+        if t == "" or column >= column_count:
+            continue
+        if t == "auto":
+            is_auto[column] = true
+            auto_count = auto_count + 1
+        elif t.starts_with("0+"):
+            fr[column] = parse_int(t.substring(2, t.byte_len()))
+            fr_total = fr_total + fr[column]
+        elif t.ends_with("fr"):
+            fr[column] = parse_int(t)
+            fr_floor[column] = true
+            fr_total = fr_total + fr[column]
+        else:
+            sizes[column] = parse_int(t)
+        column = column + 1
+    var c = child_index.first_child[i]
+    var placement = 0
+    while c >= 0:  # cpu-lane-loop-ok: one pass over a grid's children during layout, never on a paint path
+        val item_column = placements[placement + 1]
+        if placements[placement] >= 0 and placements[placement + 3] == 1 and item_column >= 0 and item_column < column_count and (is_auto[item_column] or fr_floor[item_column]):
+            val cst = styles[c]
+            val margin_l = if cst.margin_l_auto: 0 else: resolve_horizontal_margin(cst.margin_l, cst.margin_l_pct, 0)
+            val margin_r = if cst.margin_r_auto: 0 else: resolve_horizontal_margin(cst.margin_r, cst.margin_r_pct, 0)
+            val min_w = margin_l + margin_r + (if cst.width_px > 0: css_outer_width(nodes[c], cst, cst.width_px) else: flex_zero_basis_floor_w(nodes, styles, child_index, c, cst, available_w))
+            if min_w > sizes[item_column]:
+                sizes[item_column] = min_w
+            if is_auto[item_column]:
+                val max_w = margin_l + margin_r + (if cst.width_px > 0: css_outer_width(nodes[c], cst, cst.width_px) else: row_flex_item_auto_intrinsic_w(nodes, styles, child_index, c, cst, available_w, widths).width)
+                if max_w > limits[item_column]:
+                    limits[item_column] = max_w
+        placement = placement + 4
+        c = child_index.next_sibling[c]
+    var free = available_w - gap * (column_count - 1)
+    column = 0
+    while column < column_count:
+        free = free - sizes[column]
+        column = column + 1
+    # Maximize (12.6): equal increments to the auto tracks below their growth
+    # limit, each freezing at it.
+    var rounds = 0
+    while free > 0 and rounds < column_count:  # cpu-lane-loop-ok: at most one round per column of one grid during layout
+        var open = 0
+        var room = 0
+        column = 0
+        while column < column_count:
+            if is_auto[column] and sizes[column] < limits[column]:
+                open = open + 1
+                if room == 0 or limits[column] - sizes[column] < room:
+                    room = limits[column] - sizes[column]
+            column = column + 1
+        if open == 0:
+            break
+        val step_total = if room * open < free: room * open else: free
+        var k = 0
+        var assigned = 0
+        column = 0
+        while column < column_count:
+            if is_auto[column] and sizes[column] < limits[column]:
+                k = k + 1
+                val after = step_total * k / open
+                sizes[column] = sizes[column] + after - assigned
+                assigned = after
+            column = column + 1
+        free = free - step_total
+        rounds = rounds + 1
+    if free > 0 and fr_total > 0:
+        # Expand flexible tracks (12.7): a track whose floor beats its share
+        # keeps the floor and leaves the share to the others.
+        var flex_space = free
+        var flex_weight = fr_total
+        var inflexible: [bool] = [false; column_count]
+        column = 0
+        while column < column_count:
+            if fr[column] > 0:
+                flex_space = flex_space + sizes[column]
+            column = column + 1
+        var changed = true
+        while changed and flex_weight > 0:  # cpu-lane-loop-ok: each pass freezes one more fr track of one grid during layout
+            changed = false
+            column = 0
+            while column < column_count:
+                if fr[column] > 0 and not inflexible[column] and sizes[column] * flex_weight > flex_space * fr[column]:
+                    inflexible[column] = true
+                    flex_space = flex_space - sizes[column]
+                    flex_weight = flex_weight - fr[column]
+                    changed = true
+                column = column + 1
+        var used = 0
+        var assigned = 0
+        column = 0
+        while column < column_count and flex_weight > 0:
+            if fr[column] > 0 and not inflexible[column]:
+                used = used + fr[column]
+                val after = flex_space * used / flex_weight
+                sizes[column] = after - assigned
+                assigned = after
+            column = column + 1
+    elif free > 0 and auto_count > 0 and (st.justify_content == "flex-start" or st.justify_content == "normal" or st.justify_content == "stretch"):
+        var k = 0
+        var assigned = 0
+        column = 0
+        while column < column_count:
+            if is_auto[column]:
+                k = k + 1
+                val after = free * k / auto_count
+                sizes[column] = sizes[column] + after - assigned
+                assigned = after
+            column = column + 1
+    sizes
+
 # Column sizes of a grid with implicit columns (CSS Grid 7.6, 12.5; Chrome
 # 159): the template tracks, then one `grid-auto-columns` track per implicit
 # column, cycled (`auto` when the property is unset). An `auto` column is as
@@ -2260,9 +2419,18 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
             table_h
         )
-    val grid_explicit_columns = grid_track_sizes(
-        st.grid_template_columns, iw, st.column_gap_px
-    )
+    # A template with `auto` tracks is sized from its items once they are
+    # placed (`grid_explicit_auto_column_sizes`); until then it stands as that
+    # many columns. ponytail: grids that also need implicit columns keep the
+    # block path they had, a lone `auto` template keeps it too, and a spanning
+    # item does not widen an auto track. Upgrade: size explicit + implicit
+    # tracks in one pass and spread spanning items (CSS Grid 12.5.2).
+    var grid_auto_template_n = if st.display == "grid": grid_template_auto_track_count(st.grid_template_columns) else: 0
+    if grid_auto_template_n > 0 and (st.grid_auto_flow_column or st.grid_auto_columns != "" or grid_item_line_extents(styles, child_index, i)[0] > grid_auto_template_n):
+        grid_auto_template_n = 0
+    var grid_explicit_columns: [i32] = [0; grid_auto_template_n]
+    if grid_auto_template_n == 0:
+        grid_explicit_columns = grid_track_sizes(st.grid_template_columns, iw, st.column_gap_px)
     # Without a column template the grid still has columns when implicit ones
     # are sized (`grid-auto-columns`) or made by the flow (`grid-auto-flow:
     # column`); any other template-less grid stays on the block path below.
@@ -2313,7 +2481,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             grid_placement_index = grid_placement_index + 4
         grid_placement_index = 0
         val grid_columns = if grid_column_count == grid_explicit_column_count:
-            grid_explicit_columns
+            if grid_auto_template_n > 0: grid_explicit_auto_column_sizes(nodes, styles, child_index, i, st, grid_placements, grid_column_count, iw, out_intrinsic_widths) else: grid_explicit_columns
         else:
             grid_column_sizes_with_implicit(
                 nodes, styles, child_index, i, st, grid_placements,
