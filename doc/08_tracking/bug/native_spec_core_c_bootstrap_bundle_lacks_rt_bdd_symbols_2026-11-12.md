@@ -1,8 +1,11 @@
 # Native spec route: `core-c-bootstrap` runtime bundle lacks `rt_bdd_*`, so a spec that reaches link fails (2026-11-12)
 
-Status: OPEN (filed, not fixed). Severity P2 (blocks every `--native-backend=` spec row that
-gets through MIR when the producer is the Stage 2 bootstrap compiler with its receipt-bound
-runtime).
+Status: fix-implemented-verification-pending (2026-11-27, W2-3 Windows triage). `src/runtime/runtime_native.c` (`12892-13009`) and `src/runtime/runtime.c` (`1491-1512`) now define and export `rt_bdd_record_result`, `rt_bdd_executed_total`, `rt_bdd_failed_total`, `rt_bdd_describe_start_rv`, `rt_bdd_describe_end`, `rt_bdd_it_start_rv`, `rt_bdd_it_end`, `rt_bdd_has_failure`, `rt_bdd_note_skip`, `rt_bdd_fail_rv`, `rt_bdd_expect_fail`, `rt_bdd_expect_eq_rv`, `rt_bdd_expect_truthy_rv`, `rt_bdd_expect_truthy`, `rt_bdd_format_results`, and `rt_bdd_clear_state`, and `scripts/check/build-core-c-bootstrap-runtime-capsule.shs` compiles `runtime_native.c` into the `core-c-bootstrap` capsule. Severity P2 (Stage 2 native SSpec link verification on Linux/aarch64 and `src/app/compile/native.spl` link-driver inspection remain outside this Windows lane).
+
+## Verification 2026-11-27 (Windows host)
+
+- `sh test/01_unit/runtime/runtime_bdd_native_exports_contract_test.shs` -> `PASS: runtime_native.c owns rt_bdd_* exports across core-c, memowner, standalone, and legacy profiles`.
+- Pending outside this Windows lane: full Stage 2 native `--native-backend=cranelift` SSpec link+run and direct `clang`/`ld.lld` driver verification (`src/app/compile/native.spl`).
 
 ## Symptom
 `test/01_unit/lib/common/config_core/host_config_spec.spl` run through the Stage 2-built test

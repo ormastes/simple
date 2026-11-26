@@ -27,3 +27,11 @@ work/move7931-regressions).
 | slang_pack/main_spec | (see PR) | exits 0 on valid tiny safetensors | OLD | needs fixture absent in unit lane |
 
 Next: split each row into its own bug when a fix lane picks it up.
+
+## Progress 2026-11-27 (Windows host, W2-3)
+
+Fixed and verified in W2-3:
+- `test/01_unit/app/ui/session_spec.spl`: 23/23 PASS (`src/lib/common/ui/wm_chrome_theme.spl` exports added; `src/lib/nogc_sync_mut/ui/session.spl` `UISession.update_tree` / `update_surface_tree` fall back to `diff_trees(...)` global store; `session_spec.spl` updated for non-alias `glass_dark` per `23c09d490df`).
+- `test/01_unit/app/ui/backend_matrix_spec.spl`: 10/10 PASS (`src/app/ui.render/_TuiWidgets/extended_widgets.spl` adds `tui_renders_own_children` including `"dropdown"`, `"table"`, `"radio"`, etc. so `render_tui_tree` does not re-render child widgets over self-rendering widgets; `backend_matrix_spec.spl` uses `480x40` TUI viewport matching `nav_panel width: 240` and adds a radio group marker test).
+- Re-verified adjacent UI/TUI specs with zero regressions: `ui/ws_handler_spec.spl` 13/13 PASS, `ui/tui_cli_wiring_spec.spl` 7/7 PASS, `test/03_system/gui/tui_screen_spec.spl` 11/11 PASS, `backend_matrix_{web,tauri,electron}_spec.spl` 1/1 PASS each.
+- Remaining outside W2-3 / host scope: `browser/browser_render_lane_spec` (in excluded `simple_web_html_layout_renderer.spl`), `backend_matrix_browser_spec` (1/2 fails Engine2D GPU backend expectation software vs cuda/rocm/opencl), and `slang_pack/main_spec` (fixture). Bug remains open.

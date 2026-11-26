@@ -1,7 +1,6 @@
 # Test runner reports a failed native producer as `exit=-1, limit=infrastructure` with empty output (2026-11-12)
 
-Status: verification-pending (2026-11-16). Windows owned scope now keeps head+tail of an over-cap capture and no longer cancels the child at the cap (disk ceiling max(16x cap, 64 MiB)); spec test/01_unit/lib/nogc_sync_mut/io/resource_scope_failed_child_diagnostics_spec.spl RED 1 failed -> GREEN 2 passed. Not verified: end-to-end native runner route on a real compiler failure.
-infrastructure kill; the real compiler error is only in a file nobody is told about).
+Status: fix-implemented-verification-pending (2026-11-27, W2-3 Windows fixes layered over 2026-11-16 owned-scope diagnostics). Not verified: end-to-end native runner route on a real Stage 2 compiler failure.
 
 ## Symptom
 Four specs of `test/01_unit/lib/common/config_core` through the Stage 2-built runner (PR #8510
@@ -31,8 +30,9 @@ scratch `s2runner/suite.sh k3_unit <runner> test/01_unit/lib/common/config_core`
 as in `scripts/bootstrap/run-native-aot-suite.shs`, `SIMPLE_TEST_PREPROCESS_BOUNDARY=0`); compare
 the runner's `Error:` line with the producer stderr file in `TMPDIR`.
 
-## Next
-Find why the owned-process scope returns `legacy_exit == -1` with empty captures for a child that
-exited non-zero after writing ~0.5 MB to stderr (pipe/capture path of
-`run_in_owned_test_resource_scope`), and make the runner print the tail of the producer's
-diagnostics file on any native compile failure.
+## Fix & Verification 2026-11-27 (Windows host, W2-3)
+
+- `src/lib/nogc_sync_mut/io/windows_process_owner.spl`: added `windows_process_build_command_line_v1` enforcing an explicit benign `cmd.exe` pre-switch allowlist (rejecting `/cecho`, `/d&echo`, metacharacters before `/c`/`/k`), `/S` verbatim quoting for `/c`/`/k` payloads without CRT `\"` mangling, and `_windows_cmd_join_tail_v1` / `_windows_cmd_quote_tail_arg_v1` for multi-arg `cmd.exe /c` invocations (quoting individual sub-args with whitespace/metacharacters `& | < > ^ ( ) ; ,`, preserving balanced outer quotes, rejecting unsafe embedded quotes, and wrapping with `/S` when quotes are present).
+- `src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl`, `src/app/mcp/main_lazy_ctx_tools.spl`, `test/02_integration/hal_env/hal_env_process_spec.spl`, `test/03_system/app/perf/feature/simple_build_test_abnormality_detection_spec.spl`, `test/fixtures/test_runner_native_process_capture/main.spl`, `resource_scope_failed_child_diagnostics_spec.spl`, and `resource_scope_child_spawn_spec.spl`: read `.usage.exit_code.value` (`i32`) for `MetricExitCode`.
+- Verified (`--mode=interpreter`): `resource_scope_failed_child_diagnostics_spec.spl` 2/2 PASS, `resource_scope_child_spawn_spec.spl` 12/12 PASS (incl. live multi-arg `cmd.exe /c` via `run_in_owned_test_resource_scope`), `windows_command_owner_v2_spec.spl` 11/11 PASS, `portable_process_hal_spec.spl` 2/2 PASS, `ctx_capture_truncation_spec.spl` 4/4 PASS (`hal_env_process_spec.spl` skipped 4 POSIX cases on Windows; `simple_build_test_abnormality_detection_spec.spl` pre-existing `@manual_section` parse-error under seed).
+- End-to-end Stage 2 native producer failure propagation remains pending native Linux/Stage 2 verification.

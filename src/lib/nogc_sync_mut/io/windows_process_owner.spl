@@ -102,6 +102,94 @@ fn windows_process_path_valid_v1(path: text) -> bool:
         if part == "." or part == "..": return false
     true
 
+fn _windows_cmd_is_cmd_exe_v1(program: text) -> bool:
+    val norm = program.replace("\\", "/")
+    val parts = norm.split("/")
+    if parts.len() == 0: return false
+    val base = parts[parts.len() - 1].lower()
+    base == "cmd.exe" or base == "cmd"
+
+fn _windows_cmd_is_exec_switch_v1(arg: text) -> bool:
+    val lower = arg.lower()
+    lower == "/c" or lower == "/k" or lower == "-c" or lower == "-k"
+
+fn _windows_cmd_is_safe_pre_switch_v1(arg: text) -> bool:
+    val lower = arg.lower()
+    lower == "/d" or lower == "/s" or lower == "/a" or lower == "/u" or lower == "/q" or
+        lower == "/e:on" or lower == "/e:off" or lower == "/f:on" or lower == "/f:off" or
+        lower == "/v:on" or lower == "/v:off" or
+        _windows_cmd_is_exec_switch_v1(arg)
+
+fn _windows_cmd_token_needs_quote_v1(token: text) -> bool:
+    if token == "": return true
+    if token.contains(" ") or token.contains("\t"): return true
+    token.contains("&") or token.contains("|") or token.contains("<") or
+        token.contains(">") or token.contains("^") or token.contains("(") or
+        token.contains(")") or token.contains(";") or token.contains(",")
+
+fn _windows_cmd_quote_tail_arg_v1(tail: text) -> Result<text, text>:
+    if tail.contains("\r") or tail.contains("\n"):
+        return Err("Windows cmd.exe shell payload contains newline")
+    if tail.contains("\""):
+        if tail.byte_len() >= 2 and tail.starts_with("\"") and tail.ends_with("\""):
+            val inner = tail.substring(1, tail.byte_len() - 1)
+            if not inner.contains("\""):
+                return Ok(tail)
+        return Err("Windows cmd.exe multi-arg token contains unsafe embedded quote")
+    if _windows_cmd_token_needs_quote_v1(tail):
+        return Ok("\"" + tail + "\"")
+    Ok(tail)
+
+fn _windows_cmd_join_tail_v1(args: [text], start: i64) -> Result<text, text>:
+    var joined = ""
+    var idx = start
+    while idx < args.len():
+        val part = _windows_cmd_quote_tail_arg_v1(args[idx])?
+        if idx > start:
+            joined = joined + " "
+        joined = joined + part
+        idx = idx + 1
+    Ok(joined)
+
+fn windows_process_build_command_line_v1(program: text, args: [text]) -> Result<text, text>:
+    if program.contains("\0"):
+        return Err("NUL in program")
+    for arg in args:
+        if arg.contains("\0"):
+            return Err("NUL in argument")
+    var command = windows_process_quote_arg_v1(program)
+    if not _windows_cmd_is_cmd_exe_v1(program):
+        for arg in args:
+            command = command + " " + windows_process_quote_arg_v1(arg)
+        return Ok(command)
+    var seen_s = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _windows_cmd_is_exec_switch_v1(arg):
+            val remaining = args.len() - i - 1
+            if remaining == 0:
+                command = command + " " + arg
+                return Ok(command)
+            var payload = ""
+            if remaining == 1:
+                payload = args[i + 1]
+                if payload.contains("\r") or payload.contains("\n"):
+                    return Err("Windows cmd.exe shell payload contains newline")
+            else:
+                payload = _windows_cmd_join_tail_v1(args, i + 1)?
+            if payload.contains("\"") and not seen_s:
+                command = command + " /S"
+            command = command + " " + arg + " \"" + payload + "\""
+            return Ok(command)
+        if not _windows_cmd_is_safe_pre_switch_v1(arg):
+            return Err("Windows cmd.exe rejects unsupported switch before /c or /k: " + arg)
+        if arg.lower() == "/s":
+            seen_s = true
+        command = command + " " + arg
+        i = i + 1
+    Ok(command)
+
 fn windows_process_request_valid_v1(request: WindowsProcessRequestV1) -> text:
     if not windows_process_path_valid_v1(request.program) or not windows_process_path_valid_v1(request.directory):
         return "Windows owner requires absolute drive-rooted program and cwd"
@@ -132,6 +220,9 @@ fn windows_process_request_valid_v1(request: WindowsProcessRequestV1) -> text:
     for input in request.inputs:
         if not windows_process_path_valid_v1(input.path) or input.digest.len() != 64:
             return "invalid immutable input"
+    val cmd_built = windows_process_build_command_line_v1(request.program, request.args)
+    if cmd_built.is_err():
+        return cmd_built.unwrap_err()
     ""
 
 @unsafe(reason: "bounds checked UTF16 writes into a zeroed owned allocation", capabilities: [ffi, raw_ptr])
@@ -379,8 +470,10 @@ fn _windows_process_admit_core_v1(request: WindowsProcessRequestV1, memory_limit
             error = "input pin/digest mismatch: " + input.path
             break
         pins = pins.push(pin)
-    var command = windows_process_quote_arg_v1(request.program)
-    for arg in request.args: command = command + " " + windows_process_quote_arg_v1(arg)
+    val command_built = windows_process_build_command_line_v1(request.program, request.args)
+    if command_built.is_err():
+        return WindowsProcessAdmissionV1.RejectedBeforeStart(command_built.unwrap_err())
+    val command = command_built.unwrap()
     var environment = ""
     var ordered = request.environment
     var i = 1
@@ -618,7 +711,7 @@ fn windows_process_collect_v1(lease: WindowsProcessLeaseV1) -> Result<WindowsPro
 
 export WindowsProcessInputV1, WindowsProcessRequestV1, WindowsProcessPollV1, WindowsProcessLeaseV1
 export windows_process_start_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1
-export windows_process_quote_arg_v1, windows_process_path_valid_v1, windows_process_request_valid_v1
+export windows_process_quote_arg_v1, windows_process_build_command_line_v1, windows_process_path_valid_v1, windows_process_request_valid_v1
 export windows_process_file_digest_v1
 
 fn windows_process_collected_proof_v1(lease: WindowsProcessLeaseV1) -> bool:

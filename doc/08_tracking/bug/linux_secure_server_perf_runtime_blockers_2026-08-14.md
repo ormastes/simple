@@ -1,6 +1,6 @@
 # Linux secure-server performance runtime blockers
 
-Status: OPEN (P2)
+Status: fix-implemented-verification-pending (2026-11-27, W2-3 PureDatabase & driver fixes verified on Windows seed; live Stage 2 Linux HTTP/DB comparison pending)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Source repair 2026-09-22 — verification pending
@@ -73,3 +73,14 @@ Tip `79445b063c4`, Rust seed sha256 prefix `fb80903917d6d5f5`.
   the native diagnostic was this same driver comparison is open.
 - **Checker gap (not filed):** the seed accepts `i64? != bool` without a
   type error. That is how this driver bug went unnoticed.
+
+## Fix & Verification 2026-11-27 (Windows host, W2-3)
+
+- **PureDatabase delete visibility & PK index parity fix (`src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl`):**
+  - `checkpoint()` now checks `_table_all_tuples_visible(ti)` instead of unconditionally marking `_tbl_all_visible[ti] = true` over deleted `xmax != 0` tuples.
+  - `_ensure_pk_map(ti)` filters by `mvcc_is_visible` and clears stale `_pk_flat` entries; `count_by_key` / `count_by_key_text` sync MVCC via `_ensure_mvcc_sync(ti)` and filter non-PK scans by `mvcc_is_visible`; `delete_by_key`, `update_by_key`, `update_value_by_key`, `_do_select_bitmap_owned_v1`, `_do_update`, `_do_delete`, and `query` call `_ensure_mvcc_sync(ti)` before PK fast paths/scans and keep `_pk_flat`/`_tbl_pk_map`/`_tbl_pk_dirty`/caches synchronized on PK mutations (including non-PK `UPDATE` and `open_deferred` `put -> checkpoint -> put -> SELECT/UPDATE/DELETE`).
+- **Verified on Windows seed (`--mode=interpreter`):**
+  - Regression spec `test/01_unit/lib/database/pure_database_delete_visibility_spec.spl`: 5/5 PASS.
+  - `pure_sql_select_cache_spec.spl`: 10/10 PASS; `pure_sql_reopen_checkpointed_spec.spl`: 1/1 PASS; `pure_database_transaction_identity_spec.spl`: 4/4 PASS; `pure_sql_autoincrement_spec.spl`: 2/2 PASS.
+  - `test/05_perf/bench/db_crud_compare_driver.spl --mode=pure-db`: exit 0 (all 5 stages pass: `insert`, `where`, `update`, `delete`, `transaction`).
+  - Live Linux Stage 2 native server / benchmark comparison (`nginx`/`wrk`/`sqlite3`/`psql`) remains pending Linux target verification.
