@@ -82,6 +82,105 @@ unsafe extern "system" {
     fn WriteFile(file: Handle, buffer: *const c_void, count: u32, written: *mut u32, overlapped: *mut c_void) -> i32;
     fn FlushFileBuffers(file: Handle) -> i32;
     fn SetFilePointerEx(file: Handle, distance: i64, position: *mut i64, method: u32) -> i32;
+    fn GetCurrentProcess() -> Handle;
+    fn GetCurrentProcessId() -> u32;
+    fn GetCurrentThreadId() -> u32;
+    fn LocalFree(memory: Handle) -> Handle;
+}
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn OpenProcessToken(process: Handle, access: u32, token: *mut c_void) -> i32;
+    fn GetTokenInformation(token: Handle, class: i32, buffer: *mut c_void, length: u32, returned: *mut u32) -> i32;
+    fn SetTokenInformation(token: Handle, class: i32, buffer: *mut c_void, length: u32) -> i32;
+    fn CreateRestrictedToken(
+        existing: Handle,
+        flags: u32,
+        disable_sid_count: u32,
+        sids_to_disable: *mut c_void,
+        delete_privilege_count: u32,
+        privileges_to_delete: *mut c_void,
+        restricting_sid_count: u32,
+        sids_to_restrict: *mut c_void,
+        new_token: *mut c_void,
+    ) -> i32;
+    fn DuplicateTokenEx(
+        token: Handle,
+        access: u32,
+        attributes: *mut c_void,
+        impersonation_level: i32,
+        token_type: i32,
+        new_token: *mut c_void,
+    ) -> i32;
+    fn AllocateAndInitializeSid(
+        authority: *mut c_void,
+        sub_authority_count: u8,
+        sub0: u32,
+        sub1: u32,
+        sub2: u32,
+        sub3: u32,
+        sub4: u32,
+        sub5: u32,
+        sub6: u32,
+        sub7: u32,
+        sid: *mut c_void,
+    ) -> i32;
+    fn ConvertStringSidToSidW(text: *const u16, sid: *mut c_void) -> i32;
+    fn ConvertSidToStringSidW(sid: *mut c_void, text: *mut c_void) -> i32;
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        text: *const u16,
+        revision: u32,
+        descriptor: *mut c_void,
+        size: *mut u32,
+    ) -> i32;
+    fn FreeSid(sid: *mut c_void) -> *mut c_void;
+    fn GetLengthSid(sid: *mut c_void) -> u32;
+    fn IsValidSid(sid: *mut c_void) -> i32;
+    fn EqualSid(first: *mut c_void, second: *mut c_void) -> i32;
+    fn SetEntriesInAclW(count: u32, entries: *mut c_void, old_acl: *mut c_void, new_acl: *mut c_void) -> u32;
+    fn SetNamedSecurityInfoW(
+        name: *mut u16,
+        object_type: i32,
+        info: u32,
+        owner: *mut c_void,
+        group: *mut c_void,
+        dacl: *mut c_void,
+        sacl: *mut c_void,
+    ) -> u32;
+    fn GetNamedSecurityInfoW(
+        name: *const u16,
+        object_type: i32,
+        info: u32,
+        owner: *mut c_void,
+        group: *mut c_void,
+        dacl: *mut c_void,
+        sacl: *mut c_void,
+        descriptor: *mut c_void,
+    ) -> u32;
+    fn CreateProcessAsUserW(
+        token: Handle,
+        application: *const u16,
+        command_line: *mut u16,
+        process_security: *mut c_void,
+        thread_security: *mut c_void,
+        inherit_handles: i32,
+        flags: u32,
+        environment: *mut c_void,
+        directory: *const u16,
+        startup_info: *mut c_void,
+        process_info: *mut c_void,
+    ) -> i32;
+    fn CreateProcessWithTokenW(
+        token: Handle,
+        logon_flags: u32,
+        application: *const u16,
+        command_line: *mut u16,
+        flags: u32,
+        environment: *mut c_void,
+        directory: *const u16,
+        startup_info: *mut c_void,
+        process_info: *mut c_void,
+    ) -> i32;
 }
 
 #[link(name = "bcrypt")]
@@ -151,6 +250,30 @@ const NAMES: &[&str] = &[
     "WriteFile",
     "FlushFileBuffers",
     "SetFilePointerEx",
+    // Windows identity / ACL surface (container lane P1): kernel32 helpers plus
+    // advapi32 token, SID and security-descriptor APIs.
+    "GetCurrentProcess",
+    "GetCurrentProcessId",
+    "GetCurrentThreadId",
+    "LocalFree",
+    "OpenProcessToken",
+    "GetTokenInformation",
+    "SetTokenInformation",
+    "CreateRestrictedToken",
+    "DuplicateTokenEx",
+    "AllocateAndInitializeSid",
+    "ConvertStringSidToSidW",
+    "ConvertSidToStringSidW",
+    "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+    "FreeSid",
+    "GetLengthSid",
+    "IsValidSid",
+    "EqualSid",
+    "SetEntriesInAclW",
+    "SetNamedSecurityInfoW",
+    "GetNamedSecurityInfoW",
+    "CreateProcessAsUserW",
+    "CreateProcessWithTokenW",
 ];
 
 /// True when `name` is one of the direct Win64 ABI externs this module implements.
@@ -408,6 +531,201 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let position = opt_ptr(arg_i64(args, 2, name)?);
             let method = arg_i64(args, 3, name)? as u32;
             Ok(Value::Int(unsafe { SetFilePointerEx(file, distance, position.cast(), method) } as i64))
+        }
+        "GetCurrentProcess" => Ok(Value::Int(unsafe { GetCurrentProcess() } as i64)),
+        "GetCurrentProcessId" => Ok(Value::Int(unsafe { GetCurrentProcessId() } as i64)),
+        "GetCurrentThreadId" => Ok(Value::Int(unsafe { GetCurrentThreadId() } as i64)),
+        "LocalFree" => {
+            let memory = opt_ptr(arg_i64(args, 0, name)?);
+            Ok(Value::Int(unsafe { LocalFree(memory) } as i64))
+        }
+        "OpenProcessToken" => {
+            let process = opt_ptr(arg_i64(args, 0, name)?);
+            let access = arg_i64(args, 1, name)? as u32;
+            let token = opt_ptr(arg_i64(args, 2, name)?);
+            Ok(Value::Int(unsafe { OpenProcessToken(process, access, token) } as i64))
+        }
+        "GetTokenInformation" => {
+            let token = opt_ptr(arg_i64(args, 0, name)?);
+            let class = arg_i64(args, 1, name)? as i32;
+            let buffer = opt_ptr(arg_i64(args, 2, name)?);
+            let length = arg_i64(args, 3, name)? as u32;
+            let returned = opt_ptr(arg_i64(args, 4, name)?);
+            Ok(Value::Int(unsafe { GetTokenInformation(token, class, buffer, length, returned.cast()) } as i64))
+        }
+        "SetTokenInformation" => {
+            let token = opt_ptr(arg_i64(args, 0, name)?);
+            let class = arg_i64(args, 1, name)? as i32;
+            let buffer = opt_ptr(arg_i64(args, 2, name)?);
+            let length = arg_i64(args, 3, name)? as u32;
+            Ok(Value::Int(unsafe { SetTokenInformation(token, class, buffer, length) } as i64))
+        }
+        "CreateRestrictedToken" => {
+            let existing = opt_ptr(arg_i64(args, 0, name)?);
+            let flags = arg_i64(args, 1, name)? as u32;
+            let disable_count = arg_i64(args, 2, name)? as u32;
+            let disable = opt_ptr(arg_i64(args, 3, name)?);
+            let delete_count = arg_i64(args, 4, name)? as u32;
+            let delete = opt_ptr(arg_i64(args, 5, name)?);
+            let restrict_count = arg_i64(args, 6, name)? as u32;
+            let restrict = opt_ptr(arg_i64(args, 7, name)?);
+            let new_token = opt_ptr(arg_i64(args, 8, name)?);
+            Ok(Value::Int(unsafe {
+                CreateRestrictedToken(
+                    existing,
+                    flags,
+                    disable_count,
+                    disable,
+                    delete_count,
+                    delete,
+                    restrict_count,
+                    restrict,
+                    new_token,
+                )
+            } as i64))
+        }
+        "DuplicateTokenEx" => {
+            let token = opt_ptr(arg_i64(args, 0, name)?);
+            let access = arg_i64(args, 1, name)? as u32;
+            let attributes = opt_ptr(arg_i64(args, 2, name)?);
+            let level = arg_i64(args, 3, name)? as i32;
+            let kind = arg_i64(args, 4, name)? as i32;
+            let new_token = opt_ptr(arg_i64(args, 5, name)?);
+            Ok(Value::Int(unsafe { DuplicateTokenEx(token, access, attributes, level, kind, new_token) } as i64))
+        }
+        "AllocateAndInitializeSid" => {
+            let authority = opt_ptr(arg_i64(args, 0, name)?);
+            let count = arg_i64(args, 1, name)? as u8;
+            let mut sub = [0u32; 8];
+            for (i, slot) in sub.iter_mut().enumerate() {
+                *slot = arg_i64(args, 2 + i, name)? as u32;
+            }
+            let sid = opt_ptr(arg_i64(args, 10, name)?);
+            Ok(Value::Int(unsafe {
+                AllocateAndInitializeSid(
+                    authority, count, sub[0], sub[1], sub[2], sub[3], sub[4], sub[5], sub[6], sub[7], sid,
+                )
+            } as i64))
+        }
+        "ConvertStringSidToSidW" => {
+            let text = opt_ptr(arg_i64(args, 0, name)?);
+            let sid = opt_ptr(arg_i64(args, 1, name)?);
+            Ok(Value::Int(unsafe { ConvertStringSidToSidW(text.cast(), sid) } as i64))
+        }
+        "ConvertSidToStringSidW" => {
+            let sid = opt_ptr(arg_i64(args, 0, name)?);
+            let text = opt_ptr(arg_i64(args, 1, name)?);
+            Ok(Value::Int(unsafe { ConvertSidToStringSidW(sid, text) } as i64))
+        }
+        "ConvertStringSecurityDescriptorToSecurityDescriptorW" => {
+            let text = opt_ptr(arg_i64(args, 0, name)?);
+            let revision = arg_i64(args, 1, name)? as u32;
+            let descriptor = opt_ptr(arg_i64(args, 2, name)?);
+            let size = opt_ptr(arg_i64(args, 3, name)?);
+            Ok(Value::Int(unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(text.cast(), revision, descriptor, size.cast())
+            } as i64))
+        }
+        "FreeSid" => {
+            let sid = opt_ptr(arg_i64(args, 0, name)?);
+            Ok(Value::Int(unsafe { FreeSid(sid) } as i64))
+        }
+        "GetLengthSid" => {
+            let sid = opt_ptr(arg_i64(args, 0, name)?);
+            Ok(Value::Int(unsafe { GetLengthSid(sid) } as i64))
+        }
+        "IsValidSid" => {
+            let sid = opt_ptr(arg_i64(args, 0, name)?);
+            Ok(Value::Int(unsafe { IsValidSid(sid) } as i64))
+        }
+        "EqualSid" => {
+            let first = opt_ptr(arg_i64(args, 0, name)?);
+            let second = opt_ptr(arg_i64(args, 1, name)?);
+            Ok(Value::Int(unsafe { EqualSid(first, second) } as i64))
+        }
+        "SetEntriesInAclW" => {
+            let count = arg_i64(args, 0, name)? as u32;
+            let entries = opt_ptr(arg_i64(args, 1, name)?);
+            let old_acl = opt_ptr(arg_i64(args, 2, name)?);
+            let new_acl = opt_ptr(arg_i64(args, 3, name)?);
+            Ok(Value::Int(unsafe { SetEntriesInAclW(count, entries, old_acl, new_acl) } as i64))
+        }
+        "SetNamedSecurityInfoW" => {
+            let path = opt_ptr(arg_i64(args, 0, name)?);
+            let object_type = arg_i64(args, 1, name)? as i32;
+            let info = arg_i64(args, 2, name)? as u32;
+            let owner = opt_ptr(arg_i64(args, 3, name)?);
+            let group = opt_ptr(arg_i64(args, 4, name)?);
+            let dacl = opt_ptr(arg_i64(args, 5, name)?);
+            let sacl = opt_ptr(arg_i64(args, 6, name)?);
+            Ok(Value::Int(unsafe {
+                SetNamedSecurityInfoW(path.cast(), object_type, info, owner, group, dacl, sacl)
+            } as i64))
+        }
+        "GetNamedSecurityInfoW" => {
+            let path = opt_ptr(arg_i64(args, 0, name)?);
+            let object_type = arg_i64(args, 1, name)? as i32;
+            let info = arg_i64(args, 2, name)? as u32;
+            let owner = opt_ptr(arg_i64(args, 3, name)?);
+            let group = opt_ptr(arg_i64(args, 4, name)?);
+            let dacl = opt_ptr(arg_i64(args, 5, name)?);
+            let sacl = opt_ptr(arg_i64(args, 6, name)?);
+            let descriptor = opt_ptr(arg_i64(args, 7, name)?);
+            Ok(Value::Int(unsafe {
+                GetNamedSecurityInfoW(path.cast(), object_type, info, owner, group, dacl, sacl, descriptor)
+            } as i64))
+        }
+        "CreateProcessAsUserW" => {
+            let token = opt_ptr(arg_i64(args, 0, name)?);
+            let application = opt_ptr(arg_i64(args, 1, name)?);
+            let command_line = opt_ptr(arg_i64(args, 2, name)?);
+            let process_security = opt_ptr(arg_i64(args, 3, name)?);
+            let thread_security = opt_ptr(arg_i64(args, 4, name)?);
+            let inherit_handles = arg_i64(args, 5, name)? as i32;
+            let flags = arg_i64(args, 6, name)? as u32;
+            let environment = opt_ptr(arg_i64(args, 7, name)?);
+            let directory = opt_ptr(arg_i64(args, 8, name)?);
+            let startup_info = opt_ptr(arg_i64(args, 9, name)?);
+            let process_info = opt_ptr(arg_i64(args, 10, name)?);
+            Ok(Value::Int(unsafe {
+                CreateProcessAsUserW(
+                    token,
+                    application.cast(),
+                    command_line.cast(),
+                    process_security,
+                    thread_security,
+                    inherit_handles,
+                    flags,
+                    environment,
+                    directory.cast(),
+                    startup_info,
+                    process_info,
+                )
+            } as i64))
+        }
+        "CreateProcessWithTokenW" => {
+            let token = opt_ptr(arg_i64(args, 0, name)?);
+            let logon_flags = arg_i64(args, 1, name)? as u32;
+            let application = opt_ptr(arg_i64(args, 2, name)?);
+            let command_line = opt_ptr(arg_i64(args, 3, name)?);
+            let flags = arg_i64(args, 4, name)? as u32;
+            let environment = opt_ptr(arg_i64(args, 5, name)?);
+            let directory = opt_ptr(arg_i64(args, 6, name)?);
+            let startup_info = opt_ptr(arg_i64(args, 7, name)?);
+            let process_info = opt_ptr(arg_i64(args, 8, name)?);
+            Ok(Value::Int(unsafe {
+                CreateProcessWithTokenW(
+                    token,
+                    logon_flags,
+                    application.cast(),
+                    command_line.cast(),
+                    flags,
+                    environment,
+                    directory.cast(),
+                    startup_info,
+                    process_info,
+                )
+            } as i64))
         }
         "BCryptOpenAlgorithmProvider" => {
             let provider = opt_ptr(arg_i64(args, 0, name)?);
