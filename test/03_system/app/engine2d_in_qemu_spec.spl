@@ -114,62 +114,35 @@ fn _update_baseline_requested() -> bool:
     val v = rt_env_get("UPDATE_BASELINE") ?? ""
     v == "1" or v == "true"
 
-fn _capture_engine2d_ppm_with_python(qmp_socket: text, output_path: text) -> bool:
-    val script = "import json,os,socket,sys,time;" +
-        "s=socket.socket(socket.AF_UNIX);" +
-        "s.settimeout(5);" +
-        "s.connect(sys.argv[1]);" +
-        "f=s.makefile('rwb',buffering=0);" +
-        "f.readline();" +
-        "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');" +
-        "f.flush();" +
-        "f.readline();" +
-        "f.write(json.dumps(dict(execute='human-monitor-command', arguments=dict([('command-line','screendump '+sys.argv[2])]))).encode()+b'\\n');" +
-        "f.flush();" +
-        "f.readline();" +
-        "ok=any((time.sleep(0.1) or (os.path.exists(sys.argv[2]) and os.path.getsize(sys.argv[2])>0)) for _ in range(150));" +
-        "print('OK' if ok else 'NO_CAPTURE');" +
-        "sys.exit(0 if ok else 3)"
-    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 20000)
-    if result[0] != "":
-        print "[engine2d_in_qemu_spec] python qmp capture: {result[0]}"
-    if result[1] != "":
-        print "[engine2d_in_qemu_spec] python qmp stderr: {result[1]}"
-    result[2] == 0 and file_exists(output_path)
+fn _capture_engine2d_ppm(qmp_socket: text, output_path: text) -> CaptureResult:
+    val cap = capture_qemu_vm(qmp_socket, output_path)
+    if not cap.success:
+        print "[engine2d_in_qemu_spec] qmp capture failed: {cap.error}"
+    cap
 
-fn _assert_nonblack_ppm_with_python(path: text) -> bool:
-    val script = "import pathlib,sys;" +
-        "b=pathlib.Path(sys.argv[1]).read_bytes();" +
-        "h=b.find(b'\\n255\\n')+5;" +
-        "pix=b[h:];" +
-        "n=sum(1 for i in range(0,len(pix),3) if pix[i:i+3] != b'\\x00\\x00\\x00');" +
-        "print('nonblack='+str(n));" +
-        "sys.exit(0 if n > 0 else 4)"
-    val result = rt_process_run_timeout("python3", ["-c", script, path], 5000)
-    if result[0] != "":
-        print "[engine2d_in_qemu_spec] python ppm stats: {result[0]}"
-    if result[1] != "":
-        print "[engine2d_in_qemu_spec] python ppm stderr: {result[1]}"
-    result[2] == 0
-
-fn _compare_baseline_ppm_with_python(capture_path: text, baseline_path: text) -> bool:
-    val script = "import pathlib,sys;" +
-        "cb=pathlib.Path(sys.argv[1]).read_bytes();" +
-        "bb=pathlib.Path(sys.argv[2]).read_bytes();" +
-        "ci=cb.find(b'\\n255\\n')+5;" +
-        "bi=bb.find(b'\\n255\\n')+5;" +
-        "ch=cb[:ci]; cp=cb[ci:]; bh=bb[:bi]; bp=bb[bi:];" +
-        "total=min(len(cp),len(bp))//3;" +
-        "same=sum(1 for i in range(0,total*3,3) if cp[i:i+3]==bp[i:i+3]);" +
-        "pct=(same*10000)//total if total else 0;" +
-        "print('match='+str(pct/100.0)+'% '+str(same)+'/'+str(total));" +
-        "sys.exit(0 if ch==bh and len(cp)==len(bp) and pct >= 9500 else 5)"
-    val result = rt_process_run_timeout("python3", ["-c", script, capture_path, baseline_path], 10000)
-    if result[0] != "":
-        print "[engine2d_in_qemu_spec] python baseline compare: {result[0]}"
-    if result[1] != "":
-        print "[engine2d_in_qemu_spec] python baseline stderr: {result[1]}"
-    result[2] == 0
+# Exact-pixel match against the baseline: same dimensions and >= 95% of
+# pixels identical (RGB only, alpha ignored).
+fn _compare_baseline_ppm(cap: CaptureResult, baseline_path: text) -> bool:
+    val baseline = _read_baseline_ppm(baseline_path)
+    if not baseline[0]:
+        print "[engine2d_in_qemu_spec] {baseline[4]}"
+        return false
+    val bpix = baseline[1]
+    if baseline[2] != cap.width or baseline[3] != cap.height or bpix.len() != cap.pixels.len():
+        print "[engine2d_in_qemu_spec] baseline size {baseline[2]}x{baseline[3]} != capture {cap.width}x{cap.height}"
+        return false
+    val total = cap.pixels.len()
+    if total == 0:
+        return false
+    var same: i64 = 0
+    var i = 0
+    while i < total:
+        if (cap.pixels[i] & 0xFFFFFF) == (bpix[i] & 0xFFFFFF):
+            same = same + 1
+        i = i + 1
+    val pct = (same * 10000) / total
+    print "[engine2d_in_qemu_spec] baseline match={pct / 100}.{pct % 100}% {same}/{total}"
+    pct >= 9500
 
 # ===========================================================================
 # Spec
@@ -221,10 +194,11 @@ describe "Engine2D in QEMU SimpleOS":
                 val saw_painted = wait_for_serial_marker(
                     handle, "[E2D] Engine2D verification frame painted", 30000)
                 if saw_painted:
-                    val captured = _capture_engine2d_ppm_with_python(qmp_socket, capture_ppm)
+                    val cap = _capture_engine2d_ppm(qmp_socket, capture_ppm)
+                    val captured = cap.success
                     var nonblank = false
                     if captured:
-                        nonblank = _assert_nonblack_ppm_with_python(capture_ppm)
+                        nonblank = _non_black_count(cap.pixels) > 0
                     if _update_baseline_requested():
                         val cp_result = rt_process_run_timeout("cp", [capture_ppm, baseline_path], 5000)
                         val wrote = cp_result[2] == 0 and file_exists(baseline_path)
@@ -237,7 +211,7 @@ describe "Engine2D in QEMU SimpleOS":
                             stop_guest(handle)
                             expect(file_exists(baseline_path)).to_equal(true)
                         else:
-                            val compared = captured and nonblank and _compare_baseline_ppm_with_python(capture_ppm, baseline_path)
+                            val compared = captured and nonblank and _compare_baseline_ppm(cap, baseline_path)
                             stop_guest(handle)
                             expect(compared).to_equal(true)
                 else:
