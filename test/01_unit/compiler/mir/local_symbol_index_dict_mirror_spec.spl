@@ -1,12 +1,10 @@
 use std.spec
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
-# bug stage2_local_symbol_index_bucket_tagged_id_2026-11-03: under the frozen
-# phase-3 stage2 the hashed local-symbol index buckets a binding by a value that
-# disagrees with the lookup's (symbol 8 landed in bucket 1 of 16, the probe used
-# bucket 8), so every `val`-then-use was "undefined variable". The binding is
-# mirrored into the runtime-canonicalized `local_map` Dict and find_local falls
-# back to it after an index miss. This pins both halves of that mirror.
+# stage2_local_symbol_index_bucket_tagged_id_2026-11-03 RETIRED:
+# The `local_map` Dict mirror and `mirror_binding` / `restore_mirror_bindings`
+# workaround are retired now that uniform P3 resolves `[i64]` hashed buckets
+# directly without tagged-id corruption. This spec pins the retired contract.
 fn fn_body(src: text, header: text, stop: text) -> text:
     val start = src.index_of(header)
     if start < 0:
@@ -17,47 +15,25 @@ fn fn_body(src: text, header: text, stop: text) -> text:
         return rest
     rest.substring(0, end)
 
-describe "MIR local-symbol index is mirrored into local_map":
-    it "bind_local writes every binding into local_map":
+describe "MIR local-symbol index local_map mirror is retired":
+    it "MirLowering no longer carries local_map, mirror_binding, or restore_mirror_bindings":
         val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
-        val body = fn_body(src, "me bind_local(symbol_id: i64, local: LocalId):", "fn find_local(")
-        expect(body.len() > 0).to_equal(true)
-        expect(body).to_contain("self.local_map[symbol_id] = local")
+        expect(src.contains("local_map: Dict<i64, LocalId>")).to_equal(false)
+        expect(src.contains("mirror_binding(")).to_equal(false)
+        expect(src.contains("restore_mirror_bindings(")).to_equal(false)
+        expect(src.contains("@workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03")).to_equal(false)
 
-    it "find_local consults local_map BEFORE the hashed [i64] index":
-        # 2026-11-08: a mirror consulted only after an index MISS cannot catch
-        # an index HIT that is a silent alias (ids read back decoded twice,
-        # 8 -> 1, so `local_symbol_ids[slot] == symbol_id` matches the wrong
-        # binding). The mirror is written by every bind_local, so it is
-        # authoritative and must be asked first.
+    it "bind_local and find_local use the hashed index directly without local_map":
         val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
-        val body = fn_body(src, "fn find_local(symbol_id: i64) -> LocalId:", "fn hir_type_mentions_type_param(")
-        expect(body.len() > 0).to_equal(true)
-        val mirror_at = body.index_of("if self.local_map.has(symbol_id):")
-        val index_at = body.index_of("self.local_symbol_slot(symbol_id)")
-        expect(mirror_at >= 0).to_equal(true)
-        expect(index_at >= 0).to_equal(true)
-        expect(mirror_at < index_at).to_equal(true)
-        expect(body).to_contain("@workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03")
+        val bind_body = fn_body(src, "me bind_local(symbol_id: i64, local: LocalId):", "fn find_local(")
+        val find_body = fn_body(src, "fn find_local(symbol_id: i64) -> LocalId:", "fn hir_type_mentions_type_param(")
+        expect(bind_body.len() > 0).to_equal(true)
+        expect(find_body.len() > 0).to_equal(true)
+        expect(bind_body.contains("self.local_map")).to_equal(false)
+        expect(find_body.contains("self.local_map")).to_equal(false)
+        expect(find_body).to_contain("self.local_symbol_slot(symbol_id)")
 
-    it "find_local binds the mirrored LocalId to a typed local (no struct bracket-read in return position)":
-        val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
-        val body = fn_body(src, "fn find_local(symbol_id: i64) -> LocalId:", "fn hir_type_mentions_type_param(")
-        expect(body).to_contain("val mirrored: LocalId = self.local_map[symbol_id]")
-        expect(body.contains("return self.local_map[symbol_id]")).to_equal(false)
-
-    it "a rollback tombstone (id < 0) in the mirror falls through to the index":
-        val src = file_read("src/compiler/50.mir/mir_lowering_types.spl")
-        val body = fn_body(src, "fn find_local(symbol_id: i64) -> LocalId:", "fn mirror_binding(")
-        expect(body).to_contain("if mirrored.id >= 0:")
-        expect(src).to_contain("fn mirror_binding(symbol_id: i64) -> LocalId:")
-        expect(src).to_contain("me restore_mirror_bindings(syms: [i64], prevs: [LocalId]):")
-
-    it "every wholesale array rollback site rolls the mirror back too":
-        # With the mirror consulted first, the overlay/param/comprehension
-        # bindings that bind_local writes into local_map inside a rollback
-        # window must be restored with the arrays, or the enclosing scope
-        # would keep seeing the inner binding after the window closes.
+    it "every wholesale array rollback site restores arrays without mirror rollback":
         val calls = file_read("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
         val named_lambda = fn_body(calls, "me try_inline_lambda_call(symbol: SymbolId, args: [HirCallArg]) -> LocalId?:", "me lower_inline_lambda_with_locals(")
         val inline_lambda = fn_body(calls, "me lower_inline_lambda_with_locals(", "me lower_iife_call(")
@@ -65,14 +41,12 @@ describe "MIR local-symbol index is mirrored into local_map":
         val comprehension = fn_body(extras, "# The comprehension variable is scoped to the comprehension.", "var value_array_hir: HirType? = nil")
         for body in [named_lambda, inline_lambda, comprehension]:
             expect(body.len() > 0).to_equal(true)
-            expect(body).to_contain("@workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03")
-            expect(body).to_contain("self.mirror_binding(")
-            val restore_at = body.index_of("self.restore_mirror_bindings(rollback_syms, rollback_prev)")
-            val arrays_at = body.index_of("self.local_symbol_index_slots = saved_index_slots")
-            expect(arrays_at >= 0).to_equal(true)
-            expect(restore_at > arrays_at).to_equal(true)
+            expect(body.contains("@workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03")).to_equal(false)
+            expect(body.contains("self.mirror_binding(")).to_equal(false)
+            expect(body.contains("self.restore_mirror_bindings(")).to_equal(false)
+            expect(body).to_contain("self.local_symbol_index_slots = saved_index_slots")
 
-    it "local_map is still reset together with the index at function start":
+    it "function reset no longer clears local_map":
         val src = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
-        expect(src).to_contain("self.local_map = {}")
+        expect(src.contains("self.local_map = {}")).to_equal(false)
         expect(src).to_contain("self.local_symbol_ids = []")
