@@ -15,6 +15,7 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_di
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.nogc_sync_mut.storage.storage_view_v1.{_sv_merged_count_error}
+use std.nogc_sync_mut.sosix.fs_v1.{dir_create_new}
 use app.io.file_ops.{path_absolute}
 
 fn _hex(b: [u8]) -> text:
@@ -317,3 +318,22 @@ describe "storage_view_v1 hardening":
         # calls this same check before any ingest.
         expect(_sv_merged_count_error(4096)).to_equal("")
         expect(_sv_merged_count_error(4097)).to_equal("manifest-too-many-entries")
+
+describe "storage_view_v1 exclusive create":
+    it "dir_create_new claims a fresh dir once and reports exists after":
+        val base = _temp("excl-dir")
+        expect(dir_create_new(base + "/claim")).to_equal("ok")
+        expect(is_dir(base + "/claim")).to_equal(true)
+        expect(dir_create_new(base + "/claim")).to_equal("exists")
+        expect(dir_create_new(base + "/missing-parent/child")).to_equal("failed")
+        _cleanup(base)
+
+    it "refuses a view dir that already exists and leaves it untouched":
+        val base = _temp("excl-view")
+        val store = _store(base)
+        expect(dir_create_all(base + "/views/v1")).to_equal(true)
+        val made = storage_view_v1_create(store, base + "/views", "v1", "", StoreGenerationV1(0), ViewBytesV1(1000))
+        expect(made.status).to_equal("rejected")
+        expect(made.reason).to_equal("view-exists")
+        expect(dir_list(base + "/views/v1").len()).to_equal(0)
+        _cleanup(base)

@@ -31,7 +31,7 @@ use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_size_raw,
     file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes}
 use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
-use std.nogc_sync_mut.sosix.fs_v1.{dir_create_all, dir_remove_all, is_dir, dir_walk,
+use std.nogc_sync_mut.sosix.fs_v1.{dir_create_all, dir_create_new, dir_remove_all, is_dir, dir_walk,
     dir_is_real_no_follow}
 
 pub unit ViewBytesV1: i64
@@ -500,7 +500,14 @@ fn _sv_create_with(store: text, view_root_in: text, view_id: text, base_root: te
     if is_dir(view_dir) or file_exists(view_dir):
         return _sv_handle_rejected("view-exists")
     val upper = _sv_upper_dir(view_root, view_id)
-    if not dir_create_all(view_dir):
+    # The exclusive mkdir of the final component is the claim: two same-id
+    # creates cannot both pass it.
+    if not dir_create_all(view_root):
+        return _sv_handle_rejected("view-dir-failed")
+    val claimed = dir_create_new(view_dir)
+    if claimed == "exists":
+        return _sv_handle_rejected("view-exists")
+    if claimed != "ok":
         return _sv_handle_rejected("view-dir-failed")
     # The journal is durable identity for cleanup: it lands before any other
     # owned resource exists.

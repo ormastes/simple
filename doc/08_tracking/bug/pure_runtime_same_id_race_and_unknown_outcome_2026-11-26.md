@@ -21,9 +21,9 @@ Expected: allow the lifecycle edges into the outcome-unknown state and report `t
 - Tests in `test/03_system/app/container/feature/pure_simple_container_v1_spec.spl`: view-exists keeps the winner's view, half-created view still removed, missing store at create, unknown outcome reports the real reason. The race itself is emulated through the helper, since a spec cannot interleave two runs.
 
 ## Open (Fable review, 2026-11-27)
-- **View create is not exclusive.**
+- **View create is not exclusive. FIXED 2026-11-27.** `_sv_create_with` now creates `view_root`, then claims `view_dir` with SOSIX `dir_create_new` (single `rt_mkdir`, -17 maps to `exists`) and maps `exists` to `view-exists`; the `is_dir` pre-check stays as a fast path. Specs: `dir_create_new` ok/exists/failed, and a pre-made view dir yields `view-exists` and stays empty. The journal/meta writes after the claim are still non-exclusive but are only reachable by the claim winner.
   - Where: `storage_view_v1.spl` `_sv_create_with` checks `is_dir(view_dir)`, then calls `dir_create_all`, which succeeds on an existing dir. Its journal and meta writes are non-exclusive.
   - Effect: two same-id creates that both pass the check either share one view, or one fails with a non-`view-exists` reason and tears down the winner's view.
   - Fix: an exclusive mkdir (SOSIX `dir_create` that fails on exists), or an ownership nonce in the view journal.
-- **Loser's journal over-claims.** It reaches `destroyed` while `owned_paths` names the winner's dirs.
+- **Loser's journal over-claims.** STILL OPEN: clearing `owned_paths` in `_after_create_refused_v1` needs a rebuilt journal record, not a one-liner; skipped. It reaches `destroyed` while `owned_paths` names the winner's dirs.
 - **Untested path.** A failure after `dir_create_all(view_dir)` (a truly half-created view) has no spec.
