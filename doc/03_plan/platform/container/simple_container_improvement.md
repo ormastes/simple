@@ -44,7 +44,7 @@ Increment 1 implemented and verified: 6 specs / 60 examples green on the Windows
 
 ## Status 2026-11-26 — Increment 2 Lane 0
 
-Lane 0 (store API/format hardening, `work/container-inc2-hardening-20261126`) implemented items 1-7: counted root/pin docs, canonical integers, `immutable_store_v1_ingest_pinned`, pin owner check (`release_pin` now takes `owner`), aligned 4 MiB pin bound with `_ISV1_MAX_REFS` 16384, GC stem validation, and domain units in `object_record_v1`/`hash_policy_v1`. Existing stores written before the `count` field are rejected by decode (no non-spec consumers yet). A corrupt pin can no longer be released through the API because the owner cannot be verified (fails closed with `pin-corrupt`).
+Lane 0 (store API/format hardening, `work/container-inc2-hardening-20261126`) implemented items 1-7: counted root/pin docs, canonical integers, `immutable_store_v1_ingest_pinned`, pin owner check (`release_pin` now takes `owner`), aligned 4 MiB pin bound with `_ISV1_MAX_REFS` 16384, GC stem validation, and domain units in `object_record_v1`/`hash_policy_v1`. Existing stores written before the `count` field are rejected by decode (no non-spec consumers yet). Review fixes: pins are now append-only directories (`pins/<id>/owner`, `pins/<id>/refs/<key>`, no-replace publication, no lost updates or owner races); GC lists candidates before reading roots/pins and re-reads them after moving, restoring any key that became reachable (a reader may transiently see `missing`); root docs require a terminating newline and bare (unquoted) integers; pinned-ingest reuse paths republish if GC quarantined the object.
 
 ## Review follow-ups (Fable review 2026-11-26)
 
@@ -57,7 +57,6 @@ client authority.
 
 Open (P2, next increment):
 - Staged publishes do not fsync.
-- Pin update is read-then-write (not a CAS); concurrent writers of one pin can lose an appended key.
 - Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot.
 - `substring(..., byte_len())` on non-ASCII hostile lines in doc/record decode: confirm `substring` clamps (fail-closed) or reject non-ASCII first.
 - Pointer-cache write failures are ignored; an unrefreshable pointer bricks a root after 4096 generations (`root-claim-chain-too-long`).

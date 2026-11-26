@@ -1,6 +1,13 @@
 # ImmutableStoreV1 — collision-safe immutable object store with selectable
 # hashing; SCV publication discipline (staging, verify, no-replace, winner
 # verify), quarantine-only GC. Design: doc/05_design/platform/container/simple_container_improvement.md
+#
+# Concurrency is lockless: every shared write is a no-replace publication.
+# Pins are append-only directories (`pins/<id>/owner`, `pins/<id>/refs/<key>`).
+# GC lists objects first, then reads roots and pins, moves unreachable
+# candidates to quarantine, re-reads roots and pins, and moves back any moved
+# key that became reachable. A concurrent reader may therefore transiently see
+# `missing` for an object that GC moved and then restored.
 
 use std.common.hash.hash_policy_v1.{hash_policy_v1_supported, hash_policy_v1_digest}
 use std.common.storage.object_record_v1.{OBJECT_RECORD_V1_VERSION, DigestAliasV1,
@@ -48,8 +55,6 @@ val _ISV1_MAX_COLLISION_SCAN: i64 = 64
 val _ISV1_MAX_RECORD_BYTES: i64 = 65536
 val _ISV1_MAX_ALIAS_BYTES: i64 = 512
 val _ISV1_MAX_ROOT_BYTES: i64 = 4194304
-# Pin read bound equals the root read bound so any accepted pin can be read back.
-val _ISV1_MAX_PIN_BYTES: i64 = 4194304
 val _ISV1_MAX_REFS: i64 = 16384
 val _ISV1_MAX_ROOT_CLAIM_WALK: i64 = 4096
 
@@ -212,7 +217,7 @@ fn _isv1_root_path(root: text, name: text) -> text:
 fn _isv1_root_claim_path(root: text, name: text, generation: i64) -> text:
     _isv1_join(root, "roots/" + name + ".g{generation}.claim")
 fn _isv1_pin_path(root: text, pin_id: text) -> text:
-    _isv1_join(root, "pins/" + pin_id + ".sdn")
+    _isv1_join(root, "pins/" + pin_id)
 fn _isv1_collision_path(root: text, algorithm: text, digest_hex: text, n: i64) -> text:
     _isv1_join(root, "collisions/" + algorithm + "/" + digest_hex + "_{n}.sdn")
 
@@ -272,6 +277,8 @@ fn _isv1_find_colon(line: text) -> i64:
 fn _isv1_doc_decode(source: text, allowed: [text], max_bytes: i64) -> Result<Isv1DocV1, text>:
     if source.byte_len() > max_bytes:
         return Err("doc-too-large")
+    if not source.ends_with("\n"):
+        return Err("unterminated-document")
     val lines = source.split("\n")
     var fields: Dict<text, text> = {}
     var keys: [text] = []
@@ -300,6 +307,8 @@ fn _isv1_doc_decode(source: text, allowed: [text], max_bytes: i64) -> Result<Isv
             if not rest.starts_with(" "):
                 return Err("malformed-line")
             val raw = rest.substring(1, rest.byte_len())
+            if raw.starts_with("\"") and (field_name == "format_version" or field_name == "generation" or field_name == "count"):
+                return Err("quoted-integer")
             if raw.starts_with("\""):
                 val unquoted = match _isv1_unquote(raw):
                     case Ok(value): value
@@ -326,12 +335,9 @@ fn _isv1_doc_generation(doc: Isv1DocV1) -> i64:
     if not doc.fields.contains_key("generation"):
         return -1
     _isv1_parse_nonneg_int(doc.fields["generation"])
-fn _isv1_doc_encode(name_field: text, name_value: text, owner_field: text, owner_value: text,
-        generation: i64, keys: [text]) -> text:
+fn _isv1_doc_encode(name_value: text, generation: i64, keys: [text]) -> text:
     var out = "format_version: 1\n"
-    out = out + "{name_field}: \"{_isv1_escape(name_value)}\"\n"
-    if owner_field != "":
-        out = out + "{owner_field}: \"{_isv1_escape(owner_value)}\"\n"
+    out = out + "name: \"{_isv1_escape(name_value)}\"\n"
     out = out + "generation: {generation}\n"
     out = out + "count: {keys.len()}\n"
     out = out + "objects:\n"
@@ -364,6 +370,14 @@ fn _isv1_read_object_bytes(root: text, key: text) -> Result<[u8], text>:
     if not file_exists(path):
         return Err("object-missing")
     file_read_regular_no_follow_bounded_bytes(path, _ISV1_MAX_OBJECT_BYTES)
+fn _isv1_object_matches(root: text, key: text, bytes: [u8]) -> bool:
+    match _isv1_read_object_bytes(root, key):
+        case Ok(existing_bytes):
+            return existing_bytes == bytes
+        case Err(_):
+            return false
+    false
+
 fn _isv1_ingest_rejected(reason: text) -> StoreIngestV1:
     StoreIngestV1(status: "rejected", reason: reason, object_key: "", alias_hex: "", reused: StoreFlagV1(false))
 fn _isv1_ingest_ok(key: text, alias_hex: text, reused: StoreFlagV1) -> StoreIngestV1:
@@ -455,7 +469,11 @@ fn _isv1_publish(root: text, key: text, bytes: [u8], algorithm: text, alias_hex:
     if pin_reason != "":
         dir_remove_all(stage)
         return _isv1_ingest_rejected(pin_reason)
-    val published = file_publish_noreplace_raw(staged_object, object_path)
+    var published = file_publish_noreplace_raw(staged_object, object_path)
+    if published == 0 and pin_id != "" and not file_exists(object_path):
+        # The winner was moved to quarantine by a concurrent GC after we lost
+        # the race; our pin already protects the key, so publish again.
+        published = file_publish_noreplace_raw(staged_object, object_path)
     if published == 1:
         val finish_reason = _isv1_finish_publish(root, key, bytes.len(), algorithm, alias_hex, profile, from_collision)
         dir_remove_all(stage)
@@ -489,21 +507,15 @@ fn _isv1_collision_ingest(root: text, algorithm: text, alias_hex: text, bytes: [
     while n <= _ISV1_MAX_COLLISION_SCAN:
         val candidate = "{algorithm}_{alias_hex}_c{n}"
         if file_exists(_isv1_object_path(root, candidate)):
-            val existing = _isv1_read_object_bytes(root, candidate)
-            var matches = false
-            match existing:
-                case Ok(existing_bytes):
-                    if existing_bytes == bytes:
-                        matches = true
-                case Err(_):
-                    matches = false
-            if matches:
-                val pin_reason = _isv1_pin_key(root, pin_id, owner, candidate)
-                if pin_reason != "":
-                    return _isv1_ingest_rejected(pin_reason)
+            if not _isv1_object_matches(root, candidate, bytes):
+                n = n + 1
+                continue
+            val pin_reason = _isv1_pin_key(root, pin_id, owner, candidate)
+            if pin_reason != "":
+                return _isv1_ingest_rejected(pin_reason)
+            if pin_id == "" or _isv1_object_matches(root, candidate, bytes):
                 return _isv1_ingest_ok(candidate, alias_hex, StoreFlagV1(true))
-            n = n + 1
-            continue
+            # Quarantined after the match: fall through and republish the bytes.
         val attempt = _isv1_publish(root, candidate, bytes, algorithm, alias_hex, profile, true, pin_id, owner)
         if attempt.status == "ok":
             val record_reason = _isv1_write_collision_record(root, algorithm, alias_hex, candidate, bytes.len())
@@ -597,6 +609,11 @@ fn _isv1_ingest(root: text, bytes: [u8], policy: text, pin_id: text, owner: text
                     val pin_reason = _isv1_pin_key(root, pin_id, owner, candidate)
                     if pin_reason != "":
                         return _isv1_ingest_rejected(pin_reason)
+                    if pin_id != "" and not _isv1_object_matches(root, candidate, bytes):
+                        # Quarantined after the match: republish under the same key.
+                        if _isv1_key_hex(candidate) != alias_hex:
+                            return _isv1_ingest_rejected("alias-corrupt")
+                        return _isv1_publish(root, candidate, bytes, algorithm, alias_hex, digest.profile, false, pin_id, owner)
                     val record_reason = _isv1_publish_record(root, candidate, bytes.len(),
                         algorithm, alias_hex, digest.profile)
                     if record_reason != "":
@@ -658,7 +675,7 @@ pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
         return "roots-dir-failed"
     val path = _isv1_root_path(root, name)
     if expected_generation == 0:
-        val created = _isv1_doc_encode("name", name, "", "", 1, keys)
+        val created = _isv1_doc_encode(name, 1, keys)
         if created.byte_len() > _ISV1_MAX_ROOT_BYTES:
             return "manifest-too-large"
         val published = _isv1_publish_text_noreplace(root, "root.sdn", created, path)
@@ -687,7 +704,7 @@ pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
     if head_generation != expected_generation:
         return "root-generation-mismatch"
     # CAS: only one writer can no-replace publish the claim for generation N+1.
-    val replaced = _isv1_doc_encode("name", name, "", "", expected_generation + 1, keys)
+    val replaced = _isv1_doc_encode(name, expected_generation + 1, keys)
     if replaced.byte_len() > _ISV1_MAX_ROOT_BYTES:
         return "manifest-too-large"
     val claimed = _isv1_publish_text_noreplace(root, "root.claim", replaced,
@@ -740,58 +757,38 @@ fn _isv1_pin_args_error(root: text, pin_id: text, owner: text) -> text:
         return "pin-owner-invalid"
     ""
 
-# Decode an existing pin and require the same owner; never lets one owner's
-# update replace another owner's refs.
-fn _isv1_pin_load(path: text, owner: text) -> Result<Isv1DocV1, text>:
-    val existing_text = match file_read_regular_no_follow_bounded(path, _ISV1_MAX_PIN_BYTES):
-        case Ok(value): value
-        case Err(_): return Err("pin-unreadable")
-    val doc = match _isv1_doc_decode(existing_text, ["format_version", "pin_id", "owner", "generation"], _ISV1_MAX_PIN_BYTES):
-        case Ok(value): value
-        case Err(_): return Err("pin-corrupt")
-    if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
-        return Err("pin-corrupt")
-    if not doc.fields.contains_key("owner"):
-        return Err("pin-corrupt")
-    if doc.fields["owner"] != owner:
-        return Err("pin-owner-mismatch")
-    Ok(doc)
-
-# Write pin `pin_id` for `owner`. With add_key == "" the pin's refs become
-# `refs`; otherwise add_key is appended to the existing refs only if absent.
-fn _isv1_pin_update(root: text, pin_id: text, owner: text, refs: [text], add_key: text) -> text:
-    val pins_dir = _isv1_join(root, "pins")
-    if not dir_create_all(pins_dir) and not is_dir(pins_dir):
-        return "pins-dir-failed"
-    val path = _isv1_pin_path(root, pin_id)
-    var generation: i64 = 1
-    var keys: [text] = refs
-    if file_exists(path):
-        val doc = match _isv1_pin_load(path, owner):
-            case Ok(value): value
-            case Err(reason): return reason
-        val prior = _isv1_doc_generation(doc)
-        if prior < 0:
-            return "pin-corrupt"
-        generation = prior + 1
-        if add_key != "":
-            keys = doc.keys
-    if add_key != "" and not keys.contains(add_key):
-        keys.push(add_key)
+# Claim pin `pin_id` for `owner` (no-replace owner file; an existing owner file
+# must match) and add one no-replace ref file per key. Existing refs are
+# already pinned, which is success. Nothing is ever overwritten.
+fn _isv1_pin_add(root: text, pin_id: text, owner: text, keys: [text]) -> text:
     if keys.len() > _ISV1_MAX_REFS:
         return "pin-refs-too-many"
-    val content = _isv1_doc_encode("pin_id", pin_id, "owner", owner, generation, keys)
-    if content.byte_len() > _ISV1_MAX_PIN_BYTES:
-        return "pin-too-large"
-    if not atomic_write_bytes(path, content.bytes()):
+    val pin_dir = _isv1_pin_path(root, pin_id)
+    val refs_dir = pin_dir + "/refs"
+    if not dir_create_all(refs_dir) and not is_dir(refs_dir):
+        return "pins-dir-failed"
+    val owner_path = pin_dir + "/owner"
+    val claimed = _isv1_publish_text_noreplace(root, "owner", owner, owner_path)
+    if claimed == 0:
+        val existing = match file_read_regular_no_follow_bounded(owner_path, 512):
+            case Ok(value): value
+            case Err(_): return "pin-unreadable"
+        if existing != owner:
+            return "pin-owner-mismatch"
+    elif claimed != 1:
         return "pin-write-failed"
+    for key in keys:
+        val ref_path = refs_dir + "/" + key
+        val added = _isv1_publish_text_noreplace(root, "ref", key, ref_path)
+        if added != 1 and added != 0:
+            return "pin-write-failed"
     ""
 
 # An empty pin_id means the ingest is not pinned.
 fn _isv1_pin_key(root: text, pin_id: text, owner: text, key: text) -> text:
     if pin_id == "":
         return ""
-    _isv1_pin_update(root, pin_id, owner, [], key)
+    _isv1_pin_add(root, pin_id, owner, [key])
 
 pub fn immutable_store_v1_pin(root: text, pin_id: text, owner: text, refs: [text]) -> text:
     val args_reason = _isv1_pin_args_error(root, pin_id, owner)
@@ -802,37 +799,48 @@ pub fn immutable_store_v1_pin(root: text, pin_id: text, owner: text, refs: [text
     for ref_key in refs:
         if not _isv1_key_valid(ref_key):
             return "pin-ref-invalid: {_isv1_bound_reason(ref_key)}"
-    _isv1_pin_update(root, pin_id, owner, refs, "")
+    _isv1_pin_add(root, pin_id, owner, refs)
 
+# Removes the whole pin directory for its owner. A concurrent adder whose ref
+# lands after the removal loses that ref; that is the owner's own decision to
+# release while still adding.
 pub fn immutable_store_v1_release_pin(root: text, pin_id: text, owner: text) -> text:
     val args_reason = _isv1_pin_args_error(root, pin_id, owner)
     if args_reason != "":
         return args_reason
-    val path = _isv1_pin_path(root, pin_id)
-    if not file_exists(path):
+    val pin_dir = _isv1_pin_path(root, pin_id)
+    if not is_dir(pin_dir):
         return "pin-missing"
-    val loaded = _isv1_pin_load(path, owner)
-    match loaded:
-        case Ok(_):
-            pass
-        case Err(reason):
-            return reason
-    if not file_delete(path):
+    val owner_path = pin_dir + "/owner"
+    if not file_exists(owner_path):
+        return "pin-corrupt"
+    val existing = match file_read_regular_no_follow_bounded(owner_path, 512):
+        case Ok(value): value
+        case Err(_): return "pin-unreadable"
+    if existing != owner:
+        return "pin-owner-mismatch"
+    if not dir_remove_all(pin_dir):
         return "pin-remove-failed"
     ""
 
-# `store_root` non-empty means `dir` is roots/: each pointer is followed along
-# its claim chain and the head's keys count too (the pointer may lag the head).
-# Superseded claims are history and are not reachable.
-fn _isv1_collect_doc_keys(store_root: text, dir: text, allowed: [text], max_bytes: i64) -> Result<[text], text>:
-    var out: [text] = []
-    # Fail closed: init creates this dir, so a missing or unlistable one means
-    # the reachable set is unknown.
+fn _isv1_list_fail_closed(dir: text) -> Result<[text], text>:
+    # Fail closed: init creates these dirs, so a missing or unlistable one
+    # means the reachable set is unknown.
     if not is_dir(dir):
         return Err("doc-dir-missing: {_isv1_bound_reason(dir)}")
-    val entries = match dir_list_optional(dir):
-        case Some(value): value
+    match dir_list_optional(dir):
+        case Some(value): return Ok(value)
         case None: return Err("doc-dir-unlistable: {_isv1_bound_reason(dir)}")
+    Err("doc-dir-unlistable")
+
+# Each root pointer is followed along its claim chain and the head's keys count
+# too (the pointer may lag the head). Superseded claims are history.
+fn _isv1_collect_root_keys(store_root: text) -> Result<[text], text>:
+    var out: [text] = []
+    val dir = _isv1_join(store_root, "roots")
+    val entries = match _isv1_list_fail_closed(dir):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
     for entry in entries:
         val name = entry.trim()
         if name == "" or not name.ends_with(".sdn"):
@@ -840,19 +848,17 @@ fn _isv1_collect_doc_keys(store_root: text, dir: text, allowed: [text], max_byte
         val stem = name.substring(0, name.byte_len() - 4)
         if not _isv1_name_valid(stem):
             return Err("doc-name-invalid: {_isv1_bound_reason(name)}")
-        val path = dir + "/" + name
-        val source = match file_read_regular_no_follow_bounded(path, max_bytes):
+        val source = match file_read_regular_no_follow_bounded(dir + "/" + name, _ISV1_MAX_ROOT_BYTES):
             case Ok(value): value
             case Err(_): return Err("doc-unreadable: {name}")
         var sources: [text] = [source]
-        if store_root != "":
-            val head = match _isv1_root_head_text(store_root, stem, source):
-                case Ok(value): value
-                case Err(reason): return Err("{reason}: {name}")
-            if head != source:
-                sources.push(head)
+        val head = match _isv1_root_head_text(store_root, stem, source):
+            case Ok(value): value
+            case Err(reason): return Err("{reason}: {name}")
+        if head != source:
+            sources.push(head)
         for doc_source in sources:
-            val doc = match _isv1_doc_decode(doc_source, allowed, max_bytes):
+            val doc = match _isv1_doc_decode(doc_source, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
                 case Ok(value): value
                 case Err(_): return Err("doc-corrupt: {name}")
             if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
@@ -860,6 +866,52 @@ fn _isv1_collect_doc_keys(store_root: text, dir: text, allowed: [text], max_byte
             for key in doc.keys:
                 out.push(key)
     Ok(out)
+
+# Every `pins/<id>/refs/<key>` entry is a retained key. A pin directory with
+# an owner file but no refs directory pins nothing, which is fine.
+fn _isv1_collect_pin_keys(store_root: text) -> Result<[text], text>:
+    var out: [text] = []
+    val dir = _isv1_join(store_root, "pins")
+    val entries = match _isv1_list_fail_closed(dir):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    for entry in entries:
+        val name = entry.trim()
+        if name == "":
+            continue
+        if not _isv1_name_valid(name):
+            return Err("doc-name-invalid: {_isv1_bound_reason(name)}")
+        val pin_dir = dir + "/" + name
+        if not is_dir(pin_dir):
+            return Err("pin-entry-invalid: {_isv1_bound_reason(name)}")
+        val refs_dir = pin_dir + "/refs"
+        if not is_dir(refs_dir):
+            continue
+        val refs = match _isv1_list_fail_closed(refs_dir):
+            case Ok(value): value
+            case Err(reason): return Err(reason)
+        for ref_entry in refs:
+            val ref_key = ref_entry.trim()
+            if ref_key == "":
+                continue
+            if not _isv1_key_valid(ref_key):
+                return Err("pin-ref-invalid: {_isv1_bound_reason(ref_key)}")
+            out.push(ref_key)
+    Ok(out)
+
+fn _isv1_reachable(store_root: text) -> Result<Dict<text, bool>, text>:
+    var reachable: Dict<text, bool> = {}
+    val root_keys = match _isv1_collect_root_keys(store_root):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    for key in root_keys:
+        reachable[key] = true
+    val pin_keys = match _isv1_collect_pin_keys(store_root):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    for key in pin_keys:
+        reachable[key] = true
+    Ok(reachable)
 
 fn _isv1_quarantine_date() -> text:
     val micros = time_sample_unix_micros_or_failure()
@@ -872,30 +924,36 @@ fn _isv1_quarantine_date() -> text:
     val day_text = if day < 10: "0{day}" else: "{day}"
     "{year}{month_text}{day_text}"
 
+# Move back every quarantined key that is now reachable (no-replace). Returns
+# the keys that no longer need the quarantine copy: restored, or already
+# present under objects/ (the quarantine copy is then left in place).
+fn _isv1_restore_moved(root: text, keys: [text], destinations: [text],
+        reachable: Dict<text, bool>) -> [text]:
+    var settled: [text] = []
+    var i: i64 = 0
+    while i < keys.len():
+        val key = keys[i]
+        if reachable.contains_key(key):
+            val shard = _isv1_join(root, "objects/" + key.substring(0, 2))
+            if dir_create_all(shard) or is_dir(shard):
+                val target = _isv1_object_path(root, key)
+                val status = file_publish_noreplace_raw(destinations[i], target)
+                if status == 1:
+                    if file_exists(destinations[i]) and file_exists(target):
+                        file_delete(destinations[i])
+                    settled.push(key)
+                elif status == 0:
+                    settled.push(key)
+        i = i + 1
+    settled
+
 pub fn immutable_store_v1_collect(root: text, dry_run: StoreFlagV1) -> StoreGcV1:
     if root == "":
         return StoreGcV1(status: "rejected", reason: "store-root-empty", dry_run: dry_run,
             unreachable: [], moved: StoreCountV1(0))
-    var reachable: Dict<text, bool> = {}
-    # Fail closed: an unreadable or corrupt root/pin means the reachable set
-    # is unknown, so nothing may be collected.
-    val root_keys = match _isv1_collect_doc_keys(root, _isv1_join(root, "roots"),
-            ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
-        case Ok(value): value
-        case Err(reason):
-            return StoreGcV1(status: "rejected", reason: reason, dry_run: dry_run,
-                unreachable: [], moved: StoreCountV1(0))
-    for key in root_keys:
-        reachable[key] = true
-    val pin_keys = match _isv1_collect_doc_keys("", _isv1_join(root, "pins"),
-            ["format_version", "pin_id", "owner", "generation"], _ISV1_MAX_PIN_BYTES):
-        case Ok(value): value
-        case Err(reason):
-            return StoreGcV1(status: "rejected", reason: reason, dry_run: dry_run,
-                unreachable: [], moved: StoreCountV1(0))
-    for key in pin_keys:
-        reachable[key] = true
-    var unreachable: [text] = []
+    # (1) Candidate set first, so an object ingested after this listing is
+    # never a candidate.
+    var candidates: [text] = []
     val objects_dir = _isv1_join(root, "objects")
     if is_dir(objects_dir):
         for shard in dir_list(objects_dir):
@@ -909,19 +967,30 @@ pub fn immutable_store_v1_collect(root: text, dry_run: StoreFlagV1) -> StoreGcV1
                 val entry_name = entry.trim()
                 if not entry_name.ends_with(".obj"):
                     continue
-                val key = entry_name.substring(0, entry_name.byte_len() - 4)
-                if not reachable.contains_key(key):
-                    unreachable.push(key)
+                candidates.push(entry_name.substring(0, entry_name.byte_len() - 4))
+    # (2) Fail closed: an unreadable or corrupt root/pin means the reachable
+    # set is unknown, so nothing may be collected.
+    val reachable = match _isv1_reachable(root):
+        case Ok(value): value
+        case Err(reason):
+            return StoreGcV1(status: "rejected", reason: reason, dry_run: dry_run,
+                unreachable: [], moved: StoreCountV1(0))
+    var unreachable: [text] = []
+    for key in candidates:
+        if not reachable.contains_key(key):
+            unreachable.push(key)
     unreachable.sort()
     if dry_run.value:
         return StoreGcV1(status: "ok", reason: "", dry_run: StoreFlagV1(true), unreachable: unreachable, moved: StoreCountV1(0))
-    var moved: i64 = 0
+    var moved_keys: [text] = []
+    var moved_destinations: [text] = []
     var first_error = ""
     if unreachable.len() > 0:
         val quarantine = _isv1_join(root, "quarantine/" + _isv1_quarantine_date())
         if not dir_create_all(quarantine) and not is_dir(quarantine):
             return StoreGcV1(status: "rejected", reason: "quarantine-dir-failed",
                 dry_run: StoreFlagV1(false), unreachable: unreachable, moved: StoreCountV1(0))
+        # (3) Move each candidate.
         for key in unreachable:
             if not _isv1_key_valid(key):
                 if first_error == "":
@@ -951,10 +1020,32 @@ pub fn immutable_store_v1_collect(root: text, dry_run: StoreFlagV1) -> StoreGcV1
             if placed_status == 1:
                 if file_exists(source_path) and file_exists(destination):
                     file_delete(source_path)
-                moved = moved + 1
+                moved_keys.push(key)
+                moved_destinations.push(destination)
             else:
                 if first_error == "":
                     first_error = "quarantine-move-failed: {_isv1_bound_reason(key)}"
+    var moved: i64 = moved_keys.len()
+    if moved_keys.len() > 0:
+        # (4) Re-read roots and pins; anything that became reachable while we
+        # moved is restored. If the re-read fails, restore everything moved.
+        var after: Dict<text, bool> = {}
+        var recheck_error = ""
+        match _isv1_reachable(root):
+            case Ok(value):
+                after = value
+            case Err(reason):
+                recheck_error = reason
+                for key in moved_keys:
+                    after[key] = true
+        val settled = _isv1_restore_moved(root, moved_keys, moved_destinations, after)
+        for key in moved_keys:
+            if after.contains_key(key) and not settled.contains(key) and first_error == "":
+                first_error = "restore-failed: {_isv1_bound_reason(key)}"
+        moved = moved_keys.len() - settled.len()
+        if recheck_error != "":
+            return StoreGcV1(status: "rejected", reason: recheck_error, dry_run: StoreFlagV1(false),
+                unreachable: unreachable, moved: StoreCountV1(moved))
     var status = "ok"
     if first_error != "":
         status = "partial"
