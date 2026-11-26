@@ -1015,6 +1015,27 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # conversion so a declaration-level initializer cannot fall into the
         # loud unsupported-node guard.
         return Expr(kind: ExprKind.Block(flat_if_branch_block(idx, span)), span: span)
+    if tag == EXPR_FOR or tag == EXPR_WHILE:
+        # Module-scope `for`/`while` (enum_module_body.spl `_expr_for_N` /
+        # `_expr_while_N`) arrive as expression nodes: S=iter var,
+        # LEFT=iterable/cond, STMTS=body. Wrap the loop statement in a block.
+        val loop_body_ids = expr_get_stmts(idx)
+        var loop_body: [Stmt] = []
+        var li = 0
+        while li < loop_body_ids.len():
+            val l_expanded = convert_flat_stmt_in_list(loop_body_ids[li], false)
+            var lk = 0
+            while lk < l_expanded.len():
+                loop_body.push(l_expanded[lk])
+                lk = lk + 1
+            li = li + 1
+        val loop_block = Block(stmts: loop_body, span: span)
+        val loop_head = convert_flat_expr(expr_get_left(idx))
+        val loop_stmt = if tag == EXPR_FOR:
+            Stmt(kind: StmtKind.For(expr_get_str(idx), loop_head, loop_block), span: span)
+        else:
+            Stmt(kind: StmtKind.While(loop_head, loop_block), span: span)
+        return Expr(kind: ExprKind.Block(Block(stmts: [loop_stmt], span: span)), span: span)
     if tag == EXPR_IDENT:
         var owner_types: [Type] = []
         for type_handle in expr_get_call_type_args(idx):
