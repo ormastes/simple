@@ -175,7 +175,7 @@ describe "pure_container_evidence_from_qualify_v1":
         expect(e.roots_digest).to_equal("r".repeat(64))
         expect(e.host_os).to_equal("windows")
         expect(e.evidence_revision.starts_with("pure:")).to_equal(true)
-        expect(e.evidence_revision == "pure:unaffirmed").to_equal(false)
+        expect(e.evidence_revision == "").to_equal(false)
 
     it "affirms nothing from a qualify that did not run":
         val e = pure_container_evidence_from_qualify_v1(_qualify("containment-qualify-unimplemented-linux", ""),
@@ -184,7 +184,7 @@ describe "pure_container_evidence_from_qualify_v1":
         expect(e.cleanup_observed.value).to_equal(false)
         expect(e.write_confinement_observed.value).to_equal(false)
         expect(e.memory_cap_enforced.value).to_equal(false)
-        expect(e.evidence_revision).to_equal("pure:unaffirmed")
+        expect(e.evidence_revision).to_equal("")
 
     it "affirms nothing when a reason is set even with an evidence digest":
         val e = pure_container_evidence_from_qualify_v1(_qualify("x", "d".repeat(64)),
@@ -209,3 +209,30 @@ describe "pure_container_evidence_from_qualify_v1":
             "windows", "x86_64", "windows-amd64", "", "r")
         expect(e2.write_confinement_observed.value).to_equal(false)
         expect(e2.launch_observed.value).to_equal(true)
+
+    it "fails write confinement when only process-limit-spawn fails":
+        var q = _qualify("", "d".repeat(64))
+        q.canaries[8] = SosixContainCanaryV1(id: SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1, expected: "deny",
+            observed: "allow", control: "allow")
+        val e = pure_container_evidence_from_qualify_v1(q, ContainerCapabilityFlagV1(true), "m",
+            "windows", "x86_64", "windows-amd64", "", "r")
+        expect(e.write_confinement_observed.value).to_equal(false)
+        expect(e.launch_observed.value).to_equal(true)
+        expect(e.cleanup_observed.value).to_equal(true)
+
+    it "does not affirm memory when the memory digest is empty":
+        val e = pure_container_evidence_from_qualify_v1(_qualify("", "d".repeat(64)),
+            ContainerCapabilityFlagV1(true), "", "windows", "x86_64", "windows-amd64", "", "r")
+        expect(e.memory_cap_enforced.value).to_equal(false)
+
+    it "gives a failed or digestless qualify an empty revision that admission refuses":
+        val failed = pure_container_evidence_from_qualify_v1(_qualify("probe-failed", "d".repeat(64)),
+            ContainerCapabilityFlagV1(true), "m", "windows", "x86_64", "windows-amd64", "", "r")
+        expect(failed.evidence_revision).to_equal("")
+        val digestless = pure_container_evidence_from_qualify_v1(_qualify("", ""),
+            ContainerCapabilityFlagV1(true), "m", "windows", "x86_64", "windows-amd64", "", "r")
+        expect(digestless.evidence_revision).to_equal("")
+        val report = pure_container_capability_report_v1(_windows_support(), failed)
+        var req = container_capability_requirement_v1_empty()
+        req.required_launch_qualified = ContainerCapabilityFlagV1(true)
+        expect(container_capability_v1_admission_reason(report, req)).to_equal("capability-evidence-missing")

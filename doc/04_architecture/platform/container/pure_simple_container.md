@@ -597,7 +597,7 @@ code sets an evidence field:
 The shared `SandboxObservedCapabilityV1.qualification` (§7 table) is
 `sosix_contain_canaries_pass_v1`; there is no second canary set or second
 qualification path. That producer sets `evidence_revision` to `pure:` + sha256 of the qualify `evidence_digest`, `memory_digest` and `roots_digest` joined by newlines,
-or `pure:unaffirmed` when the qualify digest is empty (lane E's `unaffirmed:` precedent). `base_fully_linked` is false in qualify
+or empty when the qualify `reason` is non-empty or its digest is empty, so unmeasured evidence never passes `capability-evidence-missing`. `base_fully_linked` is false in qualify
 output and is set per run by the materializer.
 
 `pure_container_run_v1` never produces evidence for its own admission. With an
