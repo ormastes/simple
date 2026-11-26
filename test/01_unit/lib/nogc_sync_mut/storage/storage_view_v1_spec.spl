@@ -404,3 +404,49 @@ describe "storage_view_v1 review hardening":
         expect(read.reason).to_equal("view-destroyed")
         expect(storage_view_v1_add_volume(added.view, "more", vol_dir, ViewFlagV1(true)).status).to_equal("rejected")
         _cleanup(base)
+
+describe "storage_view_v1 half-created recovery":
+    it "destroys a claimed empty view dir and allows re-create":
+        val base = _temp("halfempty")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vdir = base + "/views/v1"
+        expect(dir_remove_all(vdir)).to_equal(true)
+        expect(dir_create_new(vdir)).to_equal("ok")
+        expect(storage_view_v1_create(store, base + "/views", "v1", "", StoreGenerationV1(0), ViewBytesV1(1000)).reason).to_equal("view-exists")
+        expect(storage_view_v1_destroy(view).status).to_equal("ok")
+        expect(is_dir(vdir)).to_equal(false)
+        expect(storage_view_v1_create(store, base + "/views", "v1", "", StoreGenerationV1(0), ViewBytesV1(1000)).status).to_equal("ok")
+        _cleanup(base)
+
+    it "destroys a dir with a partial journal":
+        val base = _temp("halfjournal")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vdir = base + "/views/v1"
+        expect(file_write_bytes(vdir + "/journal.sdn", "format_ver".bytes())).to_equal(true)
+        expect(storage_view_v1_destroy(view).status).to_equal("ok")
+        expect(is_dir(vdir)).to_equal(false)
+        _cleanup(base)
+
+    it "refuses a half-created dir with an unknown extra file":
+        val base = _temp("halfextra")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vdir = base + "/views/v1"
+        expect(file_write_bytes(vdir + "/journal.sdn", "junk".bytes())).to_equal(true)
+        expect(file_write_bytes(vdir + "/precious.txt", "keep".bytes())).to_equal(true)
+        expect(storage_view_v1_destroy(view).status).to_equal("rejected")
+        expect(file_exists(vdir + "/precious.txt")).to_equal(true)
+        _cleanup(base)
+
+    it "refuses a corrupt-journal dir whose upper holds data":
+        val base = _temp("halfupper")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val vdir = base + "/views/v1"
+        expect(storage_view_v1_write(view, "a.txt", "x".bytes()).status).to_equal("ok")
+        expect(file_write_bytes(vdir + "/journal.sdn", "junk".bytes())).to_equal(true)
+        expect(storage_view_v1_destroy(view).status).to_equal("rejected")
+        expect(file_exists(vdir + "/upper/a.txt")).to_equal(true)
+        _cleanup(base)
