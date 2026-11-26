@@ -57,3 +57,21 @@ available on this Windows host, and the pinned seed binary cannot load the
 current tree (`unknown decorator '@representation_boundary'` in
 `src/app/test_runner_new/test_runner_client.spl`), so no spec run was possible.
 Closure rests on source inspection only, as stated.
+
+## Verification 2026-11-26 (bf-2 lane, Windows host)
+
+- `test/01_unit/compiler/backend/llvm_copy_move_alloc_spec.spl --mode=interpreter`
+  (via `wa3_shared_bin/simple.exe`, `SIMPLE_LIB=C:\dev\wt\bf-2-compiler-mir-backend\src`):
+  7/7 passed.
+- Added `test/01_unit/compiler/backend/llvm_interp_logical_and_or_spec.spl` (4/4
+  passed, 0 lint warnings): examples 1, 2, and 4 lower `print("v={t() and t()}")`,
+  `print("w={t() or f()}")`, `SdnValue.Dict(...)`, and `code.to_string(16).upper()`
+  end-to-end through `parse_full_frontend -> HirLowering -> MirLowering -> MirToLlvm`;
+  example 3 builds a synthetic `MirModule` directly (`Alloc` + orphan
+  `Const(Str, Opaque("str"))` + `Store`) and lowers it through
+  `MirToLlvm.translate_module`.
+- Compiled the emitted LLVM IR for `print("v={t() and t()}")` and
+  `print("w={t() or f()}")` with host `clang version 23.1.2` (`clang.exe -x ir -c`):
+  both exited 0 with no `ptr` vs `i64` or invalid `inttoptr` errors.
+- Full native-build executable linking/execution remains pending a Linux/llc-18
+  lane (disallowed in this BF-2 interpreter lane).

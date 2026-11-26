@@ -1,7 +1,7 @@
 # MIR rejects inline `SdnValue.Dict({...})` literal: "enum payload dictionary key annotation mismatch"
 
 Bug ID: `mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14`
-Severity: P2. Status: open. Layer: `50.mir` (pure-Simple MIR lowering).
+Severity: P2. Status: RESOLVED (MIR fix verified in tree; `src/lib` workarounds retired in `1ce67b65c87`; native Phase 2 build verification remains pending). Layer: `50.mir` (pure-Simple MIR lowering).
 
 ## Symptom
 
@@ -111,3 +111,25 @@ inside `unsafe:`) and `None` value in a non-optional entry, a dict literal in a 
 and a `Dict<..>?` local in a `Dict<..>` slot. `contextual_enum_payload_spec.spl` is 25/25.
 The pre-existing top-level `E.N(nil)` acceptance is
 `enum_payload_nil_into_scalar_slot_accepted_2026-11-14.md`.
+
+## Verification 2026-11-26 (bf-2 lane, Windows host)
+
+- Verified root fix present on `release/1.0.0` in
+  `src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl:54-71, 417-438`
+  (`enum_payload_dict_key_is_ascribed`, `enum_payload_dict_entry_nil_vetoed`).
+- `test/01_unit/compiler/mir/contextual_enum_payload_spec.spl --mode=interpreter`
+  (via `wa3_shared_bin/simple.exe`): 25/25 passed.
+- `test/01_unit/compiler/mir/enum_payload_local_evidence_spec.spl --mode=interpreter`:
+  43/44 passed; all inline dict-literal, key/value mismatch, and nil-veto
+  examples passed (1 unrelated failure in `box_lowered_enum_tuple_payload`
+  owned by `switch_operators_calls.spl`).
+- `test/01_unit/compiler/backend/llvm_interp_logical_and_or_spec.spl --mode=interpreter`:
+  lowers `SdnValue.Dict({"kind": SdnValue.String("x"), "version": SdnValue.Int(1)})`
+  through frontend -> HIR -> MIR -> LLVM IR with 0 errors, and host
+  `clang version 23.1.2` (`clang.exe -x ir -c`) accepted the emitted IR (`exit=0`).
+- `@workaround bug=mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14`
+  sites across `src/lib/**` were already retired in commit `1ce67b65c87`
+  (2026-11-25, ancestor of `origin/release/1.0.0`; guarded by
+  `test/01_unit/lib/common/wa_batch_e12_retirement_spec.spl:37-63`).
+- Native Phase 2 compiler build verification of the inline dict lowering
+  remains pending (`native-build` excluded in this Windows interpreter BF-2 lane).
