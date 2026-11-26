@@ -111,3 +111,23 @@ itself frames re-baselining as requiring "an explicit, reviewed
 justification for each new entry" — a judgment call outside this pass's
 remit. Status remains open; violation count updated 7 -> 11 in this note.
 
+
+
+---
+
+## Follow-up Fix & Verification (2026-11-26, Windows Host / `release/1.0.0`)
+
+- **Gate script Windows E2BIG fix** (`scripts/check/check-wm-lane-boundary.shs`, `scripts/check/scan_guard_vacuity_baseline.txt`):
+  - Batched `scan.txt` into `<=20000`-byte shards against an empty baseline and aggregated violations before comparing once against `doc/08_tracking/wm_lane_boundary_baseline.txt`, eliminating `rc=126` (`Argument list too long`) on Windows MSYS.
+  - Added counted verdict output (`PASS — $FILE_COUNT file(s) scanned, ...`) and removed `check-wm-lane-boundary.shs` from `scripts/check/scan_guard_vacuity_baseline.txt`.
+- **Code fixes for the 3 surfaced `WML001` violations** (without modifying `doc/08_tracking/wm_lane_boundary_baseline.txt`):
+  1. `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`: replaced all 4 `time_now_micros()` trace calls in `present()` with `default_frame_clock().now_micros()` and removed `use std.nogc_sync_mut.io.time_ops.{time_now_micros}`.
+  2. `src/lib/gc_async_mut/gpu/engine2d/engine.spl` + `src/lib/gc_async_mut/gpu/engine2d_host_io.spl`: routed `env_get`, `platform_name`, `file_exists`, and `file_read_bytes_result` through the sibling `gpu` render-sublane host adapter `std.gc_async_mut.gpu.engine2d_host_io` (also recorded in `src/lib/source_inventory.lock`).
+  3. `src/lib/gc_async_mut/gpu/browser_engine/script/script_runner.spl` + `src/lib/gc_async_mut/gpu/browser_js_host.spl`: routed `JsRuntime`, `js_runtime_with_default_logger`, and `NATIVE_*` bridge IDs through the sibling `gpu` render-sublane adapter `std.gc_async_mut.gpu.browser_js_host` (also recorded in `src/lib/source_inventory.lock`).
+- **Verification**:
+  - `sh scripts/check/check-wm-lane-boundary.shs`: `PASS — 619 file(s) scanned, 148 violation(s), all in baseline (4 baseline entr(y/ies) now fixed)` (exit `0`).
+  - `sh scripts/audit/wm-lane-boundary-sffi-authority.shs`: `PASS` (exit `0`).
+  - `sh scripts/check/check-tierless-std-js-imports.shs`: `PASS — 141 tier-less std.js import(s) checked, common/js=1, baseline 141` (exit `0`).
+  - `sh scripts/audit/direct-env-runtime-guard.shs --working`: `STATUS: PASS direct-env-runtime-guard` (exit `0`).
+  - Targeted interpreter specs (`--mode=interpreter`): `wm_lane_boundary_spec.spl` (5/5), `wm_lane_boundary_layering_prevention_spec.spl` (4/4), `page_scripts_bom_globals_spec.spl` (15/15), `script_dom_bridge_spec.spl` (4/4), `host_bug_a07_baremetal_backend_probe_spec.spl` (4/4), `vulkan_renderer_spec.spl` (4/4), `facade_export_use_targets_exist_spec.spl` (4/4), `draw_text_bg_spec.spl` (4/4).
+  - `lint --fast --jobs=1` on all 5 touched `.spl` files: 0 errors, exit `0`.
