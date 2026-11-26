@@ -1,5 +1,6 @@
 # Windows Docker process-only bridge. These values grant no runtime authority.
-# Qualification: source-only NOT_RUN. The administrator selects an exact
+# Qualification: live-run 2026-11-26 on Windows 10.0.26300 (create/start/wait/
+# logs/rm of nanoserver:ltsc2025, process isolation). The administrator selects an exact
 # host/image version pair; matching observations do not prove compatibility.
 use std.common.contracts.container.execution_options_v1.OciEnvironmentEntryV1
 use std.nogc_async_mut.container.providers.windows.docker_server_environment_v5.windows_docker_server_environment_options_v5
@@ -115,6 +116,47 @@ pub fn windows_docker_mount_path_v1(value: text) -> bool:
         if component == "" or component == "." or component.ends_with(".") or component.ends_with(" "): return false
     true
 
+
+# Host/image build pair for --isolation=process. Process isolation needs the
+# host and image Windows builds to agree; the one cross-build pair accepted is
+# the measured live pair (host build 26300 running the 26100 ltsc2025 image).
+# Anything else, including an unparseable version, fails closed.
+pub const WINDOWS_DOCKER_PINNED_HOST_BUILD_V1 = "26300"
+pub const WINDOWS_DOCKER_PINNED_IMAGE_BUILD_V1 = "26100"
+# Live-qualified image (measured 2026-11-26, Docker Engine 29.10.1, host
+# 10.0 26300): nanoserver:ltsc2025 under --isolation=process.
+pub const WINDOWS_DOCKER_PINNED_IMAGE_ID_V1 = "sha256:b911cb54b918608b1fe776b4627c57875e1cb74d6746703ac6155530d23e4587"
+pub const WINDOWS_DOCKER_PINNED_IMAGE_OS_VERSION_V1 = "10.0.26100.33828"
+pub const WINDOWS_DOCKER_PINNED_IMAGE_REF_V1 = "mcr.microsoft.com/windows/nanoserver@sha256:5c42e42b31816a3a7619cb71b4f14353793a47293e198dbde8fe4fce2c8935cb"
+
+fn build_digits(value: text) -> bool:
+    if value == "" or value.byte_len() > 8: return false
+    for ch in value.chars():
+        if ch < "0" or ch > "9": return false
+    true
+
+# "10.0 26300 (26100.1.amd64fre...)" -> "26300"; "10.0.20348.2402" -> "20348".
+pub fn windows_docker_kernel_build_v1(kernel_version: text) -> text:
+    val parts = kernel_version.split(" ")
+    if parts.len() < 2 or parts[0] != "10.0" or not build_digits(parts[1]):
+        # Dotted "10.0.<build>.<revision>" is the other host spelling.
+        return windows_docker_image_build_v1(kernel_version)
+    parts[1]
+
+pub fn windows_docker_image_build_v1(image_os_version: text) -> text:
+    val parts = image_os_version.split(".")
+    if parts.len() != 4 or parts[0] != "10" or parts[1] != "0" or not build_digits(parts[2]) or not build_digits(parts[3]): return ""
+    parts[2]
+
+pub fn windows_docker_build_pair_reason_v1(kernel_version: text, image_os_version: text) -> text:
+    val host = windows_docker_kernel_build_v1(kernel_version)
+    val image = windows_docker_image_build_v1(image_os_version)
+    if host == "" or image == "": return "docker-host-image-version-pair-required"
+    if host == image: return ""
+    if host == WINDOWS_DOCKER_PINNED_HOST_BUILD_V1 and image == WINDOWS_DOCKER_PINNED_IMAGE_BUILD_V1 and
+            image_os_version == WINDOWS_DOCKER_PINNED_IMAGE_OS_VERSION_V1: return ""
+    "docker-host-image-build-pair-unsupported"
+
 pub fn windows_docker_policy_reason_v1(policy: WindowsDockerPolicyV1) -> text:
     if not absolute_windows_path(policy.docker_executable) or
             not policy.docker_executable.ends_with("\\docker.exe"):
@@ -124,6 +166,11 @@ pub fn windows_docker_policy_reason_v1(policy: WindowsDockerPolicyV1) -> text:
             policy.provider_generation <= 0: return "docker-policy-identity-invalid"
     if not safe_field(policy.expected_kernel_version) or not safe_field(policy.image_os_version):
         return "docker-host-image-version-pair-required"
+    val pair_reason = windows_docker_build_pair_reason_v1(policy.expected_kernel_version, policy.image_os_version)
+    if pair_reason != "": return pair_reason
+    # The cross-build exception is valid only for the exact pinned image.
+    if windows_docker_kernel_build_v1(policy.expected_kernel_version) != windows_docker_image_build_v1(policy.image_os_version) and
+            policy.expected_image_id != WINDOWS_DOCKER_PINNED_IMAGE_ID_V1: return "docker-pinned-image-id-required"
     if not policy.expected_image_id.starts_with("sha256:") or policy.expected_image_id.len() != 71:
         return "docker-image-id-invalid"
     if not windows_docker_id_v1(policy.expected_image_id.substring(7, 71)):
@@ -152,6 +199,8 @@ pub fn windows_docker_request_reason_v1(policy: WindowsDockerPolicyV1,
     val parts = request.image.split("@sha256:")
     if parts.len() != 2 or parts[0] == "" or parts[0].len() > 512 or
             not windows_docker_id_v1(parts[1]): return "docker-full-image-digest-required"
+    if windows_docker_kernel_build_v1(policy.expected_kernel_version) != windows_docker_image_build_v1(policy.image_os_version) and
+            request.image != WINDOWS_DOCKER_PINNED_IMAGE_REF_V1: return "docker-pinned-image-ref-required"
     for ch in parts[0].chars():
         if not ((ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or
                 ch == "." or ch == "/" or ch == ":" or ch == "_" or ch == "-"):

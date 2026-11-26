@@ -1,0 +1,82 @@
+# Live Windows Docker process-isolation lifecycle: create -> start -> wait ->
+# logs -> destroy against the real local engine (npipe docker_engine).
+# Skips only when the engine pipe is unreachable; every other docker failure fails.
+# Pinned pair: host kernel 26300 (build 26100 base) with nanoserver:ltsc2025
+# image OsVersion 10.0.26100.33828 under --isolation=process.
+# The interpreter lane is opt-in (SIMPLE_DOCKER_HOSTED_LIVE=1) and refuses when
+# DOCKER_*/proxy variables are set in the parent environment.
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.host_os
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_sync_mut.sosix.host.{env_get, sosix_env_set, secure_temp_dir, dir_remove_all, file_is_regular_no_follow}
+use std.nogc_sync_mut.sosix.process.sosix_process_run_bounded
+
+val LIVE_DOCKER = "C:\Program Files\Docker\docker.exe"
+val LIVE_PIPE = "npipe:////./pipe/docker_engine"
+
+fn live_policy(engine_id: text) -> WindowsDockerPolicyV1:
+    val temp = env_get("TEMP")
+    val root = env_get("SystemRoot")
+    WindowsDockerPolicyV1(docker_executable: LIVE_DOCKER,
+        endpoint: LIVE_PIPE, engine_id: engine_id,
+        node_boot_id: "live-boot-a", provider_generation: 1,
+        expected_kernel_version: "10.0 26300 (26100.1.amd64fre.ge_release.240331-1435)",
+        image_os_version: WINDOWS_DOCKER_PINNED_IMAGE_OS_VERSION_V1, expected_image_id: WINDOWS_DOCKER_PINNED_IMAGE_ID_V1,
+        timeout_ms: 120000, max_output_bytes: 65536,
+        system_root: if root != "": root else: "C:\Windows",
+        temp_directory: if temp != "": temp else: "C:\Windows\Temp")
+
+fn live_request() -> WindowsDockerRequestV1:
+    WindowsDockerRequestV1(pod_uid: "live-docker-echo", attempt: 1, operation_id: "live-docker-echo-op",
+        image: WINDOWS_DOCKER_PINNED_IMAGE_REF_V1, command: ["cmd", "/c", "echo", "simple-docker-ok"], args: [],
+        cpu_count: 1, memory_limit_bytes: 536870912, network: "none")
+
+describe "Windows Docker live process-isolation lifecycle":
+    it "runs cmd /c echo in nanoserver ltsc2025 and removes the container":
+        val previous = env_get("SIMPLE_DOCKER_HOSTED_LIVE")
+        sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", "1")
+        val have_docker = host_os() == "windows" and file_is_regular_no_follow(LIVE_DOCKER)
+        val temp = env_get("TEMP")
+        val probe_config = secure_temp_dir(if temp != "": temp else: "C:\Windows\Temp", "simple-docker-probe-")
+        val info = if have_docker and probe_config.is_ok():
+            sosix_process_run_bounded(LIVE_DOCKER, ["--host", LIVE_PIPE, "--config", probe_config.unwrap(), "info", "--format", "{{{{.ID}}}}"], 60000, 65536)
+        else: ("", "docker.exe missing or no probe config dir", -2)
+        if probe_config.is_ok(): dir_remove_all(probe_config.unwrap())
+        val unreachable = not have_docker or (info.2 != 0 and (info.1.contains("//./pipe/docker_engine") or info.1.contains("The system cannot find the file specified")))
+        if unreachable:
+            step("SKIP: Windows Docker engine pipe unreachable")
+            sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
+            skip("docker engine pipe unreachable")
+        else:
+            if info.2 != 0: sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
+            expect(info.2).to_equal(0)
+            val policy = live_policy(info.0.trim())
+            var provider = WindowsDockerRuntimeProviderV1.new(policy)
+            val probe = provider.probe()
+            expect(probe.reason).to_equal("engine-observed-request-admission-required")
+            val request = live_request()
+            val digest = windows_docker_request_digest_v1(policy, request).unwrap()
+            val now_ms = time_sample_unix_micros_or_failure() / 1000
+            val deadline = container_effect_deadline_v1(digest, request.operation_id, ["create", "start"], now_ms + 120000).unwrap()
+            expect(provider.set_launch_deadline_v1(deadline).unwrap()).to_equal(true)
+            val prepared = provider.prepare_pod(request)
+            val created = if prepared.status == "ok": provider.create(request) else: prepared
+            val started = if created.status == "ok": provider.start(request) else: created
+            val waited = if started.status == "ok": provider.wait(request) else: started
+            val logs = if waited.status == "ok": provider.logs(request) else: waited
+            # Always remove, whatever happened above.
+            val destroyed = if created.status == "ok": provider.destroy(request, true) else: created
+            sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
+            expect(prepared.status).to_equal("ok")
+            expect(created.status).to_equal("ok")
+            expect(started.status).to_equal("ok")
+            expect(waited.status).to_equal("ok")
+            expect(waited.exit_code).to_equal(0)
+            expect(logs.status).to_equal("ok")
+            expect(logs.stdout.trim()).to_equal("simple-docker-ok")
+            expect(destroyed.status).to_equal("ok")
+            expect(destroyed.state.phase).to_equal("destroyed")
+            expect(destroyed.state.reason).to_equal("docker-exact-id-absence-confirmed")
