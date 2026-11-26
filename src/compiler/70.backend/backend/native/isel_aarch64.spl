@@ -22,19 +22,9 @@ use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlo
 use compiler.backend.native.mach_inst.{AARCH64_X0, AARCH64_X1, AARCH64_X2, AARCH64_X3, AARCH64_X4, AARCH64_X5, AARCH64_X6, AARCH64_X7, AARCH64_X8, AARCH64_X9, AARCH64_X16, AARCH64_X29, AARCH64_X30, AARCH64_SP}
 use compiler.backend.native.mach_inst.{AARCH64_ARG_REGS, AARCH64_CALLEE_SAVED}
 use compiler.backend.native.mach_inst.{A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK, A64_OP_ADD, A64_OP_SUB, A64_OP_MUL, A64_OP_SDIV, A64_OP_AND, A64_OP_ORR, A64_OP_EOR, A64_OP_LSL, A64_OP_ASR, A64_OP_LSR, A64_OP_NEG, A64_OP_CMP, A64_OP_CSET, A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE, A64_OP_BL, A64_OP_RET, A64_OP_LDR, A64_OP_STR, A64_OP_LDR_W, A64_OP_STR_W, A64_OP_STP, A64_OP_LDP, A64_OP_ADRP, A64_OP_ADD_IMM, A64_OP_SUB_IMM, A64_OP_NOP, A64_OP_BRK, A64_OP_CBZ, A64_OP_CBNZ, A64_OP_RBIT, A64_OP_CLZ, A64_OP_REV}
+use compiler.backend.native.mach_inst.{A64_COND_EQ, A64_COND_NE, A64_COND_HS, A64_COND_LO, A64_COND_HI, A64_COND_LS, A64_COND_GE, A64_COND_LT, A64_COND_GT, A64_COND_LE}
 use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label, isel_definition_symbol, isel_call_symbol, isel_module_context}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
-
-# ============================================================================
-# Condition code constants for CSET
-# ============================================================================
-
-val COND_EQ: i64 = 0
-val COND_NE: i64 = 1
-val COND_LT: i64 = 2
-val COND_LE: i64 = 3
-val COND_GT: i64 = 4
-val COND_GE: i64 = 5
 
 # ============================================================================
 # Operand Lowering
@@ -320,6 +310,12 @@ pub fn a64_module_float_rejections(module: MirModule) -> [text]:
 fn a64_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
     var mach_func = new_mach_function(isel_definition_symbol(func))
 
+    # Unsigned integer locals pick LO/LS/HI/HS condition codes (x86_64/LLVM/Cranelift parity).
+    var unsigned_locals: Dict<i64, bool> = {}
+    for local in func.locals:
+        if a64_type_is_unsigned(local.type_):
+            unsigned_locals[local.id.id] = true
+
     # Reset vreg counter - use local IDs directly, start high for temps
     var local_ctx = ISelContext(
         next_vreg: func.locals.len() + 100,
@@ -332,7 +328,8 @@ fn a64_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
         global_sizes: ctx.global_sizes,
         global_signed: ctx.global_signed,
         global_mutable: ctx.global_mutable,
-        function_names: ctx.function_names
+        function_names: ctx.function_names,
+        unsigned_locals: unsigned_locals
     )
 
     # Allocate frame slots for locals that need stack space
@@ -650,6 +647,8 @@ fn a64_isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperan
         insts.push(ai)
     for ai in right_low.insts:
         insts.push(ai)
+    # Same rule as x86_64/LLVM/Cranelift: either operand unsigned makes compare unsigned.
+    val is_unsigned = a64_operand_is_unsigned(current_ctx, left) or a64_operand_is_unsigned(current_ctx, right)
 
     match op:
         case Add:
@@ -678,28 +677,40 @@ fn a64_isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperan
         case Shr:
             insts.push(new_mach_inst(A64_OP_ASR, [dest_op, left_low.result, right_low.result]))
         case Eq:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_EQ):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, A64_COND_EQ):
                 insts.push(ai)
         case Ne:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_NE):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, A64_COND_NE):
                 insts.push(ai)
         case Lt:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LT):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: A64_COND_LO else: A64_COND_LT):
                 insts.push(ai)
         case Le:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LE):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: A64_COND_LS else: A64_COND_LE):
                 insts.push(ai)
         case Gt:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GT):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: A64_COND_HI else: A64_COND_GT):
                 insts.push(ai)
         case Ge:
-            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GE):
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, if is_unsigned: A64_COND_HS else: A64_COND_GE):
                 insts.push(ai)
         case _:
             # Unsupported binop - zero result
             insts.push(new_mach_inst(A64_OP_MOVZ, [dest_op, op_imm(0)]))
 
     ISelInstResult(insts: insts, ctx: current_ctx)
+
+fn a64_type_is_unsigned(ty: MirType) -> bool:
+    match ty.kind:
+        case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
+        case _: false
+
+fn a64_operand_is_unsigned(ctx: ISelContext, operand: MirOperand) -> bool:
+    match operand.kind:
+        case Copy(local): ctx.unsigned_locals.contains(local.id)
+        case Move(local): ctx.unsigned_locals.contains(local.id)
+        case Const(_, type_): a64_type_is_unsigned(type_)
+        case _: false
 
 fn a64_isel_comparison(dest: Operand, left: Operand, right: Operand, cond: i64) -> [MachInst]:
     # CMP left, right (alias: SUBS xzr, left, right)
