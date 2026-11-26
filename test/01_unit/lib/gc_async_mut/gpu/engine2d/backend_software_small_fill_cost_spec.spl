@@ -1,0 +1,187 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl
+# @tag: unit, engine2d, backend_software, perf
+#
+# Small rect fills (dash runs, border strips) carry a fixed per-call cost in
+# the software backend that dwarfs their pixels: a Chrome-exact dashed border
+# at device scale 4 issues ~1800 of them. Measured on base 3d7deb43a98
+# (interpreter, cpu_simd, in-function): ~140-180 us per opaque 8x4 fill (the
+# span-batch kernel dispatch alone ~68 us for 8 px) and ~235 us per
+# translucent 8x4 fill (one clip + scratch + extern + dirty walk per ROW).
+#
+# Pixels, dirty tiles and SIMD hit counters are pinned to base values, so a
+# faster path must be byte-identical (opaque and translucent, clipped,
+# off-surface and over a non-uniform destination).
+
+use std.spec
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+
+val SF_W = 900
+val SF_H = 760
+val SF_N = 240
+
+fn sf_hash(px: [u32]) -> i64:
+    var h: i64 = 2166136261
+    var i = 0
+    while i < px.len():
+        h = ((h ^ (px[i] as i64)) * 16777619) & 0xFFFFFFFF
+        i = i + 1
+    h
+
+fn sf_tiles_hash(t: [bool]) -> i64:
+    var h: i64 = 2166136261
+    var i = 0
+    while i < t.len():
+        h = ((h ^ (if t[i]: (i as i64) + 1 else: 0)) * 16777619) & 0xFFFFFFFF
+        i = i + 1
+    h
+
+fn sf_color(i: i32) -> u32:
+    # Opaque and translucent dash colours, as a dashed side's runs.
+    val k = i % 4
+    if k == 0: 0xFF334155u32 else: (if k == 1: 0x7F64748Bu32 else: (if k == 2: 0xFF0F766Eu32 else: 0x40E11D48u32))
+
+fn sf_background(b: SoftwareBackend):
+    # Non-uniform destination: horizontal and vertical stripes.
+    var y = 0
+    while y < SF_H:
+        b.draw_rect_filled(0, y, SF_W, 8, 0xFF000030u32 | ((((y * 7) % 256) as u32) << 8u32))
+        y = y + 8
+    var x = 0
+    while x < SF_W:
+        b.draw_rect_filled(x, 0, 6, SF_H, 0x6000FFFFu32 | ((((x * 3) % 256) as u32) << 16u32))
+        x = x + 37
+
+# Dash-shaped fills: horizontal 12x4 and vertical 4x12 runs, some across the
+# surface edges, a band of them under a clip rect.
+fn sf_paint(b: SoftwareBackend, n: i32, phase: i32):
+    var i = 0
+    while i < n:
+        val col = (i * 13 + phase * 5) % 80
+        val row = (i * 7 + phase * 3) % 72
+        val x = col * 12 - 6
+        val y = row * 11 - 5
+        if i % 2 == 0:
+            b.draw_rect_filled(x, y, 12, 4, sf_color(i))
+        else:
+            b.draw_rect_filled(x, y, 4, 12, sf_color(i))
+        i = i + 1
+    b.set_clip(101, 99, 300, 200)
+    i = 0
+    while i < n / 4:
+        b.draw_rect_filled(90 + (i % 30) * 11, 95 + (i / 30) * 23, 14, 6, sf_color(i + 1))
+        i = i + 1
+    b.clear_clip()
+    # Same colour and width back to back (heights vary): the memo-hit path.
+    i = 0
+    while i < n / 4:
+        b.draw_rect_filled(30 + (i % 40) * 20, 400 + (i / 40) * 30, 12, 3 + i % 5, 0xFF334155u32)
+        i = i + 1
+
+fn sf_frame(simd: bool) -> (i64, i64, i32, i64, i64, i64):
+    var b = if simd: SoftwareBackend.create_cpu_simd() else: SoftwareBackend.create()
+    b.init(SF_W, SF_H)
+    sf_background(b)
+    b.present()
+    reset_simd_hits()
+    val batch0 = b.simd_batch_hits
+    sf_paint(b, SF_N, 0)
+    val hits = simd_hit_counts()
+    var dirty = 0
+    var t = 0
+    while t < b.dirty_tiles.len():
+        if b.dirty_tiles[t]:
+            dirty = dirty + 1
+        t = t + 1
+    val out = (sf_hash(b.read_pixels()), sf_tiles_hash(b.dirty_tiles), dirty, hits.fill_hits, hits.alpha_hits, b.simd_batch_hits - batch0)
+    b.shutdown()
+    out
+
+# Microseconds for SF_N calls of `kind` on a warmed 3600x3040 cpu_simd
+# surface. Kinds: 0 opaque 8x4 one colour, 1 opaque 8x4 two alternating
+# colours, 2 translucent 8x4 rect, 3 the same rect as 4 sw_hline_blend rows
+# (the per-row path a translucent fill used to take).
+fn sf_cost_round(b: SoftwareBackend, kind: i32, r: i32) -> i64:
+    val clock = default_frame_clock()
+    val t0 = clock.now_micros()
+    var i = 0
+    while i < SF_N:
+        val x = 40 + (i % 200) * 17
+        val y = 30 + (i / 200) * 9 + r * 40
+        if kind == 0:
+            b.draw_rect_filled(x, y, 8, 4, 0xFF334155u32)
+        elif kind == 1:
+            b.draw_rect_filled(x, y, 8, 4, if i % 2 == 0: 0xFF334155u32 else: 0xFF0F766Eu32)
+        elif kind == 2:
+            b.draw_rect_filled(x, y, 8, 4, 0x7F64748Bu32)
+        else:
+            var row = 0
+            while row < 4:
+                b.sw_hline_blend(x, y + row, 8, 0x7F64748Bu32)
+                row = row + 1
+        i = i + 1
+    clock.now_micros() - t0
+
+# (min us of kind_a, min us of kind_b) over 5 rounds, the two kinds
+# alternating which goes first each round, so host load hits both alike.
+fn sf_cost_pair(kind_a: i32, kind_b: i32) -> (i64, i64):
+    var b = SoftwareBackend.create_cpu_simd()
+    b.init(3600, 3040)
+    b.draw_rect_filled(0, 0, 3600, 3040, 0xFFFFFFFFu32)
+    b.ensure_kernel_table()
+    var best_a: i64 = 0
+    var best_b: i64 = 0
+    var r = 0
+    while r < 5:
+        var ta: i64 = 0
+        var tb: i64 = 0
+        if r % 2 == 0:
+            ta = sf_cost_round(b, kind_a, r)
+            tb = sf_cost_round(b, kind_b, r)
+        else:
+            tb = sf_cost_round(b, kind_b, r)
+            ta = sf_cost_round(b, kind_a, r)
+        if r == 0 or ta < best_a:
+            best_a = ta
+        if r == 0 or tb < best_b:
+            best_b = tb
+        r = r + 1
+    b.shutdown()
+    (best_a, best_b)
+
+describe "SoftwareBackend small rect fill per-call cost":
+    it "paints dash-shaped opaque and translucent fills byte-identically to base (cpu_simd)":
+        val got = sf_frame(true)
+        print "small-fill cpu_simd: hash={got.0} tiles_hash={got.1} dirty_tiles={got.2} fill_hits={got.3} alpha_hits={got.4} batch_hits={got.5}"
+        expect(got.0).to_equal(3599280067)
+        expect(got.1).to_equal(3729037204)
+        expect(got.2).to_equal(129)
+        expect(got.3).to_equal(836)
+        expect(got.4).to_equal(1440)
+        # batch_hits (got.5) follows the timing-probed kernel table, which may
+        # route a bucket either way on a given host, so it is printed only.
+
+    it "paints the same fills byte-identically to base (software)":
+        val got = sf_frame(false)
+        print "small-fill software: hash={got.0} tiles_hash={got.1} dirty_tiles={got.2}"
+        expect(got.0).to_equal(3599280067)
+        expect(got.1).to_equal(3729037204)
+        expect(got.2).to_equal(129)
+
+    # Relative, same process, so host load cancels. Base 3d7deb43a98: a
+    # repeated opaque fill cost the same as a changing one (~140 us, both
+    # dispatch the span kernel) and a translucent rect the same as its 4 rows.
+    it "reuses the kernel span for a repeated opaque fill (<= 0.8x a changing one)":
+        val pair = sf_cost_pair(0, 1)
+        val hit = pair.0
+        val miss = pair.1
+        print "small-fill opaque 8x4 at 3600x3040: repeated {hit / (SF_N as i64)} us/fill, alternating {miss / (SF_N as i64)} us/fill"
+        expect(hit * 10 <= miss * 8).to_equal(true)
+
+    it "blends a translucent rect in one pass (<= 0.6x its rows one by one)":
+        val pair = sf_cost_pair(2, 3)
+        val rect = pair.0
+        val rows = pair.1
+        print "small-fill translucent 8x4 at 3600x3040: rect {rect / (SF_N as i64)} us/fill, per-row {rows / (SF_N as i64)} us/fill"
+        expect(rect * 10 <= rows * 6).to_equal(true)

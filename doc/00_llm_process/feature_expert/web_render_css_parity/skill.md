@@ -4936,3 +4936,16 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
   `Hx <span>Hxgl</span>` 121..192 (now AC-2). Tag removed.
 - Trap: check an in-development spec on current origin before starting a fix lane;
   a neighbouring lane can close it.
+## 2026-11-24 — small rect fills: per-call cost in backend_software (8x4: 140 -> ~62 us opaque, 243 -> ~70 us translucent)
+
+- **Measure inside a function, never in a top-level `if true:` block.** A call made from top-level script code cost 20-40 us in the interpreter; the same call from inside a `fn` cost ~3 us (method) / ~12 us (cross-module). Top-level probes overstate every call by ~10x.
+- **What a small fill cost (interpreter, cpu_simd, 3600x3040):** an interpreted call is ~3-4 us and a statement ~0.5-1 us, so the cost is the NUMBER of calls, not array copies (take/write/restore of the surface is ~2 us).
+  - Opaque 8x4 (~140 us): `span_batch_new` + `span_batch_push` + `simd_span_batch_execute` built an 8 px `[colour; 8]` span for ~68 us; per-row hit counters ~4 us a row; one `mark_span_dirty` call per tile row ~10 us; `color_a` cross-module ~4 us.
+  - Translucent 8x4 (~240 us): `sw_hline_blend` per ROW, ~60 us each (`_clip_span`, `native_pixel_rows_enabled`, `sw_span_scratch`, the extern, `sw_buf_write_span`, `mark_span_dirty`). The extern itself is ~1 us.
+- **Fix (`backend_software.spl`, byte-identical by construction):**
+  - `sw_fill_rect_rows` keeps the last kernel-filled span (`_fill_memo_span`, `_fill_memo_lookups`) and reuses it for the same (colour, count): both providers write `[colour; count]`. `fill_hits` still advance once per row and `simd_batch_hits` by the recorded lookup count per row. `kernel_table.lookups` advances only on a real dispatch.
+  - A translucent `draw_rect_filled` (mask off, SIMD spans on) clips x once and calls `_sw_blend_const_rect_rows`: rows are gathered into one scratch (at most `SW_FILL_CONTIGUOUS_CHUNK_PIXELS`), blended by ONE `rt_engine2d_simd_blend_const_span_u32` call (a per-pixel kernel), and written back. `alpha_hits` still advance once per row. `SoftwareBackend.draw_rect_blend` routes there.
+  - Dirty tiles are marked per touched tile inline (same set as `mark_span_dirty` per tile row). `has_alpha` is `color < 0xFF000000u32`.
+- **Pinned by** `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_small_fill_cost_spec.spl`: frame hash, dirty-tile hash and fill/alpha hit counts (cpu_simd and software give the same hash) including a repeated same-colour run (the memo-hit path), plus same-process RELATIVE timing (a repeated opaque fill <= 0.8x an alternating one, a translucent rect <= 0.6x its 4 rows; head 0.47x / 0.31x, base 1.0x / 1.09x). Absolute us budgets flake on the shared box.
+- **Not changed, side finding:** `Engine2D.draw_rect_blend` on the CPU lane goes through `emu_draw_rect_blend`; before the rect-only readback change it cost ~21 ms per 1x1 call at 4x (whole-frame `read_pixels`). `_engine2d_draw_ir_path_fill` calls it for every edge pixel. Re-measure it after the rect-only readback change.
+- **Open:** each fill still pays ~4 us a row for `record_simd_fill_hit`/`record_simd_alpha_hit` (a bulk counter needs a new public API), plus Engine2D dispatch ~12 us (the `if val Some(...)` backend chain plus `_vulkan_primitive_target()`).
