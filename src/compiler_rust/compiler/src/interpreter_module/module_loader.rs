@@ -1221,6 +1221,48 @@ fn check_unprovided_use_names(
     Ok(())
 }
 
+/// HIR/JIT-lane twin of the interpreter's unprovided-use check: the JIT import
+/// loader never runs `load_and_merge_module`, so the same rule, message and
+/// strict/warn outcome run here against the resolved module's parsed surface.
+/// The exports table is empty (nothing is evaluated), so names the module
+/// re-exposes through its own non-glob `use` lines are added explicitly, and
+/// any shape whose surface cannot be enumerated statically is left unchecked.
+pub(crate) fn check_unprovided_use_in_resolved_module(
+    use_stmt: &UseStmt,
+    importer: &Path,
+    resolved: &Path,
+) -> Result<(), CompileError> {
+    if requested_group_import_names(use_stmt).is_none()
+        || resolved.file_name().is_some_and(|n| n == "__init__.spl")
+    {
+        return Ok(()); // not a braced group, or a package surface merged from siblings
+    }
+    let super::module_cache::SharedSource::Parsed { source, ast: Ok(ast) } = super::module_cache::shared_source(resolved)
+    else {
+        return Ok(());
+    };
+    let items = &ast.items;
+    let mut enums: Enums = HashMap::new();
+    for item in items {
+        if let Node::Enum(e) = item {
+            enums.insert(e.name.clone(), Arc::new(e.clone()));
+        }
+    }
+    let incomplete = source_is_host_gated(&source)
+        || items.iter().any(|i| matches!(i, Node::MultiUse(_) | Node::CommonUseStmt(_)));
+    let exports: Arc<ModuleTable> = Arc::new(ModuleTable::leaf(Default::default()));
+    let mut provided = collect_provided_names(items, &exports, &HashMap::new(), &HashMap::new(), &enums, incomplete);
+    if let Some(set) = provided.as_mut().and_then(Arc::get_mut) {
+        for item in items {
+            if let Node::UseStmt(u) = item {
+                set.extra.extend(published_target_names(&u.target));
+            }
+        }
+    }
+    let label = use_stmt.path.segments.join(".");
+    unprovided_use_outcome(check_unprovided_use_names(use_stmt, Some(importer), resolved, &label, &provided))
+}
+
 /// Validate that imported function effects are compatible with importer's capabilities.
 ///
 /// If the importer has no `requires [capabilities]`, it's unrestricted and can import anything.

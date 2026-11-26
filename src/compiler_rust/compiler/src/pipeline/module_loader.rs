@@ -2896,6 +2896,9 @@ fn load_module_with_imports_internal(
     for item in module.items {
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
+                // The JIT lane never runs the interpreter loader, so apply its
+                // unprovided braced-use rule here (same message / strict outcome).
+                crate::interpreter::interpreter_module::check_unprovided_use_in_resolved_module(use_stmt, &path, &resolved)?;
                 if flatten_imports {
                     let flatten_this_import = should_flatten_import(use_stmt, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                     let mut imported = load_module_with_imports_internal(
