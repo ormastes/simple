@@ -1,14 +1,13 @@
 # Windows job-object hard memory cap probe (container increment 3, Lane E).
 # Runs one child under the EXISTING windows_process_owner JobObject with a
 # committed-memory limit, records the lifetime peak, and turns three
-# observations (under cap, over cap, uncapped baseline) into a verdict. A
-# ContainerCapabilityReportV1 affirms memory_hard_limit ONLY from an Enforced
-# verdict; every other verdict yields a report with empty accounting. No new
+# observations (under cap, over cap, uncapped baseline) into a verdict. The
+# verdict feeds sosix_contain_memory_cap_evidence_v1 and, through the pure
+# evidence producer, the one capability report builder
+# (pure_container_capability_report_v1); this module builds no report. No new
 # FFI: all native work stays in windows_process_owner. Non-Windows hosts fail
 # closed with "unsupported-host".
-use std.common.crypto.sha256.{sha256_text}
-use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1, ContainerCapabilityReportV1, container_capability_report_v1_empty, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1, CONTAINER_CLIENT_AUTHORITY_USER_V1, CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1}
-use std.platform.{is_windows, host_arch}
+use std.platform.{is_windows}
 use std.nogc_sync_mut.io_runtime.{file_read, file_exists, file_delete, time_now_monotonic_ms, thread_sleep}
 use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessLeaseV1, windows_process_start_with_memory_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_peak_memory_v1, windows_process_file_digest_v1}
 
@@ -130,11 +129,6 @@ fn _windows_probe_args_key_v1(args: [text]) -> text:
         key = key + _windows_probe_field_v1(arg)
     key
 
-fn _windows_probe_identity_v1(observed: WindowsMemoryCapObservationV1) -> text:
-    _windows_probe_field_v1(observed.program) + _windows_probe_field_v1(observed.program_digest) +
-        _windows_probe_field_v1(_windows_probe_args_key_v1(observed.args)) +
-        _windows_probe_field_v1(observed.timed_out.value.to_string())
-
 # Enforced needs all of: under ok within cap; over denied (nonzero exit or
 # ALLOC_DENIED, never ALLOC_OK) with peak <= cap + denial overshoot; uncapped baseline running the same
 # over workload succeeds, so the denial came from the job and not the runtime.
@@ -171,35 +165,6 @@ pub fn windows_memory_cap_verdict_v1(under: WindowsMemoryCapObservationV1, over:
         return WindowsMemoryCapVerdictV1.Inconclusive("over-cap run died before reaching the cap")
     WindowsMemoryCapVerdictV1.Enforced
 
-# The verdict is derived here from the three observations; it is never a
-# caller-supplied claim. Evidence digest binds all three runs, the over-cap
-# stdout and the sha256 of the measured binary's bytes.
-pub fn windows_container_capability_report_v1(under: WindowsMemoryCapObservationV1, over: WindowsMemoryCapObservationV1,
-        baseline: WindowsMemoryCapObservationV1, provider_version: text) -> ContainerCapabilityReportV1:
-    val verdict = windows_memory_cap_verdict_v1(under, over, baseline)
-    var report = container_capability_report_v1_empty()
-    val arch = host_arch()
-    report.host_os = "windows"
-    report.host_arch = if arch == "unknown": "" else: arch
-    report.guest_abi = "windows"
-    report.isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1
-    report.client_authority = CONTAINER_CLIENT_AUTHORITY_USER_V1
-    report.provider_version = provider_version
-    val digest = sha256_text(_windows_probe_identity_v1(under) + _windows_probe_identity_v1(over) + _windows_probe_identity_v1(baseline) + "|" + under.cap.value.to_string() + "|" +
-        under.peak.value.to_string() + "|" + under.exit_code.value.to_string() + "|" +
-        over.peak.value.to_string() + "|" + over.exit_code.value.to_string() + "|" + over.stdout_text + "|" +
-        baseline.cap.value.to_string() + "|" + baseline.peak.value.to_string() + "|" + baseline.exit_code.value.to_string())
-    # Non-empty evidence names what was observed even when nothing is affirmed,
-    # so a rejected requirement reports the capability gap, not missing evidence.
-    report.evidence_revision = "unaffirmed:" + digest
-    match verdict:
-        WindowsMemoryCapVerdictV1.Enforced:
-            report.memory_hard_limit = ContainerCapabilityFlagV1(true)
-            report.memory_accounting = CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1
-            report.evidence_revision = "job-commit:" + digest
-        _: pass
-    report
-
+export windows_memory_cap_probe_run_v1, windows_memory_cap_verdict_v1
 export WindowsJobMemoryBytesV1, WindowsProbeExitCodeV1, WindowsProbeFlagV1, WindowsProbeTimeoutMsV1
 export WindowsMemoryCapProbeRequestV1, WindowsMemoryCapObservationV1, WindowsMemoryCapVerdictV1
-export windows_memory_cap_probe_run_v1, windows_memory_cap_verdict_v1, windows_container_capability_report_v1

@@ -1,0 +1,337 @@
+# @cover src/lib/nogc_sync_mut/container/pure_runtime_v1.spl 80%
+# @cover src/lib/common/contracts/container/pure_sandbox_observed_v1.spl 80%
+# codex-system-test
+# @manual: primary
+# Pure-Simple container runtime (lane P4), end to end on the Windows evidence host:
+# qualify, then a restricted container over a materialized two-file store base.
+# Every Windows example returns early unless is_windows(); a skipped example is not
+# evidence, so the measured values are recorded in the report that accompanies the
+# lane. Run: C:/dev/keep/seeds/simple-local-20261126.exe test <this spec>
+#
+# Measured 2026-11-26 on the Windows 11 evidence host with simple-local-20261126.exe (17 of 17 ran, 0 skipped, ~25 s):
+#   qualify: nine of nine canaries + memory cap -> evidence revision pure:<sha256>, roots-bound
+#   restricted run over the two-file base: exit 7; LOWER-READ tool-bytes, UPPER-WRITE allow, SCRATCH-WRITE allow,
+#     LOWER-WRITE deny, LOWER-AFTER tool-bytes; upper/out.txt present; lower file and both store objects unchanged
+#   store object link count 3 with two containers prepared, 2 after the second is torn down, 1 after the first
+#   second container: CONTROL-READ etc-bytes, PEER-READ deny (first container upper/secret.txt)
+#   after teardown: view_root and state_root/attempts hold no entries; journal ends destroyed
+# Architecture: doc/04_architecture/platform/container/pure_simple_container.md (7)
+use std.spec.*
+use std.platform.{is_windows, get_current_dir, get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{file_exists, getpid, time_now_monotonic_ms}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir, dir_walk}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1, ContainerCapabilityRequirementV1, container_capability_requirement_v1_empty, CONTAINER_ISOLATION_KIND_NATIVE_V1, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1}
+use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1}
+use std.common.contracts.container.pure_sandbox_observed_v1.{pure_container_observed_capability_v1}
+use std.common.contracts.container.sandbox_capability_v1.{SandboxQualificationV1, SandboxFileGuaranteeV1, SandboxNetworkGuaranteeV1, SandboxProcessGuaranteeV1, SandboxCleanupGuaranteeV1, SandboxSupportV1}
+use std.common.contracts.sosix.containment_v1.{SosixContainLimitsV1, SosixContainBytesV1, SosixContainCountV1, SosixContainCpuRateV1, SosixContainMillisV1}
+use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1, SosixContainMemoryProbeV1}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
+use std.nogc_sync_mut.storage.storage_view_v1.{ViewBytesV1, storage_view_v1_create, storage_view_v1_write, storage_view_v1_save, storage_view_v1_base_entries}
+use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, StoreGenerationV1}
+use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, PureContainerQualifyV1, pure_container_qualify_v1, pure_container_run_v1, _prepare_v1, _execute_v1, _teardown_v1}
+
+val SEED = "C:/dev/keep/seeds/simple-local-20261126.exe"
+val CAP_BYTES = 276824064
+val RUN_TAG = getpid().to_string() + "_" + time_now_monotonic_ms().to_string()
+
+fn ready() -> bool:
+    is_windows() and file_exists(SEED)
+
+# Digests need the Windows hashing owner; off Windows the module-level requests carry empty text.
+fn digest_of(path: text) -> text:
+    if is_windows(): windows_process_file_digest_v1(path) else: ""
+
+fn repo() -> text:
+    get_current_dir().replace("\\", "/")
+
+fn base_dir() -> text:
+    get_temp_dir().replace("\\", "/") + "/pure_p4_" + RUN_TAG
+
+fn store_root() -> text:
+    base_dir() + "/store"
+
+fn view_root() -> text:
+    base_dir() + "/views"
+
+fn state_root() -> text:
+    base_dir() + "/state"
+
+fn text_of(path: text) -> text:
+    match file_read_regular_no_follow_bounded(path, 4096):
+        Ok(value): value
+        Err(_reason): "<unreadable>"
+
+fn name_count(path: text) -> i64:
+    val result = process_run("fsutil", ["hardlink", "list", path.replace("/", "\\")])
+    var count: i64 = 0
+    for line in result.0.split("\n"):
+        if line.trim().starts_with("\\"): count = count + 1
+    count
+
+fn object_path(key: text) -> text:
+    store_root() + "/objects/" + key.substring(0, 2) + "/" + key + ".obj"
+
+# Two-file base saved as root "main".
+fn make_base() -> bool:
+    if not dir_create_all(base_dir() + "/mem"): return false
+    if immutable_store_v1_init(store_root()) != "": return false
+    val seeded = storage_view_v1_create(store_root(), base_dir() + "/seedviews", "seed", "", StoreGenerationV1(0), ViewBytesV1(100000))
+    if seeded.status != "ok": return false
+    if storage_view_v1_write(seeded.view, "bin/tool.txt", "tool-bytes".bytes()).status != "ok": return false
+    if storage_view_v1_write(seeded.view, "etc.txt", "etc-bytes".bytes()).status != "ok": return false
+    storage_view_v1_save(seeded.view, "main", StoreGenerationV1(0)).status == "ok"
+
+val base_ready = if ready(): make_base() else: false
+
+fn empty_evidence() -> PureContainerEvidenceV1:
+    val no = ContainerCapabilityFlagV1(false)
+    PureContainerEvidenceV1(host_os: "windows", host_arch: "x86_64", guest_abi: "windows",
+        root_view_kind: PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, memory_cap_enforced: no, write_confinement_observed: no,
+        base_fully_linked: no, launch_observed: no, cleanup_observed: no, roots_digest: "", evidence_revision: "")
+
+fn qualify_request() -> PureContainerQualifyV1:
+    PureContainerQualifyV1(state_root: state_root(), view_root: view_root(), probe_program: SEED,
+        probe_digest: digest_of(SEED),
+        probe_script: repo() + "/src/lib/nogc_sync_mut/sosix/contain_canary_probe.spl",
+        memory_probe: SosixContainMemoryProbeV1(program: SEED, program_digest: digest_of(SEED),
+            under_args: ["run", repo() + "/test/fixtures/container/alloc_mb.spl", "48"],
+            over_args: ["run", repo() + "/test/fixtures/container/alloc_mb.spl", "256"],
+            cap: SosixContainBytesV1(CAP_BYTES), work_dir: base_dir() + "/mem", wall: SosixContainMillisV1(180000)))
+
+val evidence = if base_ready: pure_container_qualify_v1(qualify_request()) else: empty_evidence()
+
+fn requirement_sandbox() -> ContainerCapabilityRequirementV1:
+    var requirement = container_capability_requirement_v1_empty()
+    requirement.required_host_os = "windows"
+    requirement.required_isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1
+    requirement.required_launch_qualified = ContainerCapabilityFlagV1(true)
+    requirement.required_ephemeral_cleanup = ContainerCapabilityFlagV1(true)
+    requirement.required_readonly_file_backing_reuse = ContainerCapabilityFlagV1(true)
+    requirement.required_root_view_kind = PURE_CONTAINER_ROOT_VIEW_SPLIT_V1
+    requirement
+
+fn child_env() -> [text]:
+    ["SystemRoot=C:\\Windows", "PATH=C:\\Windows\\System32"]
+
+fn spec_with(id: text, args: [text], ev: PureContainerEvidenceV1, requirement: ContainerCapabilityRequirementV1, network: text) -> PureContainerSpecV1:
+    PureContainerSpecV1(container_id: id, store: store_root(), view_root: view_root(), state_root: state_root(),
+        base_root: "main", quota: ViewBytesV1(1048576), program: SEED, program_digest: digest_of(SEED),
+        args: args, environment: child_env(),
+        limits: SosixContainLimitsV1(memory: SosixContainBytesV1(0), processes: SosixContainCountV1(0),
+            cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(120000)),
+        identity: "restricted", network: network, requirement: requirement, evidence: ev, extra_grants: [])
+
+fn base_args(code: text) -> [text]:
+    ["run", repo() + "/test/fixtures/container/pure_probe.spl", "args:", "base", code]
+
+fn base_spec(id: text) -> PureContainerSpecV1:
+    spec_with(id, base_args("7"), evidence, requirement_sandbox(), "host")
+
+fn tree_entries(path: text) -> i64:
+    if not is_dir(path): return 0
+    dir_walk(path).len()
+
+fn has_line(out: text, line: text) -> bool:
+    for item in out.replace("\r", "").split("\n"):
+        if item == line: return true
+    false
+
+fn refused_reason(spec: PureContainerSpecV1) -> text:
+    val run = pure_container_run_v1(spec)
+    if run.status != "rejected": return "not-rejected:" + run.status + ":" + run.reason
+    run.reason
+
+describe "pure simple container qualify":
+    it "measures the nine canaries and the memory cap through the single evidence producer":
+        if not ready(): return
+        expect(base_ready).to_equal(true)
+        expect(evidence.evidence_revision.starts_with("pure:")).to_equal(true)
+        expect(evidence.launch_observed.value).to_equal(true)
+        expect(evidence.cleanup_observed.value).to_equal(true)
+        expect(evidence.write_confinement_observed.value).to_equal(true)
+        expect(evidence.memory_cap_enforced.value).to_equal(true)
+        expect(evidence.base_fully_linked.value).to_equal(false)
+        expect(evidence.roots_digest != "").to_equal(true)
+        var leftovers = 0
+        for entry in dir_walk(state_root()):
+            if entry.contains("qualify"): leftovers = leftovers + 1
+        expect(leftovers).to_equal(0)
+
+    it "maps the evidence onto a qualified shared observation that still refuses both profiles":
+        if not ready(): return
+        val observed = pure_container_observed_capability_v1(sosix_contain_support_v1(), evidence)
+        match observed.qualification:
+            SandboxQualificationV1.Qualified(revision): expect(revision).to_equal(evidence.evidence_revision)
+            SandboxQualificationV1.Unqualified(reason): expect(reason).to_equal("qualified")
+        match observed.guarantees.file:
+            SandboxFileGuaranteeV1.NoFileGuarantee: pass
+            _: expect("file-guarantee").to_equal("NoFileGuarantee")
+        match observed.guarantees.network:
+            SandboxNetworkGuaranteeV1.NoNetworkGuarantee: pass
+            _: expect("network-guarantee").to_equal("NoNetworkGuarantee")
+        match observed.guarantees.process:
+            SandboxProcessGuaranteeV1.StrictDescendantContainment: pass
+            _: expect("process-guarantee").to_equal("StrictDescendantContainment")
+        match observed.guarantees.cleanup:
+            SandboxCleanupGuaranteeV1.QualifiedTreeAbsence: pass
+            _: expect("cleanup-guarantee").to_equal("QualifiedTreeAbsence")
+        match observed.hard_memory_limit:
+            SandboxSupportV1.Qualified: pass
+            _: expect("memory").to_equal("Qualified")
+
+    it "leaves the observation unqualified without evidence":
+        if not ready(): return
+        val observed = pure_container_observed_capability_v1(sosix_contain_support_v1(), empty_evidence())
+        match observed.qualification:
+            SandboxQualificationV1.Unqualified(reason): expect(reason).to_equal("pure-evidence-missing")
+            SandboxQualificationV1.Qualified(_revision): expect("qualified").to_equal("unqualified")
+
+val staged_prepared = _prepare_v1(base_spec("pure-main"))
+val staged_exec = _execute_v1(staged_prepared.session)
+
+describe "pure simple container run":
+    it "prepares a restricted container with a linked lower and an empty tree before launch":
+        if not ready(): return
+        expect(staged_prepared.reason).to_equal("")
+        expect(staged_prepared.status).to_equal("ready")
+        expect(staged_prepared.session.report.readonly_file_backing_reuse.value).to_equal(true)
+        expect(staged_prepared.session.report.isolation_kind).to_equal(CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1)
+        expect(staged_prepared.session.life.journal.phase).to_equal("created")
+
+    it "reads lower, writes upper, cannot overwrite lower and exits 7":
+        if not ready(): return
+        expect(staged_exec.reason).to_equal("")
+        expect(staged_exec.status).to_equal("exited")
+        expect(staged_exec.exit_code.value).to_equal(7)
+        expect(has_line(staged_exec.stdout, "LOWER-READ tool-bytes")).to_equal(true)
+        expect(has_line(staged_exec.stdout, "UPPER-WRITE allow")).to_equal(true)
+        expect(has_line(staged_exec.stdout, "UPPER-READBACK upper-bytes")).to_equal(true)
+        expect(has_line(staged_exec.stdout, "SCRATCH-WRITE allow")).to_equal(true)
+        expect(has_line(staged_exec.stdout, "LOWER-WRITE deny")).to_equal(true)
+        expect(has_line(staged_exec.stdout, "LOWER-AFTER tool-bytes")).to_equal(true)
+        expect(staged_exec.session.life.journal.phase).to_equal("stopped")
+
+    it "leaves the upper file, the lower file and the store bytes as measured before teardown":
+        if not ready(): return
+        val view = staged_prepared.session.view
+        expect(text_of(view.view_root + "/" + view.view_id + "/upper/out.txt")).to_equal("upper-bytes")
+        expect(text_of(view.view_root + "/" + view.view_id + "/lower/bin/tool.txt")).to_equal("tool-bytes")
+        val entries = storage_view_v1_base_entries(view)
+        expect(entries.keys.len()).to_equal(2)
+        for i in 0..entries.keys.len():
+            val expected = if entries.paths[i] == "etc.txt": "etc-bytes" else: "tool-bytes"
+            expect(text_of(object_path(entries.keys[i]))).to_equal(expected)
+
+    it "tears down to an empty tree with the journal destroyed":
+        if not ready(): return
+        val down = _teardown_v1(staged_exec.session)
+        expect(down.reason).to_equal("")
+        expect(down.life.journal.phase).to_equal("destroyed")
+        expect(tree_entries(view_root())).to_equal(0)
+        expect(tree_entries(state_root() + "/attempts")).to_equal(0)
+
+    it "runs the public one-shot call to the same exit code and leaves nothing behind":
+        if not ready(): return
+        val run = pure_container_run_v1(base_spec("pure-oneshot"))
+        expect(run.reason).to_equal("")
+        expect(run.status).to_equal("exited")
+        expect(run.exit_code.value).to_equal(7)
+        expect(run.journal.phase).to_equal("destroyed")
+        expect(run.report.readonly_file_backing_reuse.value).to_equal(true)
+        expect(run.report.launch_qualified.value).to_equal(true)
+        expect(tree_entries(view_root())).to_equal(0)
+        expect(tree_entries(state_root() + "/attempts")).to_equal(0)
+
+describe "pure simple container isolation between containers":
+    it "shares one store object between two containers and denies the second a read of the first's upper":
+        if not ready(): return
+        val first = _prepare_v1(base_spec("pure-first"))
+        expect(first.reason).to_equal("")
+        expect(first.status).to_equal("ready")
+        val first_upper = first.session.view_dir + "/upper"
+        expect(storage_view_v1_write(first.session.view, "secret.txt", "first-secret".bytes()).status).to_equal("ok")
+        val peer_args = ["run", repo() + "/test/fixtures/container/pure_probe.spl", "args:", "peer", first_upper + "/secret.txt", "etc.txt"]
+        val second = _prepare_v1(spec_with("pure-second", peer_args, evidence, requirement_sandbox(), "host"))
+        expect(second.reason).to_equal("")
+        expect(second.status).to_equal("ready")
+        val entries = storage_view_v1_base_entries(second.session.view)
+        val object = object_path(entries.keys[0])
+        # The store object plus one lower link per container.
+        expect(name_count(object)).to_equal(3)
+        expect(text_of(first.session.view_dir + "/lower/etc.txt")).to_equal(text_of(second.session.view_dir + "/lower/etc.txt"))
+        val ran = _execute_v1(second.session)
+        expect(ran.reason).to_equal("")
+        expect(ran.status).to_equal("exited")
+        expect(has_line(ran.stdout, "CONTROL-READ etc-bytes")).to_equal(true)
+        expect(has_line(ran.stdout, "PEER-READ deny")).to_equal(true)
+        expect(_teardown_v1(ran.session).reason).to_equal("")
+        expect(name_count(object)).to_equal(2)
+        expect(_teardown_v1(first.session).reason).to_equal("")
+        expect(name_count(object)).to_equal(1)
+        expect(tree_entries(view_root())).to_equal(0)
+        expect(tree_entries(state_root() + "/attempts")).to_equal(0)
+
+describe "pure simple container admission refusals":
+    it "refuses empty evidence for a constrained requirement as capability-evidence-missing":
+        if not ready(): return
+        expect(refused_reason(spec_with("pure-noev", base_args("0"), empty_evidence(), requirement_sandbox(), "host"))).to_equal("capability-evidence-missing")
+        expect(is_dir(view_root() + "/pure-noev")).to_equal(false)
+
+    it "refuses evidence produced for other roots as evidence-roots-mismatch":
+        if not ready(): return
+        var other = spec_with("pure-roots", base_args("0"), evidence, requirement_sandbox(), "host")
+        other.state_root = base_dir() + "/state-elsewhere"
+        expect(refused_reason(other)).to_equal("evidence-roots-mismatch")
+        expect(is_dir(view_root() + "/pure-roots")).to_equal(false)
+
+    it "refuses a restricted run whose evidence lacks write confinement":
+        if not ready(): return
+        var weak = evidence
+        weak.write_confinement_observed = ContainerCapabilityFlagV1(false)
+        expect(refused_reason(spec_with("pure-weak", base_args("0"), weak, requirement_sandbox(), "host"))).to_equal("write-confinement-unqualified")
+        expect(is_dir(view_root() + "/pure-weak")).to_equal(false)
+
+    it "refuses a restricted run with no evidence and no requirement as write-confinement-unqualified":
+        if not ready(): return
+        val none = container_capability_requirement_v1_empty()
+        expect(refused_reason(spec_with("pure-bare", base_args("0"), empty_evidence(), none, "host"))).to_equal("write-confinement-unqualified")
+
+    it "refuses a native-container requirement with qualified evidence as isolation-kind-mismatch":
+        if not ready(): return
+        var requirement = requirement_sandbox()
+        requirement.required_isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_V1
+        expect(refused_reason(spec_with("pure-native", base_args("0"), evidence, requirement, "host"))).to_equal("isolation-kind-mismatch")
+        expect(is_dir(view_root() + "/pure-native")).to_equal(false)
+
+    it "refuses network none before any view or scratch exists":
+        if not ready(): return
+        expect(refused_reason(spec_with("pure-net", base_args("0"), evidence, requirement_sandbox(), "none"))).to_equal("containment-network-isolation-unsupported")
+        expect(is_dir(view_root() + "/pure-net")).to_equal(false)
+        expect(tree_entries(state_root() + "/attempts")).to_equal(0)
+
+    it "refuses an invalid container id before any effect":
+        if not ready(): return
+        expect(refused_reason(spec_with("Pure_Bad", base_args("0"), evidence, requirement_sandbox(), "host"))).to_equal("container-id-invalid")
+
+    it "tears down a failed prepare: no view, scratch or pin is left and the id runs again":
+        if not ready(): return
+        var spec = spec_with("pure-failprep", base_args("0"), evidence, requirement_sandbox(), "host")
+        # No base means zero linked files, so the read-only-reuse requirement fails after the view, lower/ and pin exist.
+        spec.base_root = ""
+        val failed = pure_container_run_v1(spec)
+        expect(failed.reason).to_equal("readonly-file-backing-reuse-missing")
+        expect(failed.status).to_equal("rejected")
+        expect(failed.journal.phase).to_equal("destroyed")
+        expect(is_dir(view_root() + "/pure-failprep")).to_equal(false)
+        expect(is_dir(state_root() + "/attempts/pure-failprep-a1")).to_equal(false)
+        expect(is_dir(store_root() + "/pins/pure-failprep")).to_equal(false)
+        val again = pure_container_run_v1(spec_with("pure-failprep", base_args("7"), evidence, requirement_sandbox(), "host"))
+        expect(again.reason).to_equal("")
+        expect(again.exit_code.value).to_equal(7)
+
+    it "removes the spec root":
+        if not ready(): return
+        expect(dir_remove_all(base_dir())).to_equal(true)

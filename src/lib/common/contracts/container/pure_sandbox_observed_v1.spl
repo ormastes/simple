@@ -1,0 +1,64 @@
+# Pure-container backend as a shared SandboxObservedCapabilityV1 (architecture
+# pure_simple_container 7, mapping table). Pure: it reads only the SOSIX support
+# value and the evidence the one producer built. Windows increment 1 yields
+# NoFileGuarantee and NoNetworkGuarantee, so both evidence profiles are refused;
+# the ContainerCapabilityRequirementV1 path admits increment-1 workloads.
+
+use std.common.contracts.container.sandbox_capability_v1.{SandboxObservedCapabilityV1,
+    SandboxQualificationV1, SandboxEvidenceProfileV1, SandboxFileGuaranteeV1,
+    SandboxNetworkGuaranteeV1, SandboxProcessGuaranteeV1, SandboxCleanupGuaranteeV1, SandboxSupportV1}
+use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1,
+    PURE_CONTAINER_BACKEND_V1, PURE_CONTAINER_ENGINE_V1}
+use std.common.contracts.sosix.containment_v1.{SosixContainSupportV1}
+
+fn _pure_observed_file_v1(support: SosixContainSupportV1) -> SandboxFileGuaranteeV1:
+    if support.write_confinement.value and support.read_confinement.value:
+        return SandboxFileGuaranteeV1.PathAccessPolicy
+    SandboxFileGuaranteeV1.NoFileGuarantee
+
+fn _pure_observed_network_v1(support: SosixContainSupportV1) -> SandboxNetworkGuaranteeV1:
+    # Never DirectDeniedBrokered: this backend has no broker.
+    if support.network_isolation.value: return SandboxNetworkGuaranteeV1.DirectDenied
+    SandboxNetworkGuaranteeV1.NoNetworkGuarantee
+
+fn _pure_observed_process_v1(support: SosixContainSupportV1) -> SandboxProcessGuaranteeV1:
+    if support.kill_all_descendants.value: return SandboxProcessGuaranteeV1.StrictDescendantContainment
+    SandboxProcessGuaranteeV1.LeaderOnly
+
+fn _pure_observed_cleanup_v1(support: SosixContainSupportV1, evidence: PureContainerEvidenceV1) -> SandboxCleanupGuaranteeV1:
+    if support.kill_all_descendants.value and evidence.cleanup_observed.value:
+        return SandboxCleanupGuaranteeV1.QualifiedTreeAbsence
+    SandboxCleanupGuaranteeV1.NoCleanupGuarantee
+
+# The qualify result is not an input: the evidence producer sets launch_observed,
+# cleanup_observed and write_confinement_observed only from the nine canaries
+# (1 + 1 + 7): all three flags plus a non-empty revision equal
+# sosix_contain_canaries_pass_v1 over a completed qualify run, except that the
+# producer checks the nine planned ids one by one and does not repeat the
+# len() == 9 check, so an extra unplanned canary entry would not be caught here
+# (the Windows qualify never emits one).
+fn _pure_observed_qualification_v1(evidence: PureContainerEvidenceV1) -> SandboxQualificationV1:
+    if evidence.evidence_revision == "":
+        return SandboxQualificationV1.Unqualified("pure-evidence-missing")
+    if not (evidence.launch_observed.value and evidence.cleanup_observed.value and
+            evidence.write_confinement_observed.value):
+        return SandboxQualificationV1.Unqualified("pure-canaries-not-all-passed")
+    SandboxQualificationV1.Qualified(evidence.evidence_revision)
+
+pub fn pure_container_observed_capability_v1(support: SosixContainSupportV1,
+        evidence: PureContainerEvidenceV1) -> SandboxObservedCapabilityV1:
+    val memory = if support.memory_hard_limit.value and evidence.memory_cap_enforced.value:
+        SandboxSupportV1.Qualified
+    else:
+        SandboxSupportV1.Unsupported
+    SandboxObservedCapabilityV1(backend: PURE_CONTAINER_BACKEND_V1, engine: PURE_CONTAINER_ENGINE_V1,
+        host_os: evidence.host_os, architecture: evidence.host_arch,
+        qualification: _pure_observed_qualification_v1(evidence),
+        guarantees: SandboxEvidenceProfileV1(name: "observed", file: _pure_observed_file_v1(support),
+            network: _pure_observed_network_v1(support), process: _pure_observed_process_v1(support),
+            cleanup: _pure_observed_cleanup_v1(support, evidence)),
+        network_profiles: [], direct_ip: SandboxSupportV1.Unsupported,
+        host_listen: SandboxSupportV1.Unsupported, udp: SandboxSupportV1.Unsupported,
+        hard_memory_limit: memory, hard_cpu_limit: SandboxSupportV1.Unsupported)
+
+export pure_container_observed_capability_v1
