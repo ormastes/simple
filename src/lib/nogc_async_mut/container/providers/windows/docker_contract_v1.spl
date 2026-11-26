@@ -115,6 +115,39 @@ pub fn windows_docker_mount_path_v1(value: text) -> bool:
         if component == "" or component == "." or component.ends_with(".") or component.ends_with(" "): return false
     true
 
+
+# Host/image build pair for --isolation=process. Process isolation needs the
+# host and image Windows builds to agree; the one cross-build pair accepted is
+# the measured live pair (host build 26300 running the 26100 ltsc2025 image).
+# Anything else, including an unparseable version, fails closed.
+pub const WINDOWS_DOCKER_PINNED_HOST_BUILD_V1 = "26300"
+pub const WINDOWS_DOCKER_PINNED_IMAGE_BUILD_V1 = "26100"
+
+fn build_digits(value: text) -> bool:
+    if value == "" or value.byte_len() > 8: return false
+    for ch in value.chars():
+        if ch < "0" or ch > "9": return false
+    true
+
+# "10.0 26300 (26100.1.amd64fre...)" -> "26300"; "10.0.20348.2402" -> "20348".
+pub fn windows_docker_kernel_build_v1(kernel_version: text) -> text:
+    val parts = kernel_version.split(" ")
+    if parts.len() < 2 or parts[0] != "10.0" or not build_digits(parts[1]): return ""
+    parts[1]
+
+pub fn windows_docker_image_build_v1(image_os_version: text) -> text:
+    val parts = image_os_version.split(".")
+    if parts.len() != 4 or parts[0] != "10" or parts[1] != "0" or not build_digits(parts[2]) or not build_digits(parts[3]): return ""
+    parts[2]
+
+pub fn windows_docker_build_pair_reason_v1(kernel_version: text, image_os_version: text) -> text:
+    val host = windows_docker_kernel_build_v1(kernel_version)
+    val image = windows_docker_image_build_v1(image_os_version)
+    if host == "" or image == "": return "docker-host-image-version-pair-required"
+    if host == image: return ""
+    if host == WINDOWS_DOCKER_PINNED_HOST_BUILD_V1 and image == WINDOWS_DOCKER_PINNED_IMAGE_BUILD_V1: return ""
+    "docker-host-image-build-pair-unsupported"
+
 pub fn windows_docker_policy_reason_v1(policy: WindowsDockerPolicyV1) -> text:
     if not absolute_windows_path(policy.docker_executable) or
             not policy.docker_executable.ends_with("\\docker.exe"):
@@ -124,6 +157,8 @@ pub fn windows_docker_policy_reason_v1(policy: WindowsDockerPolicyV1) -> text:
             policy.provider_generation <= 0: return "docker-policy-identity-invalid"
     if not safe_field(policy.expected_kernel_version) or not safe_field(policy.image_os_version):
         return "docker-host-image-version-pair-required"
+    val pair_reason = windows_docker_build_pair_reason_v1(policy.expected_kernel_version, policy.image_os_version)
+    if pair_reason != "": return pair_reason
     if not policy.expected_image_id.starts_with("sha256:") or policy.expected_image_id.len() != 71:
         return "docker-image-id-invalid"
     if not windows_docker_id_v1(policy.expected_image_id.substring(7, 71)):

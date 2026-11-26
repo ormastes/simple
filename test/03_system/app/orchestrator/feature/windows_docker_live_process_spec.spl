@@ -1,0 +1,61 @@
+# Live Windows Docker process-isolation lifecycle: create -> start -> wait ->
+# logs -> destroy against the real local engine (npipe docker_engine).
+# Skips (never fails) when the engine pipe is absent or not this pinned host.
+# Pinned pair: host kernel 26300 (build 26100 base) with nanoserver:ltsc2025
+# image OsVersion 10.0.26100.33828 under --isolation=process.
+use std.spec.*
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.container.runtime_v1.RuntimeProviderV1
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+
+val LIVE_IMAGE_ID = "sha256:b911cb54b918608b1fe776b4627c57875e1cb74d6746703ac6155530d23e4587"
+val LIVE_IMAGE = "mcr.microsoft.com/windows/nanoserver@sha256:5c42e42b31816a3a7619cb71b4f14353793a47293e198dbde8fe4fce2c8935cb"
+
+fn live_policy() -> WindowsDockerPolicyV1:
+    WindowsDockerPolicyV1(docker_executable: "C:\Program Files\Docker\docker.exe",
+        endpoint: "npipe:////./pipe/docker_engine", engine_id: "e18ec34f-912a-4733-89de-cdc156c4e9ad",
+        node_boot_id: "live-boot-a", provider_generation: 1,
+        expected_kernel_version: "10.0 26300 (26100.1.amd64fre.ge_release.240331-1435)",
+        image_os_version: "10.0.26100.33828", expected_image_id: LIVE_IMAGE_ID,
+        timeout_ms: 120000, max_output_bytes: 65536,
+        system_root: "C:\Windows", temp_directory: "C:\Windows\Temp")
+
+fn live_request() -> WindowsDockerRequestV1:
+    WindowsDockerRequestV1(pod_uid: "live-docker-echo", attempt: 1, operation_id: "live-docker-echo-op",
+        image: LIVE_IMAGE, command: ["cmd", "/c", "echo", "simple-docker-ok"], args: [],
+        cpu_count: 1, memory_limit_bytes: 536870912, network: "none")
+
+describe "Windows Docker live process-isolation lifecycle":
+    it "runs cmd /c echo in nanoserver ltsc2025 and removes the container":
+        var provider = WindowsDockerRuntimeProviderV1.new(live_policy())
+        val probe = provider.probe()
+        # Skip only when docker.exe cannot reach the engine pipe at all; an
+        # identity/version mismatch on a present engine must fail, not skip.
+        val absent = (not probe.healthy) and probe.reason.starts_with("docker-command-failed")
+        if absent:
+            step("SKIP: Windows Docker engine pipe unavailable: " + probe.reason)
+            skip("docker engine pipe absent: " + probe.reason)
+        else:
+            expect(probe.reason).to_equal("engine-observed-request-admission-required")
+            val request = live_request()
+            val digest = windows_docker_request_digest_v1(live_policy(), request).unwrap()
+            val now_ms = time_sample_unix_micros_or_failure() / 1000
+            val deadline = container_effect_deadline_v1(digest, request.operation_id, ["create", "start"], now_ms + 120000).unwrap()
+            expect(provider.set_launch_deadline_v1(deadline).unwrap()).to_equal(true)
+            expect(provider.prepare_pod(request).status).to_equal("ok")
+            val created = provider.create(request)
+            expect(created.reason).to_equal(created.state.reason)
+            expect(created.status).to_equal("ok")
+            expect(provider.start(request).status).to_equal("ok")
+            val waited = provider.wait(request)
+            expect(waited.status).to_equal("ok")
+            expect(waited.exit_code).to_equal(0)
+            val logs = provider.logs(request)
+            expect(logs.status).to_equal("ok")
+            expect(logs.stdout.trim()).to_equal("simple-docker-ok")
+            val destroyed = provider.destroy(request)
+            expect(destroyed.status).to_equal("ok")
+            expect(destroyed.state.phase).to_equal("destroyed")
+            expect(destroyed.state.reason).to_equal("docker-exact-id-absence-confirmed")

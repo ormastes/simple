@@ -31,7 +31,8 @@ use std.common.contracts.container.runtime_v1.{RuntimeProviderV1,
     RuntimeProbeV1, RuntimeIntentV1, runtime_state_empty, runtime_command_empty,
     runtime_probe_unavailable, RUNTIME_PRIVILEGE_UNKNOWN, RUNTIME_STATUS_OK,
     RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_REJECTED}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded_environment_v1, process_run_bounded_environment_admitted_v1}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded_environment_v1, process_run_bounded_environment_admitted_v1, process_runtime_is_aot_native_v1}
+use std.nogc_sync_mut.sosix.process.{sosix_process_run_bounded, sosix_process_bounded_timed_out}
 use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
 use std.nogc_async_mut.container.providers.windows.docker_scope_v2.{windows_docker_scope_values_v2, windows_docker_scoped_create_v2, WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2}
@@ -233,6 +234,7 @@ impl WindowsDockerRuntimeProviderV1:
                 return Err("docker-execution-limit-exceeded")
             if result.exit_code != 0: return Err("docker-command-failed-" + result.exit_code.to_text())
             return Ok((result.stdout, result.stderr, result.exit_code))
+        if not process_runtime_is_aot_native_v1(): return self._execute_hosted_v1(command, admission_expiry_ms)
         val environment = [("SystemRoot", self.policy.system_root),
             ("TEMP", self.policy.temp_directory), ("TMP", self.policy.temp_directory)]
         val result = if admission_expiry_ms > 0:
@@ -244,6 +246,25 @@ impl WindowsDockerRuntimeProviderV1:
         if result.limit_exceeded: return Err("docker-execution-limit-" + result.limit_type)
         if result.exit_code != 0: return Err("docker-command-failed-" + result.exit_code.to_text())
         Ok((result.stdout, result.stderr, result.exit_code))
+
+    # Interpreter/JIT hosts have no native clean-environment child owner. Here
+    # docker.exe is pinned to the local pipe by --host and its client config
+    # directory by --config, so inherited DOCKER_HOST/DOCKER_CONTEXT/
+    # DOCKER_CONFIG cannot redirect it; the launch deadline is rechecked
+    # immediately before the effect. The native path above stays the product lane.
+    me fn _execute_hosted_v1(command: RuntimeCommandV1, admission_expiry_ms: i64) -> Result<(text, text, i64), text>:
+        if admission_expiry_ms > 0:
+            val now = time_sample_unix_micros_or_failure()
+            if now <= 0: return Err("launch-admission-clock-unavailable-before-effect")
+            if now / 1000 >= admission_expiry_ms: return Err("launch-deadline-expired-before-effect")
+        if command.args.len() < 2 or command.args[0] != "--host": return Err("docker-hosted-command-shape-invalid")
+        val args = command.args.slice(0, 2) + ["--config", self.policy.temp_directory] + command.args.slice(2, command.args.len())
+        val result = sosix_process_run_bounded(command.program, args, self.policy.timeout_ms, self.policy.max_output_bytes)
+        if sosix_process_bounded_timed_out(result.2, result.1): return Err("docker-execution-limit-timeout")
+        if result.0.byte_len() > self.policy.max_output_bytes or result.1.byte_len() > self.policy.max_output_bytes:
+            return Err("docker-execution-limit-output")
+        if result.2 != 0: return Err("docker-command-failed-" + result.2.to_text())
+        Ok((result.0, result.1, result.2))
 
     me fn _engine() -> Result<bool, text>:
         val command = windows_docker_command_v1(self.policy, "engine-info",
