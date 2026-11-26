@@ -1,0 +1,112 @@
+# Bugs 4, 5, 6, 8 verification:
+#   - Bug 4: native_noop_receipt_misses_windows_exe_suffix_2026-11-14
+#   - Bug 5: stage2_compiler_tests_matrix_rejected_pin_18a1f28937c2_2026-11-14
+#   - Bug 6: stage2_parse_shard_child_av_large_closure_2026-11-02
+#   - Bug 8: first_object_latency_stage2_2026-11-01
+
+use std.spec.{describe, context, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_read, file_write_exact}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use app.cli.native_build_shard_admission.{
+    NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1,
+    native_build_small_closure_max_v1,
+    native_build_shard_count_for_closure_v1
+}
+use app.cli.shard_worker_reap_v1.{
+    PARSE_SHARD_DEATH_GRACE_MS_V1,
+    parse_shard_abnormal_exit_v1,
+    parse_shard_death_deadline_v1
+}
+use compiler.driver.cache.native_noop_admission.{
+    native_noop_built_output_v1,
+    native_noop_request_v1,
+    native_noop_admit_v1,
+    native_noop_publish_built_v1,
+    native_noop_admission_hit_v1,
+    native_noop_admission_reason_v1
+}
+
+describe "Stage 2 matrix, native no-op Windows .exe, parse-shard AV, and first-object latency invariants":
+    context "Bugs 4 & 5: native_noop_receipt_misses_windows_exe_suffix & stage2 compiler-tests matrix":
+        it "resolves .exe vs bare spellings, rejects missing outputs, and invalidates on .exe mutation":
+            val root = "build/tmp/held_verify_noop_exe_matrix"
+            val _rm = dir_remove_all(root)
+            expect(dir_create_all(root)).to_equal(true)
+
+            val src = "{root}/main.spl"
+            val bare = "{root}/test_runner"
+            val exe = "{bare}.exe"
+            expect(file_write_exact(src, "fn main():\n    print 1\n")).to_equal(true)
+            expect(file_write_exact(exe, "pe-binary-v1")).to_equal(true)
+
+            expect(native_noop_built_output_v1(bare)).to_equal(exe)
+            expect(native_noop_built_output_v1(exe)).to_equal(exe)
+            expect(native_noop_built_output_v1("{root}/nonexistent_bin")).to_equal("{root}/nonexistent_bin")
+
+            val req = native_noop_request_v1(
+                root, bare, "llvm", "x86_64-pc-windows-gnu", 2, true, false,
+                false, "release", ["gc_sync_mut"], "", "rev-1", "tree-1",
+                "inventory-1", "authority-1", sha256_text("env-1"),
+                "invocation-1", ["main.spl"])
+            val miss_before = native_noop_admit_v1(req)
+            expect(native_noop_admission_hit_v1(miss_before)).to_equal(false)
+            expect(native_noop_admission_reason_v1(miss_before).len()).to_be_greater_than(0)
+
+            expect(native_noop_publish_built_v1(req, [src], bare)).to_equal("ok")
+
+            val hit_after = native_noop_admit_v1(req)
+            expect(native_noop_admission_hit_v1(hit_after)).to_equal(true)
+
+            expect(file_write_exact(exe, "pe-binary-v2-changed")).to_equal(true)
+            val miss_mutated = native_noop_admit_v1(req)
+            expect(native_noop_admission_hit_v1(miss_mutated)).to_equal(false)
+            expect(native_noop_publish_built_v1(req, [src], "{root}/nonexistent_bin")).to_equal("output-missing")
+            val _clean = dir_remove_all(root)
+
+        it "wires native_noop_built_output_v1 in driver_orchestration and .exe in bootstrap matrix scripts":
+            val orch = file_read("src/compiler/80.driver/driver_orchestration.spl")
+            val admit_sh = file_read("scripts/bootstrap/admit-built-stage2-compiler-tests.shs")
+            val verify_sh = file_read("scripts/bootstrap/lib/verify-stage2-compiler-tests.shs")
+            expect(orch).to_contain("native_noop_built_output_v1(")
+            expect(admit_sh).to_contain(".exe")
+            expect(verify_sh).to_contain("compiler_cli_build")
+            expect(verify_sh).to_contain("test_runner_build")
+
+    context "Bug 6: stage2_parse_shard_child_av_large_closure_2026-11-02":
+        it "flags access-violation exit codes as abnormal and bounds sibling death deadline":
+            expect(parse_shard_abnormal_exit_v1(0)).to_equal(false)
+            expect(parse_shard_abnormal_exit_v1(-2)).to_equal(false)
+            expect(parse_shard_abnormal_exit_v1(-1073741819)).to_equal(true)
+            expect(parse_shard_abnormal_exit_v1(3)).to_equal(true)
+
+            expect(parse_shard_death_deadline_v1(0, 1000, PARSE_SHARD_DEATH_GRACE_MS_V1)).to_equal(1000 + PARSE_SHARD_DEATH_GRACE_MS_V1)
+            expect(parse_shard_death_deadline_v1(2000, 1000, PARSE_SHARD_DEATH_GRACE_MS_V1)).to_equal(2000)
+            expect(parse_shard_death_deadline_v1(900000, 1000, 500)).to_equal(1500)
+            expect(parse_shard_death_deadline_v1(0, 1000, 0)).to_equal(0)
+
+        it "retains pool resets in driver_parse_shard_entry and shard-disable flags in targeted stage2 build":
+            val shard_entry = file_read("src/compiler/80.driver/driver_parse_shard_entry.spl")
+            val p3_build = file_read("scripts/bootstrap/p3-targeted-stage2-build.shs")
+            expect(shard_entry).to_contain("reset_all_pools()")
+            expect(p3_build).to_contain("SIMPLE_PARSE_SHARDING=0")
+            expect(p3_build).to_contain("SIMPLE_FILE_FIBERS=0")
+
+    context "Bug 8: first_object_latency_stage2_2026-11-01":
+        it "clamps small closures in-process and caps shard workers at closure file count":
+            expect(NATIVE_BUILD_SMALL_CLOSURE_DEFAULT_MAX_V1).to_equal(4)
+            expect(native_build_small_closure_max_v1("")).to_equal(4)
+            expect(native_build_small_closure_max_v1("bad")).to_equal(4)
+            expect(native_build_small_closure_max_v1("0")).to_equal(0)
+            expect(native_build_small_closure_max_v1("8")).to_equal(8)
+
+            expect(native_build_shard_count_for_closure_v1(8, 1, 4)).to_equal(0)
+            expect(native_build_shard_count_for_closure_v1(8, 4, 4)).to_equal(0)
+            expect(native_build_shard_count_for_closure_v1(8, 6, 4)).to_equal(6)
+            expect(native_build_shard_count_for_closure_v1(8, 20, 4)).to_equal(8)
+            expect(native_build_shard_count_for_closure_v1(0, 20, 4)).to_equal(0)
+            expect(native_build_shard_count_for_closure_v1(8, -1, 4)).to_equal(8)
+
+        it "wires closure shard clamp inside native_build_main":
+            val main_src = file_read("src/app/cli/native_build_main.spl")
+            expect(main_src).to_contain("native_build_shard_count_for_closure_v1(")
