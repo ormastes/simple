@@ -405,4 +405,13 @@ Each default is what the lanes assume. Default, owner may override.
   `doc/08_tracking/bug/pure_runtime_same_id_race_and_unknown_outcome_2026-11-26.md`,
   `doc/08_tracking/bug/seed_get_volume_information_w_extern_missing_2026-11-26.md`,
   `doc/08_tracking/bug/platform_variant_gate_export_list_not_counted_2026-11-26.md`.
-- Next: increment 2 lanes.
+- Increment 2 landed (2026-11-26): SOSIX fs facade (#11993), R2 report v2 (#11999),
+  W2 AppContainer read+network denial measured on this host (#12010; seed userenv
+  externs, `simple-local-20261126b.exe`), A1 selection + api_v2 pure owner (#12015),
+  and the review-only lanes N2 FreeBSD jail candidate (#12017), N1 Linux over
+  `linux_process_owner` (#12020) and N3 macOS over Seatbelt (#12021). N1-N3 are unverified
+  and claim no capability.
+- Open: N4 SimpleOS (QEMU real-firmware lane, then board); Docker through `api_v2`
+  needs a native host identity (seed refuses); N1 holds no cgroup parent (likely
+  `ENOTSUP`); W2 hardcodes `C:Windows`; `storage.*` still imports `io.*` directly;
+  seed `export use ... as` alias bug.
