@@ -12,7 +12,7 @@
 use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1, ContainerCapabilityRequirementV1, ContainerCapabilityFlagV1, container_capability_v1_admission_reason, CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1}
 use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1, PURE_CONTAINER_BACKEND_V1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, pure_container_capability_report_v1, pure_container_evidence_from_qualify_v1}
 use std.common.contracts.container.lifecycle_journal_v1.{ContainerLifecycleJournalV1, ContainerJournalVersionV1, ContainerJournalGenerationV1, LIFECYCLE_JOURNAL_V1_VERSION, LIFECYCLE_PHASE_V1_CREATED, LIFECYCLE_PHASE_V1_STARTING, LIFECYCLE_PHASE_V1_RUNNING, LIFECYCLE_PHASE_V1_STOPPING, LIFECYCLE_PHASE_V1_STOPPED, LIFECYCLE_PHASE_V1_DESTROYED}
-use std.common.contracts.container.contained_lifecycle_v1.{contained_lifecycle_next_v1, contained_runtime_phase_v1, CONTAINED_STATE_VALIDATED_V1, CONTAINED_STATE_PREPARED_V1, CONTAINED_STATE_LAUNCH_PENDING_V1, CONTAINED_STATE_RUNNING_V1, CONTAINED_STATE_ABSENT_V1, CONTAINED_STATE_CLOSED_V1}
+use std.common.contracts.container.contained_lifecycle_v1.{contained_lifecycle_next_v1, contained_runtime_phase_v1, CONTAINED_STATE_VALIDATED_V1, CONTAINED_STATE_PREPARED_V1, CONTAINED_STATE_LAUNCH_PENDING_V1, CONTAINED_STATE_RUNNING_V1, CONTAINED_STATE_ABSENT_V1, CONTAINED_STATE_CLOSED_V1, CONTAINED_STATE_OUTCOME_UNKNOWN_V1, CONTAINED_STATE_QUARANTINED_V1}
 use std.common.contracts.container.runtime_v1.{RUNTIME_PHASE_UNKNOWN}
 use std.common.container_policy.attempt_dir_plan_v1.{ContainerAttemptNumberV1, ContainerAttemptDirPlanV1, container_attempt_key_v1, container_attempt_dir_plan_v1}
 use std.common.container_policy.filesystem_plan_v1.{PlannedGrantV1}
@@ -227,7 +227,9 @@ fn _life_new_v1(container_id: text, owned_paths: [text]) -> PureLifecycleV1:
 # projection must be known. An edge the machine lacks is an Err, never invented.
 fn _advance_v1(life: PureLifecycleV1, event: text) -> Result<PureLifecycleV1, text>:
     val next = contained_lifecycle_next_v1(life.state, event)?
-    if contained_runtime_phase_v1(next) == RUNTIME_PHASE_UNKNOWN: return Err("lifecycle-phase-unknown")
+    # outcome-unknown and quarantined project to the unknown phase on purpose: the tree is not proven gone.
+    if contained_runtime_phase_v1(next) == RUNTIME_PHASE_UNKNOWN and next != CONTAINED_STATE_OUTCOME_UNKNOWN_V1 and next != CONTAINED_STATE_QUARANTINED_V1:
+        return Err("lifecycle-phase-unknown")
     Ok(PureLifecycleV1(state: next, journal: _journal_with_v1(life.journal, _journal_phase_v1(next))))
 
 # Teardown after a start that never produced a child leaves the machine where it was;
@@ -297,6 +299,13 @@ fn _fail_prepare_v1(session: PureContainerSessionV1, reason: text) -> PurePrepar
             report: session.report, life: down.life, view_dir: session.view_dir,
             attempt_root: session.attempt_root, stdout_path: session.stdout_path))
 
+# `view-exists` means another run with this id created the view (and, same id, the attempt
+# scratch) between our check and our create: neither path is ours, so teardown must not remove them.
+fn _after_create_refused_v1(session: PureContainerSessionV1, reason: text) -> PureContainerSessionV1:
+    if reason != "view-exists": return session
+    PureContainerSessionV1(spec: session.spec, view: session.view, request: session.request, report: session.report,
+        life: session.life, view_dir: "", attempt_root: "", stdout_path: session.stdout_path)
+
 # Admission, then every effect up to a launchable container: view, lower/, grants.
 fn _prepare_v1(spec: PureContainerSpecV1) -> PurePreparedV1:
     val support = sosix_contain_support_v1()
@@ -331,7 +340,7 @@ fn _prepare_v1(spec: PureContainerSpecV1) -> PurePreparedV1:
         if not dir_create_all(dir): return _fail_prepare_v1(session, "scratch-create-failed")
     val created = storage_view_v1_create(spec.store, spec.view_root, spec.container_id, spec.base_root,
         head_generation, spec.quota)
-    if created.status != "ok": return _fail_prepare_v1(session, "view-" + created.reason)
+    if created.status != "ok": return _fail_prepare_v1(_after_create_refused_v1(session, created.reason), "view-" + created.reason)
     session = PureContainerSessionV1(spec: spec, view: created.view, request: request, report: unadmitted,
         life: session.life, view_dir: created.view.view_root + "/" + created.view.view_id,
         attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path)
