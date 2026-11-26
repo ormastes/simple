@@ -27,6 +27,8 @@ use compiler.driver.watcher.smf_manifest.{SmfManifestEntry}
 use compiler.driver.driver_api_interpret.{smf_cached_unit_identity_admit}
 
 val HOT_SWAP_RECLAIMED: i64 = -1
+# Slot generation after hot_swap_slot_release; never a valid generation.
+val HOT_SWAP_RELEASED: i64 = -2
 val HOT_SWAP_CAPACITY: i64 = 8
 val HOT_SWAP_RETRIES: i64 = 1024
 
@@ -175,6 +177,8 @@ fn hot_swap_read_begin(slot: HotSwapSlot) -> Result<HotSwapRead, text>:
     var attempts = 0
     while attempts < HOT_SWAP_RETRIES:
         val cur = slot.current_generation()
+        if cur < 0:
+            return Err("SMF-E-HOTSWAP-RELEASED: slot was released by unload")
         val entry = slot.entry_for(cur)
         val readers = entry.readers
         val c = readers.load(MemoryOrdering.SeqCst)
@@ -204,9 +208,31 @@ fn hot_swap_reclaim(slot: HotSwapSlot) -> i64:
                 freed = freed + 1
     freed
 
+# Writer only: retire the whole slot when its module is unloaded. One CAS
+# moves the generation from the current value to HOT_SWAP_RELEASED, so a
+# second release (or one racing another writer) fails closed and new readers
+# are refused; then every image no reader pins is freed by the usual
+# 0 -> RECLAIMED CAS. A pinned image stays valid for its holder.
+# Ok = the number of images freed; Err = SMF-E-HOTSWAP-RELEASED.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn hot_swap_slot_release(slot: HotSwapSlot) -> Result<i64, text>:
+    val gen = slot.generation
+    val cur = gen.load(MemoryOrdering.SeqCst)
+    if cur < 0 or not gen.compare_exchange(cur, HOT_SWAP_RELEASED, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+        return Err("SMF-E-HOTSWAP-RELEASED: slot already released")
+    var freed = 0
+    for e in slot.images:
+        val readers = e.readers
+        if readers.compare_exchange(0, HOT_SWAP_RECLAIMED, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+            e.image = []
+            freed = freed + 1
+    Ok(freed)
+
 fn hot_swap_image_live(slot: HotSwapSlot, generation: i64) -> bool:
     val e = slot.entry_for(generation)
     e.holds_generation() == generation and not e.is_reclaimed()
 
 export HotSwapSlot, HotSwapImage, HotSwapRead, hot_swap_slot_new, hot_swap_slot_load, hot_swap_try
 export hot_swap_read_begin, hot_swap_read_end, hot_swap_reclaim, hot_swap_image_live, hot_swap_rollback
+export hot_swap_slot_release
