@@ -5,7 +5,8 @@ use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
 use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOperationRequestV6, host_service_operation_validate_v6}
 use std.common.contracts.orchestration.host_service_operation_reply_v6.HostServiceOperationReplyV6
 use std.common.contracts.orchestration.host_remote_build_operation_v6.{host_remote_build_sub_decode_v6, host_remote_build_sub_domain_action_v6}
-use std.common.contracts.orchestration.host_control_operation_v6.{host_control_sub_decode_v6, host_control_sub_domain_action_v6}
+use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_CONTROL_SUBS_V6,
+    host_control_sub_decode_v6, host_control_sub_domain_action_v6}
 use std.common.contracts.orchestration.host_controller_status_v3.host_controller_status_encode_v3
 use std.nogc_sync_mut.orchestration.host_controller_observation_v3.{host_controller_retained_origin_v3, host_controller_status_v3}
 use std.nogc_sync_mut.orchestration.host_controller_inspection_session_v3.*
@@ -166,13 +167,21 @@ pub fn smux_host_continuation_begin_constrained_v6(domain: HostServiceDomainV3,
             request.action == "host-agent-pane-resize"):
         return agent_pane_turn_v6(domain, state, request, context)
     val turn = host_service_domain_turn_v3(domain, request)
-    if (request.action == "host-agent-attach" and turn.exit_code == 0 and
+    state = retain_agent_attach_state_v6(state, request, turn.exit_code)
+    SmuxHostTurnV6(turn.owner, state, turn.response,
+        if turn.exit_code == 0: "" else: "runtime-host-request-refused")
+
+# One lease record follows accepted attach in both trusted and authenticated
+# routes. An exact replay of the same run leaves its held lease untouched.
+fn retain_agent_attach_state_v6(original: SmuxHostContinuationV6, request: HostServiceRequestV2,
+        exit_code: i64) -> SmuxHostContinuationV6:
+    var state = original
+    if (request.action == "host-agent-attach" and exit_code == 0 and
             smux_agent_pane_attach_supersedes_v1(state.agent_pane_operation_id, request.operation_id)):
         state.agent_pane_lease = None
         state.agent_pane_revoked = false
         state.agent_pane_operation_id = ""
-    SmuxHostTurnV6(turn.owner, state, turn.response,
-        if turn.exit_code == 0: "" else: "runtime-host-request-refused")
+    state
 
 # milestone_0024 PR3c: the pane family. Claim and Read reach the agent only through the domain pass-throughs
 # (terminal-authority gated, the service's own clock); the lease record is dropped when the agent refuses it.
@@ -329,6 +338,15 @@ fn host_control_query_v6(domain: HostServiceDomainV3, state: SmuxHostContinuatio
         return operation_reply_v6(domain, state, request, false, 2, "", "runtime-host-execution-pending")
     if context.connection_pending: return operation_reply_v6(domain, state, request, false, 2, "", "runtime-connection-opening")
     if context.geometry_pending: return operation_reply_v6(domain, state, request, false, 2, "", "runtime-geometry-pending")
+    if HOST_AGENT_CONTROL_SUBS_V6.contains(sub.unwrap().sub):
+        match domain.local:
+            case HostLocalRootV3.LinuxService(_): ()
+            case _: return operation_reply_v6(domain, state, request, false, 2, "", "runtime-agent-control-requires-linux-service")
+        val routed = HostServiceRequestV2(action.unwrap(), request.operation_id, sub.unwrap().frame)
+        val turn = host_service_domain_turn_v3(domain, routed)
+        val retained = retain_agent_attach_state_v6(state, routed, turn.exit_code)
+        return operation_reply_v6(turn.owner, retained, request, false, turn.exit_code, turn.response,
+            if turn.exit_code == 0: "" else: "runtime-host-request-refused")
     val turn = host_service_domain_turn_v3(domain, HostServiceRequestV2(action.unwrap(), request.operation_id, sub.unwrap().frame))
     operation_reply_v6(turn.owner, state, request, false, turn.exit_code, turn.response,
         if turn.exit_code == 0: "" else: "runtime-host-request-refused")
