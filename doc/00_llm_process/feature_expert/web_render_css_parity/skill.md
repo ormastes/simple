@@ -5519,3 +5519,35 @@ that clear is conditional.
   - an unresolved `font-family` `xx <span></span> ib` puts `ib` at 20, matching
     Chrome (base gave 25);
   - a wrapped run ending in a space matches Chrome.
+## 2026-11-27 — auto-width inline-block holding a row flex (inline-block-flex lane)
+
+Bug `web_inline_block_flex_percent_margin_item_1px_2026-11-27`. An auto-width
+inline-block's width came from `intrinsic_text_width` alone, which walks inline
+content and never enters a block child. A block child with its own `width`, a
+column flex and a grid hid it: their items keep their width when the box is
+laid out at the 1 px prediction. A ROW flex shrinks its items into that 1 px
+(flex-shrink: 1), so Chrome's 40..79 painted as 40..40. Fix: the auto-width
+inline-block also takes `flex_item_max_content_width` when wider, as a float
+already did. Trap: `flex_item_max_content_width` returned the WIDEST child of a
+row flex container; it now sums its items' outer widths plus column gaps (two
+items 30 + 40: Chrome 70..109, the max gave 58..79). Spec:
+`test/01_unit/browser_engine/inline_block_flex_container_width_chrome159_spec.spl`
+(8 Chrome 159 cases, k=1 / k=4).
+
+Gates (seed fb80903917d6d5f5) at faf1ed3af73 on 0b32251071c: 30 specs green,
+matrix 77 (ratchet PASS), catalogs 1x worst 0.44 / 4x worst 0.27, byte-identical
+to base 8/8 at both scales. Perf css-layout, 4 alternated rounds, base / head
+medians: k=1 3090 / 3090 ms, RSS 2.449 / 2.368 GB; k=4 3349 / 3217 ms, RSS 2.356
+/ 2.426 GB. Per-run RSS spread is 2.32..2.58 GB on both sides (noise); the
+change allocates nothing.
+
+Review fix (same lane): the row-flex sum added an input / select / textarea
+child's horizontal margins a second time (the atomic-box rule just above
+already adds them), 7px too wide for a `0 3px 0 4px` checkbox; it now reuses
+that rule's condition (AC-6). The sum lives in `flex_item_max_content_width`,
+so it applies to EVERY caller: floats, table cells
+(`layout_foundation.spl` ~1378 / ~2883) and flex / grid item bases
+(`layout_engine.spl` ~813), not only inline-blocks. Found while capturing:
+a checkbox WITHOUT `box-sizing:border-box; padding:0; border:0` is predicted
+4px wider than Chrome's 13px (UA border counted into its max-content); AC-6
+pins the border-box form, the default-UA gap is unfiled.
