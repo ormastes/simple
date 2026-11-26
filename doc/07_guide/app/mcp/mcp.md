@@ -503,7 +503,12 @@ POSIX/dash-clean, each with `--selftest`): `bash_net_blocker.shs` (fail-closed
 deny of curl/wget/inline-HTTP Bash with a redirect to the ctx tools),
 `webfetch_deny.shs` (fail-closed WebFetch deny), `bash_output_hint.shs` and
 `read_analysis_hint.shs` (fail-open additionalContext hints for likely
->20-line commands and Read-for-analysis of large files).
+>20-line commands and Read-for-analysis of large files). `ctx_common.shs`
+decodes JSON escapes once in `ctx_json_str` (Windows `C:\dev\x` paths reach
+`[ -f ]` via `ctx_posix_path`), the Bash hint counts only verbose AND unbounded
+statements (short git/ls/cd chains stay silent), and every hint is emitted only
+when the launcher `.mcp.json` names for `simple-mcp` exists (`CTX_HINTS=0`
+silences them). Hooks use builtins, ~110-250 ms per call on Windows.
 
 ### Token savings
 
