@@ -1931,6 +1931,8 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
     val export_dir = run_mir_shard_export_summaries(base, queue_dir, simple_bin, timeout_ms)
     print "[mir-shard] shards={count} parallel={run_parallel} ledger={queue_dir}"
     if not env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", export_dir):
+        if export_dir != "":
+            val _rm_export = dir_remove_all(export_dir)
         eprint "[mir-shard] export directory environment could not be installed"
         return ("fail", "")
     # Export the LIVE owner count to the shard workers, as the per-file
@@ -1948,6 +1950,8 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
         simple_bin, timeout_ms, spawn_limit)
     native_build_env_restore_v1("SIMPLE_NATIVE_FILE_WORKERS", old_live_owners)
     native_build_env_restore_v1("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
+    if export_dir != "" and run.all_stopped and (env_get("SIMPLE_KEEP_SHARD_LEDGERS") ?? "") != "1":
+        val _rm_export = dir_remove_all(export_dir)
     val hir_compile_errors = native_mir_shard_hir_compile_errors_recorded_v1(queue_dir)
     val outcome = native_mir_shard_outcome_after_hir_errors_v1(
         native_mir_shard_outcome_v1(run.code, run.failed_modules, run.total_claims, run.all_stopped),
@@ -2211,6 +2215,9 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
         return "fail"
     val old_hir_queue = native_build_env_saved_v1(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1)
     if not env_set(NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, hir_queue):
+        if (env_get("SIMPLE_KEEP_SHARD_LEDGERS") ?? "") != "1":
+            val _rm_hir = dir_remove_all(hir_queue)
+            val _rm_mir = dir_remove_all(mir_queue)
         eprint "error: per-file worker pool could not publish the HIR queue; no fallback"
         return "fail"
     print "[file-worker] workers={parallel} hir_ledger={hir_queue} mir_ledger={mir_queue}"
@@ -2472,6 +2479,7 @@ fn run_mir_shard_export_summaries(base: [text], queue_dir: text, simple_bin: tex
         stopped = shard_worker_confirm_kill_v1(pid, process_kill(pid))
     val manifest = "{export_dir}/manifest"
     if code != 0 or not stopped or not file_exists(manifest):
+        val _rm_export = dir_remove_all(export_dir)
         eprint "[mir-shard-export] summary step exit={code}; workers use full HIR"
         return ""
     print "[mir-shard-export] bundle={export_dir}"

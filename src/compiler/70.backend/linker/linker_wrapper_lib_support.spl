@@ -14,6 +14,9 @@ use compiler.backend.linker.object_emitter.{assemble_code_units}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{shell}
 use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io_runtime.{dir_remove_all}
 use compiler.backend.runtime_compiler.{_get_temp_dir}
 
 fn detect_preferred_backend(extra_flags: [text]) -> text:
@@ -90,9 +93,10 @@ fn scan_libraries_with_provider(library_paths: [text], verbose: bool, provider: 
                     print "[linker-lib] Warning: Could not read library {trimmed}: {add_result.unwrap_err()}"
                 continue
 
-            val getter_modules = SmfGetter.new()
+            var getter_modules = SmfGetter.new()
             _ = getter_modules.add_library(trimmed)
             val modules = getter_modules.list_modules()
+            getter_modules.close()
             lib_info = LibraryInfo(path: trimmed, name: lib_name, modules: modules)
             libraries.push(lib_info)
 
@@ -405,8 +409,10 @@ fn link_with_libraries(
     if verbose:
         print "[linker-lib] Extracting object files for {resolved.len()} modules"
 
-    val extract_result = extract_objects_from_resolved(resolved, "{_get_temp_dir()}/simple_lib_obj", verbose)
+    val lib_temp_dir = "{_get_temp_dir()}/simple_lib_obj_{getpid()}_{time_now_unix_micros()}"
+    val extract_result = extract_objects_from_resolved(resolved, lib_temp_dir, verbose)
     if extract_result.is_err():
+        val _clean_err = dir_remove_all(lib_temp_dir)
         return Err(extract_result.unwrap_err())
 
     val library_objects = extract_result.unwrap()
@@ -421,6 +427,7 @@ fn link_with_libraries(
 
     # Step 6: Link all objects together
     val link_result = link_to_native(all_objects, output, config)
+    val _clean_done = dir_remove_all(lib_temp_dir)
     link_result
 
 fn extract_objects_from_resolved(

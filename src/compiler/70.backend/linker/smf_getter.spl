@@ -292,19 +292,12 @@ impl SmfGetter:
                 case SmfSourceType.LibraryFile:
                     pass_dn
 
-        # For library-embedded modules, write the SMF data to a temporary
-        # file and open it with SmfReaderImpl.  This avoids requiring a new
-        # in-memory constructor on SmfReaderImpl (which depends on Rust SFFI
-        # file handles).  The temp file is cleaned up by the caller via close().
-        val safe_name = module_name.replace("/", "_")
-        val tmp_path = "/tmp/smf_getter_{safe_name}.smf"
-        val ok = file_write_bytes_tagged_native(tmp_path, data)
-        if not ok:
-            return Err("Failed to write temp SMF for library module {module_name}")
-        val reader_result = SmfReaderImpl.open(tmp_path)
-        if reader_result.is_err():
-            return Err("Failed to open temp SMF for {module_name}: {reader_result.unwrap_err()}")
-        reader_result
+        # Load library-embedded module directly from memory instead of staging
+        # into /tmp/smf_getter_*.smf (which leaks temp files across calls).
+        val mem_result = SmfReaderMemory.from_data(data)
+        if mem_result.is_err():
+            return Err("Failed to parse SMF in memory for {module_name}: {mem_result.unwrap_err()}")
+        SmfReaderImpl.from_memory(module_name, mem_result.unwrap())
 
     """Check if a module exists.
 
