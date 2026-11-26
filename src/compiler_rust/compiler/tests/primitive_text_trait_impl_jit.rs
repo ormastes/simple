@@ -37,3 +37,45 @@ fn main() -> i64:
     jit.compile_module(&mir_module).expect("module must JIT-compile");
     assert_eq!(unsafe { jit.call_i64_void("main").expect("main must execute") }, 0);
 }
+
+#[test]
+fn text_trait_hash_impl_dispatches_instead_of_rt_hash_text() {
+    let source = r#"
+trait HashProbe:
+    fn hash() -> i64
+
+impl HashProbe for text:
+    fn hash() -> i64:
+        self.len() + 7000
+
+fn main() -> i64:
+    val s: text = "hello"
+    if s.hash() != 7005: return 1
+    if "ab".hash() != 7002: return 2
+    0
+"#;
+    let ast = Parser::new(source).parse().expect("source must parse");
+    let hir_module = hir::lower_lenient(&ast).expect("source must lower to HIR");
+    let mir_module = mir::lower_to_mir(&hir_module).expect("source must lower to MIR");
+    let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+    jit.compile_module(&mir_module).expect("module must JIT-compile");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("main must execute") }, 0);
+}
+
+#[test]
+fn text_hash_without_trait_impl_keeps_rt_hash_text_jit_parity() {
+    let source = r#"
+fn main() -> i64:
+    val s: text = "hello"
+    s.hash()
+"#;
+    let ast = Parser::new(source).parse().expect("source must parse");
+    let hir_module = hir::lower_lenient(&ast).expect("source must lower to HIR");
+    let mir_module = mir::lower_to_mir(&hir_module).expect("source must lower to MIR");
+    let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+    jit.compile_module(&mir_module).expect("module must JIT-compile");
+    assert_eq!(
+        unsafe { jit.call_i64_void("main").expect("main must execute") },
+        -6615550055289275125i64
+    );
+}

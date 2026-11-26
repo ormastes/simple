@@ -50,6 +50,44 @@ fn string_ord_and_hash_lower_to_shared_runtime_calls() {
 }
 
 #[test]
+fn text_hash_with_declared_trait_impl_lowers_to_method_call_not_rt_hash_text() {
+    let mir = compile_to_mir(
+        "trait CustomHash:\n    fn hash() -> i64\n\nimpl CustomHash for text:\n    fn hash() -> i64:\n        return 98765\n\nfn probe(value: text) -> i64:\n    return value.hash()\n",
+    )
+    .unwrap();
+
+    let probe = mir.functions.iter().find(|f| f.name == "probe").expect("probe function");
+    assert!(probe.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, args, .. }
+            if func_name == "text.hash" && args.is_empty()
+    ))));
+    assert!(!probe.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_hash_text")
+    ))));
+}
+
+#[test]
+fn text_hash_with_wrong_arity_impl_still_lowers_zero_arg_hash_to_rt_hash_text() {
+    let mir = compile_to_mir(
+        "trait SeededHash:\n    fn hash(seed: i64) -> i64\n\nimpl SeededHash for text:\n    fn hash(seed: i64) -> i64:\n        return seed + 1\n\nfn probe(value: text) -> i64:\n    return value.hash()\n",
+    )
+    .unwrap();
+
+    let probe = mir.functions.iter().find(|f| f.name == "probe").expect("probe function");
+    assert!(probe.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::Call { target, args, .. }
+            if target == &CallTarget::from_name("rt_hash_text") && args.len() == 1
+    ))));
+    assert!(!probe.blocks.iter().any(|b| b.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "str.hash" || func_name == "text.hash"
+    ))));
+}
+
+#[test]
 fn string_literal_hash_uses_tagged_runtime_but_user_hash_keeps_static_dispatch() {
     let mir = compile_to_mir(
         "struct HashBox:\n    value: i64\n\nimpl HashBox:\n    fn hash(self) -> i64:\n        return self.value\n\nfn literal_probe() -> i64:\n    return \"hello\".hash()\n\nfn user_probe(value: HashBox) -> i64:\n    return value.hash()\n",
