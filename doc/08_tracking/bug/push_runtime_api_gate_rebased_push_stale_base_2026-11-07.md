@@ -1,7 +1,7 @@
 # push-runtime-api-regression charges upstream removals to a rebased force-push (stale base 1dc81da08c2)
 
 - **ID:** `push_runtime_api_gate_rebased_push_stale_base_2026-11-07`
-- **Status:** Failed-fetch repair verified locally (2026-11-10); canonical bug shard tracks review/landing.
+- **Status:** Repair landed (`0d48d24c6e0`). Verified on Windows (2026-11-10) and on Linux aarch64 (2026-11-27, see the last section).
 - **Priority:** P2
 - **Area:** `scripts/check/check-push-must-pass.shs` (`rebased_push_published_base`, ~line 1304), which feeds `check-runtime-api-regression-push.shs`
 
@@ -83,3 +83,14 @@ and correctly attributed RISC-V gate execution.
 Provider input/output/cache-read/cache-create token usage: **unavailable**.
 Comparable cohort average: **unavailable**. Usage ratio: **unavailable**; no
 estimated or zero-filled accounting values are claimed.
+
+## 2026-11-27: Linux verification
+
+The repair `0d48d24c6e0` is on `release/1.0.0`. On Linux aarch64 at
+`25308aa2aed`, `sh scripts/check/check-push-must-pass.shs
+--self-test-release-base` exits 0 with 25 PASS lines, including
+`failed advertised release fetch refuses rebased and new-ref stale bases`.
+
+Red control: a temporary copy with only the two product hunks of
+`0d48d24c6e0` reverted exits 2 with
+`failed release fetch selected a stale base: FAIL`.
