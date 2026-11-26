@@ -34,6 +34,11 @@ use std.nogc_sync_mut.sosix.fs_v1.{sosix_fs_host_arch, dir_create_all}
 use std.nogc_async_mut.container.backend_select_v1.*
 use std.nogc_async_mut.container.pure_adapter_v1.*
 use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.execution_progress_v4.{simple_container_execution_scripted_v4, simple_container_execution_thread_check_v4, simple_container_execution_begin_v4, simple_container_inspection_begin_v4}
+use std.nogc_async_mut.container.user_mapping_v3.simple_container_user_mapping_v3
+use std.nogc_async_mut.container.service_v2.{simple_container_inventory_service_v2}
+use std.nogc_async_mut.container.workspace_api_v3.{simple_container_workspace_source_open_installed_v3, simple_container_enable_workspace_v3, simple_container_workspace_step_v3, simple_container_workspace_cancel_pending_v3, simple_container_workspace_primary_observe_v3, simple_container_primary_attach_cleanup_v3, simple_container_workspace_source_cleanup_v3}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1}
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
 use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_encode_v1
 use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
@@ -132,6 +137,9 @@ fn docker_policy(engine_id: text) -> WindowsDockerPolicyV1:
         system_root: if root != "": root else: "C:\Windows",
         temp_directory: if temp != "": temp else: "C:\Windows\Temp")
 
+fn docker_live() -> bool:
+    ready() and env_get("SIMPLE_DOCKER_HOSTED_LIVE") == "1" and docker_engine_cached() != ""
+
 fn docker_engine_cached() -> text:
     if ready(): docker_engine_id() else: ""
 
@@ -180,7 +188,10 @@ describe "backend selection by capability admission":
 
     it "picks Docker for native-container when the engine is observed live":
         if not ready(): return
-        expect(docker_engine_cached() != "").to_equal(true)
+        if not docker_live():
+            step("SKIP: Docker engine unreachable or SIMPLE_DOCKER_HOSTED_LIVE not 1")
+            skip("docker not live")
+            return
         val docker = docker_candidate_parts(true)
         expect(docker.unavailable_reason).to_equal("")
         expect(docker.report.evidence_revision.starts_with("docker:")).to_equal(true)
@@ -221,8 +232,13 @@ describe "backend selection by capability admission":
 
 fn scope_a() -> ContainerHostScopeV2:
     ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "service-a", boot_id: "boot-a",
-        provider_generation: 1, native_machine_id: "machine-a", continuity_mode: "native-boot-incarnation-v1",
+        provider_generation: 1, native_machine_id: "machine-a", continuity_mode: "caller-scope-v1",
         continuity_id: "boot-a")
+
+fn scope_native() -> ContainerHostScopeV2:
+    var scope = scope_a()
+    scope.continuity_mode = "native-boot-incarnation-v1"
+    scope
 
 fn pure_policy() -> PureContainerOwnerPolicyV1:
     PureContainerOwnerPolicyV1(store: store_root(), view_root: view_root(), base_root: "main", quota: ViewBytesV1(1048576),
@@ -254,7 +270,7 @@ describe "api_v2 through the pure backend":
     it "refuses the text-policy open and the text observation for the pure backend (typed owner required)":
         if not ready(): return
         val pin = pure_container_provider_pin_v1(pure_policy())
-        expect(simple_container_open_v2(CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, "x", "C:\\x", scope_a(), pin, 1000).unwrap_err())
+        expect(simple_container_open_v2(CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, "x", "C:\\x", scope_native(), pin, 1000).unwrap_err())
             .to_equal("container-api-pure-typed-open-required")
         expect(simple_container_observe_v2(CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1, "x").unwrap_err())
             .to_equal("container-api-pure-observation-requires-owner")
@@ -269,6 +285,10 @@ describe "api_v2 through the pure backend":
             .to_equal("pure-container-provider-identity-mismatch")
         var weak = scope_a()
         weak.continuity_mode = "machine-boot-counter-v1"
+        var native = scope_a()
+        native.continuity_mode = "native-boot-incarnation-v1"
+        expect(simple_container_open_pure_v2(pure_policy(), state_root(), native, pure_container_provider_pin_v1(pure_policy()), SosixContainMillisV1(WALL_MS)).unwrap_err())
+            .to_equal("container-api-continuity-unproven")
         expect(simple_container_open_pure_v2(pure_policy(), state_root(), weak, pure_container_provider_pin_v1(pure_policy()), SosixContainMillisV1(WALL_MS)).unwrap_err())
             .to_equal("container-api-open-invalid")
 
@@ -325,13 +345,16 @@ describe "api_v2 through the pure backend":
 describe "api_v2 and the Docker backend on this host":
     it "stays refused at the owner gate: Windows observes only a boot counter, never a native boot incarnation":
         if not ready(): return
-        if docker_engine_cached() == "": return
+        if not docker_live():
+            step("SKIP: Docker engine unreachable or SIMPLE_DOCKER_HOSTED_LIVE not 1")
+            skip("docker not live")
+            return
         val previous = env_get("SIMPLE_DOCKER_HOSTED_LIVE")
         sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", "1")
         val policy_bytes = windows_docker_policy_encode_v1(docker_policy(docker_engine_cached())).unwrap()
         val temp = env_get("TEMP")
         val opened = simple_container_open_v2(CONTAINER_BACKEND_WINDOWS_DOCKER_PROCESS_V1, policy_bytes,
-            (if temp != "": temp else: "C:\Windows\Temp"), scope_a(), "a".repeat(64), WALL_MS)
+            (if temp != "": temp else: "C:\Windows\Temp"), scope_native(), "a".repeat(64), WALL_MS)
         sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", previous)
         expect(opened.is_err()).to_equal(true)
         # Fail-closed at the owner gate. Which gate answers first depends on the runtime: the seed interpreter has no native
@@ -341,7 +364,10 @@ describe "api_v2 and the Docker backend on this host":
 
     it "runs cmd /c echo through the selected Docker provider lifecycle and returns exit 0":
         if not ready(): return
-        if docker_engine_cached() == "": return
+        if not docker_live():
+            step("SKIP: Docker engine unreachable or SIMPLE_DOCKER_HOSTED_LIVE not 1")
+            skip("docker not live")
+            return
         val previous = env_get("SIMPLE_DOCKER_HOSTED_LIVE")
         sosix_env_set("SIMPLE_DOCKER_HOSTED_LIVE", "1")
         val docker = docker_candidate_parts(true)
@@ -365,3 +391,37 @@ describe "api_v2 and the Docker backend on this host":
         expect(waited.status).to_equal("ok")
         expect(waited.exit_code).to_equal(0)
         expect(destroyed.status).to_equal("ok")
+
+# ---------------------------------------- pure owner on Linux/Windows-only entries
+
+describe "pure owner on entries that only Linux or Windows back":
+    it "returns a typed refusal, never a crash, from every owner-only public entry":
+        if not ready(): return
+        val owner = open_pure().unwrap()
+        val request = pure_request("5")
+        val now_ms = sosix_time_now_unix_micros() / 1000
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, "pure-api-op", ["create", "start"], now_ms + WALL_MS).unwrap()
+        val identity = RuntimeIdentityV1(pod_uid: "pure-api-pod", attempt: 1, provider_generation: 1, operation_id: "pure-api-op",
+            engine: "simple-pure-container-v1", native_id: "a".repeat(64), node_boot_id: "b".repeat(64))
+        var errors: [text] = []
+        errors.push(simple_container_execution_scripted_v4(owner).unwrap_err())
+        errors.push(simple_container_execution_thread_check_v4(owner).unwrap_err())
+        errors.push(simple_container_execution_begin_v4(owner, "start", request, deadline).error)
+        errors.push(simple_container_inspection_begin_v4(owner, request).error)
+        errors.push(simple_container_user_mapping_v3(owner, request, identity).error)
+        errors.push(simple_container_inventory_service_v2(owner).error)
+        errors.push(simple_container_workspace_source_open_installed_v3(owner, request).error)
+        errors.push(simple_container_enable_workspace_v3(owner, request, "m", "d", "s").error)
+        errors.push(simple_container_workspace_step_v3(owner, request).error)
+        errors.push(simple_container_workspace_cancel_pending_v3(owner, request).error)
+        errors.push(simple_container_workspace_primary_observe_v3(owner, request).error)
+        errors.push(simple_container_primary_attach_cleanup_v3(owner).error)
+        errors.push(simple_container_workspace_source_cleanup_v3(owner).error)
+        errors.push(simple_container_take_workspace_root_v3(owner).error)
+        errors.push(simple_container_epoch_current_v3(owner).unwrap_err())
+        expect(errors.len()).to_equal(15)
+        for error in errors:
+            expect(error != "").to_equal(true)
+        expect(errors[0]).to_equal("container-cooperative-execution-backend-unavailable")
+        expect(errors[7]).to_equal("container-workspace-linux-required")
+        expect(errors[13]).to_equal("container-workspace-linux-required")

@@ -170,12 +170,15 @@ impl PureSimpleContainerAdapterV1:
         if not builder_digest_valid_v1(expected_provider_identity_digest) or
                 expected_provider_identity_digest != pure_container_provider_pin_v1(policy):
             return Err("pure-container-provider-identity-mismatch")
+        # ponytail: caller-scope-v1 is NOT a native boot incarnation. The machine and boot identities are the
+        # trusted owner's scope text; the upgrade path is a SOSIX host-identity API that lets this adapter
+        # observe them itself and report native-boot-incarnation-v1.
         # The pure runtime has no persistent service incarnation: the machine and
         # boot identities are the trusted owner's scope, not a native observation.
         val observed = ContainerHostObservationV2(backend: CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1,
             native_machine_id: scope.native_machine_id, native_boot_id: scope.boot_id,
             provider_identity_digest: expected_provider_identity_digest, execution_os: "host",
-            architecture: evidence.host_arch, continuity_assurance: "native-boot-incarnation-v1", boot_observation: "")
+            architecture: evidence.host_arch, continuity_assurance: "caller-scope-v1", boot_observation: "")
         Ok(PureSimpleContainerAdapterV1(policy: policy, state_root: state_root, scope: scope, observed: observed,
             timeout: timeout, records: {}))
 
@@ -221,7 +224,11 @@ impl PureSimpleContainerAdapterV1:
         decoded.pod_uid + "|" + decoded.attempt.value.to_text() + "|" + decoded.operation_id
 
     fn _container_id(decoded: PureContainerRequestV1) -> text:
-        "pure-" + sha256_text(decoded.pod_uid + "\n" + decoded.attempt.value.to_text() + "\n" + decoded.operation_id).substring(0, 40)
+        # The scope fence is part of the id, so two scopes sharing a caller id cannot collide on a view.
+        val fence = match container_scope_fence_id_v2(self.scope):
+            case Ok(value): value
+            case Err(_): "invalid-scope"
+        "pure-" + sha256_text(fence + "|" + decoded.pod_uid + "|" + decoded.attempt.value.to_text() + "|" + decoded.operation_id).substring(0, 40)
 
     fn _identity(decoded: PureContainerRequestV1) -> Result<RuntimeIdentityV1, text>:
         val fence = container_scope_fence_id_v2(self.scope)?
