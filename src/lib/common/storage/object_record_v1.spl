@@ -5,6 +5,12 @@
 
 pub const OBJECT_RECORD_V1_VERSION = 1
 
+unit ObjectFormatVersionV1: i64
+unit ObjectLogicalLengthV1: i64
+unit ObjectGenerationV1: i64
+unit ObjectRecordValidV1: bool
+export ObjectFormatVersionV1, ObjectLogicalLengthV1, ObjectGenerationV1, ObjectRecordValidV1
+
 fn _orv1_max_record_bytes() -> i64:
     65536
 
@@ -16,16 +22,15 @@ pub struct DigestAliasV1:
     algorithm_profile: text
     digest_hex: text
 
-@allow(primitive_api)  # reason: on-disk record v1 integer fields (version/length/generation) are the serialized format; callers construct them directly
 pub struct ObjectRecordV1:
-    format_version: i64
+    format_version: ObjectFormatVersionV1
     object_key: text
-    logical_length: i64
-    generation: i64
+    logical_length: ObjectLogicalLengthV1
+    generation: ObjectGenerationV1
     aliases: [DigestAliasV1]
 
 fn _orv1_invalid() -> ObjectRecordV1:
-    ObjectRecordV1(format_version: 0, object_key: "", logical_length: 0, generation: 0, aliases: [])
+    ObjectRecordV1(format_version: ObjectFormatVersionV1(0), object_key: "", logical_length: ObjectLogicalLengthV1(0), generation: ObjectGenerationV1(0), aliases: [])
 
 fn _orv1_is_digit_byte(b: i64) -> bool:
     b >= 48 and b <= 57
@@ -76,6 +81,9 @@ fn _orv1_parse_nonneg_int(value: text) -> i64:
     for b in bs:
         if not _orv1_is_digit_byte(b):
             return -1
+    # Canonical decimal: no leading zero except "0" itself.
+    if bs.len() > 1 and bs[0] == 48:
+        return -1
     val parsed = value.to_i64() ?? -1
     if parsed < 0:
         return -1
@@ -201,10 +209,10 @@ fn _orv1_field_int(fields: Dict<text, text>, key: text) -> Result<i64, text>:
     Ok(parsed)
 
 pub fn object_record_v1_encode(record: ObjectRecordV1) -> text:
-    var out = "format_version: {record.format_version}\n"
+    var out = "format_version: {record.format_version.value}\n"
     out = out + "object_key: {_orv1_quote(record.object_key)}\n"
-    out = out + "logical_length: {record.logical_length}\n"
-    out = out + "generation: {record.generation}\n"
+    out = out + "logical_length: {record.logical_length.value}\n"
+    out = out + "generation: {record.generation.value}\n"
     out = out + "alias_count: {record.aliases.len()}\n"
     var i: i64 = 0
     while i < record.aliases.len():
@@ -235,8 +243,8 @@ fn _orv1_decode_fields(fields: Dict<text, text>) -> Result<ObjectRecordV1, text>
         val digest_hex = _orv1_field_string(fields, "alias.{i}.digest_hex")?
         aliases.push(DigestAliasV1(algorithm: algorithm, algorithm_profile: profile, digest_hex: digest_hex))
         i = i + 1
-    Ok(ObjectRecordV1(format_version: version, object_key: object_key,
-        logical_length: logical_length, generation: generation, aliases: aliases))
+    Ok(ObjectRecordV1(format_version: ObjectFormatVersionV1(version), object_key: object_key,
+        logical_length: ObjectLogicalLengthV1(logical_length), generation: ObjectGenerationV1(generation), aliases: aliases))
 
 pub fn object_record_v1_decode(source: text) -> ObjectRecordV1:
     if source.byte_len() > _orv1_max_record_bytes():
@@ -264,21 +272,23 @@ pub fn object_record_v1_decode(source: text) -> ObjectRecordV1:
     val decoded = match _orv1_decode_fields(fields):
         case Ok(record): record
         case Err(_): _orv1_invalid()
-    if decoded.format_version == 0:
+    if decoded.format_version.value == 0:
         return _orv1_invalid()
-    if not object_record_v1_valid(decoded):
+    if not object_record_v1_valid(decoded).value:
         return _orv1_invalid()
     decoded
 
-@allow(primitive_api)  # reason: validity predicate result is a plain accept/reject flag
-pub fn object_record_v1_valid(record: ObjectRecordV1) -> bool:
-    if record.format_version != OBJECT_RECORD_V1_VERSION:
+pub fn object_record_v1_valid(record: ObjectRecordV1) -> ObjectRecordValidV1:
+    ObjectRecordValidV1(_orv1_record_ok(record))
+
+fn _orv1_record_ok(record: ObjectRecordV1) -> bool:
+    if record.format_version.value != OBJECT_RECORD_V1_VERSION:
         return false
     if not _orv1_object_key_valid(record.object_key):
         return false
-    if record.logical_length < 0:
+    if record.logical_length.value < 0:
         return false
-    if record.generation < 0:
+    if record.generation.value < 0:
         return false
     if record.aliases.len() < 1 or record.aliases.len() > _orv1_max_aliases():
         return false
