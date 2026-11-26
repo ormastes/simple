@@ -40,3 +40,9 @@ lifecycle_journal 11, system 2, plus `scv_gc_store_e2e_spec.spl` (2).
 ## Not done
 Native provider wiring, SimpleOS pager/PMM, VFS enforcement, live memory-limit
 updates; SCV write paths are not hooked (chunks import lazily at gc).
+
+## Remaining work
+Increment 4 (pure-Simple Windows backend), the Windows Docker process-isolation
+lane, Lane D, AppContainer confinement and other-host items are in
+`doc/03_plan/platform/container/simple_container_remaining_work.md`
+(todo rows 468-475 in `doc/08_tracking/todo/todo_db.sdn`).
