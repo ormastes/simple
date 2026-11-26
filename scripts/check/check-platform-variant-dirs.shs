@@ -86,6 +86,9 @@ scan() {
         -v skc="$_sk_c" -v sks="$_sk_spl" -v out="$_out" '
     function kind(s) { if (index(oss, " " s " ")) return "os"; if (index(abis, " " s " ")) return "abi"; if (index(arches, " " s " ")) return "arch"; return "other" }
     function add(k, c) { v[k] += c }
+    # names made public via `export a, b` (and `export use ... as x`) count like `pub fn`
+    function pubname(d, nm) { if (nm ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && !((d, nm) in NM)) { NM[d, nm] = 1; ALLN[d] = ALLN[d] " " nm } }
+    function exportlist(d, s,   a, i, q, nm) { sub(/#.*/, "", s); q = split(s, a, ","); for (i = 1; i <= q; i++) { nm = a[i]; gsub(/[ \t\r]/, "", nm); pubname(d, nm) } }
     function rootof(p,   r) { for (r in R) if (p == r || index(p, r "/") == 1) return r; return "" }
     BEGIN {
         nr = split(rc, a, " "); for (i = 1; i <= nr; i++) { R[a[i]] = "c" }
@@ -139,7 +142,17 @@ scan() {
         for (d in VF) {
             k = split(VF[d], fl, " ")
             for (i = 1; i <= k; i++) {
+                cont = 0
                 while ((getline ln < (repo fl[i])) > 0) {
+                    if (fl[i] ~ /\.spl$/) {
+                        if (cont || (ln ~ /^export[ \t]/ && ln !~ /^export[ \t]+use[ \t]/)) {
+                            s = ln; if (!cont) sub(/^export[ \t]+/, "", s)
+                            exportlist(d, s); t = s; sub(/#.*/, "", t); cont = (t ~ /,[ \t\r]*$/)
+                        } else if (ln ~ /^export[ \t]+use[ \t].*[ \t]as[ \t]/) {
+                            s = ln; sub(/#.*/, "", s)
+                            while (match(s, /[ \t]as[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) { nm = substr(s, RSTART, RLENGTH); sub(/.*[ \t]/, "", nm); pubname(d, nm); s = substr(s, RSTART + RLENGTH) }
+                        }
+                    }
                     if (fl[i] ~ /\.spl$/ && match(ln, /^(pub +(extern +)?|extern +)fn +[A-Za-z_][A-Za-z0-9_]*/)) {
                         nm = substr(ln, RSTART, RLENGTH); sub(/.*fn +/, "", nm); NM[d, nm] = 1; ALLN[d] = ALLN[d] " " nm
                     }
@@ -182,7 +195,7 @@ run_check() { # repo baseline -> verdict, rc
     _n=$(scan "$_repo" "$_v")
     if [ "${_n:-0}" -le 0 ]; then rm -f "$_v"; echo "ERROR — nothing was checked (0 items under $_repo)"; return 2; fi
     # one awk: new/grown offenders, totals, stale count
-    _res=$(awk -F'\t' 'FILENAME == ARGV[1] { b[$1] = $2; next }
+    _res=$(awk -F'\t' 'FILENAME == ARGV[1] { if ($1 !~ /^#/) b[$1] = $2; next }
         { tot++; if (!($1 in b)) { print "NEW " $1 " (" $2 ")"; off++ } else if ($2 + 0 > b[$1] + 0) { print "GREW " $1 " (" b[$1] " -> " $2 ")"; off++ }; cur[$1] = $2 }
         END { for (k in b) if (!(k in cur) || cur[k] + 0 < b[k] + 0) st++; printf "#%d %d %d\n", off + 0, tot + 0, st + 0 }' "$_base" "$_v")
     rm -f "$_v"
@@ -210,6 +223,11 @@ selftest() {
     : > "$_t/p/base.txt"
     cp -r "$_t/p" "$_t/clean"; cp -r "$_t/p" "$_t/alias"; cp -r "$_t/p" "$_t/skel"; cp -r "$_t/p" "$_t/order"
     cp -r "$_t/p" "$_t/api"; cp -r "$_t/p" "$_t/priv"; cp -r "$_t/p" "$_t/ext"; cp -r "$_t/p" "$_t/cond"; cp -r "$_t/p" "$_t/abi"
+    # export-list names count as public (bug platform_variant_gate_export_list_not_counted_2026-11-26)
+    cp -r "$_t/p" "$_t/exp"; cp -r "$_t/p" "$_t/expboth"; cp -r "$_t/p" "$_t/expml"
+    printf 'fn x(h: i64):\n    pass\nexport x\n' >> "$_t/exp/$_sp/linux/io.spl"
+    for _v in linux windows; do printf 'fn x(h: i64):\n    pass\nexport x\n' >> "$_t/expboth/$_sp/$_v/io.spl"; done
+    printf 'fn y(h: i64):\n    pass\nfn z(h: i64):\n    pass\nexport y,\n    z\n' >> "$_t/expml/$_sp/linux/io.spl"
     mkdir -p "$_t/alias/src/os/kernel/arch/arm64" "$_t/order/$_rp/linux/x86_64/windows" "$_t/abi/$_sp/windows/msvc"
     rm -rf "$_t/skel/$_rp/windows/msvc/aarch64"
     printf 'pub fn close_file(h: i64):\n    pass\n' >> "$_t/api/$_sp/linux/io.spl"
@@ -231,6 +249,15 @@ selftest() {
     expect abi-under-simple-root 1 abi
     expect api-missing 1 api
     expect api-private-helper-not-counted 0 priv
+    expect export-list-missing 1 exp
+    expect export-list-both 0 expboth
+    expect export-list-multiline-missing 1 expml
+    _o=$(run_check "$_t/exp" "$_t/exp/base.txt" 2>/dev/null); _c=$(printf '%s\n' "$_o" | grep -c "^NEW api:.*/windows:x ")
+    _a=$(printf '%s\n' "$_o" | grep -c "^NEW api:")
+    [ "$_c" -eq 1 ] && [ "$_a" -eq 1 ] || { echo "selftest FAIL: export-list must give exactly one api offender (windows:x): $_o" >&2; _fail=1; }
+    _o=$(run_check "$_t/expml" "$_t/expml/base.txt" 2>/dev/null); _a=$(printf '%s\n' "$_o" | grep -c "^NEW api:")
+    [ "$_a" -eq 2 ] || { echo "selftest FAIL: multi-line export must give two api offenders (y,z): $_o" >&2; _fail=1; }
+    SELFTEST_N=$((SELFTEST_N + 2))
     expect extsig-mismatch 1 ext
     expect cond-new 1 cond
     printf 'cond:%s/common.c\t1\n' "$_rp" > "$_t/cond/base.txt"; expect cond-frozen 0 cond
