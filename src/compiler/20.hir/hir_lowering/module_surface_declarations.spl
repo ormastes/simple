@@ -18,8 +18,17 @@ use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_typ
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceCompositeIndex, ModuleSurfaceConst, ModuleSurfaceDeclarationAuthorityIndex, ModuleSurfaceEnum, ModuleSurfaceExportOriginIndex, ModuleSurfaceField, ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, module_surface_declaration_authority_index_empty, module_surface_declaration_authority_index_put, module_surface_export_origin_index_empty, module_surface_export_origin_index_put}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_projection, module_surface_semantic_hex_limb}
+use compiler.common.attributes.{parse_function_attrs, parse_export_attrs}
 
 extern fn rt_hash_text(content: text) -> i64
+
+fn module_surface_attributes_have_unmangled_abi(attributes: [Attribute]) -> bool:
+    if attributes.len() == 0:
+        return false
+    if val _export_attr = parse_export_attrs(attributes):
+        return true
+    val fn_attr = parse_function_attrs(attributes)
+    fn_attr.is_global or fn_attr.is_entry
 
 fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
@@ -53,11 +62,13 @@ fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSur
         is_const: function_.is_const,
         is_kernel: function_.is_kernel,
         is_extern: function_.is_extern,
-        span: function_.span
+        span: function_.span,
+        has_unmangled_abi: module_surface_attributes_have_unmangled_abi(function_.attributes)
     )
 
 fn module_surface_callable_from_header(
-    header: ParserFunctionHeader
+    header: ParserFunctionHeader,
+    has_unmangled_abi: bool = false
 ) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
     for raw_param in header.params:
@@ -92,7 +103,8 @@ fn module_surface_callable_from_header(
         is_const: header.is_const,
         is_kernel: header.is_kernel,
         is_extern: header.is_extern,
-        span: header.span
+        span: header.span,
+        has_unmangled_abi: has_unmangled_abi
     )
 
 fn module_surface_trait_from_trait(trait_: ParserTrait) -> ModuleSurfaceTrait:
@@ -390,7 +402,8 @@ pub fn module_surface_from_owner(
     for name in module_local.functions.keys():
         val callable = if module_local.function_headers.contains_key(name):
             val fn_header: ParserFunctionHeader = module_local.function_headers[name]
-            module_surface_callable_from_header(fn_header)
+            val fn_unmangled = module_surface_attributes_have_unmangled_abi(module_local.functions[name].attributes)
+            module_surface_callable_from_header(fn_header, fn_unmangled)
         else:
             # Compatibility for parser producers without the compact header
             # index.
