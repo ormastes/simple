@@ -172,6 +172,30 @@ fn gc_delete_trash(root: text) -> i64:
 # unpinned action mappings oldest-first (by mtime) until at or below the low
 # watermark. `referenced_artifacts` (from active leases) are never evicted —
 # lease_safe. Returns bytes freed (best-effort estimate).
+fn _gc_norm_path(path: text) -> text:
+    path.replace("\\", "/")
+
+fn _gc_build_protected_paths(root: text, active_leases: [CacheLease]) -> Dict<text, bool>:
+    var protected_paths: Dict<text, bool> = {}
+    for lease in active_leases:
+        for d in lease.referenced_artifacts:
+            protected_paths[_gc_norm_path(cas_action_path(root, d))] = true
+        for d in lease.referenced_manifests:
+            protected_paths[_gc_norm_path(cas_action_path(root, d))] = true
+    val pins_path = "{root}/pins"
+    if gc_file_exists_raw(pins_path):
+        val maybe_pins = file_read_nullable(pins_path)
+        if maybe_pins.is_some():
+            for pin_line in maybe_pins.unwrap().split("\n"):
+                val pin_digest = pin_line.trim()
+                if pin_digest != "":
+                    protected_paths[_gc_norm_path(cas_action_path(root, pin_digest))] = true
+                    protected_paths[_gc_norm_path(cas_blob_path(root, pin_digest))] = true
+    protected_paths
+
+fn _gc_is_path_protected(protected_paths: Dict<text, bool>, path: text) -> bool:
+    protected_paths.contains_key(_gc_norm_path(path))
+
 fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
     # The legacy local lease/pin view cannot close cross-process roots or bind
     # deletion to a generation. The current guard is explicitly unavailable,
@@ -187,21 +211,7 @@ fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
         return 0
 
     val active_leases = lease_list_active(root)
-    var protected_paths: Dict<text, bool> = {}
-    for lease in active_leases:
-        for d in lease.referenced_artifacts:
-            protected_paths[cas_action_path(root, d)] = true
-        for d in lease.referenced_manifests:
-            protected_paths[cas_action_path(root, d)] = true
-    val pins_path = "{root}/pins"
-    if gc_file_exists_raw(pins_path):
-        val maybe_pins = file_read_nullable(pins_path)
-        if maybe_pins.is_some():
-            for pin_line in maybe_pins.unwrap().split("\n"):
-                val pin_digest = pin_line.trim()
-                if pin_digest != "":
-                    protected_paths[cas_action_path(root, pin_digest)] = true
-                    protected_paths[cas_blob_path(root, pin_digest)] = true
+    val protected_paths = _gc_build_protected_paths(root, active_leases)
 
     val actions_dir = "{root}/actions"
     if not gc_file_exists_raw(actions_dir):
@@ -210,7 +220,7 @@ fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
     var candidates: [GcCandidate] = []
     for path in gc_dir_walk_raw(actions_dir):
         if not gc_dir_exists_raw(path):
-            if not protected_paths.contains_key(path):
+            if not _gc_is_path_protected(protected_paths, path):
                 val size = gc_file_size_raw(path)
                 val raw_mtime = gc_file_modified_time_raw(path)
                 val safe_mtime = if raw_mtime <= 0: 9999999999999 else: raw_mtime

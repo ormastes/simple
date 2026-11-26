@@ -87,6 +87,9 @@ fn move_to_trash(root: text, path: text) -> bool:
     val name = _sanitize_trash_name(path)
     mark_file_move_raw(path, "{trash_dir(root)}/{name}-{stamp}")
 
+fn _mark_norm_path(path: text) -> text:
+    path.replace("\\", "/")
+
 # Collect every action-manifest file path under root/actions.
 fn list_action_paths(root: text) -> [text]:
     val dir = "{root}/actions"
@@ -95,7 +98,7 @@ fn list_action_paths(root: text) -> [text]:
     var out: [text] = []
     for path in mark_dir_walk_raw(dir):
         if not mark_dir_exists_raw(path):
-            out = out.push(path)
+            out = out.push(_mark_norm_path(path))
     out
 
 # Collect every blob file path under root/cas.
@@ -106,7 +109,7 @@ fn list_blob_paths(root: text) -> [text]:
     var out: [text] = []
     for path in mark_dir_walk_raw(dir):
         if not mark_dir_exists_raw(path):
-            out = out.push(path)
+            out = out.push(_mark_norm_path(path))
     out
 
 # Explicit pins: a flat digest list at root/pins (one digest per line). No
@@ -176,20 +179,20 @@ fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
             case Some(manifest):
                 manifests_kept = manifests_kept + 1
                 for d in manifest.artifact_digests:
-                    val artifact_path = cas_blob_path(root, d)
+                    val artifact_path = _mark_norm_path(cas_blob_path(root, d))
                     if not marked_artifact_paths.contains_key(artifact_path):
                         marked_artifact_paths[artifact_path] = true
                         marked_artifact_count = marked_artifact_count + 1
             case None:
                 # unparseable manifest: not reachable, trash it
-                move_to_trash(root, path)
-                manifests_trashed = manifests_trashed + 1
+                if move_to_trash(root, path):
+                    manifests_trashed = manifests_trashed + 1
 
     var trashed_blobs: i64 = 0
     for blob_path in list_blob_paths(root):
-        if not marked_artifact_paths.contains_key(blob_path):
-            move_to_trash(root, blob_path)
-            trashed_blobs = trashed_blobs + 1
+        if not marked_artifact_paths.contains_key(_mark_norm_path(blob_path)):
+            if move_to_trash(root, blob_path):
+                trashed_blobs = trashed_blobs + 1
 
     MarkSweepResult(
         marked_manifests: manifests_kept,
