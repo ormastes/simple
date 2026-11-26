@@ -1,0 +1,107 @@
+# Windows job-object hard memory cap probe: measured Enforced verdict and the
+# capability report that affirms memory_hard_limit only from it.
+# Skips (returns early) on non-Windows hosts, where the probe fails closed.
+#
+# Measured 2026-11-26 on the Windows 11 evidence host, child =
+# simple-local-20261125.exe running test/fixtures/container/alloc_mb.spl <N>:
+#   idle (N=0, cap 4 GiB)        peak 175067136   exit 0            ALLOC_OK 0
+#   cap = 276824064 (264 MiB = idle + ~97 MiB)
+#   under  N=48                  peak 208805888   exit 0            ALLOC_OK 48
+#   over   N=256                 peak 310333440   exit 3221226505   (0xC0000409, no marker)
+#   baseline cap 0, N=256        peak 444280832   exit 0            ALLOC_OK 256
+# Denial overshoots the cap by ~33.5 MB in PeakJobMemoryUsed (see the module).
+# Job limits must be page-aligned (4096) or the owner's readback check fails.
+use std.spec.{describe, it, expect}
+use std.platform.{is_windows, get_current_dir, get_temp_dir}
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1, container_capability_requirement_v1_empty, container_capability_v1_admission_reason, CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1}
+use std.nogc_sync_mut.io.windows_memory_cap_probe_v1.{WindowsJobMemoryBytesV1, WindowsProbeTimeoutMsV1, WindowsMemoryCapProbeRequestV1, WindowsMemoryCapObservationV1, WindowsMemoryCapVerdictV1, windows_memory_cap_probe_run_v1, windows_memory_cap_verdict_v1, windows_container_capability_report_v1}
+
+val PROBE_CAP_BYTES = 276824064
+val PROBE_UNDER_MB = "48"
+val PROBE_OVER_MB = "256"
+
+fn probe_root() -> text:
+    get_current_dir().replace("\\", "/")
+
+fn probe_request(cap: i64, megabytes: text, tag: text) -> WindowsMemoryCapProbeRequestV1:
+    val root = probe_root()
+    val temp = get_temp_dir().replace("\\", "/")
+    WindowsMemoryCapProbeRequestV1(program: "C:/dev/keep/seeds/simple-local-20261125.exe",
+        args: ["run", root + "/test/fixtures/container/alloc_mb.spl", megabytes], directory: root,
+        stdout_path: temp + "/memcap_probe_" + tag + ".out", stderr_path: temp + "/memcap_probe_" + tag + ".err",
+        cap: WindowsJobMemoryBytesV1(cap), timeout_ms: WindowsProbeTimeoutMsV1(180000))
+
+val under_run = windows_memory_cap_probe_run_v1(probe_request(PROBE_CAP_BYTES, PROBE_UNDER_MB, "under"))
+val over_run = windows_memory_cap_probe_run_v1(probe_request(PROBE_CAP_BYTES, PROBE_OVER_MB, "over"))
+val baseline_run = windows_memory_cap_probe_run_v1(probe_request(0, PROBE_OVER_MB, "base"))
+
+fn require_hard_limit() -> text:
+    var requirement = container_capability_requirement_v1_empty()
+    requirement.required_memory_hard_limit = ContainerCapabilityFlagV1(true)
+    requirement.required_memory_accounting = CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1
+    container_capability_v1_admission_reason(windows_container_capability_report_v1(
+        windows_memory_cap_verdict_v1(under_run.unwrap(), over_run.unwrap(), baseline_run.unwrap()),
+        under_run.unwrap(), over_run.unwrap(), "windows-job-v1"), requirement)
+
+describe "windows memory cap probe":
+    it "runs the under-cap workload to completion within the cap":
+        if not is_windows():
+            expect(under_run.is_err()).to_equal(true)
+            return
+        val observed = under_run.unwrap()
+        expect(observed.exit_code.value).to_equal(0)
+        expect(observed.stdout_text.contains("ALLOC_OK")).to_equal(true)
+        expect(observed.peak.value > 0).to_equal(true)
+        expect(observed.peak.value <= PROBE_CAP_BYTES).to_equal(true)
+        expect(observed.tree_empty.value).to_equal(true)
+
+    it "denies the over-cap workload and bounds the peak":
+        if not is_windows(): return
+        val observed = over_run.unwrap()
+        expect(observed.exit_code.value != 0).to_equal(true)
+        expect(observed.stdout_text.contains("ALLOC_OK")).to_equal(false)
+        expect(observed.timed_out.value).to_equal(false)
+        expect(observed.peak.value <= PROBE_CAP_BYTES + 67108864).to_equal(true)
+
+    it "lets the same workload finish uncapped, so the denial came from the job":
+        if not is_windows(): return
+        val observed = baseline_run.unwrap()
+        expect(observed.exit_code.value).to_equal(0)
+        expect(observed.stdout_text.contains("ALLOC_OK")).to_equal(true)
+        expect(observed.peak.value > PROBE_CAP_BYTES).to_equal(true)
+
+    it "reaches the Enforced verdict from the three observations":
+        if not is_windows(): return
+        val verdict = windows_memory_cap_verdict_v1(under_run.unwrap(), over_run.unwrap(), baseline_run.unwrap())
+        val enforced = match verdict:
+            WindowsMemoryCapVerdictV1.Enforced: true
+            _: false
+        expect(enforced).to_equal(true)
+
+    it "affirms memory_hard_limit with job-commit accounting only from Enforced":
+        if not is_windows(): return
+        expect(require_hard_limit()).to_equal("")
+        val report = windows_container_capability_report_v1(WindowsMemoryCapVerdictV1.Enforced,
+            under_run.unwrap(), over_run.unwrap(), "windows-job-v1")
+        expect(report.host_os).to_equal("windows")
+        expect(report.isolation_kind).to_equal(CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1)
+        expect(report.memory_limit_update.value).to_equal(false)
+        expect(report.memory_reclaim.value).to_equal(false)
+        expect(report.evidence_revision.starts_with("job-commit:")).to_equal(true)
+
+    it "rejects the report of a NotEnforced verdict":
+        if not is_windows(): return
+        val report = windows_container_capability_report_v1(WindowsMemoryCapVerdictV1.NotEnforced("test"),
+            under_run.unwrap(), over_run.unwrap(), "windows-job-v1")
+        var requirement = container_capability_requirement_v1_empty()
+        requirement.required_memory_hard_limit = ContainerCapabilityFlagV1(true)
+        expect(report.memory_accounting).to_equal("")
+        expect(container_capability_v1_admission_reason(report, requirement)).to_equal("memory-hard-limit-missing")
+
+    it "does not enforce when the over-cap workload completes":
+        if not is_windows(): return
+        val verdict = windows_memory_cap_verdict_v1(under_run.unwrap(), baseline_run.unwrap(), baseline_run.unwrap())
+        val enforced = match verdict:
+            WindowsMemoryCapVerdictV1.Enforced: true
+            _: false
+        expect(enforced).to_equal(false)
