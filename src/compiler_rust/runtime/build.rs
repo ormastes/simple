@@ -360,6 +360,9 @@ fn configure_runtime_c_build(build: &mut cc::Build, runtime_c_dir: &Path, target
     // Bootstrap-only compatibility: the seed cannot link the canonical Pure
     // Simple timestamp module. Stage4 never enables this provider.
     build.define("SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT", None);
+    // This crate is also a dlopen'ed GPU provider DSO: no initial-exec TLS,
+    // or the DSO is DF_STATIC_TLS and dlopen fails (runtime_timestamp.c).
+    build.define("SIMPLE_RUNTIME_DYNAMIC_TLS", None);
     // See the runtime_process.c comment below: the Rust runtime crate already
     // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
     build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);

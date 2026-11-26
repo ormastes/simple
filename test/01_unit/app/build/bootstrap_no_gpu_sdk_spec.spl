@@ -3,7 +3,9 @@
 Purpose: Prove RB-BUILD-03 at config and planner level. The default build plan
 selects only host targets, every GPU/HDL accelerator group is opt-in, and the
 Rust seed's default cargo features enable no GPU backend, so host bootstrap
-needs no CUDA/ROCm/Vulkan SDK.
+needs no CUDA/ROCm/Vulkan SDK. native-all does enable `cuda` (owner decision
+2026-11-26), which is SDK-free because that feature adds no dependency and
+reaches libcuda only by dlopen.
 Audience: build engineers maintaining targets.sdn and bootstrap lanes.
 ## Operator workflow
 Run `bin/simple test test/01_unit/app/build/bootstrap_no_gpu_sdk_spec.spl` from the repo root.
@@ -92,3 +94,26 @@ describe "RB-BUILD-03: host bootstrap needs no GPU SDK":
             val line = _feature_default_line(file_read(path))
             expect(line.len()).to_be_greater_than(0)
             expect(_is_accel(line)).to_equal(false)
+
+    it "enables cuda in native-all only as a dlopen feature that pulls no SDK crate":
+        # @req: REQ-BUILD-GROUP-008
+        # Owner decision 2026-11-26: the native-all authority links the
+        # cuda-featured runtime so `--runtime-path` programs reach a real GPU.
+        # That is SDK-free only while runtime's `cuda` feature adds no
+        # dependency: libcuda is dlopen'ed, so no build-time SDK and no
+        # NEEDED libcuda entry.
+        step("Read the native-all simple-runtime dependency and runtime's cuda feature")
+        var runtime_dep = ""
+        for line in file_read("src/compiler_rust/native_all/Cargo.toml").split("\n"):
+            if line.trim().starts_with("simple-runtime = "):
+                runtime_dep = line.trim()
+        expect(runtime_dep.contains("\"cuda\"")).to_equal(true)
+        var cuda_feature = ""
+        var in_features = false
+        for line in file_read("src/compiler_rust/runtime/Cargo.toml").split("\n"):
+            val t = line.trim()
+            if t.starts_with("["):
+                in_features = (t == "[features]")
+            elif in_features and t.starts_with("cuda ="):
+                cuda_feature = t
+        expect(cuda_feature.starts_with("cuda = []")).to_equal(true)
