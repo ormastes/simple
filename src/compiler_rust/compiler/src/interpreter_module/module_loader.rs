@@ -353,6 +353,23 @@ fn locally_defined_names(items: &[Node]) -> Vec<String> {
             // above, which likewise does not contribute its method names.
             Node::Extern(e) => names.push(e.name.clone()),
             Node::ExternClass(c) => names.push(c.name.clone()),
+            // Every other named declaration is importable surface too. Since an
+            // unprovided braced use name is a hard error, missing one here
+            // rejects a valid import (`pub unit SosixWindowsTokenV1: i64`).
+            Node::Unit(u) => names.push(u.name.clone()),
+            Node::UnitFamily(u) => names.push(u.name.clone()),
+            Node::CompoundUnit(u) => names.push(u.name.clone()),
+            Node::Trait(t) => names.push(t.name.clone()),
+            Node::Mixin(m) => names.push(m.name.clone()),
+            Node::Actor(a) => names.push(a.name.clone()),
+            Node::TypeAlias(t) => names.push(t.name.clone()),
+            Node::ClassAlias(c) => names.push(c.name.clone()),
+            Node::FunctionAlias(f) => names.push(f.name.clone()),
+            Node::Bitfield(b) => names.push(b.name.clone()),
+            Node::Macro(m) => names.push(m.name.clone()),
+            Node::Newtype(n) => names.push(n.name.clone()),
+            Node::Const(c) => names.push(c.name.clone()),
+            Node::Static(s) => names.push(s.name.clone()),
 
             Node::Let(stmt) => {
                 if let simple_parser::ast::Pattern::Identifier(name) = &stmt.pattern {
