@@ -1,0 +1,56 @@
+"""
+Two traits that both declare `mark`, implemented for the same primitive Self,
+are two distinct callables (`i32::mod.Marker::mark`, `i32::mod.Other::mark`).
+Their RTI callee keys must stay distinct, or registering the provider module
+fails with E-RTI-006 "two rows for callee 'mark'" and native builds of
+test/fixtures/compiler/primitive_trait_identity stop at MIR lowering.
+"""
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+# Tracks: primitive_receiver_trait_impl_dispatch_2026-08-07
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.return_type_interface_v1.*
+
+val TWO_TRAITS_I32 = "trait Marker:\n    fn mark() -> i64\n\ntrait Other:\n    fn mark() -> i64\n\nimpl Marker for i32:\n    fn mark() -> i64: 1032\n\nimpl Other for i32:\n    fn mark() -> i64: 2032\n"
+
+fn rti_register_result_code(r: Result<RtiRowsV1, RtiError>) -> text:
+    match r:
+        case Ok(_): "ok"
+        case Err(e): e.code + ": " + e.message
+
+fn rti_lower_source(source: text, path: text) -> HirModule:
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+describe "RTI rows for primitive trait methods":
+    it "registers two traits' same-name methods on one primitive Self":
+        val module = rti_lower_source(TWO_TRAITS_I32, "test/rti_two_traits_i32.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        expect(rti_register_result_code(table.register_hir_module(module))).to_equal("ok")
+
+    it "registers the primitive trait identity provider fixture":
+        val path = "test/fixtures/compiler/primitive_trait_identity/provider.spl"
+        val module = rti_lower_source(file_read(path), path)
+        var table = ReturnTypeInterfaceTable.new()
+        expect(rti_register_result_code(table.register_hir_module(module))).to_equal("ok")
+
+    it "still rejects a conflicting second row for the same callee":
+        var table = ReturnTypeInterfaceTable.new()
+        val owner = rti_type_ref("m.a", "type", "i32")
+        val key = CalleeKey(module_id: "m.a", owner: Some(owner), name: "m.a.Marker::mark", is_static: false)
+        val first = ReturnTypeRow(decl: rti_method_ref(owner, "m.a.Marker::mark"), key: key,
+            type_param_count: 0, entry: ReturnTypeEntry.Decided(RtType.Builtin("i64")), owner_type_param_count: 0)
+        val second = ReturnTypeRow(decl: rti_method_ref(owner, "m.a.Marker::mark_other_body"), key: key,
+            type_param_count: 0, entry: ReturnTypeEntry.Decided(RtType.Builtin("i64")), owner_type_param_count: 0)
+        expect(table.register_row("m.a", first).unwrap()).to_equal(1)
+        match table.register_row("m.a", second):
+            case Ok(_): expect("ok").to_equal("E-RTI-006")
+            case Err(e): expect(e.code).to_equal("E-RTI-006")
