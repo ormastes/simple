@@ -1,0 +1,70 @@
+# Container capability report v2 (plan pure_simple_container_plan section 4 row R2, section 6 Q5).
+# v2 = the whole v1 report (composition, lossless) plus two tri-state isolation
+# axes a caller can require independently. Value-only: no host calls. Unknown
+# is a first-class state and is never promoted to isolated; a requirement is
+# admitted only on an affirmed Isolated state backed by evidence_revision.
+
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1,
+    ContainerCapabilityFlagV1}
+
+pub enum ContainerIsolationStateV1:
+    Isolated
+    NotIsolated
+    Unknown
+
+pub struct ContainerCapabilityReportV2:
+    base: ContainerCapabilityReportV1
+    network_isolation: ContainerIsolationStateV1
+    pid_isolation: ContainerIsolationStateV1
+
+# Lossless upgrade: every v1 field is carried unchanged. v1 never measured
+# either axis, so both start Unknown (never Isolated).
+pub fn container_capability_report_v2_from_v1(
+        v1: ContainerCapabilityReportV1) -> ContainerCapabilityReportV2:
+    ContainerCapabilityReportV2(base: v1,
+        network_isolation: ContainerIsolationStateV1.Unknown,
+        pid_isolation: ContainerIsolationStateV1.Unknown)
+
+pub fn container_isolation_state_v1_from_flag(known: ContainerCapabilityFlagV1,
+        isolated: ContainerCapabilityFlagV1) -> ContainerIsolationStateV1:
+    if not known.value: return ContainerIsolationStateV1.Unknown
+    if isolated.value: return ContainerIsolationStateV1.Isolated
+    ContainerIsolationStateV1.NotIsolated
+
+# Pure Windows backend (restricted low-integrity token + job object): neither
+# the network nor the process namespace is isolated.
+pub fn container_capability_report_v2_pure_windows(
+        v1: ContainerCapabilityReportV1) -> ContainerCapabilityReportV2:
+    ContainerCapabilityReportV2(base: v1,
+        network_isolation: ContainerIsolationStateV1.NotIsolated,
+        pid_isolation: ContainerIsolationStateV1.NotIsolated)
+
+# Windows Docker process isolation. docker_contract_v1 establishes the
+# --network request ("none" or an administrator-authorized NAT network) and
+# nothing about PID visibility, so: network is Isolated only for "none"
+# (otherwise Unknown, a NAT network can still reach out), pid stays Unknown.
+pub fn container_capability_report_v2_docker_process(
+        v1: ContainerCapabilityReportV1, network_mode: text) -> ContainerCapabilityReportV2:
+    val net = if network_mode == "none": ContainerIsolationStateV1.Isolated else: ContainerIsolationStateV1.Unknown
+    ContainerCapabilityReportV2(base: v1, network_isolation: net,
+        pid_isolation: ContainerIsolationStateV1.Unknown)
+
+fn _isolation_affirmed_v2(state: ContainerIsolationStateV1, evidence_revision: text) -> bool:
+    evidence_revision != "" and state == ContainerIsolationStateV1.Isolated
+
+# Empty result = admitted. Each axis is required independently; anything but an
+# evidenced Isolated state fails closed with that axis's reason.
+pub fn container_isolation_v2_admission_reason(report: ContainerCapabilityReportV2,
+        require_network: ContainerCapabilityFlagV1,
+        require_pid: ContainerCapabilityFlagV1) -> text:
+    val rev = report.base.evidence_revision
+    if require_network.value and not _isolation_affirmed_v2(report.network_isolation, rev):
+        return "network-isolation-required"
+    if require_pid.value and not _isolation_affirmed_v2(report.pid_isolation, rev):
+        return "pid-isolation-required"
+    ""
+
+export ContainerIsolationStateV1, ContainerCapabilityReportV2
+export container_capability_report_v2_from_v1, container_isolation_state_v1_from_flag
+export container_capability_report_v2_pure_windows, container_capability_report_v2_docker_process
+export container_isolation_v2_admission_reason
