@@ -23,7 +23,11 @@ that will handle the test's attach and read requests.
    the original invoke frame. The Host allocates vacant pane metadata in its
    own smux registry. Repeat the exact request before attaching to confirm the
    retained receipt.
-3. Construct the canonical pane binding with the receipt's session, window and
+3. Request `agent-runtime-inspect` through the retained Controller with the
+   same operation ID and exact invoke frame. The reply is the first retained
+   running observation for this runtime. Use it to pin the native ID and
+   provider identity in the attach plan.
+4. Construct the canonical pane binding with the receipt's session, window and
    pane IDs, Host continuity ID and native epoch generation. The receipt's
    `serviceIncarnation` names the Host continuity ID. The authenticated
    request instead uses the listener incarnation published by the ready

@@ -6,7 +6,8 @@ use std.common.sdn.value.SdnValue
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
-use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, host_agent_pane_binding_decode_v4}
+use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, host_agent_pane_binding_decode_v4,
+    container_primary_attach_plan_decode_v1}
 use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneStreamRequestV6, HostAgentPaneStreamReceiptV6,
     host_agent_pane_stream_request_encode_v6, host_agent_pane_stream_receipt_decode_v6,
     host_agent_pane_target_receipt_decode_v6}
@@ -15,6 +16,7 @@ use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOpe
 use std.common.contracts.orchestration.host_service_operation_reply_v6.HostServiceOperationReplyV6
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attach_request_decode_v4,
     host_agent_detach_request_decode_v4}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_decode_v2
 use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
 use std.nogc_sync_mut.io.env_ops.env_get
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
@@ -184,6 +186,20 @@ fn attachment_trial_v6(fixture: LinuxAgentControlFixtureV6) -> Result<bool, text
     if not attachment_pane_retry_v6(repeated, target): return Err("Linux V6 pane target retry changed the receipt")
     step("Refuse a correctly authenticated envelope with the wrong operation ID")
     val other = if operation == "sspec-different-run": "sspec-another-run" else: "sspec-different-run"
+    val wrong_observation = attachment_control_v6(incarnation, scope, other, "agent-runtime-inspect", fixture.invoke)?
+    if not attachment_pane_refused_v6(wrong_observation, "linux-host-agent-pane-target-operation-mismatch"):
+        return Err("Linux V6 runtime inspection returned evidence for the wrong run")
+    step("Read the archived running observation and match the exact signed runtime")
+    val observed = attachment_control_v6(incarnation, scope, operation, "agent-runtime-inspect", fixture.invoke)?
+    if observed.pending or observed.exit_code != 0 or observed.error != "":
+        return Err("Linux V6 runtime observation refused: " + observed.error)
+    val native = host_execution_observation_decode_v2(observed.payload)?
+    val attach = host_agent_attach_request_decode_v4(fixture.attach)?
+    val plan = container_primary_attach_plan_decode_v1(attach.plan)?
+    if (native.scope != status.scope or native.operation_id != operation or native.runtime != plan.runtime or
+            native.request_digest != plan.workload.request_digest or native.provider_identity_digest != plan.provider_identity_digest or
+            native.phase != "running" or native.inspect_status != "ok"):
+        return Err("Linux V6 retained runtime differs from its signed attach plan")
     val wrong = attachment_control_v6(incarnation, scope, other, "agent-attach", fixture.attach)?
     if wrong.exit_code == 0 or not wrong.payload.contains("host-service-agent-attachment-operation-mismatch"):
         return Err("Linux V6 mismatched attachment envelope was not refused")

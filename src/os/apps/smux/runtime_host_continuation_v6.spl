@@ -6,12 +6,14 @@ use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOpe
 use std.common.contracts.orchestration.host_service_operation_reply_v6.HostServiceOperationReplyV6
 use std.common.contracts.orchestration.host_remote_build_operation_v6.{host_remote_build_sub_decode_v6, host_remote_build_sub_domain_action_v6}
 use std.common.contracts.orchestration.host_control_operation_v6.{HOST_AGENT_CONTROL_SUBS_V6,
-    HOST_AGENT_PANE_SUBS_V6, HOST_AGENT_PANE_TARGET_SUB_V6, host_control_sub_decode_v6, host_control_sub_domain_action_v6}
+    HOST_AGENT_PANE_SUBS_V6, HOST_AGENT_PANE_TARGET_SUB_V6, HOST_AGENT_RUNTIME_INSPECT_SUB_V6,
+    host_control_sub_decode_v6, host_control_sub_domain_action_v6}
 use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneStreamRequestV6,
     HostAgentPaneStreamReceiptV6, host_agent_pane_stream_request_decode_v6, host_agent_pane_stream_request_matches_v6,
     host_agent_pane_stream_receipt_encode_v6, HostAgentPaneTargetReceiptV6, host_agent_pane_target_receipt_encode_v6}
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{host_linux_service_agent_terminal_authority_v4,
-    host_linux_service_agent_pane_target_authority_v4}
+    host_linux_service_agent_pane_target_authority_v4, host_linux_service_agent_runtime_inspect_v4}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_encode_v2
 use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.HostAgentTerminalAuthorityV4
 use std.common.contracts.orchestration.host_controller_status_v3.host_controller_status_encode_v3
 use std.nogc_sync_mut.orchestration.host_controller_observation_v3.{host_controller_retained_origin_v3, host_controller_status_v3}
@@ -472,6 +474,13 @@ fn remote_build_query_v6(domain: HostServiceDomainV3, state: SmuxHostContinuatio
 # milestone_0046: the ONE V6 `host-control` action (controller-signed Host service actions and their read-only inspects).
 # The sub names a closed Host-domain route; it runs through the same pending gates as `remote-build`. Authority is the
 # Host owner's verification of the signed frame, never this route.
+fn agent_runtime_observation_v6(domain: HostServiceDomainV3, operation_id: text, invoke_source: text) -> Result<text, text>:
+    val local = match domain.local:
+        case HostLocalRootV3.LinuxService(owner): owner
+        case _: return Err("runtime-agent-inspect-requires-linux-service")
+    val observed = host_linux_service_agent_runtime_inspect_v4(local, operation_id, invoke_source)?
+    host_execution_observation_encode_v2(observed)
+
 fn host_control_query_v6(domain: HostServiceDomainV3, state: SmuxHostContinuationV6,
         request: HostServiceOperationRequestV6, context: SmuxHostContextV6) -> SmuxHostOperationTurnV6:
     val sub = host_control_sub_decode_v6(request.payload)
@@ -483,6 +492,11 @@ fn host_control_query_v6(domain: HostServiceDomainV3, state: SmuxHostContinuatio
         return operation_reply_v6(domain, state, request, false, 2, "", "runtime-host-execution-pending")
     if context.connection_pending: return operation_reply_v6(domain, state, request, false, 2, "", "runtime-connection-opening")
     if context.geometry_pending: return operation_reply_v6(domain, state, request, false, 2, "", "runtime-geometry-pending")
+    if sub.unwrap().sub == HOST_AGENT_RUNTIME_INSPECT_SUB_V6:
+        val result = agent_runtime_observation_v6(domain, request.operation_id, sub.unwrap().frame)
+        return match result:
+            case Ok(payload): operation_reply_v6(domain, state, request, false, 0, payload, "")
+            case Err(code): operation_reply_v6(domain, state, request, false, 2, "", code)
     if HOST_AGENT_PANE_SUBS_V6.contains(sub.unwrap().sub) or sub.unwrap().sub == HOST_AGENT_PANE_TARGET_SUB_V6:
         val routed = HostServiceRequestV2(action.unwrap(), request.operation_id, sub.unwrap().frame)
         val turn = if sub.unwrap().sub == HOST_AGENT_PANE_TARGET_SUB_V6:

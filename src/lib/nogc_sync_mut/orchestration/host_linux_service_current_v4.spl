@@ -31,6 +31,8 @@ use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperatio
     distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3,
     distributed_operation_journal_read_required_v3, distributed_operation_journal_lookup_v2}
 use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.{HostExecutionObservationV2,
+    host_execution_observation_load_owned_v3}
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperCancelTurnV1,
     host_helper_cancel_unconsumed_v1}
 use std.nogc_sync_mut.orchestration.host_helper_abandon_record_v1.host_helper_abandoned_pending_v1
@@ -1510,6 +1512,22 @@ pub fn host_linux_service_agent_pane_target_authority_v4(owner: HostLinuxService
         return Err("linux-host-agent-pane-target-window")
     Ok(HostAgentPaneTargetAuthorityV4(service_incarnation: scope.continuity_id,
         service_epoch: linux_service_live_epoch_v4(owner)?))
+
+# The first native running observation archived by this exact V4 agent.
+# The live owner still has to hold that same run and runtime. The returned
+# timestamp describes the archived sample, independent of this read.
+pub fn host_linux_service_agent_runtime_inspect_v4(owner: HostLinuxServiceCurrentV4,
+        operation_id: text, invoke_source: text) -> Result<HostExecutionObservationV2, text>:
+    val _authority = host_linux_service_agent_pane_target_authority_v4(owner, operation_id, invoke_source)?
+    val agent = owner.agent.unwrap()
+    if not agent.observed or agent.created.is_none(): return Err("linux-host-agent-runtime-unobserved")
+    val journal = owner.capacity.unwrap().journal
+    val observation = host_execution_observation_load_owned_v3(journal, operation_id)?
+    if (observation.scope != owner.scope_v4() or observation.runtime != agent.created.unwrap() or
+            observation.phase != "running" or observation.inspect_status != "ok" or
+            observation.provider_identity_digest != owner.records.unwrap().binding.provider_identity_digest):
+        return Err("linux-host-agent-runtime-observation-mismatch")
+    Ok(observation)
 
 # The held-run inputs every controller-signed attachment action re-derives (attach, the terminal authority): the
 # archived signed execute of the held agent and its association digest, as HostAgentActionAuthorityV4 under the
