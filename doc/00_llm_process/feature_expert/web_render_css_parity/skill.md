@@ -4833,3 +4833,47 @@ Spec: `test/01_unit/browser_engine/inline_element_line_tops_chrome159_spec.spl`.
   pinned the 462.78 device row the cursor had to reach.
 - **Trap:** a fixture copied from another spec can differ in its last block's
   font; take every oracle from the capture of the exact page the spec renders.
+## 2026-11-25 — fractional horizontal margins (%/em) keep their sub-pixel part
+
+- **Two root causes, both measured against Chrome 159 at k=1 and k=4:**
+  - **Parse:** `12.5%` went through `parse_int` (12), and `0.4em` went through
+    `_decl_font_relative_length_px` (6 px).
+  - **Layout:** block flow placed the box at `ix + cml`, in whole px. So -10% of 215 px
+    (-21.5) painted from device 76 at k=4 where Chrome paints 74. Nested `0.4em` margins
+    summed to 12, where Chrome has 12.8 -> 13.
+- **Found on the way: `em` in the `margin` shorthand and in `margin-inline(-start/-end)`
+  was read by `parse_int`.** `margin:0 1.5em` was a 1 px margin; Chrome paints from 64,
+  we painted from 41. Every horizontal-margin path now goes through
+  `_decl_horizontal_margin_px` (decl_apply), which resolves em/rem. `margin_token_px` is
+  deleted.
+- **Carrier:** `Style.margin_l_milli` / `margin_r_milli` hold the token's fractional
+  number, mirroring `margin_t_milli`:
+  - a percentage in milli-percent (`12.5%` -> 12500);
+  - a length in milli-px on the 1/64 grid (`0.4em` -> 6390);
+  - 0 when the token is whole.
+  `resolve_horizontal_margin_milli(value, is_pct, milli, w)` gives the exact value. The
+  whole-px `resolve_horizontal_margin` is unchanged, so its 29 readers do not move.
+- **Block flow (layout_engine, block child loop):** when a margin has a fraction, no auto
+  margin applies and no float sits beside the box:
+  - `box_x_snap` (factored out of `absolute_box_snap`, one implementation for both)
+    snaps the left edge and records the remainder as the line-start pen error, plus the
+    device x shift at k>1;
+  - an auto width spans to the snapped right edge;
+  - at k>1 an auto width also records `box_device_extra_w`
+    (`round(k*right) - round(k*left) - k*w`). Paint now applies `device-extra-width` to
+    any non-text box, not only form controls.
+  Whole-px margins take the old path unchanged.
+- **Open:**
+  - flex, grid and float margins still use whole px;
+  - the gpu_web adapter's `LayoutLength` holds only whole px or whole percent, so the
+    fraction is not passed to it (the milli fields are in the layout hash).
+- **Pinned by `fractional_horizontal_margin_chrome159_spec`:** 10 cases, base 0/10, head
+  10/10. The page with text (AC-7) keeps the k=1 raster route covered alongside the
+  all-solid GPU-paint route. `layout_renderer_value_parsers_spec` now pins the new
+  helpers.
+- **Catalogs** at 1x and 4x are byte-identical to base, 16/16 PPMs (no catalog page has
+  a fractional horizontal margin). Matrix: 79.
+- **Perf**, css-layout, 6 alternated rounds on seed1126b, wall medians base/head (busy host, rounds 3-6 noisy):
+  - k=1: 4094 / 4160 ms;
+  - k=4: 3841 / 3778 ms;
+  - RSS medians: k=1 2.36 / 2.36 GB (5 rounds at load < 8, head first on odd rounds, one warmup per side; a noisy first run read 2.32 / 2.41), k=4 2.34 / 2.33 GB.

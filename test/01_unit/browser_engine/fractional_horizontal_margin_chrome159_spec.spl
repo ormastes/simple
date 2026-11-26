@@ -1,0 +1,175 @@
+"""
+## Purpose and audience
+Purpose: Pin in-flow block boxes whose horizontal margin resolves to a
+fractional CSS px (a percentage of the containing block, an `em`), against
+Chrome 159 at k=1 (the catalog's Engine2D route) and k=4. Chrome keeps the
+margin in LayoutUnits, paints the box from round(k x exact edge) and starts
+the box's text at the exact pen. The engine parsed `12.5%` as 12 and `0.4em`
+as 6 px and laid the box out at whole px, so `-10%` of 215 px (-21.5) painted
+from device 76 at k=4 (Chrome 74), and nested `0.4em` margins summed to 12
+(Chrome 12.8 -> 13).
+Audience: web renderer style cascade (margins) and block layout.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window
+400x300. Each case is a `.w` box (margin-left 40px, 200px wide unless noted,
+30px tall) stacked from y 0 holding a 20px tall #00f child. Runs are blue
+columns on the device row through CSS row `case * 30 + 10`.
+
+| case | child | exact x | k=1 Chrome / base | k=4 Chrome / base |
+|------|-------|---------|-------------------|-------------------|
+| 0 | .w 215px; margin-left:-10%; width:40px | 18.5 | 19..58 / 19..58 | 74..233 / 76..235 |
+| 1 | .w 205px; margin-left:10%; width:40px | 60.5 | 61..100 / 60..99 | 242..401 / 240..399 |
+| 2 | margin-left:0.4em; width:40px | 46.4 | 46..85 / 46..85 | 186..345 / 184..343 |
+| 3 | margin-left:0.4em > margin-left:0.4em; width:40px | 52.8 | 53..92 / 52..91 | 211..370 / 208..367 |
+| 4 | .w 213px; margin-inline:12.5% (auto width) | 66.625..226.375 | 67..225 / 65..227 | 267..905 / 260..911 |
+| 5 | margin-left:1.3em; margin-right:0.7em (auto width) | 60.8..228.8 | 61..228 / 60..228 | 243..914 / 240..915 |
+| 6 | margin:0 1.5em (em in the shorthand, auto width) | 64..216 | 64..215 / 41..238 | 256..863 / 164..955 |
+| 7 | margin-inline:1.5em 0 (auto width) | 64..240 | 64..239 / 41..239 | 256..959 / 164..959 |
+
+Text page (not all-solid, so k=1 takes the raster route, not the GPU
+solid-only frame): case 6, `.w` 205px, child margin-left:10% width:40px
+holding a white `l` (16px/20px sans-serif). Chrome 1x 61..61 63..100, 4x
+242..245 252..401.
+"""
+
+"""
+Traceability: REQ-WEB-MARGIN-FRACTIONAL-HORIZONTAL-001 — an in-flow block box's horizontal margin keeps its sub-pixel part: the box paints from Chrome's snapped device edge and its text starts at the exact pen.
+"""
+# @tag: unit, browser_engine, layout, margin, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{renderer_default_style}
+use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.{apply_decls}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val H: text = "height:20px;background:#00f"
+val HEAD: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}.w{{margin-left:40px;width:200px;height:30px}}</style></head><body>"
+
+val SOLID: text = HEAD + "<div class=\"w\" style=\"width:215px\"><div style=\"margin-left:-10%;width:40px;" + H + "\"></div></div><div class=\"w\" style=\"width:205px\"><div style=\"margin-left:10%;width:40px;" + H + "\"></div></div><div class=\"w\"><div style=\"margin-left:0.4em;width:40px;" + H + "\"></div></div><div class=\"w\"><div style=\"margin-left:0.4em;height:20px\"><div style=\"margin-left:0.4em;width:40px;" + H + "\"></div></div></div><div class=\"w\" style=\"width:213px\"><div style=\"margin-inline:12.5%;" + H + "\"></div></div><div class=\"w\"><div style=\"margin-left:1.3em;margin-right:0.7em;" + H + "\"></div></div><div class=\"w\"><div style=\"margin:0 1.5em;" + H + "\"></div></div><div class=\"w\"><div style=\"margin-inline:1.5em 0;" + H + "\"></div></div></body></html>"
+
+val TEXT: text = HEAD + "<div class=\"w\" style=\"width:205px\"><div style=\"margin-left:10%;width:40px;" + H + ";font:16px/20px sans-serif;color:#fff\">l</div></div></body></html>"
+
+var g_solid1: [u32] = []
+var g_solid4: [u32] = []
+var g_text1: [u32] = []
+var g_text4: [u32] = []
+
+fn _render(html: text, k: i32) -> [u32]:
+    if k == 1:
+        return simple_web_render_html_to_pixels_with_engine2d_backend(html, CSS_W, CSS_H, "cpu_simd")
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, CSS_W, CSS_H, k, "cpu_simd")
+
+fn _px(page: text, k: i32) -> [u32]:
+    if page == "solid":
+        if k == 1:
+            if g_solid1.len() == 0:
+                g_solid1 = _render(SOLID, 1)
+            return g_solid1
+        if g_solid4.len() == 0:
+            g_solid4 = _render(SOLID, 4)
+        return g_solid4
+    if k == 1:
+        if g_text1.len() == 0:
+            g_text1 = _render(TEXT, 1)
+        return g_text1
+    if g_text4.len() == 0:
+        g_text4 = _render(TEXT, 4)
+    g_text4
+
+# Blue runs " a..b" on the device row through CSS row `row * 30 + 10`.
+fn _runs(page: text, k: i32, row: i32) -> text:
+    val px = _px(page, k)
+    val w = CSS_W * k
+    val y = (row * 30 + 10) * k
+    var out = ""
+    var x = 0
+    var inr = false
+    var start = 0
+    while x <= w:
+        var blue = false
+        if x < w:
+            val v = px[y * w + x]
+            val r = ((v >> 16u32) & 0xFFu32).to_i32()
+            val b = (v & 0xFFu32).to_i32()
+            blue = b > 128 and r < 128
+        if blue and not inr:
+            inr = true
+            start = x
+        if not blue and inr:
+            inr = false
+            out = out + " {start}..{x - 1}"
+        x = x + 1
+    out
+
+describe "An in-flow block's fractional horizontal margin (Chrome 159)":
+    it "AC-1: -10% of a 215px container (-21.5px) paints from Chrome's snapped edge":
+        expect(_px("solid", 1).len()).to_equal((CSS_W * CSS_H) as i64)
+        expect(_runs("solid", 1, 0)).to_equal(" 19..58")
+        expect(_runs("solid", 4, 0)).to_equal(" 74..233")
+
+    it "AC-2: 10% of a 205px container (20.5px) rounds half up at k=1":
+        expect(_runs("solid", 1, 1)).to_equal(" 61..100")
+        expect(_runs("solid", 4, 1)).to_equal(" 242..401")
+
+    it "AC-3: margin-left:0.4em (6.4px)":
+        expect(_runs("solid", 1, 2)).to_equal(" 46..85")
+        expect(_runs("solid", 4, 2)).to_equal(" 186..345")
+
+    it "AC-4: nested 0.4em margins accumulate their fractions (52.8px)":
+        expect(_runs("solid", 1, 3)).to_equal(" 53..92")
+        expect(_runs("solid", 4, 3)).to_equal(" 211..370")
+
+    it "AC-5: margin-inline:12.5% (fractional percent) on an auto-width box snaps both edges":
+        expect(_runs("solid", 1, 4)).to_equal(" 67..225")
+        expect(_runs("solid", 4, 4)).to_equal(" 267..905")
+
+    it "AC-6: em margins on both sides of an auto-width box snap both edges":
+        expect(_runs("solid", 1, 5)).to_equal(" 61..228")
+        expect(_runs("solid", 4, 5)).to_equal(" 243..914")
+
+    it "AC-7: a text box at a fractional margin (raster route at k=1) paints from Chrome's edge":
+        val r1 = _runs("text", 1, 0)
+        val r4 = _runs("text", 4, 0)
+        expect(r1.starts_with(" 61..")).to_equal(true)
+        expect(r1.ends_with("..100")).to_equal(true)
+        expect(r4.starts_with(" 242..")).to_equal(true)
+        expect(r4.ends_with("..401")).to_equal(true)
+
+    it "AC-10: em in the margin shorthand and margin-inline resolves against the font (1.5em is 24px, not 1px)":
+        expect(_runs("solid", 1, 6)).to_equal(" 64..215")
+        expect(_runs("solid", 4, 6)).to_equal(" 256..863")
+        expect(_runs("solid", 1, 7)).to_equal(" 64..239")
+        expect(_runs("solid", 4, 7)).to_equal(" 256..959")
+
+# Sub-pixel part of a style's margin side: the token's number in milli
+# (milli-px for a length on Chrome's 1/64 grid, milli-percent for a
+# percentage) when it is fractional, else 0.
+fn _left_milli(css: text) -> i32:
+    apply_decls(renderer_default_style(), css, 16).margin_l_milli
+
+fn _right_milli(css: text) -> i32:
+    apply_decls(renderer_default_style(), css, 16).margin_r_milli
+
+describe "A horizontal margin's sub-pixel part after the cascade (both style paths)":
+    it "AC-8: dispatch path (margin / margin-left only)":
+        expect(_left_milli("margin-left:12.5%")).to_equal(12500)
+        expect(_left_milli("margin-left:0.4em")).to_equal(6390)
+        expect(_left_milli("margin-left:0.4em;margin-left:5px")).to_equal(0)
+        expect(_left_milli("margin-left:-10%")).to_equal(0)
+        expect(_right_milli("margin:0 -0.4em")).to_equal(-6390)
+        expect(_left_milli("margin-left:0.4em;margin-left:auto")).to_equal(0)
+
+    it "AC-9: full path (margin-inline / margin-inline-start present)":
+        expect(_right_milli("margin-inline:0 12.5%")).to_equal(12500)
+        expect(_left_milli("margin-inline-start:-0.4em")).to_equal(-6390)
+        expect(_left_milli("margin-inline-start:0.4em;margin-left:5px")).to_equal(0)
+        expect(_left_milli("margin-left:1.3em;margin-inline-end:0")).to_equal(20796)
