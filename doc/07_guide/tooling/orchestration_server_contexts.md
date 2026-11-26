@@ -1,9 +1,8 @@
 # Shared orchestration server contexts
 
-Status: source and documentation are under implementation. Examples describe
-the planned CLI contract. Runtime, cross-host connectivity, native packaging,
-LinuxPodman and WindowsDocker qualification are **NOT_RUN**. No example below
-identifies a provisioned or reachable server.
+The command routes below exist on `release/1.0.0`. End-to-end qualification
+for shared server selection and dispatch is **NOT_RUN**. The examples use
+local placeholders and example server names.
 
 Simple, Simple Orchestrator, Caret and agents can share a named server or select
 separate servers through one strict SDN document. Server selection does not
@@ -71,12 +70,17 @@ address, credential, trust and executable fields; their defaults are empty and
 port zero. HTTPS records are representable, but current consumer selection
 returns `server-consumer-transport-unsupported`.
 
-## Planned CLI
+## Command routes
 
 ```text
 simple-orchestrator server-resolve <config-file|-> <consumer> <context|-> <server|-> <host|container>
 simple-orchestrator server-request <config-file|-> <consumer> <context|-> <server|-> <host|container> <profile-file> <request-file>
 ```
+
+The `simple orchestrator` command uses the same resolver and request dispatcher
+as the standalone `simple-orchestrator` executable. The `llm_caret orchestrator`
+route requires the `caret` consumer. An agent selects the `agent` consumer with
+`container` address selection when it runs inside the workload.
 
 For the config argument, `-` requests default configuration discovery. For
 context and server arguments, `-` selects the normal defaults. These are
@@ -84,7 +88,9 @@ argument sentinels, not stdin. `host` retains the configured host;
 `container` requests container address selection explicitly.
 
 ```sh
-simple-orchestrator server-resolve /home/alice/.config/simple/servers.sdn orchestrator - - host
+simple orchestrator server-resolve - simple - - host
+simple-orchestrator server-resolve - orchestrator - - host
+llm_caret orchestrator server-resolve - caret - - host
 simple-orchestrator server-resolve /home/alice/.config/simple/servers.sdn agent development build container
 simple-orchestrator server-request /home/alice/.config/simple/servers.sdn orchestrator - build host /home/alice/.config/simple/build-ssh.sdn /home/alice/requests/inspect.sdn
 ```

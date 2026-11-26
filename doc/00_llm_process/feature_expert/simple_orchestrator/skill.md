@@ -122,14 +122,22 @@ bin/simple test test/01_unit/lib/common/sdn/sdn_sequence_duplicate_key_spec.spl 
   Probing "can I make a user namespace" says yes and is useless; probe the
   operation runc actually performs (`unshare --user --mount true`).
 
-## Shared server selection and controller gateway (2026-11-15)
+## Shared server selection and controller gateway
 
 The [server-context guide](../../../07_guide/tooling/orchestration_server_contexts.md)
-describes the authored `server-resolve` and `server-request` CLI, shared and
+describes the linked `server-resolve` and `server-request` routes, shared and
 per-consumer SDN mappings, explicit container endpoints, SSH profiles and
 installed controller gateway policy. [Host identity setup](../../../07_guide/tooling/orchestration_host_identity.md)
 owns key and peer-policy provisioning. See [architecture](../../../04_architecture/server_contexts.md)
 and the [verification plan](../../../03_plan/sys_test/server_contexts.md).
+
+Use `simple orchestrator server-resolve - simple - - host` and
+`simple-orchestrator server-resolve - orchestrator - - host` to inspect the
+same discovery chain through both entrypoints. Use
+`llm_caret orchestrator server-resolve - caret - - host` for the Caret route.
+Choose `agent` and `container` for a container-scoped resolution. When Simple
+and Orchestrator share a server, reuse the same `authRef` and trust reference
+through the protected identity store.
 
 Keep submit/inspect/cancel with existing journal owners and signed
 dispatch/resume/inspect-execution with existing execution/host authorization

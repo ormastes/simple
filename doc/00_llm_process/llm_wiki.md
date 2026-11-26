@@ -394,6 +394,22 @@ with `doc/05_design/language/concurrency/parent_commit_parallel_apps.md`, then
 the two focused test plans under `doc/03_plan/sys_test/`. Preserve the explicit
 same-thread/typed-payload exclusions and the Stage-4 blocker.
 
+## Simple Orchestrator server discovery and identity
+
+Simple, Simple Orchestrator, Caret, and container agents resolve a named server
+from the same strict SDN document. Consumer overrides can select independent
+servers, and the `host` and `container` scopes select the appropriate public
+endpoint. On a shared server, use the same authentication and trust references
+through the protected store. Keep credentials out of the server document.
+[Server contexts](../07_guide/tooling/orchestration_server_contexts.md) ·
+[Host identity setup](../07_guide/tooling/orchestration_host_identity.md)
+
+For command routing and verification, start with the Orchestrator feature
+skill. Check the acceptance record for the exact platform and workflow before
+reporting a qualified deployment.
+[Orchestrator feature skill](feature_expert/simple_orchestrator/skill.md) ·
+[Release status](../03_plan/agent_tasks/simple_orchestrator_status_20261126.md)
+
 ## Modern SSpec typed evidence
 
 - **Observation:** a canonical record produced from the exercised surface.
