@@ -5464,3 +5464,58 @@ is shared again until no new item freezes (AC-27, SHRINK3). A fractional
 186..533 at k=4 on that row. The stale-record spec now also covers a
 templated-grid item (`tgriditem`, the grid snap site at line ~2441), red when
 that clear is conditional.
+
+## 2026-11-26 — measured line-end hang; a space across an empty inline (`work/webrender-parity-lineend-space2-20261126`)
+
+- **Follow-up to #11979.** `inline_line_end_space_px` guessed what the closing
+  whitespace-only runs charged: a rounded space (4 px, but the pen carried 5
+  after `<b>Hello</b>`: 39.12 + 4.45 -> 44) and a `k == 0` test, while the pen
+  charges on `inline_x > inline_start_x`. A line whose first item is zero-wide
+  was over-credited (Chrome 200/400, here 202/404).
+- **Fix:** the layout loop measures it. `line_end_hang` adds each closing
+  whitespace-only run's pen delta (lead space plus milli carry), is cleared by
+  any item that moves the pen and at every line reset, and is passed to all six
+  `align_inline_line_horizontal` call sites. rtl right adds only the last run's
+  trailing edge (`inline_line_end_text_edge_px`).
+- **Space across an empty inline:** an empty plain inline (`<span></span>`) is
+  0 wide as in Chrome (its 1 px layout box is zeroed before the pen takes it),
+  and a lead space where the pen has not moved since a space was put in it
+  (`last_space_pen_x`: after a whitespace-only run's charge or a run ending in a
+  collapsible space) only drops from the run's box, the pen stays. Chrome 159:
+  `ib <span></span> x` 144/288, `x <span></span> ib` 156.
+- **Catalog check:** element geometry on all 8 catalog pages is unchanged
+  against #11979's tree (0 of 1582 boxes moved); the 1x catalog equals base and
+  the 4x catalog equals the dpr4 rows, so no row moved.
+
+## 2026-11-26 — line-end space review fixes (zero-width atomics, bordered empty inline, white-space)
+
+- **Any item except a whitespace-only `#text` and an empty plain inline ends
+  the hang and the collapse.** This includes a 0 px inline-block. Before the fix:
+  - `ib z` right/centre kept the interior space in the hang;
+  - `x z y` lost its second space.
+
+  Chrome 159 results:
+  - `ib z` centre 148, right 296;
+  - `ib z ib` puts the second `ib` at 109.
+- **An "empty plain inline" needs zero padding, border and margin.** A
+  `border-left:1px` divider span keeps its 1 px (Chrome 159: next box at 101).
+- **`white_space_spaces_kept`** is a new Style flag, set for `pre`, `pre-wrap`
+  and `break-spaces`. It is NOT set for `pre-line`.
+  - `white_space_newline` cannot tell `pre-line` apart, and `pre-line`
+    collapses spaces and hangs them.
+  - Kept spaces neither collapse nor hang. Chrome 159: centred pre-wrap `ib ` at
+    148; pre-line at 150 and 104.
+- **Pen-error carry past exact-width atomics.** `inline_item_width_err_milli`
+  returns 0 for:
+  - a non-replaced inline-block whose box equals a whole-px `width` (with
+    `width_milli == 0` and no padding or border);
+  - an empty 0 px plain inline.
+
+  Without this, two 4.45 px spaces around an atomic rounded to 108, not 109.
+- **`text_ends_with_collapsible_space`** reads the last byte with
+  `byte_len`/`byte_at`. It no longer copies with `bytes()`, because it runs per
+  text run in the inline loop.
+- **Fallback face and wrapped runs:**
+  - an unresolved `font-family` `xx <span></span> ib` puts `ib` at 20, matching
+    Chrome (base gave 25);
+  - a wrapped run ending in a space matches Chrome.
