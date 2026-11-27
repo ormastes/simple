@@ -745,3 +745,10 @@ ever carried the pinned behaviour):
   v1 capsule built by the test (identity fixture vs current schema), needs an owner read.
 - `performance_target_identity_external`: importer reason for retained build-origin placeholders differs
   (not investigated further).
+
+## Batch 4 (2026-11-27): 7 wired
+Six `check/cert/*default_path_contract` (class 3, see
+`cert_scripts_hardcoded_author_home_simple_bin_2026-11-27.md`) and `dynsmf_trusted_facet_index_contract`
+(class 2: the owner keeps `_trusted_facet_bindings` as the index; the old `_trusted_facet_indices` field was
+folded into it, the no-rescan contract still holds). Fresh serial re-run on origin: 13 green of 126 now
+(10 earlier-wired plus `bootstrap_stop_after_stage3_contract`, which started passing on its own).
