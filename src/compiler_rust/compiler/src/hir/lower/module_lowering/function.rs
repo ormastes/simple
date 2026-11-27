@@ -1523,10 +1523,14 @@ impl Lowerer {
         if declared_return_type.is_some() {
             if let Err(error) = self.validate_implicit_return_type(&body, return_type) {
                 // The HIR tail carries no span: point at the function instead.
+                // Name the DEFINING module, not the entry file, when the
+                // function reached this unit through import flattening.
                 let error = match error {
-                    LowerError::Unsupported(message) => {
-                        LowerError::Unsupported(format!("{message} (function at line {})", f.span.line))
-                    }
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message} ({}, function at line {})",
+                        self.body_diagnostic_file(),
+                        f.span.line
+                    )),
                     other => other,
                 };
                 // Unconditional: the error variant carries only two TypeIds, so
@@ -1534,7 +1538,7 @@ impl Lowerer {
                 eprintln!(
                     "error: declared return type mismatch in function `{}` ({}): {error:?}",
                     func_name,
-                    self.current_file.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+                    self.body_diagnostic_file()
                 );
                 return Err(error);
             }

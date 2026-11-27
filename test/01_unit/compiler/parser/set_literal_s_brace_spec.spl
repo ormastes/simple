@@ -21,6 +21,8 @@ use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.core.parser.{parser_has_errors, parser_first_error_get}
 use compiler.frontend.parser_types_expr.{Expr, ExprKind, StmtKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
 
 fn expr_shape(e: Expr) -> text:
     match e.kind:
@@ -46,6 +48,21 @@ fn init_shape(source: text, fn_name: text) -> text:
         case StmtKind.Val(_, _, init): return expr_shape(init)
         case _: return "not-val"
 
+# HIR-lowering diagnostics of a whole module, with source locations stripped.
+# The literal is desugared at parse time to `Set.from([...])`, so lowering it
+# standalone cannot resolve `Set` (a synthesized zero-span identifier, versus
+# the explicit spelling's real span); what must hold is that both spellings
+# produce the same diagnostic sequence modulo locations — i.e. the literal
+# reaches HIR as exactly the `Set.from` construction and nothing else.
+fn lower_diags(source: text) -> text:
+    val parsed = parse_full_frontend(source, "set_lit_hir.spl", "set_lit_hir", Logger(level: 0))
+    var lowering = HirLowering.with_filename("set_lit_hir.spl")
+    lowering.lower_module(parsed)
+    var normed: [text] = []
+    for m in lowering.diagnostic_messages:
+        normed.push(m.split(" at ")[0])
+    return normed.join("\n")
+
 describe "`s{...}` set literal parses in the self-hosted frontend":
     it "lowers s{1, 2, 3} to Set.from([1, 2, 3])":
         step("sugar")
@@ -65,3 +82,9 @@ describe "`s{...}` set literal parses in the self-hosted frontend":
 
     it "leaves a plain `s` identifier untouched":
         expect(init_shape("fn main(s: i64):\n    val t = s + 1\n    t\n", "main")).to_equal("binary")
+
+    it "reaches HIR as the identical Set.from construction":
+        step("hir parity")
+        val sugar = lower_diags("fn main():\n    val nums = s{{1, 2, 3}}\n    nums\n")
+        val explicit = lower_diags("fn main():\n    val nums = Set.from([1, 2, 3])\n    nums\n")
+        expect(sugar).to_equal(explicit)

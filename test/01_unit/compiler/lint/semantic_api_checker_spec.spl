@@ -135,24 +135,63 @@ describe "semantic_api recursive checker":
             expect(vs.len()).to_equal(1)
             expect(vs[0].code).to_equal("MC-API-003")
 
-    context "enum payloads (lane A4E, 2026-07-29 — confirmed structural blocker)":
-        it "emits nothing for an enum, even one whose variant text encodes a primitive payload":
-            # Ground truth (doc/08_tracking/bug/enum_variant_payload_types_discarded_at_parse_2026-07-29.md):
-            # the core parser discards variant payload types at the token
-            # level (parser_decls_types.spl:140, enum_module_body.spl:150/155)
-            # and the one production flat-AST bridge that builds real
-            # Enum/Variant nodes from parsed source hardcodes an empty
-            # payload for every variant (_FlatAstBridge/module_assembly.spl:390).
-            # There is no AST structure to walk, so check_module_items must
-            # stay silent on Enum nodes -- this pins that honest behavior
-            # rather than leaving it an unverified assumption.
+    context "enum payloads (MC-API-002 — wired per doc/08_tracking/bug/enum_variant_payload_types_discarded_at_parse_2026-07-29.md)":
+        it "flags unit, tuple and struct variant payload types with MC-API-002":
+            # Flat AST contract (compiler.frontend.ast.EnumDef): `variants`
+            # holds bare variant names; variant_payload_counts is parallel to
+            # it (0 = unit); variant_payload_type_names /
+            # variant_payload_field_names are FLAT across variants in source
+            # order, element-for-element parallel ("" field name = positional
+            # slot). Dot is unit (no payloads), Pair is a 2-slot tuple,
+            # Rect is a struct with named fields w/h.
             val ed = EnumDef(
-                name: "BadEnum",
+                name: "Shape",
                 generic_params: [],
-                variants: ["Bad(payload: i64)", "Clean"],
+                variants: ["Dot", "Pair", "Rect"],
+                is_generic_template: false,
+                specialization_of: "",
+                type_bindings: {},
+                variant_payload_counts: [0, 2, 2],
+                variant_payload_kinds: [0, 1, 2],
+                variant_payload_type_names: ["i64", "f32", "u16", "Option<i32>"],
+                variant_payload_field_names: ["", "", "w", "h"]
+            )
+            val vs = check_module_items([Node.Enum(ed)])
+            expect(vs.len()).to_equal(4)
+            expect(vs[0].code).to_equal("MC-API-002")
+            expect(vs[0].item_name).to_equal("Shape")
+            expect(vs[0].member).to_equal("variant 'Pair' payload")
+            expect(vs[0].leaf).to_equal("i64")
+            expect(vs[1].leaf).to_equal("f32")
+            expect(vs[1].member).to_equal("variant 'Pair' payload")
+            expect(vs[2].leaf).to_equal("u16")
+            expect(vs[2].member).to_equal("variant 'Rect' payload field 'w'")
+            expect(vs[3].leaf).to_equal("i32")
+            expect(vs[3].member).to_equal("variant 'Rect' payload field 'h'")
+            expect(vs[3].type_text).to_equal("Option<i32>")
+
+        it "leaves an all-domain-payload enum clean":
+            val ed = EnumDef(
+                name: "Signal",
+                generic_params: [],
+                variants: ["Retry", "Delivered"],
+                is_generic_template: false,
+                specialization_of: "",
+                type_bindings: {},
+                variant_payload_counts: [1, 1],
+                variant_payload_kinds: [2, 2],
+                variant_payload_type_names: ["Height", "Address"],
+                variant_payload_field_names: ["at", "to"]
+            )
+            expect(check_module_items([Node.Enum(ed)]).len()).to_equal(0)
+
+        it "stays silent when no payload lists were recorded (legacy producers)":
+            val ed = EnumDef(
+                name: "Legacy",
+                generic_params: [],
+                variants: ["A", "B"],
                 is_generic_template: false,
                 specialization_of: "",
                 type_bindings: {}
             )
-            val vs = check_module_items([Node.Enum(ed)])
-            expect(vs.len()).to_equal(0)
+            expect(check_module_items([Node.Enum(ed)]).len()).to_equal(0)

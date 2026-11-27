@@ -17,8 +17,8 @@ use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, grid_track_fr_micro}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_rest_pen_origin_reset, text_rest_pen_origin_restore, text_rest_pen_origin_record, g_text_rest_pen_origin_milli, box_frac_w_set, absolute_width_frac_milli, g_table_column_edge_frac_milli, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record, form_control_tag}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, text_line_rest_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale, summary_marker_inline_milli, textarea_value_device_lines_record}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_rest_pen_origin_reset, text_rest_pen_origin_restore, text_rest_pen_origin_record, g_text_rest_pen_origin_milli, box_frac_w_set, absolute_width_frac_milli, g_table_column_edge_frac_milli, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record, form_control_tag, g_text_nowrap_lead_collapse_pending}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, text_line_rest_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_h_at, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale, summary_marker_inline_milli, textarea_value_device_lines_record}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{line_h_frac_milli, inline_element_union_text_line_h, text_line_frac_record, text_line_steps_table, text_line_steps_restore}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, box_right_edge_err_record, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{grid_fr_track_floor, grid_fr_track_factor, button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px, GridTrackLayout, grid_track_layout}
@@ -1994,8 +1994,16 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     if node.tag != "#text" and st.width_px == 0 and not st.width_zero and st.white_space_nowrap:
         val nowrap_intrinsic = intrinsic_text_width(nodes, styles, child_index, i, out_intrinsic_widths)
         out_intrinsic_widths = nowrap_intrinsic.widths
-        if nowrap_intrinsic.width > node_w:
-            node_w = nowrap_intrinsic.width
+        # The inline run loop may have dropped the run's lead space from the
+        # box (it collapsed into a space already in the pen): the intrinsic
+        # still measures it, so narrow the bump by the same px.
+        var nowrap_bump_w = nowrap_intrinsic.width
+        if g_text_nowrap_lead_collapse_pending > 0:
+            nowrap_bump_w = nowrap_bump_w - g_text_nowrap_lead_collapse_pending
+            if nowrap_bump_w < 0:
+                nowrap_bump_w = 0
+        if nowrap_bump_w > node_w:
+            node_w = nowrap_bump_w
     node_w = constrained_outer_width(node, st, node_w)
     out_bw[i] = node_w
     # An authored px / em width is exact (`30.2px` is 30.1875): its text
@@ -2115,7 +2123,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             out_wrap_starts[i] = nl_ranges.starts
             out_wrap_ends[i] = nl_ranges.ends
         elif st.white_space_nowrap:
-            out_wrap_starts[i] = [0; 1]
+            # The inline run loop may have collapsed this run's lead space
+            # into a space already in the pen: start the single line past it
+            # so the paint loops, which slice by wrap ranges, drop it too.
+            val lead_skip = if g_text_nowrap_lead_collapse_pending > 0 and txt.byte_len() > 0:
+                next_codepoint_start(txt, 0)
+            else:
+                0
+            g_text_nowrap_lead_collapse_pending = 0
+            out_wrap_starts[i] = [lead_skip; 1]
             out_wrap_ends[i] = [txt_len; 1]
         elif first_dx > 0:
             val first_ranges = compute_style_wrap_ranges_exact(txt, node_w - first_dx, node_w, wrap_frac_w, first_frac_w, st, cpl)
@@ -4282,6 +4298,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     var cy_frac = origin_frac
     var trailing_margin_b = 0
     var leading_margin_t = 0
+    # Lowest in-flow block child bottom (CSS px) and its device-px bottom
+    # edge; see the child loop.
+    var lowest_child_bottom: i32 = -1
+    var lowest_child_device_bottom: i32 = 0
     var in_inline_run = false
     var inline_run_has_content = false
     val is_summary_marker = node.is_details_summary and st.display == "list-item"
@@ -4814,7 +4834,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # </span> ib` at 105). With no padding/border its 1 px layout box
                 # is zeroed before the pen takes it (Chrome: 0 wide, a 5 px
                 # margin-only span puts the next box at 105); with no margin
-                # either it does not move the pen at all.
+                # either it does not move the pen at all. Whatever of that it
+                # has, it stays transparent to the line-end hang (Chrome 159,
+                # right-aligned: `ib <span style=margin-left:5px></span>` at
+                # 295 — the space hangs, the margin counts; bug
+                # web_render_space_hang_before_moving_empty_inline_2026-11-27).
                 val empty_inline_box = (
                     nodes[c].tag != "#text" and child_index.child_count[c] == 0 and
                     cst.display == "inline" and not grid_item_is_replaced(nodes[c])
@@ -4823,7 +4847,6 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     empty_inline_box and
                     cst.pad_l == 0 and cst.pad_r == 0 and cst.border_l == 0 and cst.border_r == 0
                 )
-                val empty_plain_inline = empty_unpadded_inline and cst.margin_l == 0 and cst.margin_r == 0
                 if inline_w < 1:
                     inline_w = 1
                 # Bound an inline #text run to the available content width so a
@@ -4896,6 +4919,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     -1
                 val rst = if run_node >= 0: styles[run_node] else: cst
                 var text_first_dx = 0
+                # Set below when this item's nowrap sole run loses its lead
+                # space to collapsing into a space already in the pen; handed
+                # to `layout_with_style` just before the box is laid out.
+                var nowrap_lead_collapse_px = 0
                 if (
                     run_node >= 0 and
                     not cst.white_space_nowrap and
@@ -5009,6 +5036,38 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     val full_inline = line_iw - inline_x
                     if full_inline > inline_w:
                         inline_w = full_inline
+                # A nowrap sole run's leading collapsible space collapses into
+                # a space already in the pen (CSS Text 3 4.1.1; Chrome 159:
+                # `x <span style=white-space:nowrap> y</span>` keeps ONE
+                # space, and the nowrap span's box holds `y` only). Nowrap
+                # metrics run over the raw text, so the space was measured
+                # into this box; drop it here and hand the skip to the run,
+                # whose wrap range then starts past it so paint slices the
+                # space off too. A lead space at a line start is removed by
+                # the ordinary paths; an rtl run is left to them as well (the
+                # paint slice is visual-order there).
+                if (
+                    run_node >= 0 and run_node != c and
+                    rst.white_space_nowrap and not rst.white_space_spaces_kept and
+                    not rst.direction_rtl and
+                    after_space and
+                    nodes[run_node].text_trimmed != "" and
+                    text_starts_with_collapsible_space(nodes[run_node].text_data)
+                ):
+                    val before_collapse_w = inline_w
+                    # The lead space's own advance inside the raw run: the
+                    # run's per-codepoint table is measured over the raw
+                    # text, so this is exactly what the wrap-range skip
+                    # takes out of what paint draws.
+                    val run_cps = text_codepoints(nodes[run_node].text_data)
+                    if rst.resolved_font_advances.len() == run_cps.len() and rst.resolved_font_advances.len() > 0:
+                        inline_w = rst.resolved_font_width - rst.resolved_font_advances[0]
+                    else:
+                        val collapse_lead = resolved_space_advance(rst, text_codepoints(nodes[run_node].text_trimmed))
+                        inline_w = if inline_w > collapse_lead: inline_w - collapse_lead else: 0
+                    if inline_w < 0:
+                        inline_w = 0
+                    nowrap_lead_collapse_px = before_collapse_w - inline_w
                 val inline_outer_w = (
                     inline_margin_l + inline_w + inline_margin_r
                 )
@@ -5107,6 +5166,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # The first-line inset this `#text` takes: its own, or the one
                 # its plain inline parent handed down for it (see run_node).
                 val run_first_dx = if nodes[c].tag == "#text": g_text_first_line_dx_pending else: 0
+                if nowrap_lead_collapse_px > 0:
+                    g_text_nowrap_lead_collapse_pending = nowrap_lead_collapse_px
                 val child = layout_with_style(nodes, styles, child_index, c, inline_box_x, inline_y, inline_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_inline_style)
                 out_bx = child.bx
                 out_by = child.by
@@ -5348,18 +5409,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # Only preserved spaces (pre, pre-wrap, break-spaces) neither
                 # hang nor collapse; nowrap and pre-line do both (Chrome 159:
                 # centred nowrap `ib ` at 150, pre-wrap at 148). An empty inline
-                # is transparent to the collapse, and to the hang while it does
-                # not move the pen; any other item, a zero-width atomic included
+                # is transparent to the collapse and to the hang, moving the
+                # pen or not; any other item, a zero-width atomic included
                 # (`ib z ib`: 109), ends both.
                 val spaces_collapsible = not cst.white_space_spaces_kept
                 if nodes[c].tag == "#text" and nodes[c].text_trimmed == "" and spaces_collapsible:
                     line_end_hang = line_end_hang + (inline_x - node_pen_start)
                     if lead_charged or inline_x != node_pen_start:
                         after_space = true
-                elif empty_inline_box:
-                    if not empty_plain_inline:
-                        line_end_hang = 0
-                else:
+                elif not empty_inline_box:
                     line_end_hang = 0
                     # A run that ends in a collapsible space put it in the pen;
                     # a lead space after an empty inline collapses into it.
@@ -5700,6 +5758,19 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # sibling.
                 prev_margin_b = collapse_margins_signed(
                     resolved_cst_margin_b, child_trailing_margin_b)
+            # The child's device bottom is final here: remember the lowest
+            # one, a form control's grown edge included, for the auto-height
+            # carry at the record below. The CSS bottom is tracked with it so
+            # the carry applies only when that bottom IS the cursor's final
+            # bottom (a child floated past by a sibling's negative margin
+            # overflows like any other overflow and stays clipped).
+            val child_bottom = out_by[c] + out_bh[c]
+            val child_dev_bottom = layout_device_scale() * child_bottom + box_device_extra_h_at(c)
+            if child_bottom > lowest_child_bottom:
+                lowest_child_bottom = child_bottom
+                lowest_child_device_bottom = child_dev_bottom
+            elif child_bottom == lowest_child_bottom and child_dev_bottom > lowest_child_device_bottom:
+                lowest_child_device_bottom = child_dev_bottom
             child_count = child_count + 1
         c = child_index.next_sibling[c]
     if child_count > 0:
@@ -5768,7 +5839,19 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     # An authored or clamped height makes the bottom edge start + h exactly, so the
     # residual is the start fraction; a content height ends where the cursor did.
     val end_frac = if h == content_h and st.height_px <= 0 and not st.contain_size: cy_frac else: origin_frac
-    box_device_extra_h_record(nodes.len() as i32, i, box_device_top_px(end_frac * layout_device_scale()) - box_device_top_px(origin_frac * layout_device_scale()))
+    val cursor_extra_h = box_device_top_px(end_frac * layout_device_scale()) - box_device_top_px(origin_frac * layout_device_scale())
+    # An auto-height box whose cursor bottom IS an in-flow block child's CSS
+    # bottom carries that child's device height delta (a form control whose
+    # device size is not k x its CSS box, grown OR shrunk): the parent's
+    # painted bottom and the clip edge it owns move by the same delta, so the
+    # child is not cut at — nor left short of — the parent's k x CSS bottom
+    # (textarea_4x_device_height_not_in_ancestor_2026-11-27: Chrome 159 grows
+    # the wrapper with the textarea's device height; a select's round(1.5k)
+    # inner padding shrinks it the same way).
+    var carry_extra_h = 0
+    if h == content_h and st.height_px <= 0 and not st.contain_size and lowest_child_bottom == cy:
+        carry_extra_h = lowest_child_device_bottom - layout_device_scale() * cy
+    box_device_extra_h_record(nodes.len() as i32, i, cursor_extra_h + carry_extra_h)
     if node.tag == "button" and layout_device_scale() > 1 and st.width_px <= 0 and st.flex_grow <= 0:
         box_device_extra_w_record(nodes.len() as i32, i, button_device_extra_w(nodes, styles, child_index, i))
     LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b, leading_margin_t: leading_margin_t, end_frac_milli: end_frac, end_frac_valid: true)
