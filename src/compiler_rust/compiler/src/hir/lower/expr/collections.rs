@@ -67,41 +67,63 @@ impl Lowerer {
     /// Lower an array literal to HIR
     ///
     /// Creates an array type with a fixed size.
+    fn expected_array_element_type(&self, target_ty: Option<TypeId>) -> Option<TypeId> {
+        target_ty.and_then(|ty| match self.module.types.get(ty) {
+            Some(HirType::Array { element, .. }) if *element != TypeId::ANY && *element != TypeId::VOID => {
+                Some(*element)
+            }
+            _ => None,
+        })
+    }
+
+    /// Lower an array literal expression to HIR.
     /// Empty arrays use the configured default element type from type_inference_config.
     pub(super) fn lower_array(&mut self, exprs: &[Expr], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
-        let mut hir_exprs = Vec::new();
-        for e in exprs {
-            hir_exprs.push(self.lower_expr(e, ctx)?);
-        }
+        let saved_target = self.expected_target_type.take();
+        let elem_target = self.expected_array_element_type(saved_target);
 
-        let elem_ty = if let Some(first) = hir_exprs.first() {
-            match &first.kind {
-                HirExprKind::Lambda { params, body, .. } => {
-                    let param_types = params.iter().map(|(_, ty)| *ty).collect();
-                    self.module.types.register(HirType::Function {
-                        params: param_types,
-                        ret: body.ty,
-                    })
+        let result = (|| -> LowerResult<HirExpr> {
+            let mut hir_exprs = Vec::with_capacity(exprs.len());
+            for e in exprs {
+                self.expected_target_type = elem_target;
+                hir_exprs.push(self.lower_expr(e, ctx)?);
+            }
+            self.expected_target_type = None;
+
+            let elem_ty = if let Some(first) = hir_exprs.first() {
+                match &first.kind {
+                    HirExprKind::Lambda { params, body, .. } => {
+                        let param_types = params.iter().map(|(_, ty)| *ty).collect();
+                        self.module.types.register(HirType::Function {
+                            params: param_types,
+                            ret: body.ty,
+                        })
+                    }
+                    _ => first.ty,
                 }
-                _ => first.ty,
-            }
-        } else {
-            // Empty array - use configured default or error if strict mode
-            if self.type_inference_config.strict_empty_collections {
-                return Err(LowerError::EmptyArrayNeedsType);
-            }
-            self.type_inference_config.empty_array_default
-        };
+            } else if let Some(element) = elem_target {
+                element
+            } else {
+                // Empty array - use configured default or error if strict mode
+                if self.type_inference_config.strict_empty_collections {
+                    return Err(LowerError::EmptyArrayNeedsType);
+                }
+                self.type_inference_config.empty_array_default
+            };
 
-        let arr_ty = self.module.types.register(HirType::Array {
-            element: elem_ty,
-            size: Some(exprs.len()),
-        });
+            let arr_ty = self.module.types.register(HirType::Array {
+                element: elem_ty,
+                size: Some(exprs.len()),
+            });
 
-        Ok(HirExpr {
-            kind: HirExprKind::Array(hir_exprs),
-            ty: arr_ty,
-        })
+            Ok(HirExpr {
+                kind: HirExprKind::Array(hir_exprs),
+                ty: arr_ty,
+            })
+        })();
+
+        self.expected_target_type = saved_target;
+        result
     }
 
     /// Lower an array repeat expression to HIR: [value; count]
@@ -114,64 +136,81 @@ impl Lowerer {
         count: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        // Infer element type from the value
-        let elem_ty = self.infer_type(value, ctx)?;
-        let hir_value = self.lower_expr(value, ctx)?;
+        let saved_target = self.expected_target_type.take();
+        let elem_target = self.expected_array_element_type(saved_target);
 
-        // Try to evaluate count as a compile-time constant
-        let size = match count {
-            Expr::Integer(n) => Some(*n as usize),
-            _ => None, // Dynamic size - will be runtime evaluated
-        };
+        let result = (|| -> LowerResult<HirExpr> {
+            // `infer_type` returns VOID for an empty `[]` literal, so fall back to the
+            // targeted element's lowered type when an outer array annotation supplied one.
+            self.expected_target_type = None;
+            let inferred_ty = self.infer_type(value, ctx)?;
+            self.expected_target_type = elem_target;
+            let hir_value = self.lower_expr(value, ctx)?;
+            self.expected_target_type = None;
 
-        let arr_ty = self.module.types.register(HirType::Array { element: elem_ty, size });
+            let elem_ty = match inferred_ty {
+                TypeId::VOID if elem_target.is_some() => hir_value.ty,
+                ty => ty,
+            };
 
-        // A large repeat of a pure scalar stays a runtime `rt_array_repeat`
-        // fill instead of being unrolled: `[_KERN_EMPTY; 72200]` (a module
-        // global in font_renderer) became a 72,200-element literal -- 144k MIR
-        // instructions that Cranelift spent ~20 minutes compiling (2026-10-05).
-        // Restricted to scalar element types (a fill shares ONE value, so a
-        // heap value would alias) and to side-effect-free value expressions
-        // (unrolling evaluates the value per element). `u8` keeps its existing
-        // literal path (byte-packed arrays are owned by a separate change), and
-        // so does `u64`: a full-width u64 fill reads back wrong through
-        // `rt_array_repeat` (`[u64::MAX; 300][0] == u64::MAX` was false while
-        // the unrolled literal is true -- the interpreter also answers false,
-        // a pre-existing divergence recorded in the bug doc).
-        let large_scalar_fill = size.is_some_and(|n| n >= Self::ARRAY_REPEAT_UNROLL_LIMIT)
-            && matches!(
-                elem_ty,
-                TypeId::I8
-                    | TypeId::I16
-                    | TypeId::I32
-                    | TypeId::I64
-                    | TypeId::U16
-                    | TypeId::U32
-                    | TypeId::F32
-                    | TypeId::F64
-                    | TypeId::BOOL
-            )
-            && Self::is_pure_scalar_repeat_value(&hir_value);
+            // Try to evaluate count as a compile-time constant
+            let size = match count {
+                Expr::Integer(n) => Some(*n as usize),
+                _ => None, // Dynamic size - will be runtime evaluated
+            };
 
-        // Generate array elements by repeating the value
-        // For compile-time known sizes, expand to explicit array
-        if let Some(n) = size.filter(|_| !large_scalar_fill) {
-            let hir_exprs: Vec<_> = std::iter::repeat_n(hir_value, n).collect();
-            Ok(HirExpr {
-                kind: HirExprKind::Array(hir_exprs),
-                ty: arr_ty,
-            })
-        } else {
-            // For dynamic sizes, lower count and use ArrayRepeat HIR node
-            let hir_count = self.lower_expr(count, ctx)?;
-            Ok(HirExpr {
-                kind: HirExprKind::ArrayRepeat {
-                    value: Box::new(hir_value),
-                    count: Box::new(hir_count),
-                },
-                ty: arr_ty,
-            })
-        }
+            let arr_ty = self.module.types.register(HirType::Array { element: elem_ty, size });
+
+            // A large repeat of a pure scalar stays a runtime `rt_array_repeat`
+            // fill instead of being unrolled: `[_KERN_EMPTY; 72200]` (a module
+            // global in font_renderer) became a 72,200-element literal -- 144k MIR
+            // instructions that Cranelift spent ~20 minutes compiling (2026-10-05).
+            // Restricted to scalar element types (a fill shares ONE value, so a
+            // heap value would alias) and to side-effect-free value expressions
+            // (unrolling evaluates the value per element). `u8` keeps its existing
+            // literal path (byte-packed arrays are owned by a separate change), and
+            // so does `u64`: a full-width u64 fill reads back wrong through
+            // `rt_array_repeat` (`[u64::MAX; 300][0] == u64::MAX` was false while
+            // the unrolled literal is true -- the interpreter also answers false,
+            // a pre-existing divergence recorded in the bug doc).
+            let large_scalar_fill = size.is_some_and(|n| n >= Self::ARRAY_REPEAT_UNROLL_LIMIT)
+                && matches!(
+                    elem_ty,
+                    TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::F32
+                        | TypeId::F64
+                        | TypeId::BOOL
+                )
+                && Self::is_pure_scalar_repeat_value(&hir_value);
+
+            // Generate array elements by repeating the value
+            // For compile-time known sizes, expand to explicit array
+            if let Some(n) = size.filter(|_| !large_scalar_fill) {
+                let hir_exprs: Vec<_> = std::iter::repeat_n(hir_value, n).collect();
+                Ok(HirExpr {
+                    kind: HirExprKind::Array(hir_exprs),
+                    ty: arr_ty,
+                })
+            } else {
+                // For dynamic sizes, lower count and use ArrayRepeat HIR node
+                let hir_count = self.lower_expr(count, ctx)?;
+                Ok(HirExpr {
+                    kind: HirExprKind::ArrayRepeat {
+                        value: Box::new(hir_value),
+                        count: Box::new(hir_count),
+                    },
+                    ty: arr_ty,
+                })
+            }
+        })();
+
+        self.expected_target_type = saved_target;
+        result
     }
 
     /// Repeat counts at or above this stay a runtime fill (see lower_array_repeat).
