@@ -1,4 +1,5 @@
-use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_reads_v1}
+use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_reads_v1,
+    visibility_manifest_roots_valid_v1, visibility_manifest_reads_prevalidated_v1}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_open_published_v1, compiler_source_authority_visibility_maps_v1}
 # Entry-closure walker for `native-build --entry-closure`, split out of
 # compile_targets.spl so the slim parse-shard entry
@@ -472,6 +473,8 @@ pub fn _native_build_entry_closure_chunked_v1(entry: text, source_dirs: [text],
     var resolve_cache: Dict<text, text> = {}
     var closure_source_dirs = _nb_normalize_source_dirs(frozen_source_dirs)
     var walk_library_mode = library_mode
+    val visibility_roots_prevalidated = frozen_snapshot and
+        visibility_manifest_roots_valid_v1(_nb_scv_snapshot_root_v1, frozen_source_dirs) == ""
     var qi = 0
     var timing_file_start_us: i64 = 0
     while qi < queue.len():
@@ -508,8 +511,12 @@ pub fn _native_build_entry_closure_chunked_v1(entry: text, source_dirs: [text],
             # Validate policy inputs in the same frozen snapshot, but do not
             # traverse their imports. Only actual source imports add compile
             # dependencies; the worker parses ancestor policy records alone.
-            val observations = visibility_manifest_reads_v1(f, _nb_scv_snapshot_root_v1,
-                frozen_source_dirs, manifest_snapshot_id, manifest_inventory, manifest_selected)
+            val observations = if visibility_roots_prevalidated:
+                visibility_manifest_reads_prevalidated_v1(f, _nb_scv_snapshot_root_v1,
+                    manifest_snapshot_id, manifest_inventory, manifest_selected)
+            else:
+                visibility_manifest_reads_v1(f, _nb_scv_snapshot_root_v1,
+                    frozen_source_dirs, manifest_snapshot_id, manifest_inventory, manifest_selected)
             if observations.is_err():
                 _cli_eprint(observations.unwrap_err())
                 return []
@@ -526,6 +533,8 @@ pub fn _native_build_entry_closure_chunked_v1(entry: text, source_dirs: [text],
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:
             _cli_eprint("[native-build] closure visited {result.len()} queued={queue.len()} file={f}")
+        elif result.len() % 500 == 0:
+            _cli_eprint("[native-build] closure progress visited={result.len()} queued={queue.len()}")
         # Import specs, resolution, and native-owner preference are the
         # driver worker walk's own functions (driver_resolve_closure_import_v1):
         # the two walks must bind every spelling to the same physical file.

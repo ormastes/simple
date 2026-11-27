@@ -22,7 +22,9 @@
 # receipt counts, cache hit/miss counts, witness-shadow evidence, the Phase-2
 # reuse ledger, and the whole schedule's module names (the frozen storage
 # registry must know modules that are lowered after it freezes).
-use compiler.driver.driver_build.build_outcome.{BuildOutcomeSet}
+use compiler.driver.driver_build.build_outcome.{BuildOutcomeSet,
+    build_outcome_abnormal_exit_label_v1, build_outcome_diagnostics_dir_v1,
+    build_outcome_write_diag_artifact_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 use compiler.driver.driver_build.smf_object_spool_v1.{SmfObjectSpoolV1, smf_object_spool_begin_v1,
     smf_object_spool_dir_v1}
@@ -211,3 +213,43 @@ pub fn native_staged_codegen_recovery_flush_due_v1(
 @allow(primitive_api)
 pub fn native_staged_initializer_capture_dead_v1(flushing: bool, shard_queue: text) -> bool:
     flushing and shard_queue != ""
+
+# Pending / in-flight module names for the active staged codegen batch:
+# covers unrecorded scheduled entries up to `batch_size` and any shard claims
+# not yet finalized in `module_objects`, so an abort names candidate modules.
+pub fn native_staged_codegen_pending_modules_v1(state: NativeStagedCodegenStateV1) -> [text]:
+    var pending: [text] = []
+    val recorded = state.module_outcomes.records.len()
+    val window = if state.batch_size > 0: state.batch_size else: state.scheduled_names.len()
+    var idx = recorded
+    while idx < state.scheduled_names.len() and pending.len() < window:
+        val candidate = state.scheduled_names[idx]
+        if candidate != "" and not pending.contains(candidate):
+            pending.push(candidate)
+        idx = idx + 1
+    for claimed in state.shard_claimed_names:
+        if claimed != "" and not state.module_objects.contains_key(claimed) and
+                not state.module_outcomes.has_path(claimed) and
+                not pending.contains(claimed):
+            pending.push(claimed)
+    pending
+
+# Attribute an abnormal exit during a staged codegen batch, naming the active
+# batch number, candidate modules, abort cause, and durable `diagnostics/` file.
+# reason: raw process exit status characterizes the abnormal staged batch termination
+@allow(primitive_api)
+pub fn native_staged_codegen_batch_attribute_v1(state: NativeStagedCodegenStateV1,
+        status: i64, stderr_text: text, diag_dir: text = "",
+        batch_modules: [text] = []) -> text:
+    val batch_num = state.batches_flushed + 1
+    val modules = if batch_modules.len() > 0:
+        batch_modules
+    else:
+        native_staged_codegen_pending_modules_v1(state)
+    val mod_text = if modules.len() == 0: "<unknown>" else: modules.join(", ")
+    val label = build_outcome_abnormal_exit_label_v1(status, false)
+    val target_dir = if diag_dir != "": diag_dir else: build_outcome_diagnostics_dir_v1(state.shard_queue)
+    val diag_path = build_outcome_write_diag_artifact_v1(
+        target_dir, "staged-batch-abort", mod_text, "staged-batch-{batch_num}",
+        status, false, "batch={batch_num} queue={state.shard_queue}", stderr_text)
+    "[staged-codegen] batch-abort batch={batch_num} {label} modules=[{mod_text}] diag={diag_path}"

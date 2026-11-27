@@ -89,11 +89,13 @@ fn build_outcome_is_failure(kind: BuildOutcomeKind) -> bool:
 # in this repo. By the shell convention a status of 128+N means "killed by signal
 # N", so 139 = SIGSEGV(11), 137 = SIGKILL(9), 134 = SIGABRT(6), 143 = SIGTERM(15).
 
-# Signal number encoded in a 128+N wait status, or 0 when the status is a plain
-# exit code.
+# Signal number encoded in a 128+N (or negative -(128+N) from rt_process_wait)
+# wait status, or 0 when the status is a plain exit code.
 fn build_outcome_signal_of_status(status: i64) -> i64:
     if status > 128 and status < 192:
         return status - 128
+    if status < -128 and status > -192:
+        return -status - 128
     0
 
 # Classify a raw wait status. `timed_out` is passed separately because a unit the
@@ -143,6 +145,8 @@ fn build_outcome_classify_status(status: i64, timed_out: bool) -> BuildOutcomeKi
 #     everything (`shown=N retained=N total=M`). Silent truncation is the same
 #     defect class as a silent failure.
 extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
 
 # Diagnostic lines kept verbatim per unit. Matches the existing display cap so
 # retained and shown are the same number and the summary can say so honestly.
@@ -496,3 +500,149 @@ fn build_outcome_text_list(items: [text]) -> text:
             out = out + ", "
         out = out + item
     out
+
+# Deterministic non-PID artifact hash (no `getpid()` or timestamps) so capture
+# filenames stay reproducible and comply with the PID-free artifact audit.
+fn _build_outcome_diag_key_v1(seed: text) -> text:
+    val alpha = "0123456789abcdef"
+    var h1: i64 = 2166136261
+    var h2: i64 = 33590361
+    var i: i64 = 0
+    while i < seed.byte_len():
+        val b = seed.byte_at(i) as i64
+        h1 = ((h1 * 16777619) ^ b) & 4294967295
+        h2 = ((h2 * 65599) + b + i) & 4294967295
+        i = i + 1
+    var out = ""
+    var shift = 28
+    while shift >= 0:
+        val n1 = (h1 >> shift) & 15
+        out = out + alpha.substring(n1, n1 + 1)
+        shift = shift - 4
+    shift = 28
+    while shift >= 0:
+        val n2 = (h2 >> shift) & 15
+        out = out + alpha.substring(n2, n2 + 1)
+        shift = shift - 4
+    out
+
+# Decode process exit/signal status into an explicit abort label.
+# Handles shell 128+N (134 SIGABRT), rt_process_wait -(128+N) (-134),
+# raw negative signals (-6), and 8-bit wrapped exit 122 ((-134) & 0xff).
+# reason: build exit status and timeout flag mapped to human-readable abort label
+@allow(primitive_api)
+pub fn build_outcome_abnormal_exit_label_v1(status: i64, timed_out: bool) -> text:
+    if timed_out:
+        return "TIMEOUT (killed after deadline, exit={status})"
+    if status == -134 or status == 134 or status == -6:
+        return "SIGABRT (signal 6, exit={status})"
+    if status == 122:
+        return "EXIT_122 (possible 8-bit wrapped SIGABRT signal 6)"
+    if status == -139 or status == 139 or status == 117 or status == -11:
+        return "SIGSEGV (signal 11, exit={status})"
+    if status == -137 or status == 137 or status == 119 or status == -9:
+        return "SIGKILL (signal 9, exit={status})"
+    if status == -143 or status == 143 or status == 113 or status == -15:
+        return "SIGTERM (signal 15, exit={status})"
+    if status > 128 and status < 192:
+        return "SIGNAL_{status - 128} (exit={status})"
+    if status < -128 and status > -192:
+        return "SIGNAL_{-status - 128} (exit={status})"
+    if status == 0:
+        return "EMPTY_OBJECT (exit=0)"
+    "EXIT_{status}"
+
+# Extract up to the last `max_lines` non-empty lines from captured worker output.
+# reason: bounded diagnostic line slicing parameter and text output
+@allow(primitive_api)
+pub fn build_outcome_tail_lines_v1(raw_text: text, max_lines: i64) -> text:
+    if raw_text == "" or max_lines <= 0:
+        return ""
+    var non_empty: [text] = []
+    for line in raw_text.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            non_empty.push(trimmed)
+    if non_empty.len() == 0:
+        return ""
+    val start = if non_empty.len() > max_lines: non_empty.len() - max_lines else: 0
+    var kept: [text] = []
+    var idx = start
+    while idx < non_empty.len():
+        kept.push(non_empty[idx])
+        idx = idx + 1
+    kept.join("\n")
+
+fn _build_outcome_is_ephemeral_stage_path_v1(path: text) -> bool:
+    if path == "":
+        return false
+    path.contains("simple-codegen-pool") or path.starts_with("/tmp/") or
+        path.starts_with("/var/tmp/") or path.contains("/Temp/") or
+        path.contains("\\Temp\\") or path.contains("/AppData/Local/Temp")
+
+pub fn build_outcome_diagnostics_dir_v1(ledger_or_root: text = "") -> text:
+    val native_dir = (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_DIAG_DIR") ?? "").trim()
+    if native_dir != "":
+        return native_dir
+    val build_dir = (sosix_env_get_nullable("SIMPLE_BUILD_DIAG_DIR") ?? "").trim()
+    if build_dir != "":
+        return build_dir
+    val root = ledger_or_root.trim()
+    if root != "" and not _build_outcome_is_ephemeral_stage_path_v1(root):
+        return "{root}/diagnostics"
+    val cache_dir = (sosix_env_get_nullable("SIMPLE_NATIVE_CACHE_DIR") ??
+        (sosix_env_get_nullable("SIMPLE_CACHE_DIR") ?? "")).trim()
+    if cache_dir != "" and not _build_outcome_is_ephemeral_stage_path_v1(cache_dir):
+        return "{cache_dir}/diagnostics"
+    ".simple/build/diagnostics"
+
+# Write one bounded diagnostic artifact into `diag_dir` when a worker or
+# unit compilation aborts. Filename is keyed deterministically without PIDs.
+# reason: status code and timeout scalar characterize abnormal child termination
+@allow(primitive_api)
+pub fn build_outcome_write_diag_artifact_v1(diag_dir: text, prefix: text,
+        module_name: text, slot_label: text, status: i64, timed_out: bool,
+        detail_header: text, stderr_text: text) -> text:
+    val target_dir = if diag_dir != "": diag_dir else: build_outcome_diagnostics_dir_v1("")
+    if not rt_dir_create_all(target_dir):
+        return ""
+    val label = build_outcome_abnormal_exit_label_v1(status, timed_out)
+    val tail = build_outcome_tail_lines_v1(stderr_text, 64)
+    val mod_text = if module_name != "": module_name else: "<unknown-module>"
+    val key = _build_outcome_diag_key_v1("{prefix}|{mod_text}|{slot_label}|{status}|{detail_header}|{tail}")
+    val path = "{target_dir}/{prefix}-{key}.log"
+    var body = "module: {mod_text}\n"
+    if slot_label != "":
+        body = body + "worker: {slot_label}\n"
+    body = body + "abort: {label}\n"
+    if detail_header != "":
+        body = body + "detail: {detail_header}\n"
+    if tail != "":
+        body = body + "stderr_tail:\n{tail}\n"
+    else:
+        body = body + "stderr_tail: <empty>\n"
+    if rt_file_write_text(path, body): path else: ""
+
+# Capture unit stderr/diagnostic attribution into `diagnostics/` for parallel
+# and `--threads 1` in-process lanes.
+# reason: unit id, exit status, and timeout flag describe the failing unit
+@allow(primitive_api)
+pub fn build_outcome_capture_worker_stderr_v1(source_path: text, unit_id: i64,
+        status: i64, timed_out: bool, stderr_text: text, diag_dir: text = "") -> text:
+    build_outcome_write_diag_artifact_v1(
+        diag_dir, "worker-abort", source_path, "unit-{unit_id}",
+        status, timed_out, "", stderr_text)
+
+# Canonical single-line attribution shared across `--threads 1` in-process,
+# parallel worker pool, and MIR shard abort reporting paths.
+# reason: unit id, exit status, and timeout flag format parity attribution line
+@allow(primitive_api)
+pub fn build_outcome_unit_attribution_v1(unit_id: i64, source_path: text,
+        status: i64, timed_out: bool, diag_path: text, detail: text) -> text:
+    val label = build_outcome_abnormal_exit_label_v1(status, timed_out)
+    var line = "[build-diag] unit={unit_id} module={source_path} {label}"
+    if diag_path != "":
+        line = line + " diag={diag_path}"
+    if detail != "":
+        line = line + " detail={detail}"
+    line

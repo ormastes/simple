@@ -1,6 +1,6 @@
 # Stage 2 native-build: codegen worker dies with signal 6 and no diagnostic (2026-11-12)
 
-Status: OPEN (filed, not fixed). Severity P1 (the full-CLI closure contains the modules that
+Status: fix-implemented-verification-pending (`waiting-for:` aarch64 Stage 2 Cranelift repro; prior status: OPEN, 2026-11-12). Severity P1 (the full-CLI closure contains the modules that
 triggered it; any `compiler_cli_build` row is exposed, and the failure carries no diagnostic).
 
 ## Symptom
@@ -55,3 +55,17 @@ The deletion variant (PR #8510) at the same sha links (rc=0, 707 s, 333 modules)
    main process stderr with the module name.
 2. Capture codegen-worker stderr into `diagnostics/` on abnormal exit.
 3. Bisect the batch by module once named.
+
+## 2026-11-27 Fix Implemented (`fix-implemented-verification-pending`)
+Implemented deterministic abnormal-exit stderr capture, module/batch attribution, and `--threads 1` in-process diagnostic parity across `src/compiler/80.driver/driver_build/**`, `src/compiler/80.driver/driver_mir_shard*`, and `src/compiler/80.driver/driver_aot_pipeline.spl`:
+- `src/compiler/80.driver/driver_build/build_outcome.spl`:
+  - Extended `build_outcome_signal_of_status` to decode negative `-(128+N)` wait statuses alongside `128+N`.
+  - Added shared non-PID deterministic diagnostic helpers: `build_outcome_abnormal_exit_label_v1` (handling SIGABRT `-134`/`134`/`122`/`-6`, SIGSEGV, SIGKILL, SIGTERM, timeout, empty object), `build_outcome_tail_lines_v1`, `build_outcome_diagnostics_dir_v1` (skipping ephemeral `stage_root`/temp paths and defaulting to persistent `.simple/build/diagnostics` outside `stage_root` when env overrides are unset), `build_outcome_write_diag_artifact_v1`, `build_outcome_capture_worker_stderr_v1`, and `build_outcome_unit_attribution_v1`.
+- `src/compiler/80.driver/driver_build/native_codegen_pool_v1.spl`:
+  - Wired `native_codegen_pool_run_v1` to persist abnormal-exit stderr + module attribution via `native_codegen_diagnostics_dir_v1` into a persistent diagnostics dir outside `stage_root` (never inside `stage_root` or nested `stage_root/ledger`) BEFORE `stage_root` cleanup via `native_codegen_capture_abnormal_stderr_v1`, emit immediate `[codegen-pool] abnormal-exit` + `stderr-tail` lines, and record `abort_label`/`stderr_diag_path`/`stderr_excerpt` via `native_codegen_receipt_encode_with_diag_v1`.
+- `src/compiler/80.driver/driver_build/parallel.spl`:
+  - Unified `--threads 1` deterministic and batch error accounting in `_record_compile_outcome` with canonical attribution and `diagnostics/` capture, and made `build_supervised` emit unit attribution + `diagnostics/` capture unconditionally on abnormal exit.
+- `src/compiler/80.driver/driver_aot_pipeline.spl`, `src/compiler/80.driver/driver_build/native_staged_codegen.spl`, `native_mir_shard.spl`, `native_mir_fork_v1.spl`, `native_file_worker_v1.spl`, and `src/compiler/80.driver/driver_mir_shard_hir_residency_v1.spl`:
+  - Wired `native_staged_codegen_batch_attribute_v1` into `CompilerDriver.native_staged_codegen_flush_v1` on staged batch failures, registry rejections, and withheld batches.
+  - Added pre-seal in-flight module claim attribution + HIR residency context + `diagnostics/` capture in MIR fork/shard workers (`native_mir_shard_in_flight_modules_v1`, `native_mir_shard_attribute_abort_v1` routed through `native_mir_shard_diagnostic_parity_v1`, `mir_shard_hir_residency_abort_context_v1`), and enriched `mir-shard` early exit receipts with `diagnostics/` capture and `SIMPLE_MIR_SHARDING=0 SIMPLE_NATIVE_BUILD_THREADS=1` rerun parity.
+- **waiting-for:** live aarch64 Stage 2 Cranelift `native-build` repro (`--threads 2` and `--threads 1` parity) of `src/app/test_runner_new/main.spl` confirming the aborting module attribution and `diagnostics/` stderr file end-to-end.

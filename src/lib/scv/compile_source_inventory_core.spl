@@ -5,11 +5,11 @@
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1, scv_cost_elapsed_v1}
 use std.common.text_whitespace.{split_whitespace}
-use std.common.text_bytes.{text_to_utf8_bytes}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
 
 pub val COMPILE_SOURCE_INVENTORY_SCHEMA_V1: i64 = 1
 pub val COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
+pub val COMPILE_SOURCE_INVENTORY_EMPTY_SHA256_V1: text = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 struct CompileSourceInventoryEntryV1:
     source_identity: text
@@ -133,9 +133,9 @@ fn compile_source_inventory_whole_text_canonical_v1(content: text) -> text:
         var pieces = body.replace("\n#", "\n\n#").split("\n\n")
         var index = 1
         while index < pieces.len():
-            var rows = pieces[index].split("\n")
-            rows[0] = ""
-            pieces[index] = rows.join("\n")
+            val piece = pieces[index]
+            val nl = piece.index_of("\n")
+            pieces[index] = if nl < 0: "" else: piece.substring(nl)
             index = index + 1
         body = pieces.join("")
     # Every kept line is non-empty and edge-trimmed, so trim removes exactly
@@ -159,7 +159,9 @@ fn compile_source_inventory_whole_text_rows_v1(canonical: text, prefixes: [text]
     var rows: [text] = []
     var index = 1
     while index < pieces.len():
-        rows.push(pieces[index].split("\n")[0])
+        val piece = pieces[index]
+        val nl = piece.index_of("\n")
+        rows.push(if nl < 0: piece else: piece.substring(0, nl))
         index = index + 1
     rows.join("\n")
 
@@ -288,26 +290,22 @@ fn compile_source_inventory_text_valid_v1(value: text) -> bool:
         not value.contains("|")
 
 fn compile_source_inventory_digest_valid_v1(value: text) -> bool:
-    # One bulk byte copy instead of 64 `byte_at` calls that each re-validated
-    # the string twice; every entry is checked several times per cold
-    # inventory (initial batch, encode, publication readback, admission).
-    if value.len() != 64:
+    # Native byte-length + hex-strip check avoids 64 interpreter loop iterations
+    # and `[u8]` allocations per facet across cold init, encode, readback, and admission.
+    if value == COMPILE_SOURCE_INVENTORY_EMPTY_SHA256_V1:
+        return true
+    if value.byte_len() != 64:
         return false
-    val raw = text_to_utf8_bytes(value)
-    if raw.len() != 64u64:
-        return false
-    var index = 0
-    while index < 64:
-        val ch = raw[index] as i64
-        if not ((ch >= 48 and ch <= 57) or (ch >= 97 and ch <= 102)):
-            return false
-        index = index + 1
-    true
+    value.replace("0", "").replace("1", "").replace("2", "").replace("3", "")
+        .replace("4", "").replace("5", "").replace("6", "").replace("7", "")
+        .replace("8", "").replace("9", "").replace("a", "").replace("b", "")
+        .replace("c", "").replace("d", "").replace("e", "").replace("f", "") == ""
 
 fn compile_source_inventory_path_valid_v1(value: text) -> bool:
     compile_source_inventory_text_valid_v1(value) and
         not value.starts_with("/") and not value.contains("\\") and
-        not value.contains("//") and not value.split("/").contains("..") and
+        not value.contains("//") and
+        (not value.contains("..") or not value.split("/").contains("..")) and
         (value.ends_with(".spl") or value == "simple.sdn" or
             value.ends_with("/simple.sdn"))
 
@@ -384,15 +382,9 @@ export compile_source_inventory_plain_checkout_v1
 # allocation-order inventory that failed its own canonical re-encode check
 # (inventory-noncanonical on every Windows stage-2 cold init, 2026-09-25).
 fn compile_source_inventory_identity_cmp_v1(left: text, right: text) -> i64:
-    val shared = if left.byte_len() < right.byte_len(): left.byte_len() else: right.byte_len()
-    var index = 0
-    while index < shared:
-        val a = left.byte_at(index) as i64
-        val b = right.byte_at(index) as i64
-        if a != b:
-            return if a < b: -1 else: 1
-        index = index + 1
-    if left.byte_len() == right.byte_len(): 0 elif left.byte_len() < right.byte_len(): -1 else: 1
+    # Native string ordering compares UTF-8 bytes lexicographically without
+    # per-character interpreter `byte_at` loops.
+    if left == right: 0 elif left < right: -1 else: 1
 
 fn compile_source_inventory_sort_v1(
     values: [CompileSourceInventoryEntryV1]
@@ -425,16 +417,16 @@ fn compile_source_inventory_sort_v1(
                 # Take the right run only when strictly smaller: ties keep
                 # the left (earlier) entry first.
                 if compile_source_inventory_identity_cmp_v1(sorted[j].source_identity, sorted[i].source_identity) < 0:
-                    merged = merged.push(sorted[j])
+                    merged.push(sorted[j])
                     j = j + 1
                 else:
-                    merged = merged.push(sorted[i])
+                    merged.push(sorted[i])
                     i = i + 1
             while i < middle:
-                merged = merged.push(sorted[i])
+                merged.push(sorted[i])
                 i = i + 1
             while j < stop:
-                merged = merged.push(sorted[j])
+                merged.push(sorted[j])
                 j = j + 1
             left = stop
         sorted = merged
@@ -459,10 +451,10 @@ fn compile_source_inventory_initial_events_v1(
             event.source_identity, event.content_digest, event.semantic_digest,
             event.export_digest, event.initializer_digest, event.provider_digest,
             event.byte_count)
-        if not compile_source_inventory_entry_valid_v1(entry):
+        if not compile_source_inventory_entry_valid_unscoped_v1(entry):
             return nil
         seen[event.source_identity] = true
-        entries = entries.push(entry)
+        entries.push(entry)
     Some(CompileSourceInventoryV1(1, events.len(), compile_source_inventory_sort_v1(entries)))
 
 fn compile_source_inventory_entry_valid_v1(
@@ -518,15 +510,11 @@ fn compile_source_inventory_encode_v1(inventory: CompileSourceInventoryV1) -> te
     ]
     var previous = ""
     for entry in entries:
-        if (not compile_source_inventory_entry_valid_v1(entry) or
+        if (not compile_source_inventory_entry_valid_unscoped_v1(entry) or
                 entry.source_identity == previous):
             return ""
         previous = entry.source_identity
-        rows = rows.push([
-            entry.source_identity, entry.content_digest, entry.semantic_digest,
-            entry.export_digest, entry.initializer_digest,
-            entry.provider_digest, entry.byte_count.to_text()
-        ].join("|"))
+        rows.push("{entry.source_identity}|{entry.content_digest}|{entry.semantic_digest}|{entry.export_digest}|{entry.initializer_digest}|{entry.provider_digest}|{entry.byte_count}")
     rows.join("\n")
 
 fn compile_source_inventory_digest_v1(inventory: CompileSourceInventoryV1) -> text:
@@ -598,6 +586,7 @@ fn compile_source_inventory_apply_event_v1(
 
 export COMPILE_SOURCE_INVENTORY_SCHEMA_V1
 export COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1
+export COMPILE_SOURCE_INVENTORY_EMPTY_SHA256_V1
 export CompileSourceInventoryEntryV1
 export CompileSourceEventV1
 export CompileSourceGitChangeV1
@@ -625,6 +614,7 @@ export compile_source_inventory_snapshot_cache_root_v1
 export compile_source_inventory_sort_v1
 export compile_source_inventory_initial_events_v1
 export compile_source_inventory_entry_valid_v1
+export compile_source_inventory_entry_valid_unscoped_v1
 export compile_source_inventory_encode_v1
 export compile_source_inventory_digest_v1
 export compile_source_inventory_find_v1
