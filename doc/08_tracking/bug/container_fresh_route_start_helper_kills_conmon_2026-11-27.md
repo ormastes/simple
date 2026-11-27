@@ -1,6 +1,7 @@
 # Container fresh route: retiring the start helper kills the workload's conmon
 
-- **Status:** BUILT IN SOURCE 2026-11-27 (section "Built"), the whole chain in one commit. Proven by unit
+- **Status:** BUILT IN SOURCE 2026-11-27 (section "Built"), the whole chain in one commit; workspace starts
+  added the same day (section "Workspace starts"). Proven by unit
   specs, a C selfcheck on real cgroup v2 groups and a host emulation with real podman. **Not run in the
   guest**: no installed custody on this host, and the installed broker has to be rebuilt first.
 - **Component:** Linux Podman fresh install route, helper containment
@@ -247,16 +248,74 @@ The runtime move itself is proven by `src/runtime/test/runtime_linux_group_resid
 (`sh scripts/check/check-linux-group-residue-move.shs`, six cases on real groups: moved and thawed; leader
 failed; not asked; cancelled; name already taken; frozen group still killable).
 
+## Workspace starts (2026-11-27, follow-up)
+
+The gap listed under "Open" until this change: `linux_fresh_workspace_project_launch_v3` is a separate
+projection and passed the base profile through, so a workspace container that outlived its start helper
+lost its monitor. Source only, like the rest; not run in the guest.
+
+- **Request.** The workspace projection now sets `leader_residue_mode` for `Start` and clears it for every
+  other action, whatever the base carried, in the same statement as the plain projection. Before, a mode
+  carried by a caller's template would have passed through to every workspace helper.
+- **Record and observe: nothing new.** A workspace action runs through the same
+  `machine_fresh_workload_begin_v3` / `machine_fresh_workload_progress_v3` (the workspace workflow calls
+  both), so `capture_v2` records the group from the captured launch and the `start` completion observes
+  its device and inode.
+- **Fifth retirement site.** `machine_workspace_settle_v3` retires the engine group after its settled early
+  return and before both workspace settles (plain and retained). Both pass the `prepare_settlement_v2`
+  gate, and the retained one commits its native retirement before reaching that gate, so the retirement
+  has to come first; a refusal there writes nothing, which is what the service stages
+  (`host_linux_service_agent_v4`, `host_linux_service_remote_build_v4`, stage `settle`) already assume when
+  they resume on the next call. The order is unchanged: the workspace Destroy runs the owner's own Stop,
+  Remove and Absence. The transfer `close_v2` attempt (site 3) is shared. `close_workload_v3` makes no
+  attempt of its own and needs none: it refuses through the same gate while a group is recorded, and a
+  group is only still recorded when the settle that retires it has not passed.
+- **A settle called before Destroy finished** now refuses `machine-fresh-workload-engine-group-store-live`
+  (or `...-helper-active` while a helper is live) when a group is recorded, where it refused
+  `machine-fresh-workload-absence-unproven` before. All are plain refusals and nothing is latched.
+
+### Other start-like paths
+
+| Path | Leaves a long-lived process under a helper group? | Done |
+|---|---|---|
+| Workspace start, TTY arm (`create --tty --interactive`, agent) | Yes, the same `start -- <id>`: `catatonit conmon` at leader reap. | Covered by the request above. |
+| Workspace start, no-TTY arm (remote build) | Yes, the same. | Covered. |
+| Plain start with build roots or `--tty` (#12209, `workloadBuildRootPrefix`) | Yes. | Already covered: it goes through `linux_fresh_workload_project_launch_v2`. |
+| Workspace primary attach (`attach --detach-keys= --sig-proxy=false`) | No. The leader lives as long as the transport and forks no monitor. It is built on the Inspect projection (`fresh-workspace-primary-attach-inspect-identity-required`), which clears the mode. | Pinned, not changed. |
+| `wait` / `logs` probes | No. Finite readers built on a verified Inspect projection. | Unchanged. |
+| Secondary exec, TTY or not (`LinuxOciEngineExecOwnerV3`) | No helper group at all: it talks to the installed engine socket (`local_unix_connect_v1`). The exec session's monitor belongs to that service. | Does not apply. |
+| Epoch startup V1 (`linux_fresh_epoch_project_launch_v1`) | Its operand allow-list admits `start` and `exec` from the caller's template, and it never asks. Its entry `local_container_service_start_fresh_epoch_v1` takes the template from its caller and has no caller in `src/` today. | **Not changed, open.** No owner there holds or retires an engine group, so asking would leave a group nobody kills; `start_provider_v1` is a pinned body. If a caller ever starts a container through it, that container loses its monitor as before. |
+
+### Host measurement (podman 4.9.3 rootless, uid 1000, busybox:1.36, same emulation)
+
+The route's create flags plus the workspace ones (`--userns=keep-id --user=1000:1000 --workdir /workspace
+--mount type=bind,...,rw,nosuid,nodev,bind-propagation=rprivate`), `sleep 300`. Everything was removed.
+
+| Case | Result |
+|---|---|
+| TTY arm, start helper group killed at reap (before) | `start` 0, left `catatonit conmon`; `inspect`, `stop`, `rm`, absence all exit 1, `invalid internal status`. |
+| TTY arm, residue moved | 2 members moved, helper group `populated 0`; `inspect` running (`tty=true stdin=true`), `stop`, `rm` exit 0, absence 125; engine group then held `catatonit`, killed, `populated 0`, removed. |
+| No-TTY arm, residue moved | The same (`tty=false stdin=false`). |
+| TTY arm, residue moved, then an attach helper killed by `cgroup.kill` while attached | The attach group held one `podman`; after its kill `inspect` running, `stop`, `rm` 0, absence 125. |
+
+### Proof
+
+`test/01_unit/lib/container/linux_fresh_workspace_start_residue_v3_spec.spl` executes the production
+workspace projection (Start asks and yields the thirteenth word; every other action is cleared and a plain
+base stays byte-identical) and pins the settle order and the paths in the table. Red before the source
+change (2 of 6), green after (6 of 6). `machine_fresh_engine_residue_containment_v3_spec.spl` link 2a and
+`machine_fresh_workload_engine_group_v3_spec.spl` (five sites) were updated in the same change.
+
 ## Open
 
 - **Guest.** Nothing here was run in the guest. It needs the broker and runtime rebuilt and installed
   (the wire field is refused by an older broker), then `podman_shared_api_live_spec.spl`.
+  The workspace half needs a workspace run on top of that: an agent (TTY) or remote-build workload that is
+  still running when its start helper is reaped, then Stop, Destroy and the `settle` stage.
 - **The owner-side Simple code is not executed by any spec.** The seed cannot run the stateful owners
   (their first step is a native process-origin check, `unknown extern function: gettid`). The reducers and
   the protocol are executed; the lifecycle, effects, custody and holder are loaded and source-pinned only.
-- **Workspace workloads are not covered.** `linux_fresh_workspace_project_launch_v3` is a separate
-  projection and does not ask for the move, so a workspace container that outlives its start helper still
-  loses its monitor.
+- ~~Workspace workloads are not covered.~~ Closed in source the same day, see "Workspace starts".
 - **A failed Stop** leaves a store that says running. Destroy then refuses
   (`machine-fresh-workload-engine-group-store-live` is never reached; the Stop refusal comes first) and
   the group is retained with the workload. Whether the route should repair the store is undecided.
