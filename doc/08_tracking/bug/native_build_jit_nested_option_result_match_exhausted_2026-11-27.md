@@ -54,3 +54,16 @@ Fix: the nested arm now also takes the presence/absence path when the slot's sta
 enum or a `T?` pointer (`slot_is_builtin_option`), unless the pointee is an enum owning that variant name.
 Regression test: `compiler/tests/jit_nested_option_result_user_none_enum_match.rs`.
 Both inventory_events.spl sites (247 expression form, 474 statement-in-loop form) share the same lowering.
+
+## Review follow-up (2026-11-27)
+
+- The `inventory_events.spl` workarounds (`case Ok(item): if item.is_some()`, two sites) STAY until seeds older than the
+  fix (`simple-local-20261127s` and later) are retired; older seeds still run that code.
+- `Result<Mode?, text>` where `Mode` itself owns a `None` variant was still broken by the first version of the fix (it
+  excluded pointers to such enums; with `Ok(None)` first, `Ok(Some(Mode.Fast))` silently took the None arm). `rt_is_none`
+  checks the enum id, so the exclusion bought nothing: the pointer branch is now gated on
+  `types.optional_inner(ty).is_some()` (source-declared `T?` only; a genuine pointer never gets Optional semantics).
+- Tests now cover `Result<Ev?>`, `Result<Mode?>`, `Result<Option<Mode>>`, a `Some`-declaring decoy and the statement-in-loop
+  form. Pre-fix, the statement-in-loop, `Result<Ev?>` and `Result<Mode?>` cases abort the test process; the `Some`-decoy case
+  passes pre-fix as well (it is a guard, not a discriminator).
+- Remaining holes that reproduce identically on seeds r and s: `doc/08_tracking/bug/jit_nested_optional_pattern_holes_2026-11-27.md`.

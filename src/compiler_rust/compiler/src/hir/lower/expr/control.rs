@@ -1923,7 +1923,7 @@ impl Lowerer {
                 // decides first: a builtin-`Option` slot is always presence/absence.
                 // Bug: doc/08_tracking/bug/native_build_jit_nested_option_result_match_exhausted_2026-11-27.md
                 if self.is_builtin_optional_variant_name(variant)
-                    || ((variant == "Some" || variant == "None") && self.slot_is_builtin_option(slot_ty, variant))
+                    || ((variant == "Some" || variant == "None") && self.slot_is_builtin_option(slot_ty))
                 {
                     let probe = if variant == "None" { "rt_is_none" } else { "rt_is_some" };
                     let presence = HirExpr {
@@ -2489,11 +2489,12 @@ impl Lowerer {
         }
     }
 
-    /// Is a slot of type `ty` an optional (`T?`) in nil-boxed form for variant
-    /// `variant` (`Some`/`None`)? True for the builtin generic `Option<T>` enum
-    /// (not a user enum named `Option`) and for the `T?` pointer form, unless
-    /// that pointer's pointee is itself an enum declaring `variant`.
-    pub(crate) fn slot_is_builtin_option(&self, ty: TypeId, variant: &str) -> bool {
+    /// Is a slot of type `ty` an optional (`T?`) in nil-boxed form? True for the
+    /// builtin generic `Option<T>` enum (not a user enum named `Option`) and for
+    /// a source-declared `T?` (`optional_inner`; a genuine pointer never gets
+    /// Optional semantics). `rt_is_none` checks the enum id, so `T` may itself
+    /// be an enum that owns a `None`/`Some` variant.
+    pub(crate) fn slot_is_builtin_option(&self, ty: TypeId) -> bool {
         match self.module.types.get(ty) {
             Some(HirType::Enum { name, variants, generic_params, .. }) => {
                 name == "Option"
@@ -2502,10 +2503,7 @@ impl Lowerer {
                     && variants.iter().any(|(n, p)| n == "Some" && p.is_some())
                     && variants.iter().any(|(n, p)| n == "None" && p.is_none())
             }
-            Some(HirType::Pointer { inner, .. }) => !matches!(
-                self.module.types.get(*inner),
-                Some(HirType::Enum { variants, .. }) if variants.iter().any(|(n, _)| n == variant)
-            ),
+            Some(HirType::Pointer { .. }) => self.module.types.optional_inner(ty).is_some(),
             _ => false,
         }
     }
