@@ -384,9 +384,26 @@ fn has_visible_overflow_clip(styles: [Style]) -> bool:
         i = i + 1
     false
 
+# A `<textarea>` clips its value at its padding box like an overflow
+# container (Chrome 159 UA `overflow:auto`): a value taller than the rows
+# never paints over the bottom border or below the control.
+fn _clips_children(nd: HNode, st: Style) -> bool:
+    (st.overflow_hidden or st.overflow_auto_y or nd.tag == "textarea") and st.display != "none"
+
+fn _has_child_clip(nodes: [HNode], styles: [Style]) -> bool:
+    if has_visible_overflow_clip(styles):
+        return true
+    var i = 0
+    # cpu-lane-loop-ok: existence scan for a textarea; returns on the first hit, bound is node count, once per paint
+    while i < nodes.len():
+        if nodes[i].tag == "textarea" and styles[i].display != "none":
+            return true
+        i = i + 1
+    false
+
 fn build_ancestor_clip_cache(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fbw: i32, fbh: i32) -> PaintClipCache:
     val default_clip = ClipRect(x0: 0, y0: 0, x1: fbw, y1: fbh)
-    if not has_visible_overflow_clip(styles):
+    if not _has_child_clip(nodes, styles):
         return PaintClipCache(has_node_clips: false, default_clip: default_clip, clips: [])
     val node_count = nodes.len()
     var clips: [ClipRect] = [default_clip; node_count]
@@ -398,7 +415,7 @@ fn build_ancestor_clip_cache(nodes: [HNode], styles: [Style], bx: [i32], by: [i3
         if p >= 0:
             clip = clips[p]
             val pst = styles[p]
-            if (pst.overflow_hidden or pst.overflow_auto_y) and pst.display != "none":
+            if _clips_children(nodes[p], pst):
                 val cx0 = bx[p] + pst.border_l
                 val cy0 = by[p] + pst.border_t
                 val cx1 = bx[p] + bw[p] - pst.border_r

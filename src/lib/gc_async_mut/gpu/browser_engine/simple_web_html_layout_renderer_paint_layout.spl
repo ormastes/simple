@@ -1985,6 +1985,28 @@ fn _html_draw_ir_edge_device_dy(nodes: [HNode], boxes: LayoutResult, owner: i32)
 # box (an svg viewport, an image box) and moves with the node. Carried as
 # `device-clip` = "dl,dt,dr,db" device px, which
 # `draw_ir_composition_at_device_scale` applies and strips.
+# Device-px delta of a clip's right (x_axis) or bottom edge owned by `own`.
+# A textarea edge also moves by the textarea's device-px size delta (it is
+# rows x its k-scaled line height tall, not k x its CSS height), but never past
+# the device edge the enclosing clip applies to its own children: k x its CSS
+# edge plus its owner's move, with no device size delta, since a non-textarea
+# owner's edge is emitted with `moved` only (a wrapper whose CSS edge is just
+# below the textarea). Textareas only: no Chrome oracle pins other overflow
+# boxes, whose fractional size layout drops anyway
+# (`overflow_hidden_fractional_clip_4x_chrome159_spec`).
+fn _html_draw_ir_far_edge_delta(nodes: [HNode], boxes: LayoutResult, clip_cache: PaintClipCache, edge_owner: [i32], own: i32, o: i32, edge_css: i32, x_axis: bool) -> i32:
+    val moved = if x_axis: _html_draw_ir_edge_device_dx(nodes, own) else: _html_draw_ir_edge_device_dy(nodes, boxes, own)
+    if own < 0 or own == o or nodes[own].tag != "textarea":
+        return moved
+    val grown = moved + (if x_axis: box_device_extra_w_at(own) else: box_device_extra_h_at(own))
+    val anc = paint_clip_at(clip_cache, own)
+    val a = edge_owner[own * 4 + (if x_axis: 2 else: 3)]
+    val a_moved = if x_axis: _html_draw_ir_edge_device_dx(nodes, a) else: _html_draw_ir_edge_device_dy(nodes, boxes, a)
+    val k = layout_device_scale()
+    val a_edge = if x_axis: anc.x1 else: anc.y1
+    val limit = k * a_edge + a_moved - k * edge_css
+    if grown > limit: limit else: grown
+
 fn _html_draw_ir_device_clip(commands: [DrawIrCommand], owners: [i32], nodes: [HNode], boxes: LayoutResult, clip_cache: PaintClipCache) -> [DrawIrCommand]:
     val n = nodes.len() as i32
     if layout_device_scale() <= 1 or (not box_device_dx_any() and boxes.device_top.len() != nodes.len()):
@@ -2006,8 +2028,8 @@ fn _html_draw_ir_device_clip(commands: [DrawIrCommand], owners: [i32], nodes: [H
             if ox0 >= 0 or oy0 >= 0 or ox1 >= 0 or oy1 >= 0:
                 val dl = _html_draw_ir_edge_device_dx(nodes, ox0)
                 val dt = _html_draw_ir_edge_device_dy(nodes, boxes, oy0)
-                val dr = _html_draw_ir_edge_device_dx(nodes, ox1)
-                val db = _html_draw_ir_edge_device_dy(nodes, boxes, oy1)
+                val dr = _html_draw_ir_far_edge_delta(nodes, boxes, clip_cache, edge_owner, ox1, o, r.x + r.width, true)
+                val db = _html_draw_ir_far_edge_delta(nodes, boxes, clip_cache, edge_owner, oy1, o, r.y + r.height, false)
                 if dl != 0 or dt != 0 or dr != 0 or db != 0:
                     var style = command.computed_style
                     style.push(draw_ir_style_prop("device-clip", "{dl},{dt},{dr},{db}"))

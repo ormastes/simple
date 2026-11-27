@@ -5712,3 +5712,57 @@ pins the border-box form, the default-UA gap is unfiled.
 - **k = 4 oracle.** The spec's `_last_red_k4` helper reads the last red device
   column on a 420x40 CSS page at scale 4. Chrome is screenshotted with
   `--force-device-scale-factor=4` and row 40 is scanned.
+
+
+## 2026-11-26 — textarea value clipped at the padding box (1x and 4x)
+
+- **A textarea is a clipping box.** Chrome's UA sheet gives `<textarea>`
+  `overflow:auto`, so a value taller than its rows is cut at the padding box.
+  Simple's `Style` has no overflow flag for it, and setting one would also
+  change layout (baseline, BFC). Paint-only fix: `build_ancestor_clip_cache`
+  (paint_raster) treats a `textarea` parent like an overflow box
+  (`_clips_children`), and `_has_child_clip` keeps the clip cache on when a
+  page has a textarea but no overflow box.
+- **4x trap: the clip's bottom edge must follow the box's device height.**
+  The first fix cut line 3 at device row 220 while Chrome keeps its ink to
+  row 225. Clip rects are CSS px x k, but a form control's device height is
+  not k x its CSS height (`device-extra-height`). `_html_draw_ir_device_clip`
+  (paint_layout) now adds `box_device_extra_w_at` / `box_device_extra_h_at`
+  of the clipping box to its right / bottom edge.
+- Spec: `textarea_value_clip_chrome159_spec` (1x border row + blank row
+  below; 4x blank row below + kept line-3 ink as an over-clip guard).
+  Fixture diff vs Chrome (12 x `lllll`): 1x rows 56+ now exact; 4x
+  12888 -> 6960 px.
+- **Review follow-up (same day): the edge shift is textarea-only and clamped.**
+  Chrome 159 at 4x clips an `overflow:hidden` 100.25x10.5px box at device
+  row 82 / column 441; Simple drops the fraction in layout (row 80 / column
+  440) with or without the shift, so no oracle backs shifting other overflow
+  boxes. `_html_draw_ir_far_edge_delta` grows only a textarea-owned edge, and
+  clamps it to the device edge of the clip enclosing the textarea: a `rows=10`
+  textarea in an `overflow:hidden` wrapper 1px taller painted its value 9
+  device rows past the wrapper (each clip edge has one owner). Gap pinned by
+  `overflow_hidden_fractional_clip_4x_chrome159_spec` (in-development).
+- **Review follow-up 2 (2026-11-27): the clamp limit carries no `a_extra`.**
+  The enclosing clip's edge, as applied to its own non-textarea children, is
+  `k x edge + moved` only, so adding the owner's device size delta let a
+  textarea value paint that many device px past the wrapper. Chrome never
+  needs it: an `overflow:hidden` box clips every descendant at one edge. No probed
+  page (integer wrapper, auto wrapper, a .5px spacer) produced a nonzero
+  owner delta, so the drop is untested either way.
+  Spec now asserts the wrapper cases (Chrome 159, `textarea_value_clip` AC-4..6):
+  1x `rows=10` textarea with a 2px red bottom border in a 153px wrapper keeps
+  rows 150-151 red, 152 yellow, 153 blue (base painted line 11 over the border
+  and strip, red on base); at 4x the device-taller textarea and a non-textarea
+  block are cut on the same row (612 / 1304 blue); an auto-height wrapper gets
+  no ink below its edge. AC-6 is a sensitivity guard, not red on base: with
+  the clamp removed it fails with ink on rows 608-629.
+- **Trap — #12099 moved every textarea after inline text to the next line.**
+  The inline-block shrink-to-fit measurement (`flex_item_max_content_width`)
+  read a textarea's VALUE as its max-content, so `Notes <textarea>` with a
+  12-word value wrapped below `Notes` (y 32, Chrome 8) and the clip specs
+  sampled the wrong rows. Replaced elements and form controls
+  (`grid_item_is_replaced`, except `button`) now skip it (AC-3, Chrome
+  x=56.25 y=8).
+- Open: at 4x Chrome's textarea is 630 device px (157.5 CSS) with a 63 px line
+  pitch and its auto-height wrapper grows to 634; Simple keeps 604 and a 60
+  px pitch. Bug `textarea_4x_device_height_not_in_ancestor_2026-11-27`.
