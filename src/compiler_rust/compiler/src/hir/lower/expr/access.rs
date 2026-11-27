@@ -1216,6 +1216,11 @@ impl Lowerer {
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
         self.reject_uninferred(&recv_hir, "an index expression", ctx)?;
         let idx_hir = Box::new(self.lower_expr(index, ctx)?);
+        // A float is never an index: the int -> float value join (see
+        // `join_value_arms`) must not reach this integer slot silently.
+        if self.index_type_must_be_integer(recv_hir.ty) {
+            self.reject_float_for_int_slot(TypeId::I64, &idx_hir, "the index")?;
+        }
         self.require_integer_index_operand(recv_hir.ty, idx_hir.ty)?;
         let elem_ty = self.get_index_element_type(recv_hir.ty).map_err(|err| match err {
             LowerError::CannotInferIndexType(detail) => {

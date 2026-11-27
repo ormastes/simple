@@ -76,6 +76,10 @@ pub struct Lowerer {
     pub(super) suffix_guessed_return_types: HashSet<TypeId>,
     /// Set by `lookup_method_return_type` when its result came from that guess.
     pub(super) last_method_return_guessed: std::cell::Cell<bool>,
+    /// Sticky per function: a suffix-search guess produced a FLOAT type in the
+    /// function being lowered. A guessed float is not evidence, so the
+    /// float-into-int errors and the int/float value join skip that function.
+    pub(super) guessed_float_in_function: std::cell::Cell<bool>,
     /// Declaration line of the function currently being lowered. Recorded so the
     /// `lenient_types` unresolved-name fallback can attribute the global it
     /// emits to a source location; `Expr::Identifier` carries no span of its own.
@@ -442,6 +446,25 @@ thread_local! {
     static PRIVATE_REF_VIOLATIONS: std::cell::RefCell<Option<Vec<PrivateRefViolation>>> = const { std::cell::RefCell::new(None) };
 }
 
+thread_local! {
+    /// True while the unit being lowered on this thread has a SCRIPT entry
+    /// file (see `set_entry_script_mode`).
+    static ENTRY_SCRIPT_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tell the lowerings that follow on this thread whether the entry file is a
+/// script by file kind (`.shs` / `.sscript`; `.spl` is a compiled safe module,
+/// specs included). Script-owned
+/// functions keep dynamically typed value joins; see
+/// `Lowerer::join_value_arms`. Only the run/JIT lane sets it.
+pub fn set_entry_script_mode(on: bool) {
+    ENTRY_SCRIPT_MODE.with(|cell| cell.set(on));
+}
+
+pub(crate) fn entry_script_mode() -> bool {
+    ENTRY_SCRIPT_MODE.with(|cell| cell.get())
+}
+
 fn private_ref_gate_armed() -> bool {
     PRIVATE_REF_VIOLATIONS.with(|cell| cell.borrow().is_some())
 }
@@ -488,6 +511,7 @@ impl Lowerer {
             current_function_name: None,
             suffix_guessed_return_types: HashSet::new(),
             last_method_return_guessed: std::cell::Cell::new(false),
+            guessed_float_in_function: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
@@ -602,6 +626,7 @@ impl Lowerer {
             current_function_name: None,
             suffix_guessed_return_types: HashSet::new(),
             last_method_return_guessed: std::cell::Cell::new(false),
+            guessed_float_in_function: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
@@ -739,6 +764,7 @@ impl Lowerer {
             current_function_name: None,
             suffix_guessed_return_types: HashSet::new(),
             last_method_return_guessed: std::cell::Cell::new(false),
+            guessed_float_in_function: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,

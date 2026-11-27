@@ -305,3 +305,252 @@ type becomes `Option<T>`.
   `if c: Some([7.5]) else: Some(xs)` = 0.0 on r and y); d07/d14/d08/d10 k5 (ill-typed literal
   reassign/push is silent garbage, should be errors); d13 (`-> [i64]?` returning `Some([f64])`
   should be a hard error).
+
+## (C) disagreeing siblings
+
+### Symptom (seed `r` and older)
+
+```simple
+val r = if c: 1 else: "a"          # "{r}" for the else arm: 6225353883777
+val r = if c: 1.5 else: 2          # the int arm read as f64 bits: 0.000...277
+val r = match k:                   # probe p_kind k6
+    case K.A: {}
+    case _: 5                      # "{r}": <value:0x5>
+val r = match k:                   # probe n1 d1 / d2
+    case K.A: []
+    case K.B: xs                   # [f64]
+    case K.C: ys                   # [i64]: r[0] printed 0.000...277 or 6090532272433
+```
+
+No diagnostic, exit 0. The seed type checker does not catch it either:
+`type/src/checker_infer.rs` (`Expr::If`) discards the `unify` result of the two
+branch types, and `Expr::Match` answers a fresh type variable.
+
+### Semantics (owner rule: no ANY in safe code)
+
+The join of two value arms is typed. `ANY` / `[ANY]` is never produced.
+
+1. **int vs float joins to the float type.** This is the one implicit
+   conversion the language already has (mixed arithmetic promotes to float;
+   int -> float widening at declared slots stays implicit, float -> int is
+   error E1003). The int arm is wrapped in a real `Cast` to the float arm's
+   type, so the value is converted, not reinterpreted. The promoted (float)
+   join never reaches an integer slot silently: stored into an annotated int
+   binding (`val r: i64 = if c: 1 else: 2.5`), an int assignment target, an int
+   struct field, an int parameter or return, or used as an index, it is
+   `error[E1003] ... is declared as `i64` but receives `f64``. Review found the
+   first cut of this fix dropped that check and turned `21 42` into `0 0`.
+2. **Any other disagreement is a compile-time type error in safe code**,
+   reported with the existing lowering type-error tag `error[E1003]`, which the
+   run lane never demotes to the interpreter (`jit_failure_must_propagate`).
+   Judged classes: `bool`, int, float, `text`, array, dict. Two arms disagree
+   when their classes differ (`1` vs `"a"`, `{}` vs `5`, `[]` vs `"txt"`,
+   `[]` vs a dict) or when both are concrete arrays whose element types
+   disagree, recursively (`[f64]` vs `[i64]`, `[i64]` vs `[text]`). There is no
+   array promotion: `[i64]` does not become `[f64]`. An array literal that holds
+   only empty literals (`[[]]`, `[[], []]`) is weak below that nesting depth,
+   like `[]` itself: `if c: [[]] else: xs` with `xs: [[f64]]` is accepted.
+3. **Declared expected types do not relax the rule.** A union annotation
+   (`val r: i64 | text = if c: 1 else: "a"`) printed `<enum@0x...>` on seed `r`:
+   the seed has no typed union join, so the same error is reported. The fix for
+   the user is one arm type (explicit conversion) or an enum wrapping the
+   alternatives. A union-typed join is a named gap, not implemented here.
+4. **Permissive contexts**, both detected at HIR lowering:
+   - `unsafe:` blocks (`ctx.unsafe_depth > 0`) keep the untyped first-arm join.
+   - Script mode, by FILE KIND (owner decision 2026-11-27): a `.shs` or
+     `.sscript` entry file is a script; a `.spl` file is a compiled safe module,
+     spec files (`*_spec.spl`) included. The driver sets
+     `hir::set_entry_script_mode` for the lowering (`run_file_jit_outcome` in
+     `driver/src/exec_core.rs`), and only functions OWNED BY THE ENTRY FILE
+     (`current_function_owner == None`) are exempt; modules a script imports
+     are still checked. This file-kind test is TEMPORARY: the owner precedence
+     is file-header `@source_mode(...)` > CLI `--source-mode` > `simple.sdn
+     [source_mode]` > file kind, and plan lanes S4-A / S4-B replace this check
+     with that resolution. None of the three overrides is read here yet. (The
+     first cut used a heuristic -- top-level statements or no `main` -- which
+     exempted every spec file; it is gone.)
+   The native-build lane never sets script mode: it has no interpreter to give
+   a mixed join dynamic semantics, so the rule is unconditional there.
+
+Left to the existing rules (not judged): bottom arms (`nil`, `panic`, `return`),
+arms whose block ends in a statement (`continue`, `break`, an assignment, a
+statement-form `if`), a weak empty `[]` / `{}` against the same collection
+kind, statement-form `match` (value discarded), and every type whose seed
+typing is not authoritative: ANY, struct, enum, Option, tuple, char, and return
+types borrowed by the untyped-receiver method search
+(`suffix_guessed_return_types`).
+
+### Message
+
+```
+error[E1003] type mismatch: value arms disagree in `d1` (fn at line 65): the arm at
+line 68 is `[f64]` but the arm(s) from line 69 is `[i64]`; give every arm one type
+(convert explicitly, or wrap the alternatives in an enum) -- only `unsafe` code or a
+script may mix arm types
+```
+
+`Expr::If` carries no span, so an `if` is located by its function and that
+function's declaration line plus `the then-arm` / `the else-arm`; a `match`
+also names the arm lines. A function of an imported module is named with its
+module path.
+
+### Known limits
+
+- A block-form `if` whose arm is a statement block ending in a statement
+  `if` / `match` (e.g. `val r = if c:` + indented `match` + `else: "txt"`) is not
+  judged: that arm's value comes from the tail-statement join
+  (`hir_tail_if_value_type`), a separate path.
+- A function's implicit tail (`fn t(c: bool) -> text: if c: 1 else: "a"`, or a
+  tail `match`) is not a join error. It was and still is the untagged
+  `declared return type mismatch`, which drops the module to the interpreter
+  with a `[jit-fallback]` line and prints the right values (same on `r`, `w`).
+- Where the int -> float conversion lands in existing `src` code was not
+  counted; the sweeps only looked for errors.
+- The int-slot check covers a join used DIRECTLY as the stored value. A float
+  join bound to an untyped local and later copied into an int slot
+  (`val r = if c: n else: 2.5` then `val q: i64 = r`) is the general
+  float-into-int-binding hole, which exists without any join and is not closed
+  here; only the index use of such a local is rejected.
+- An explicit empty repeat `[0; 0]` lowers to an empty array literal and is
+  treated as weak; `[0; 0]` vs `[f64]` keeps the pre-existing behaviour.
+- Dict key/value disagreement between two concrete dicts is not judged.
+- Sources routed straight to the interpreter (`SIMPLE_EXECUTION_MODE=interpreter`,
+  the forced-interpreter allowlist) are never lowered, so nothing is reported
+  there; this is the pre-existing limit of every lowering type error.
+- `type/src/checker_infer.rs` is unchanged. Its `if` unification result is still
+  discarded; the lowering is the enforcing site because it owns the join type
+  and the unsafe / script context.
+
+### Behaviour change to expect
+
+Programs that printed the right text on seed `r` for the inputs tried are now
+rejected, because the other arm of the same join was read as garbage or only
+worked by accident:
+
+- `[]` vs a dict or text (`r.len()`, `"{r}"` happened to work), `[1]` vs `[1.5]`
+  and `[1]` vs `["a"]` printed whole (element reads were wrong).
+- An int/float join in an int slot: `val r: i64 = match k: case 0: n; case 1:
+  n * 2; case _: 0.0` printed `21 42` on `r` for the int arms and garbage for
+  the float arm. It is now `binding `r` is declared as `i64` but receives
+  `f64``; likewise `r = if c: 1 else: 2.5` (int `r`), `P(n: if c: k else: 2.5)`
+  and `xs[r]` with `r` a float.
+- A `.spl` file with top-level statements or no `main` is no longer exempt: it
+  is a compiled module by file kind, so its own mixed joins are rejected.
+
+### Fixed in `src`
+
+- `src/lib/gc_async_mut/pure/nn/embedding.spl` (two copies of the lookup loop):
+  the row index read from an `[f64]` tensor was used as an array index and
+  pushed into `last_indices: [i64]` unconverted; the comment said "convert from
+  f64 to i64" but the code was `val idx_int = idx`. Now `idx as i64`, with the
+  negative test kept on the float (`idx < 0.0`). Found by the float-index error through
+  `test/01_unit/lib/gc_async_mut/embedding_spec.spl`.
+
+### Residuals found in review (NOT fixed here)
+
+The first two behave the same on `r` and on the fixed seed.
+
+- Integer width mixes are not judged and are misread: `val r = if c: n else: m`
+  with `n: i32`, `m: i64` returns `1705032704` for `m = 6000000000` (the join
+  takes the first arm's width). Same for `u8` vs `i64`. All ints are one join
+  class here; a width rule (widen to the larger, or E1003) is open.
+- A 3-arm implicit tail `match` in a `-> f64` function with arms `1` / `2.5` /
+  `3` returns `0.0` for every arm. The 2-arm form and the tail `if` form are
+  right. The tail-statement join (`hir_tail_if_value_type`) is a separate path
+  from the value join fixed here.
+- A lambda body is value position even when the call result is discarded:
+  `val f = z if c: p(1) else: q(2)` followed by `f(true)` is now E1003
+  (`i64` vs `text`); it ran on `r`. The lowering cannot see that every call
+  site discards the result. Write the lambda with a statement body, or give
+  both arms one type.
+- Arms typed through a generic call or an untyped lambda (`gen(x)`, `y: y +
+  1`) are ANY and belong to class (A); they still print garbage.
+
+#### Second review (2026-11-28, seed `e`)
+
+- FIXED here: a return type GUESSED by the untyped-receiver suffix search
+  (`o.pos()` with untyped `o`, `A.pos() -> i64` and `B.pos() -> f64`) made the
+  float-index error fire in 4 of 6 runs. Two causes. (1) The search took the
+  shortest matching name out of a HashMap, so equal-length names (`A.pos`,
+  `B.pos`) were picked by hash order per run; ties now break by name, which
+  makes every lane deterministic (it also flaked the 2026-11-24 float-argument
+  rule on seed `r`). (2) A guess is not evidence: once a suffix guess yields a
+  float in a function, the float-into-int errors (argument, index, int-slot
+  join) and the int/float value join are skipped for the rest of that function
+  (`guessed_float_in_function`). The exemption is PER FUNCTION, which is coarse:
+  one guessed float switches the checks off for unrelated, well-typed joins
+  later in the same function. A per-expression marker (the guessed call and
+  the locals bound from it) is the follow-up. The declared-return check is
+  unchanged.
+- Interaction with (A) after #12260: an untyped (ANY) arm against a typed arm
+  is the `uninferred-any` warning and is never judged here (`join_class` skips
+  ANY). But a call that (A) now instantiates implicitly is TYPED: with
+  `fn un(x): x`, `if c: un(1) else: "t"` is `i64` vs `text` and is E1003 (it
+  printed a garbage word for the text arm on seed `20261128d`).
+- OPEN: a float slice bound (`xs[a:3]` with `a: f64`) is not checked; only the
+  plain index is.
+- OPEN: the interpreter accepts a float WRITE index (`xs[1.0] = 99`); the
+  lowering rejects only the read form on must-be-integer receivers.
+- OPEN (feature gap, separate): int literals in an array literal do not adopt
+  `f64` at an annotated slot; `takes([1, 2])` into a `[f64]` parameter prints
+  `0.5`-style garbage. The value-join promotion does not reach array literals.
+- `embedding.spl`: `idx as i64` alone truncated `-0.5` to row 0, where the
+  original `idx_int < 0.0` test sent every negative index down the zero path.
+  The bounds test is now `idx < 0.0 or idx_int >= num_embeddings`, so negative
+  fractions keep the zero path.
+
+### Sweep of existing code (2026-11-27)
+
+Run with an audit build of the same rule that printed every site instead of
+stopping at the first. Newly rejected sites in `src/`: **none**.
+
+| lane | input | lowered to completion | not verified | value-join sites |
+|---|---|---|---|---|
+| run/JIT, flattened import closure | 1,351 unit specs (first 2 per directory of `test/01_unit/lib` and `test/01_unit/compiler`, plus the 4 named specs) | 1,229 | 122 (99 stopped on an unrelated HIR error, 2 MIR, 3 module load, 18 no verdict) | 0 |
+| `compile`, per file | 7,453 files: all of `src/compiler`, every 3rd `src/lib`, about every 4th `src/app`, every 6th `src/os` | 5,958 | 1,495 hit the 15 s cap on a loaded host (1,169 of them in `src/compiler`) | 0 |
+| `compile` on the final seed, 400 s cap | 22 of those capped `src/compiler` files, one per layer directory | 16 | 6 failed on unrelated semantic errors | 0 |
+
+The audit found one false positive, fixed in the rule before the final build:
+`src/compiler/00.common/data/data_schema_resolver.spl:294,299`, a `match` arm
+that ends in `continue` and so yields no value. Not run: the full bootstrap and
+the rest of `test/01_unit` (9,985 specs; a spec takes 30-200 s through
+`simple test` here). `storage_view_v1_spec`, `parsers_json_core_spec`,
+`if_val_match_diverging_value_type_spec` and `match_empty_array_bug_spec` pass
+through `simple test` on the final seed.
+
+#### After the review fixes (2026-11-28, seed `z`)
+
+Spec files are now compiled modules, so their own functions are checked too,
+and the int-slot and float-index errors are new. Re-run in the final
+(non-audit) mode, which stops at the first error of a unit:
+
+| lane | input | lowered to completion | not verified | new E1003 |
+|---|---|---|---|---|
+| run/JIT, flattened import closure | the same 1,351 unit specs | 1,232 | 119 (100 stopped on a HIR error, 3 MIR, 3 module load, 13 no verdict) | 1: the float index in `embedding.spl` (fixed above); no value-join rejection |
+| `compile`, per file, 15 s cap | first 1,507 files of `src/compiler` (stopped there: about 35 files a minute on the loaded host) | 889 | 618 capped; `src/lib`, `src/app`, `src/os` not re-run | 0 |
+
+Both sweeps ran on the first `z` build, before the match-chain hollow-literal
+relaxation and the rebase onto #12253; the probe sets and the five specs were
+re-run on the final build.
+
+So the file-kind switch rejected no spec in the sample, and it was kept. The
+int-slot and float-index rules were NOT swept over `src/lib`, `src/app` or
+`src/os` per file; they are covered only as far as the 1,232 spec closures
+reach. The five specs (the four above plus `embedding_spec`) pass through
+`simple test` on the fixed seed.
+
+### Tests
+
+`src/compiler_rust/compiler/src/hir/lower/tests/conditional_empty_array_tests.rs`:
+`disagreeing_value_arms_are_a_type_error_in_safe_code`,
+`disagreeing_match_arms_name_both_types_and_arm_lines`,
+`int_and_float_arms_join_to_float_by_converting_the_int_arm`,
+`value_join_rule_leaves_agreeing_bottom_weak_unsafe_and_statement_forms_alone`,
+`script_entry_functions_keep_the_untyped_join_and_compiled_entries_do_not`.
+`promoted_float_join_never_reaches_an_int_slot`,
+`nested_empty_literals_are_weak_at_every_depth`,
+`nested_hollow_then_arm_takes_the_concrete_sibling_type`,
+`guessed_float_method_return_never_triggers_float_into_int_errors`.
+One older pin was removed because it now is the error (`[1]` vs `[text]`), and
+the `[]` vs dict pin moved inside `unsafe:`. The `["typed"; 0]` vs `[1]` pin is
+kept: an explicit empty repeat is a weak arm, so that join still lowers.
