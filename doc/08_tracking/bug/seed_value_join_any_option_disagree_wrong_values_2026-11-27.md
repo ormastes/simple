@@ -1,6 +1,242 @@
-# Seed value join: Any / Option / disagreeing arms produce wrong values (2026-11-27)
+# Seed value-join wrong values: ANY sibling, Option-wrapped, disagreeing arms (2026-11-27)
 
-Sections (A) and (C) are owned by lanes d29-c and d29-e; (B) below is lane d29-d.
+Follow-up to PR #12202 (weak empty `[]`/`{}` arms at the match/if join). Three
+shapes still produced silent garbage on seeds m and r.
+Section (A) is lane d29-c, (B) is lane d29-d, (C) is lane d29-e.
+
+## (A) untyped/ANY sibling
+
+Repro (seed r `simple-local-20261127r.exe` and older, JIT lane):
+
+```simple
+fn untyped(x):
+    x
+fn a2(xs: [f64]) -> f64:
+    val r = untyped(xs)
+    if r.len() > 0: r[0] + 0.25 else: -2.0     # printed 0.0, expected 1.75
+```
+
+Same through a join with a `[]` arm (`if c: [] else: untyped(xs)`, `match`
+forms). Probes: rv3 `p_any` y1..y9, `q_s2`, `n3 s2`.
+
+### Root cause
+
+The seed erases an unannotated parameter, an unannotated return and every
+generic parameter to `any` (`hir/lower/module_lowering/function.rs`,
+`type_resolver.rs`). `untyped(xs)` was typed `any`, so `r`, `r[0]` and
+`r[0] + 0.25` were tagged words. The if/match join then held a tagged word in
+one arm and the raw `f64` `-2.0` in the other, and the consumer decoded both
+the same way. `fn untyped<T>(x: T) -> T` failed identically:
+`refine_generic_identity_return` instantiated the result for struct arguments
+only.
+
+### Semantics (owner decisions)
+
+`any` is not a type of safe code; it is permitted only inside `unsafe:` and in
+script mode. The seed does syntactic checks only: it does not infer types for
+unannotated parameters (that belongs to the self-hosted compiler, with full
+monomorphization as the target). Where an untyped value reaches a typed use in
+safe code the seed reports it and asks for an annotation.
+
+Rollout (owner decision, warn then error): the report is a WARNING by default
+(`warning[uninferred-any]: <file>:<fn line>: in <fn>: ...`) and lowering
+continues exactly as before, so existing untyped library code keeps building
+and keeps its old run-time behaviour. `SIMPLE_STRICT_ANY=1` makes it an error.
+S8-J flips the default to error once the listed families are typed.
+
+### Fix (`hir/lower/implicit_generic.rs`)
+
+1. The check (`LowerError::UninferredType`). Every site of a unit is printed
+   once all bodies are lowered. Under `SIMPLE_STRICT_ANY=1` the lines are
+   `error[uninferred-any]`, lowering fails with the first, and the error
+   carries `SIMPLE_JIT_STRICT:` so the run lane cannot demote it to the
+   interpreter. The seed's existing `SIMPLE_JIT_STRICT` switch is not reused:
+   it governs JIT-to-interpreter fallback, a different rollout.
+   An untyped value is an unannotated parameter, the result of a
+   value-returning unannotated function, an unannotated local bound from one,
+   or a method / field / operator result read out of one. It is reported as
+
+   - an index receiver and a tuple index (`h.0`),
+   - an operand of arithmetic, bitwise or ordered comparison,
+   - an if/match arm joined with a typed arm,
+   - a match subject.
+
+   A call to an unannotated procedure (no value, or a unit-call tail) is `()`,
+   not an untyped value; a callee declared further down is judged once every
+   body is lowered.
+
+2. Call-site instantiation of the `T -> T` signature shape only (no inference
+   inside bodies): the existing `refine_generic_identity_return` hook now
+   instantiates for every concrete argument type instead of structs only, and
+   also covers the unannotated spelling `fn f(.., x, ..): x`. One type variable
+   takes one type (`pick<T>(a: T, b: T)` needs agreeing arguments); no `[any]`;
+   `bool`/`char` stay tagged. The erased callee returns a tagged word, so a
+   numeric result is decoded with a cast. This is kept because the explicit
+   generic is the form the owner rule points users to, and it printed the same
+   garbage on r.
+
+3. Script mode in the seed is the entry file kind only: `.shs` / `.sscript`
+   are scripts, `.spl` is compiled mode, spec files included. Imported modules
+   of a script are not script code. The rest of the owner's precedence
+   (`@source_mode(...)` header > `--source-mode` > `simple.sdn [source_mode]`
+   > file kind) is not read by the seed. An earlier revision also treated a
+   `.spl` entry with top-level statements and no `main` as a script; that
+   heuristic is dropped.
+
+### Known gaps
+
+- Not rejected: an untyped value passed on untouched, used as a condition,
+  compared with `==`/`!=`, or iterated with `for`.
+- Explicit `any` and explicit generic bodies are untouched (`fn f(x: any)`,
+  `fn first<T>(xs: [T]) -> T`): a join of such an arm with a raw scalar is still
+  the garbage shape. The existing staged "`Any` outside `unsafe:`" warning owns
+  those.
+- A callee compiled in another unit (per-module native-build) is never judged;
+  only calls whose callee body is lowered in the same unit are.
+- The `<seed> test` lane interprets and never lowers HIR, so it neither
+  enforces nor exercises any of this.
+- A function-tail join is not reported: `fn f(c: bool, xs: [f64]) -> [f64]:
+  if c: xs else: opaque(xs)` lowers its tail `if` as a statement, so the
+  join check never sees the two arms.
+- The reported location is the declaration line of the enclosing function,
+  not the line of the use (`Expr` nodes carry no span in the seed).
+
+### Reported source (errors under `SIMPLE_STRICT_ANY=1`)
+
+Per-family site list with `file:line` for migration lanes:
+`uninferred_any_sites.md` in the session scratchpad (handed to the
+coordinator; not tracked).
+
+Census: seed lowering of each of the 162 `src/` files that declare an
+unannotated parameter (146 lib, 9 app, 7 compiler), one unit per file, all sites
+reported. 20 units stop on an unrelated error first and are not classified;
+files whose only untyped surface is an unannotated *return* are not in the list.
+
+Fixed with real types:
+
+- `src/lib/nogc_sync_mut/spec.spl` `to_be_close_to(expected, tolerance)` ->
+  `f64, f64` (trait `ExpectScalarMatcher`, its `i64` impl, `ExpectHelper`);
+  loaded by every spec.
+- `src/lib/common/complex/{arithmetic,exponential,trigonometric,types,utilities}.spl`:
+  complex numbers are `(f64, f64)`; 5 units, 121 site lines. Same output on r
+  and u before/after for an add/multiply/divide/polar/power/sqrt probe.
+- `src/lib/nogc_sync_mut/tls/_TlsUtilities/{text_ops,hex_encoding}.spl`:
+  `xor`/`or` are `(i64, i64) -> i64`; `index`/`length` parameters are `i64`.
+
+Reported and NOT fixed: 603 sites in 34 directories (deduplicated by
+function, value and kind of use; same numbers as the site list). They are
+tuple-as-record or heterogeneous-array code whose parameter is the whole
+untyped record, so each needs the record's type written down (a struct or a
+full tuple type), not a one-word annotation:
+
+| family | sites |
+|---|---|
+| `src/lib/nogc_async_immut/persistent_sorted_map` | 59 |
+| `src/lib/nogc_sync_mut/compression` | 43 |
+| `src/lib/gc_async_mut/cache` | 39 |
+| `src/lib/nogc_sync_mut/cache` | 39 |
+| `src/lib/nogc_async_immut/persistent_map` | 36 |
+| `src/lib/nogc_async_immut/persistent_vec` | 36 |
+| `src/lib/nogc_async_immut/combinators` | 34 |
+| `src/lib/gc_async_mut/mqtt` | 33 |
+| `src/lib/nogc_async_mut/mqtt` | 33 |
+| `src/lib/nogc_sync_mut/mqtt` | 33 |
+| `src/lib/gc_async_mut/oauth` | 32 |
+| `src/lib/nogc_async_mut/oauth` | 32 |
+| `src/lib/nogc_sync_mut/oauth` | 32 |
+| `src/lib/nogc_async_mut/dns` | 20 |
+| `src/lib/nogc_sync_mut/dns` | 20 |
+| `src/lib/gc_async_mut/benchmark` | 12 |
+| `src/lib/nogc_async_immut/persistent_trie` | 12 |
+| `src/lib/nogc_async_mut/benchmark` | 12 |
+| `src/lib/nogc_sync_mut/benchmark` | 12 |
+| `src/lib/nogc_sync_mut/tls` | 12 |
+| `src/compiler/15.blocks` | 4 |
+| `src/lib/nogc_async_mut/cache` | 4 |
+| `src/lib/nogc_async_mut` | 2 |
+| `src/lib/nogc_sync_mut/src` | 2 |
+| `src/app/mcp` | 1 |
+| `src/lib/gc_async_mut/src` | 1 |
+| `src/lib/nogc_async_immut/persistent_list` | 1 |
+| `src/lib/nogc_async_immut/persistent_set` | 1 |
+| `src/lib/nogc_async_mut/linalg` | 1 |
+| `src/lib/nogc_async_mut/llm` | 1 |
+| `src/lib/nogc_async_mut/mcp` | 1 |
+| `src/lib/nogc_async_mut/src` | 1 |
+| `src/lib/nogc_sync_mut` | 1 |
+| `src/lib/nogc_sync_mut/io` | 1 |
+
+With the default warning these units build and run as before: `run
+test/01_unit/lib/immut/persistent_map_spec.spl` is 64 passed with 17
+`warning[uninferred-any]` lines. Under `SIMPLE_STRICT_ANY=1` the same run
+fails at `hamt_node_tag`. `<seed> test` interprets and prints nothing.
+
+### Tests
+
+`hir/lower/tests/implicit_generic_tests.rs` (21 tests; they fail without the
+fix; the rule is exercised with `set_strict_any(true)`, the default with one
+warning-mode test, and the full report list through
+`take_uninferred_any_reports`). On the tree rebased over #12253:
+`cargo test -p simple-compiler --lib hir::` is 588 passed, 0 failed;
+`implicit_generic_tests` 21/21, `conditional_empty_array_tests` 16/16.
+`calls::some_record_payload_tests::scalar_dynamic_and_array_payloads_keep_the_existing_erased_route`
+failed on the bare release tip (3e63398dd11) since #12253 types
+`Some(<array with a declared type>)` as `Option<[T]>`; it is split here into the
+scalar/dynamic erased-route test and an `Option<[i64]>` test.
+
+### Review fixes (Fable review of 9f740e8287c)
+
+- A local callable (lambda, fn-typed parameter) named like an identity-shaped
+  function was instantiated as that function (`val id = \v: "n={v}"; id(n)`
+  typed `i64`). Only a callee that lowered to a global is instantiated, looked
+  up by its resolved symbol and never by the bare name.
+- `uninferred_locals` kept the entries of lambda-local slots after the lambda
+  truncated the local table, so annotated locals that reused the slots were
+  reported. The entries are pruned with the truncate.
+
+### Verification (seed `simple-local-20261128d.exe`, sources `8bfe7aae531`, vs seed r)
+
+Default (warning) mode. Probes: 70 identical outputs out of 92 (`rv3/{a,b,c}`,
+`mt`, `mt2`, `kinds`, `dv`); nothing correct on r changed. Every difference:
+
+- garbage on r, correct now, from this section: `p_any` y1..y9
+  (`y1 -2.0 1.75` ... `y9 1.75 -2.0`), `q_s2`, `n3 s2` (b and mt2 copies),
+  `n4 c0`; class field read and `u64` through the identity in unannotated /
+  explicit-generic / forward-declared form (`kinds/ke,kf,ki`);
+  `pick<T>(a: T, b: T)` on `u64` and `[f64]` (`dv/pick`, `dv/p5`).
+- garbage on r, correct now, from the rebased (B) fix #12253: `q_s5`, `n3 s5`
+  (b and mt2 copies), `p_opt`.
+- timeout on r, correct now: `mt2/h1400`, `h3000`, `long`, `long1500` (the
+  rebased #12235 long-match-chain fix).
+- `n1`, `kinds/ka`: one line each prints a raw word that differs between any
+  two runs (explicit `any`, unchanged).
+
+Still garbage, now with a `warning[uninferred-any]` naming the function, and an
+error under `SIMPLE_STRICT_ANY=1`: `n4 c1` (`untyped([])` joined with
+`untyped(xs)`), `dv/d1` (method result), `d3` (tuple index), `d5` (join), `d7`
+(match subject) of an untyped value. `dv/d6` (`fn g(h): h.1 + 0.25`) stays
+correct and warns.
+
+Review probes (`rev_d29c`, 23 files): same output on r and the new seed, no
+engine demotion; `t5`/`t5b` differ only in a raw word that differs between any
+two runs. `t9`/`k3` (annotated locals after a lambda) print no warning;
+`k1`/`k2`/`t7`/`xm/main3` (local callable shadowing an identity function)
+print `n=5`.
+
+`run test/01_unit/lib/immut/persistent_map_spec.spl`: 64 examples, 0 failures,
+17 warnings. `<seed> test` of `parsers_json_core_spec` (101/101),
+`storage_view_v1_spec` (34/34) and `persistent_map_spec` (64/64) pass.
+
+Measured on earlier builds of this branch and not re-run on this seed:
+
+- Dropping the top-level-statement script heuristic (seed 20261128a): `<seed>
+  run` over 60 sampled specs, r vs that seed, 58 identical exit codes; the 2
+  that differ are 90 s timeout flaps in both directions (`manual_mode_spec`
+  re-run to completion: rc=1 on both).
+- `<seed> test` over 252 specs (seed u, error-by-default): identical verdicts
+  to r.
+- Rust native-build of `bootstrap_main.spl` (seed u, error-by-default): 752 of
+  1685 closure objects, no report and no failed file, before a 50-minute cap.
 
 ## (B) Option-wrapped weak-empty arms
 
