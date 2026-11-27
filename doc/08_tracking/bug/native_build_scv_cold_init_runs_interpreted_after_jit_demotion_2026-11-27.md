@@ -308,3 +308,11 @@ hir_module_surface_index, mir_lowering_stmts, mir_instruction_support, feature_c
 (jit6.log): `SIMPLE_EXECUTION_MODE=jit run native_build_worker.spl --help` -> rc=1, last line
 `error: native_build_worker.spl is an internal entrypoint`, 0 "is not visible", 0 jit-compile-error /
 JIT compilation failed / CODEGEN-AMBIGUOUS; only `hybrid-interp-splice` (rt_* externs) remains.
+## llvm_lib import fix (3ae9ee35013) does not un-demote the final worker (2026-11-27, seed r)
+
+Rerun with the `std.nogc_sync_mut.sffi.llvm.*` import fix cherry-picked: the worker is still interpreter-speed. stage_parse per file,
+before -> after: smoke.spl (134 chars) 0.9 -> 1.5 s, fs_v1.spl (2354) 2.8 -> 5.1 s, dir_ops.spl (5029) 9.5 -> 15.1 s (box was
+loaded, so slower, not faster); load_sources bulk closure 233 s -> 181 s of worker time but the worker start rose to 334 s. Stopped
+at the third file. Per the coordinator, a further demotion (`CudaTypeMapper.map_tuple` CODEGEN-AMBIGUOUS-METHOD) still drops the whole
+worker closure to the interpreter; that fix is pending in lane d29-f. The worker's `[engine-demotion]` lines are invisible on
+Windows (stdout returned at exit only); consider teeing `[engine-demotion]` to the trace file too. No exe; todo 478 stays open.
