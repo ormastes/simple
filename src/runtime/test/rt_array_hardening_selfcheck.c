@@ -29,9 +29,10 @@ extern int64_t rt_array_max(int64_t receiver);
  * Under the c-runtime test kind (SIMPLE_TEST_CORE_RUNTIME) the core-C owner
  * runtime_legacy_core.c defines it instead. */
 #ifndef SIMPLE_TEST_CORE_RUNTIME
+/* Same report and status as runtime.c's spl_panic. */
 void spl_panic(const char* msg) {
-    fprintf(stderr, "panic: %s\n", msg);
-    abort();
+    fprintf(stderr, "PANIC: %s\n", msg ? msg : "unknown error");
+    exit(1);
 }
 #endif
 
@@ -46,15 +47,20 @@ static int text_is(int64_t s, const char* want) {
 static int64_t rv(SplArray* a) { return (int64_t)(uintptr_t)a; }
 
 #ifndef _WIN32
-#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
-/* Run one typed word write on a BYTES array in a child; it must abort. */
+/* Run one typed word write on a BYTES array in a child; it must exit 1 with
+ * the spl_panic report. runtime.c prints "PANIC: ", runtime_legacy_core.c
+ * "panic: "; the message after the prefix is the cross-lane contract (the
+ * Rust runtime prints the runtime.c line). */
 static int word_write_traps(SplArray* bytes, int op) {
+    int fds[2];
+    if (pipe(fds) != 0) return 0;
     pid_t pid = fork();
     if (pid < 0) return 0;
     if (pid == 0) {
-        fclose(stderr);
+        close(fds[0]);
+        dup2(fds[1], 2);
         switch (op) {
         case 0: rt_typed_words_i64_set(bytes, 0, 1); break;
         case 1: rt_typed_words_u64_set(bytes, 0, 1); break;
@@ -65,9 +71,18 @@ static int word_write_traps(SplArray* bytes, int op) {
         }
         _exit(0);
     }
+    close(fds[1]);
+    char err[512];
+    size_t got = 0;
+    ssize_t n;
+    while (got < sizeof err - 1 && (n = read(fds[0], err + got, sizeof err - 1 - got)) > 0) got += (size_t)n;
+    err[got] = 0;
+    close(fds[0]);
     int status = 0;
     if (waitpid(pid, &status, 0) != pid) return 0;
-    return WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 1 &&
+           strstr(err, ": typed word write: a [u8] array cannot be written through a "
+                       "word-typed array parameter ([i64]/[u64]/[u32])\n") != NULL;
 }
 #endif
 

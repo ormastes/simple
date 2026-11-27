@@ -358,6 +358,25 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    /// A bound-proved loop replaces the receiver with its hoisted data pointer,
+    /// which only the typed `[u8]`/`[u32]`/`[u64]` readers consume. The generic
+    /// `rt_array_get` / `rt_array_get_text` / `rt_index_get` take the array
+    /// handle, so re-lower the receiver for them: with the raw pointer `[f64]`
+    /// 7.5 read as 0.0 and `[text]` "ab" as "".
+    /// Bug: seed_jit_hoisted_loop_data_ptr_reaches_generic_array_get_2026-11-27
+    fn array_handle_for_generic_get(
+        &mut self,
+        receiver: &HirExpr,
+        receiver_reg: VReg,
+        hoisted_data_ptr: Option<VReg>,
+    ) -> MirLowerResult<VReg> {
+        if hoisted_data_ptr.is_some() {
+            self.lower_expr(receiver)
+        } else {
+            Ok(receiver_reg)
+        }
+    }
+
     pub(super) fn lower_index_expr(
         &mut self,
         receiver: &HirExpr,
@@ -630,6 +649,7 @@ impl<'a> MirLowerer<'a> {
         {
             // HIR already proved this receiver is an array, so avoid the
             // generic collection dispatcher and boxed-index path.
+            let receiver_reg = self.array_handle_for_generic_get(receiver, receiver_reg, hoisted_data_ptr)?;
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -690,6 +710,7 @@ impl<'a> MirLowerer<'a> {
             };
             // Use rt_index_get(collection_rv, index_rv) for arrays/strings/dicts
             let target = CallTarget::from_name("rt_index_get");
+            let receiver_reg = self.array_handle_for_generic_get(receiver, receiver_reg, hoisted_data_ptr)?;
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
