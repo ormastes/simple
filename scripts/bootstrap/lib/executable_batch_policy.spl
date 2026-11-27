@@ -1,7 +1,7 @@
 # Diagnostic executable admission; RSS estimates are not enforced memory limits.
-# Pure-Simple port of the former executable_batch_policy.py (policy part).
-# The Windows-only available_commit_bytes probe stays with the Python driver
-# (adaptive-executable-batch.py) until its commit-headroom probe is decided.
+# Pure-Simple port of the former executable_batch_policy.py. The Windows
+# commit-headroom probe is lib/executable_batch_probe.spl (PowerShell CIM); the
+# driver is scripts/bootstrap/adaptive-executable-batch.spl.
 
 use std.common.crypto.sha256.{sha256_text}
 use std.common.text_whitespace.{split_whitespace}
@@ -43,7 +43,7 @@ struct SavedSuccess:
     sanity_pass: bool
     closure: text
 
-fn may_start(active: i64, observations: [i64], free_commit: i64, config: BatchConfig) -> bool:
+pub fn may_start(active: i64, observations: [i64], free_commit: i64, config: BatchConfig) -> bool:
     val maximum = config.max_executables
     assert maximum >= 1 and maximum <= 20 and active >= 0
     if active >= maximum:
@@ -63,10 +63,10 @@ fn may_start(active: i64, observations: [i64], free_commit: i64, config: BatchCo
         ramp = maximum
     active < ramp and free_commit >= config.headroom_bytes + estimate * (active + 1)
 
-fn closed_rss(r: RssReceipt) -> bool:
+pub fn closed_rss(r: RssReceipt) -> bool:
     r.quiescent == "1" and r.observer_errors == "0" and (r.status == "complete" or r.status == "interrupted")
 
-fn outcome(exit_code: i64, result: ChildResult, receipts: [RssReceipt]) -> text:
+pub fn outcome(exit_code: i64, result: ChildResult, receipts: [RssReceipt]) -> text:
     # A crash without process-tree closure stops admission, never assumes reap.
     if not result.has_result or not result.has_compile_exit:
         return "BLOCKED_UNVERIFIED_CHILD"
@@ -81,7 +81,7 @@ fn outcome(exit_code: i64, result: ChildResult, receipts: [RssReceipt]) -> text:
 
 # JSON string literal, byte-identical to Python json.dumps for ASCII input.
 # ponytail: non-ASCII is not \uXXXX-escaped (Python ensure_ascii); targets are ASCII paths/hashes.
-fn json_str(s: text) -> text:
+pub fn json_str(s: text) -> text:
     var out = "\""
     var i = 0
     while i < s.len():
@@ -102,7 +102,7 @@ fn json_str(s: text) -> text:
     out + "\""
 
 # sha256 of sorted-key compact JSON over the target identity fields.
-fn identity(t: Target) -> text:
+pub fn identity(t: Target) -> text:
     var pairs: [OptionPair] = []
     for p in t.options:
         var at = pairs.len()
@@ -133,7 +133,7 @@ fn identity(t: Target) -> text:
     val body = "{{\"backend\":" + json_str(t.backend) + ",\"entry\":" + json_str(t.entry) + ",\"options\":{{" + opts + "}},\"producer_sha256\":" + json_str(t.producer_sha256) + ",\"source\":" + json_str(t.source) + "}}"
     sha256_text(body)
 
-fn reusable_success(saved: SavedSuccess, target: Target, binary_sha: text) -> bool:
+pub fn reusable_success(saved: SavedSuccess, target: Target, binary_sha: text) -> bool:
     saved.identity == identity(target) and saved.binary_sha256 == binary_sha and saved.binary_linked and saved.sanity_pass and saved.closure == "CLOSED"
 
 struct EnvPair:
@@ -153,7 +153,7 @@ struct Invocation:
     environment: [EnvPair]
 
 # Inherited environment overlaid with the request's own entries (request wins).
-fn request_environment(request: PreflightRequest, inherited: [EnvPair]) -> [EnvPair]:
+pub fn request_environment(request: PreflightRequest, inherited: [EnvPair]) -> [EnvPair]:
     var merged: [EnvPair] = []
     for e in inherited:
         var overridden = false
@@ -166,7 +166,7 @@ fn request_environment(request: PreflightRequest, inherited: [EnvPair]) -> [EnvP
         merged.push(r)
     merged
 
-fn preflight_invocation(request: PreflightRequest, inherited: [EnvPair]) -> Invocation:
+pub fn preflight_invocation(request: PreflightRequest, inherited: [EnvPair]) -> Invocation:
     var command: [text] = []
     if request.has_preflight_command:
         command = request.preflight_command
@@ -214,13 +214,13 @@ struct ProcessRow:
 # ponytail: paths are slash-folded and casefolded, NOT resolve()d (Python
 # pathlib.resolve also made relative tokens absolute). The driver passes absolute
 # paths; resolve in the caller if a relative token must match.
-fn norm_path(p: text) -> text:
+pub fn norm_path(p: text) -> text:
     var s = p.replace("\\", "/").lower()
     while s.len() > 1 and s.ends_with("/"):
         s = s.substring(0, s.len() - 1)
     s
 
-fn parent_dir(p: text) -> text:
+pub fn parent_dir(p: text) -> text:
     val s = norm_path(p)
     var i = s.len() - 1
     while i >= 0:
@@ -229,15 +229,15 @@ fn parent_dir(p: text) -> text:
         i = i - 1
     "."
 
-fn is_absolute_path(p: text) -> bool:
+pub fn is_absolute_path(p: text) -> bool:
     val s = p.replace("\\", "/")
     s.starts_with("/") or (s.len() > 2 and s.substring(1, 3) == ":/")
 
-fn is_boundary(c: text) -> bool:
+pub fn is_boundary(c: text) -> bool:
     c == " " or c == "\t" or c == "\""
 
 # helper path appears as its own token (start/space/quote before, end/space/quote after).
-fn command_names_helper(command: text, helper: text) -> bool:
+pub fn command_names_helper(command: text, helper: text) -> bool:
     var i = 0
     while i + helper.len() <= command.len():
         if command.substring(i, i + helper.len()) == helper:
@@ -250,7 +250,7 @@ fn command_names_helper(command: text, helper: text) -> bool:
     false
 
 # "--flag value" as adjacent whitespace tokens.
-fn has_flag_value(command: text, flag: text, value: text) -> bool:
+pub fn has_flag_value(command: text, flag: text, value: text) -> bool:
     val toks = split_whitespace(command)
     var i = 0
     while i + 1 < toks.len():
@@ -259,7 +259,7 @@ fn has_flag_value(command: text, flag: text, value: text) -> bool:
         i = i + 1
     false
 
-fn find_row(rows: [ProcessRow], pid: i64) -> i64:
+pub fn find_row(rows: [ProcessRow], pid: i64) -> i64:
     var i = 0
     while i < rows.len():
         if rows[i].pid == pid:
@@ -270,7 +270,7 @@ fn find_row(rows: [ProcessRow], pid: i64) -> i64:
 # Reject stale receipts and PID reuse; metadata comes from a pinned observer.
 # Returns "" when valid, otherwise the first violated rule (the Python asserts).
 # ISO-8601 UTC stamps of equal width compare correctly as text.
-fn validate_owned_ancestry(config: OwnerConfig, launch: OwnerLaunch, reservation: OwnerReservation, request: OwnerRequest, rows: [ProcessRow], batch_pid: i64, runner_path: text, packet_path: text, hash_file: fn(text) -> text) -> text:
+pub fn validate_owned_ancestry(config: OwnerConfig, launch: OwnerLaunch, reservation: OwnerReservation, request: OwnerRequest, rows: [ProcessRow], batch_pid: i64, runner_path: text, packet_path: text, hash_file: fn(text) -> text) -> text:
     val owner = reservation.owner_pid
     val collector = launch.collector_pid
     if launch.owner_pid != owner or owner == collector:

@@ -1,0 +1,68 @@
+#!/bin/sh
+# End-to-end check of scripts/bootstrap/adaptive-executable-batch.spl --preflight:
+# the request cwd and environment overlay reach the preflight child, and a changed
+# request, changed input, bad option set or failing child is refused.
+# Needs a Simple binary: SIMPLE_BIN=/path/to/simple, else <repo>/bin/simple.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+root=$(CDPATH= cd -- "$here/../../.." && pwd -P)
+simple=${SIMPLE_BIN:-$root/bin/simple}
+[ -x "$simple" ] || { echo "ERROR: no Simple binary at $simple (set SIMPLE_BIN)" >&2; exit 2; }
+work=$(mktemp -d "${TMPDIR:-/tmp}/batch-preflight-test.XXXXXX")
+# Native Windows binaries need drive-letter paths (pwd -W); POSIX hosts use pwd.
+work=$(CDPATH= cd -- "$work" && { pwd -W 2>/dev/null || pwd; })
+trap 'rm -rf "$work"' EXIT
+fail() { echo "FAIL: $1" >&2; exit 1; }
+sha() { sha256sum "$1" | cut -d' ' -f1; }
+driver=$root/scripts/bootstrap/adaptive-executable-batch.spl
+opts='{"threads":1,"hir_sharding":0,"parse_sharding":0,"streaming_surfaces":1}'
+
+# $1 = child shell snippet, $2 = options JSON; writes packet to $work/pk.
+make_packet() {
+    rm -rf "$work/pk" "$work/t1"
+    mkdir -p "$work/pk" "$work/t1"
+    printf x >"$work/t1/input.txt"
+    printf '%s\n' "$1" >"$work/t1/child.sh"
+    printf '{"threads":1,"command":["sh","%s/t1/child.sh"],"cwd":"%s/t1","environment":{"BATCH_FOO":"bar"},"files":{"input.txt":"%s"}}' \
+        "$work" "$work" "$(sha "$work/t1/input.txt")" >"$work/t1/request.json"
+    printf '{"aggregate_jobs":20,"max_executables":2}' >"$work/pk/config.json"
+    printf '{"targets":[{"packet":"%s/t1","request":"%s/t1/request.json","request_sha256":"%s","producer_sha256":"p","source":"s","backend":"cranelift","entry":"e.spl","cache_lease":"%s/lease","options":%s}]}' \
+        "$work" "$work" "$(sha "$work/t1/request.json")" "$work" "$2" >"$work/pk/tasks.json"
+}
+run_preflight() {
+    rc=0
+    "$simple" run "$driver" --packet "$work/pk" --preflight >"$work/out" 2>&1 || rc=$?
+}
+
+make_packet 'echo "ran:$1:$BATCH_FOO:$(pwd -W 2>/dev/null || pwd)"' "$opts"
+run_preflight
+[ "$rc" = 0 ] || fail "good packet must pass (rc=$rc): $(cat "$work/out")"
+grep -q 'ran:--preflight:bar:' "$work/out" || fail "preflight child lacked --preflight, env overlay or cwd"
+grep -q 'batch preflight passed' "$work/out" || fail "missing success line"
+
+make_packet 'exit 3' "$opts"
+run_preflight
+[ "$rc" != 0 ] || fail "a failing preflight child must fail the driver"
+
+make_packet 'exit 0' "$opts"
+printf y >"$work/t1/input.txt"
+run_preflight
+[ "$rc" != 0 ] || fail "a changed request input must fail"
+grep -q 'Child input changed' "$work/out" || fail "changed input not named"
+
+make_packet 'exit 0' '{"threads":2,"hir_sharding":0,"parse_sharding":0,"streaming_surfaces":1}'
+run_preflight
+[ "$rc" != 0 ] || fail "non-reviewed options must fail"
+
+make_packet 'exit 0' "$opts"
+printf '{}' >"$work/t1/request.json"
+run_preflight
+[ "$rc" != 0 ] || fail "a changed request must fail"
+grep -q 'Child request changed' "$work/out" || fail "changed request not named"
+
+make_packet 'exit 0' "$opts"
+printf '{"targets":[]}' >"$work/pk/tasks.json"
+run_preflight
+[ "$rc" != 0 ] || fail "an empty manifest must fail"
+grep -q 'Empty target manifest' "$work/out" || fail "empty manifest not named"
+echo "PASS adaptive-executable-batch preflight"

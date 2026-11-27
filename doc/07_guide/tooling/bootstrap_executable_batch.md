@@ -1,13 +1,13 @@
 # Diagnostic parallel executable batches
 
-The opt-in `scripts/bootstrap/adaptive-executable-batch.py` preserves the reviewed
+The opt-in `scripts/bootstrap/adaptive-executable-batch.spl` preserves the reviewed
 Windows diagnostic scheduler used to collect independent native compiler and link
 failures. It is **not a production buildrunner default or release admission**.
 The existing bootstrap scheduler contract remains the owner of parent admission;
 this helper only schedules executable tasks inside one admitted group.
 
 Run the helper beneath the canonical Windows CFEC collector with
-`--root-exit-policy terminate-job`. The collector must contain the Python parent,
+`--root-exit-policy terminate-job`. The collector must contain the driver process,
 all child qualification processes, native compilers, linkers, and nested RSS
 collectors. The parent reservation remains held until the collector reports whole
 tree closure. A child exception without a quiescent receipt stops new admissions,
@@ -40,6 +40,7 @@ may internally be serial even while multiple executable tasks overlap.
 
 ## Packet interface
 
+Run it as `bin/simple run scripts/bootstrap/adaptive-executable-batch.spl --packet PATH [--preflight]`.
 The helper takes `--packet PATH` and optional `--preflight`. Host paths, producer
 bytes, source authority, cache locations, and 420-target inventories belong in
 external immutable diagnostic packets, never this source file.
@@ -118,9 +119,12 @@ ABI or duplicate-definition bug is established until a linker was actually reach
 ## Focused checks and limits
 
 ```text
-python scripts/bootstrap/tests/executable-batch-test.py
-python scripts/bootstrap/tests/executable-batch-lease-test.py
-python scripts/bootstrap/tests/executable-batch-owner-test.py
+bin/simple run test/01_unit/scripts/executable_batch_policy_spec.spl
+bin/simple run test/01_unit/scripts/executable_batch_probe_spec.spl
+bin/simple run test/01_unit/scripts/executable_batch_driver_spec.spl
+bin/simple run test/01_unit/scripts/executable_batch_lease_spec.spl
+sh scripts/bootstrap/tests/executable-batch-launch-test.shs
+SIMPLE_BIN=bin/simple sh scripts/bootstrap/tests/adaptive-executable-batch-preflight-test.shs
 ```
 
 On Windows set `SIMPLE_BOOTSTRAP_BASH` to the installed Git Bash executable if PATH
@@ -134,3 +138,22 @@ reaping; these focused tests do not claim end-to-end product qualification.
 Ownership tests reject missing owners, reused owner/collector PIDs, unrelated
 ancestry and unbound commands, and execute a real preflight cwd/environment probe.
 Set `SIMPLE_BOOTSTRAP_POWERSHELL` to enable the Windows live-observer test.
+
+## Commit-headroom probe and child launch
+
+Available commit comes from `lib/executable_batch_probe.spl`: PowerShell
+`Get-CimInstance Win32_OperatingSystem`, `FreeVirtualMemory` (KB, free commit) with
+`TotalVirtualMemorySize` (KB, commit limit) as its sanity bound. It replaced the former
+ctypes `GetPerformanceInfo` call (`CommitLimit - CommitTotal`); both read the same
+system counters, and on the development host they agreed within the drift between
+two calls. An unreadable or inconsistent probe is an error, never zero or a guess:
+the driver stops admitting (`BLOCKED_COMMIT_PROBE_FAILED`), drains running children
+and exits 1.
+
+No Simple spawn API sets the working directory and redirects stdout/stderr to files
+in one call, so the driver starts each child through
+`lib/executable-batch-launch.shs` (cd, exclusive log creation, `exec`). The shell is
+`$SIMPLE_BOOTSTRAP_BASH` or `sh`. The request `environment` is overlaid on the
+inherited environment (spawn mode 1). The recorded child PID is that of the
+launcher's process; the launcher `exec`s the command, so it stays inside the same
+collector Job.

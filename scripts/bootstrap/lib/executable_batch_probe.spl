@@ -1,0 +1,67 @@
+# Windows commit-headroom probe for the adaptive executable batch driver.
+# Replaces the ctypes GetPerformanceInfo call of the former
+# executable_batch_policy.py with PowerShell:
+#   Get-CimInstance Win32_OperatingSystem -> FreeVirtualMemory, TotalVirtualMemorySize (KB).
+# The script text avoids braces: Simple string interpolation would rewrite them.
+# FreeVirtualMemory is the system-wide free commit (CommitLimit - CommitTotal),
+# TotalVirtualMemorySize is the commit limit. An unreadable probe is an error:
+# unknown memory must never be guessed or read as zero or as "plenty".
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+val KIB = 1024
+val I64_MAX = 9223372036854775807
+
+fn is_decimal(s: text) -> bool:
+    if s.len() == 0 or s.len() > 19:
+        return false
+    var i = 0
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if c < "0" or c > "9":
+            return false
+        i = i + 1
+    true
+
+fn lines_of(raw: text) -> [text]:
+    var out: [text] = []
+    for line in raw.replace("\r", "").split("\n"):
+        if line.trim().len() > 0:
+            out.push(line.trim())
+    out
+
+# "<FreeVirtualMemory> <TotalVirtualMemorySize>" (KB) -> available commit bytes.
+pub fn parse_commit_probe_output(raw: text) -> Result<i64, text>:
+    val lines = lines_of(raw)
+    if lines.len() != 1:
+        return Err("commit probe: expected exactly one output line, got {lines.len()}")
+    var fields: [text] = []
+    for f in lines[0].split(" "):
+        if f.len() > 0:
+            fields.push(f)
+    if fields.len() != 2:
+        return Err("commit probe: expected 2 fields, got {fields.len()}")
+    if not is_decimal(fields[0]) or not is_decimal(fields[1]):
+        return Err("commit probe: fields must be unsigned decimal integers")
+    val free_kib = fields[0].to_i64()
+    val total_kib = fields[1].to_i64()
+    if total_kib <= 0:
+        return Err("commit probe: TotalVirtualMemorySize must be positive")
+    if free_kib > total_kib:
+        return Err("commit probe: FreeVirtualMemory exceeds TotalVirtualMemorySize")
+    if free_kib > I64_MAX / KIB:
+        return Err("commit probe: FreeVirtualMemory overflows bytes")
+    Ok(free_kib * KIB)
+
+pub fn commit_probe_script() -> text:
+    "$o = Get-CimInstance Win32_OperatingSystem; Write-Output ($o.FreeVirtualMemory.ToString() + ' ' + $o.TotalVirtualMemorySize.ToString())"
+
+pub fn commit_probe_args() -> [text]:
+    ["-NoProfile", "-NonInteractive", "-Command", commit_probe_script()]
+
+# Available commit bytes, or Err naming why the probe could not be read.
+pub fn available_commit_bytes() -> Result<i64, text>:
+    val (out, err, code) = process_run("powershell.exe", commit_probe_args())
+    if code != 0:
+        return Err("commit probe: powershell.exe exited {code}: {err.trim()}")
+    parse_commit_probe_output(out)
