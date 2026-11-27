@@ -90,46 +90,38 @@ use std.spec.step
 
 use std.spec.*
 use std.common.mem_infra.config.{mem_infra_matrix, mem_infra_row_supported, mem_infra_auto_rows}
-use std.io_runtime.process_run
+use std.common.mem_infra.parity.{
+    MemInfraBackendLane, MemInfraGateMode, MemInfraExitOutcome,
+    MemInfraProbeEvaluation, mem_infra_status_label, mem_infra_evaluate_guard_probe
+}
+use std.io_runtime.{env_get, env_set, env_remove_process}
+use std.spec.engine_probe.{run_under_engine}
 
 val FIXTURE = "test/fixture/mem_infra/guard_uaf_probe.spl"
-val SURVIVED = "uaf_probe: survived"
 
-# The SIMPLE_TEST_BINARY override is expanded by the CHILD SHELL
-# (`${SIMPLE_TEST_BINARY:-bin/simple}`) rather than read Simple-side via
-# `env_get`. Either spelling works now; this one is kept only because it makes
-# the default visible at the point of use.
-#
-# CORRECTION (2026-08-02). An earlier version of this comment claimed the shell
-# form was load-bearing — that "the spec runner does not surface that variable
-# to the spec body", so `env_get` returned "" while the shell form worked. That
-# diagnosis was wrong, and acting on it would have left every sibling spec
-# broken while looking fixed.
-#
-# The real defect was never about how the override is spelled. `bin/simple test`
-# hands the spec to a long-lived helper process (src/app/test_daemon/light_daemon.spl)
-# over a request that carries NO environment, and that helper's own environment
-# is frozen at whichever invocation first started it. The spec body therefore
-# ran under a stale environment — and so did any shell it forked, since the
-# shell inherits the daemon's environment too. Measured: with a daemon already
-# running, a spec body saw the PREVIOUS run's value through `env_get` AND
-# through `$SIMPLE_TEST_BINARY` in a child shell, on the same run. Kill the
-# daemon and both spellings immediately read the caller's value.
-#
-# Fixed in `test_runner_client.spl`: naming any binary-override variable now
-# takes the direct lane instead of the daemon lane, so the override reaches the
-# spec body whichever way it is read. Full write-up, including why the
-# original sabotage check passed for the wrong reason:
-# doc/08_tracking/bug/test_daemon_freezes_env_binary_override_dead_2026-08-02.md
-fn survived_uaf(engine: text, guard_on: bool) -> bool:
-    val gate = if guard_on: "SIMPLE_MEM_GUARD_RATE=1 " else: ""
-    # NB: the `{{`/`}}` are escaped braces — a bare `{...}` in a Simple text
-    # literal is string interpolation, so an unescaped `${SIMPLE_TEST_BINARY:-…}`
-    # is parsed as an interpolation of a variable named `SIMPLE_TEST_BINARY:-…`
-    # and fails to compile rather than reaching the shell.
-    val cmd = "{gate}SIMPLE_EXECUTION_MODE={engine} \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run '{FIXTURE}' 2>&1"
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
-    out.contains(SURVIVED)
+fn _restore_env(key: text, prev: text?):
+    match prev:
+        case Some(value):
+            val _ = env_set(key, value)
+        case None:
+            val _ = env_remove_process(key)
+
+fn eval_guard_uaf(engine: text, guard_on: bool) -> MemInfraProbeEvaluation:
+    val prev_guard = env_get("SIMPLE_MEM_GUARD_RATE")
+    val prev_strict = env_get("SIMPLE_JIT_STRICT")
+    if guard_on:
+        val _ = env_set("SIMPLE_MEM_GUARD_RATE", "1")
+    else:
+        val _ = env_remove_process("SIMPLE_MEM_GUARD_RATE")
+    if engine == "jit":
+        val _ = env_set("SIMPLE_JIT_STRICT", "1")
+    val (out, err, code) = run_under_engine(FIXTURE, engine)
+    _restore_env("SIMPLE_JIT_STRICT", prev_strict)
+    _restore_env("SIMPLE_MEM_GUARD_RATE", prev_guard)
+    val lane = if engine == "jit": MemInfraBackendLane.Jit else: MemInfraBackendLane.Interpreter
+    val gate = if guard_on: MemInfraGateMode.On else: MemInfraGateMode.Off
+    val exit_outcome = if code == 0: MemInfraExitOutcome.Zero else: MemInfraExitOutcome.NonZero
+    mem_infra_evaluate_guard_probe(lane, gate, out + "\n" + err, exit_outcome)
 
 describe "guard capability-matrix row matches observed guard-page behaviour":
     # @manual scenario evidence
@@ -141,10 +133,12 @@ describe "guard capability-matrix row matches observed guard-page behaviour":
         assert_equal(mem_infra_row_supported("guard", "interpreter"), true)
 
         step("Sabotage control: with the guard knob unset the same UAF must survive")
-        assert_equal(survived_uaf("interpreter", false), true)
+        val off_eval = eval_guard_uaf("interpreter", false)
+        assert_equal(mem_infra_status_label(off_eval.status), "passed")
 
         step("With SIMPLE_MEM_GUARD_RATE=1 the UAF must NOT survive - the guard page traps it")
-        assert_equal(survived_uaf("interpreter", true), false)
+        val on_eval = eval_guard_uaf("interpreter", true)
+        assert_equal(mem_infra_status_label(on_eval.status), "passed")
 
     it "traps a use-after-free on the in-process JIT lane, which shares the interpreter allocator":
         # @req REQ-SSPEC-LIB
@@ -153,16 +147,46 @@ describe "guard capability-matrix row matches observed guard-page behaviour":
         # allocator the JIT lane really binds (mem_guard.rs, via the
         # rt_interp_call trampoline) - it is NOT evidence about the cranelift
         # matrix row, which describes a natively-linked artifact.
-        step("Sabotage control: with the guard knob unset the same UAF survives")
-        assert_equal(survived_uaf("jit", false), true)
+        step("Sabotage control: with the guard knob unset the same UAF survives without demotion")
+        val off_eval = eval_guard_uaf("jit", false)
+        assert_equal(mem_infra_status_label(off_eval.status), "passed")
 
-        step("With SIMPLE_MEM_GUARD_RATE=1 the UAF must NOT survive on the JIT lane either")
-        assert_equal(survived_uaf("jit", true), false)
+        step("With SIMPLE_MEM_GUARD_RATE=1 the UAF must NOT survive on the JIT lane without demotion")
+        val on_eval = eval_guard_uaf("jit", true)
+        assert_equal(mem_infra_status_label(on_eval.status), "passed")
 
         step("The matrix row for the natively-linked cranelift backend is still guard: false")
         # Not measured by the arm above; hand-measured native-build evidence is
         # in doc/08_tracking/bug/mem_infra_guard_row_false_on_native_backends_2026-07-31.md.
         assert_equal(mem_infra_row_supported("guard", "cranelift"), false)
+
+    it "refuses silent interpreter demotion or missing startup banner as guard parity":
+        # @req REQ-SSPEC-LIB
+        step("A JIT child that emits a demotion marker must be rejected even if it died non-zero without printing survived")
+        val jit_fb = mem_infra_evaluate_guard_probe(
+            MemInfraBackendLane.Jit,
+            MemInfraGateMode.On,
+            "[jit-fallback] lowering failed\nuaf_probe: start\n",
+            MemInfraExitOutcome.NonZero
+        )
+        assert_equal(mem_infra_status_label(jit_fb.status), "demoted-to-interpreter")
+
+        val engine_demote = mem_infra_evaluate_guard_probe(
+            MemInfraBackendLane.Jit,
+            MemInfraGateMode.On,
+            "[engine-demotion] reason=hybrid-interp-splice\nuaf_probe: start\n",
+            MemInfraExitOutcome.NonZero
+        )
+        assert_equal(mem_infra_status_label(engine_demote.status), "demoted-to-interpreter")
+
+        step("A binary crash before printing uaf_probe: start must fail as launch-error rather than masquerade as a trap")
+        val no_banner = mem_infra_evaluate_guard_probe(
+            MemInfraBackendLane.Jit,
+            MemInfraGateMode.On,
+            "error: binary crashed early",
+            MemInfraExitOutcome.NonZero
+        )
+        assert_equal(mem_infra_status_label(no_banner.status), "launch-error")
 
     it "claims guard: false on llvm, which links the same no-guard C rt_alloc as cranelift":
         # @req REQ-SSPEC-LIB

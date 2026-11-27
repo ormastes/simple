@@ -398,3 +398,17 @@ Re-ran under Windows seed interpreter (`--mode=interpreter`):
   W2-3 scope), and natively-linked `cranelift` verification requires a native
   build outside this Windows seed host. Kept shard `.sdn` open to reflect this
   Windows/native residual.
+
+
+---
+
+## 2026-11-27 W4-9 Fix & Verification Update (Windows Seed Host)
+
+- **Code changes (strict `src/lib/common/mem_infra/**` + spec scope):**
+  - Added pure evaluation module `src/lib/common/mem_infra/parity.spl` (zero I/O, zero `pub` primitive APIs) exporting `MemInfraBackendLane`, `MemInfraGateMode`, `MemInfraExitOutcome`, `MemInfraRunStatus`, `MemInfraProbeEvaluation`, `mem_infra_status_label`, `mem_infra_demotion_reason`, `mem_infra_evaluate_guard_probe`, `mem_infra_evaluate_harden_poison_probe`, and `mem_infra_evaluate_harden_tamper_probe`.
+  - Any `"jit"` run emitting `[jit-fallback]`, `[engine-demotion]`, `hybrid-interp-splice`, `SIMPLE_JIT_STRICT`, `falling back to interpreter`, `dropped to the interpreter`, `unknown extern function`, or `rt_interp_call error` now fails closed as `DemotedToInterpreter`; missing `uaf_probe: start` or premature nonzero exit fails as `LaunchError` instead of vacuous pass.
+  - Replaced `process_run("/bin/sh", ...)` in both `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl` and `test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl` with `std.spec.engine_probe.{run_under_engine}`, setting `SIMPLE_JIT_STRICT=1` on `"jit"` and adding explicit anti-demotion regression examples.
+- **Verbatim Windows run (`simple.exe test ... --mode=interpreter`):**
+  - `test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl`: `SPEC FILE VERDICT: test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 blocked=0 dropped=0` (`RC=0`, strict `"jit"` tamper probe + anti-demotion regression passed).
+  - `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl`: `SPEC FILE VERDICT: test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl outcome=ERROR declared>=5 executed=5 passed=3 failed=2 skipped=0 blocked=0 dropped=0` (`RC=1`; sabotage controls and anti-demotion check passed; the 2 UAF-trap assertions honestly failed `expected passed, got probe-failed` because `src/compiler_rust/compiler/src/interpreter_extern/mem_guard.rs` `#[cfg(not(unix))]` stub returns `None`).
+- **Status:** `fix-implemented-verification-pending` (`waiting-for:` Unix host verification of OS guard-page UAF traps + native-build `cranelift` parity; `src/compiler_rust` is outside this slim sparse worktree).

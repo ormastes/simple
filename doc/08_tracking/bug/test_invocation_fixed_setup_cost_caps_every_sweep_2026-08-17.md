@@ -218,3 +218,21 @@ and pay the runner's fixed setup once per process. Executable SSpec:
 test/02_integration/app/test_runner/single_runner_directory_target_spec.spl
 (3 examples, hosted seed PASS 2026-11-12, no pass_todo); manual:
 doc/06_spec/02_integration/app/test_runner/single_runner_directory_target_spec.md.
+
+
+---
+
+## 2026-11-27 W4-9 Fix & Verification Update (Windows Seed Host)
+
+- **Code changes (strict `src/app/test_daemon/**` + `test_runner_new` startup/cache + `test/01_unit/app/test_daemon/**` scope; zero edits in `src/app/cli/**` or `src/app/compile/native.spl`):**
+  - Added `src/app/test_daemon/worker_cache.spl` implementing a `.smf` compiled single-file worker cache under `.build/test_daemon_light/worker_cache/` keyed by compiler binary `(path, size, mtime)`, `test_runner_single.spl` + 9 runner dependency digests, `SIMPLE_LIB`, and daemon `environment_digest`. Includes stale artifact pruning and negative `.disabled` caching on compile failure or SMF load/relocation failure (e.g., Rust seed lacking `rt_text_is_ascii`) while never misclassifying or hiding real spec failures carrying `SPEC FILE VERDICT:`.
+  - Wired `worker_cache` + one-shot source fallback into `src/app/test_daemon/light_daemon.spl` (`handle_request`), preserving daemon child env markers, lock-owner generation checks, and timeout synthesis.
+  - Updated `src/app/test_runner_new/test_runner_single.spl` (`clean_args`) to strip cached `test_runner_single_*.smf` entrypoint arguments.
+  - Updated `src/app/test_runner_new/test_runner_client.spl` to evaluate static bypass flags (`daemon_host_bypass`, `cov_bypass`, `binary_override_bypass`, `long_timeout_bypass`, `require_gpu_bypass`, `env_gate_bypass`, `compiler_bypass`) before calling `ensure_dirs()`, `test_daemon_environment_identity_v1()`, lock checks, or backlog dir scans.
+  - Added `test/01_unit/app/test_daemon/light_daemon_worker_cache_spec.spl`.
+- **Verbatim Windows measurements & test results (`simple.exe`):**
+  - Baseline probe before edits: `simple.exe test test/01_unit/_mcdc_probe/plain_ok_spec.spl --mode=interpreter` -> `ELAPSED_MS=11611 RC=0`; `test_runner_single.spl` source run `9544ms`; compiled `trs_probe.smf` startup `1727ms` (blocked on seed SMF loader missing `rt_text_is_ascii`).
+  - Post-edit Windows `plain_ok_spec.spl`: `ELAPSED_MS=9345 RC=0` (spec `outcome=OK`, `1/1`).
+  - `test/01_unit/app/test_daemon/light_daemon_worker_cache_spec.spl`: `outcome=OK declared>=4 executed=4 passed=4 failed=0` (`RC=0`), micro-bench `worker_cache micro-bench: cold_compile_ms=320 warm_10x_resolve_ms=817`.
+  - Sibling `test_daemon` specs passed sequentially: `light_daemon_pinned_bypass_spec.spl` (`3/3`), `light_request_claim_spec.spl` (`2/2`), `test_daemon_light_protocol_spec.spl` (`6/6`), `test_daemon_verdict_line_emission_spec.spl` (`8/8`).
+- **Status:** `fix-implemented-verification-pending` (`waiting-for:` Linux host with pure-Simple binary defining `rt_text_is_ascii` to verify `light_daemon` warm `.smf` worker execution end-to-end).
