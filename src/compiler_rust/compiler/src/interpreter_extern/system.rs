@@ -2258,7 +2258,28 @@ const PIPED_WRITE_CHUNK_V1: usize = 4096;
 
 /// stderr must never park the interpreter: O_NONBLOCK on unix; Windows reads
 /// are gated by PeekNamedPipe instead (anonymous pipes have no O_NONBLOCK).
+/// Windows split children also get PIPE_NOWAIT on stdin: the write-only handle
+/// lacks FILE_READ_ATTRIBUTES, so free space cannot be queried; a PIPE_NOWAIT
+/// write of <= 4 KiB is accepted whole or returns 0 (measured on Win11).
 fn piped_split_endpoints_nonblocking(child: &std::process::Child) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn SetNamedPipeHandleState(pipe: *mut std::ffi::c_void, mode: *const u32,
+                max_collection: *const u32, timeout: *const u32) -> i32;
+        }
+        const PIPE_NOWAIT: u32 = 1;
+        let Some(stdin) = child.stdin.as_ref() else { return false };
+        let ok = unsafe {
+            SetNamedPipeHandleState(stdin.as_raw_handle() as *mut std::ffi::c_void, &PIPE_NOWAIT,
+                std::ptr::null(), std::ptr::null())
+        };
+        if ok == 0 {
+            return false;
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -2441,36 +2462,12 @@ fn piped_stdin_writable_now(stdin: &std::process::ChildStdin, request: usize) ->
     if ready == 1 && poll.revents & libc::POLLOUT != 0 { request.min(libc::PIPE_BUF) } else { 0 }
 }
 
+/// Windows: split children carry PIPE_NOWAIT on stdin (see
+/// piped_split_endpoints_nonblocking), so a <= 4 KiB write never parks; legacy
+/// children are blocking and refused by the caller.
 #[cfg(windows)]
-fn piped_stdin_writable_now(stdin: &std::process::ChildStdin, request: usize) -> usize {
-    use std::os::windows::io::AsRawHandle;
-    #[repr(C)]
-    struct IoStatusBlock { status: usize, information: usize }
-    #[repr(C)]
-    #[derive(Default)]
-    struct FilePipeLocalInformation {
-        named_pipe_type: u32, named_pipe_configuration: u32, maximum_instances: u32,
-        current_instances: u32, inbound_quota: u32, read_data_available: u32,
-        outbound_quota: u32, write_quota_available: u32, named_pipe_state: u32,
-        named_pipe_end: u32,
-    }
-    #[link(name = "ntdll")]
-    unsafe extern "system" {
-        fn NtQueryInformationFile(handle: *mut std::ffi::c_void, io: *mut IoStatusBlock,
-            info: *mut std::ffi::c_void, length: u32, class: i32) -> i32;
-    }
-    const FILE_PIPE_LOCAL_INFORMATION_CLASS: i32 = 24;
-    let mut io = IoStatusBlock { status: 0, information: 0 };
-    let mut info = FilePipeLocalInformation::default();
-    let status = unsafe {
-        NtQueryInformationFile(stdin.as_raw_handle() as *mut std::ffi::c_void, &mut io,
-            &mut info as *mut _ as *mut std::ffi::c_void,
-            std::mem::size_of::<FilePipeLocalInformation>() as u32,
-            FILE_PIPE_LOCAL_INFORMATION_CLASS)
-    };
-    // Writing no more than the free outbound quota completes without waiting
-    // for the reader; an unanswerable query is "not now", never a guess.
-    if status < 0 { 0 } else { request.min(info.write_quota_available as usize) }
+fn piped_stdin_writable_now(_stdin: &std::process::ChildStdin, request: usize) -> usize {
+    request
 }
 
 /// `rt_process_write_stdin_bytes_some_v1(pid: i64, data: [u8], offset: i64, max_bytes: i64) -> i64`
@@ -2502,16 +2499,19 @@ pub fn rt_process_write_stdin_bytes_some_v1(args: &[Value]) -> Result<Value, Com
     }
     let request = (bytes.len() - start).min(max_bytes as usize).min(PIPED_WRITE_CHUNK_V1);
     let mut map = PIPED_PROCESSES.lock().unwrap();
-    let Some(stdin) = map.get_mut(&pid).and_then(|p| p.child.stdin.as_mut()) else {
+    let Some(process) = map.get_mut(&pid) else { return Ok(Value::Int(-1)) };
+    // Windows legacy children have a blocking stdin; only split spawns are nonblocking.
+    if cfg!(windows) && process.child.stderr.is_none() {
         return Ok(Value::Int(-1));
-    };
+    }
+    let Some(stdin) = process.child.stdin.as_mut() else { return Ok(Value::Int(-1)) };
     let now = piped_stdin_writable_now(stdin, request);
     if now == 0 {
         return Ok(Value::Int(0));
     }
     match stdin.write(&bytes[start..start + now]) {
         Ok(n) => Ok(Value::Int(n as i64)),
-        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(Value::Int(0)),
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock) => Ok(Value::Int(0)),
         Err(_) => Ok(Value::Int(-1)),
     }
 }
