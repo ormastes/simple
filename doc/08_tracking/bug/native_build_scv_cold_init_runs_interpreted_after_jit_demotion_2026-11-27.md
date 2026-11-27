@@ -145,3 +145,32 @@ reached and todo 478 / the plan-doc "STILL OWED native link smoke" stay open. Th
 lines are captured on Windows (`process_run_bounded` / `process_run_timeout_windows`; Unix relays live) and not echoed until exit, so its internal phase at the kill is
 unknown; next step is to make the worker's stdout live (or `SIMPLE_NATIVE_BUILD_WORKER_SPAWN_TRACE`) and re-run
 with a >2400 s cap, or run the children on JIT (see root cause above).
+
+## JIT children probe (2026-11-27, seed simple-local-20261127l, worktree c27-census)
+
+`SIMPLE_EXECUTION_MODE=jit SIMPLE_BUILD_TRACE=1 ... native-build smoke.spl` (children inherit `jit`):
+
+| phase | interpreted (before) | JIT children (measured) |
+|---|---|---|
+| parse shard `source_closure` 93 files | 125-132 s | 1.8-2.0 s |
+| parse shard FileFiber loop | 7 files = 300 s (io_runtime.spl 4.3 s parse) | whole shard ~5-7 s; io_runtime.spl 2.3 KB parse 0.4 s (+0.0 s TLDR); 6 shards x 11-22 files done in the ~57 s between `coordinator:shards parse=6` and `mir_parallel` |
+| coordinator admission (warm) | 21-24 s | 17 s to worker:select |
+| MIR shard admission (default) | refused (`mir_parallel=-1`) | still refused: needs `SIMPLE_MIR_SHARDING=0` (coordinator RSS ~3.5 GB) |
+
+No `[engine-demotion] reason=jit-compile-error` and no JIT hang (no flat-CPU stall) in coordinator or parse children; only the known
+`hybrid-interp-splice` extern lines. Memory: coordinator WS ~3.4 GB, each parse child ~0.8 GB, final worker ~2.0-2.1 GB, flat.
+
+The 2026-07-30 doc's own final section already re-scoped that "JIT hang" as `process_run_timeout` buffering stdout until exit
+(not a hang), so the forced `interpret` default had no standing reason. Change: `run_native_build_worker` now sets
+`SIMPLE_EXECUTION_MODE=jit` (was `interpret`) when unset on the non-bootstrap route (`native_build_main.spl`); the
+`== "interpret"` clamps (parse cap 1, `--low-memory`) now apply only when the operator opts into interpret.
+
+STILL OPEN: with `SIMPLE_MIR_SHARDING=0 SIMPLE_EXECUTION_MODE=jit` the single final worker (`native_build_worker.spl`) ran to the
+2400 s cap (rc=143, ~2200 cpu-s, WS flat ~2.1 GB, no clang/lld children) and produced no exe, so the smoke (`true`/`false`) is still
+NOT reached; todo 478 and the plan-doc owed item stay open. JIT therefore fixes the parse-warm phase (>30 min -> <10 s) but not the
+final worker; its internal phase is invisible on Windows because its stdout (74 KB) and stderr (1.3 MB) are only returned at exit and
+are discarded on timeout kill. Next: make the worker's output live (or flush captured stdout on timeout) to see which phase
+(HIR serial lowering after "HIR warm-up pool refused: no closure request published", MIR, LLVM) consumes the time.
+
+Follow-up: verify that JIT-run parse shards write front-end cache entries identical to interpreted ones (the lint entry has a known
+JIT wrong-answer precedent, `src/compiler_rust/driver/src/exec_core.rs:1971-1987`); a faster but divergent cache warm would be silent.
