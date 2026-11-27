@@ -1138,6 +1138,33 @@ pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bo
     }
 }
 
+/// Make directory-entry changes durable (`rt_dir_sync(path) -> bool`).
+/// Unix: open the directory and fsync it. Windows/NTFS has no portable
+/// directory fsync and journals metadata, so report whether `path` is an
+/// existing directory. Missing path or non-directory is false.
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_sync(path_ptr: *const u8, path_len: u64) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path = match std::str::from_utf8(path_bytes) {
+        Ok(s) => Path::new(s),
+        Err(_) => return false,
+    };
+    if !path.is_dir() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(path).and_then(|dir| dir.sync_all()).is_ok()
+    }
+}
+
 /// Synchronize the cached write-at handle when it matches `path`.
 ///
 /// Falls back to `rt_file_fsync` when the current thread has no matching

@@ -316,6 +316,7 @@ const RT_KEEP: &[&str] = &[
     "rt_file_rename",
     "rt_crc32_text",
     "rt_file_sync",
+    "rt_dir_sync",
     "rt_file_create_excl",
     "rt_mem_snapshot_open",
     "rt_mem_snapshot_record",
@@ -686,6 +687,7 @@ int main(int argc, char** argv) {
 {w}bool rt_file_rename(const char* a, const char* b) {{ (void)a; (void)b; return true; }}
 {w}int64_t rt_crc32_text(const char* a, int64_t n) {{ (void)a; (void)n; return 0; }}
 {w}bool rt_file_sync(const char* a, int64_t n) {{ (void)a; (void)n; return true; }}
+{w}bool rt_dir_sync(const char* a, int64_t n) {{ (void)a; (void)n; return true; }}
 {w}bool rt_file_create_excl(const char* a, int64_t an, const char* b, int64_t bn) {{ (void)a; (void)an; (void)b; (void)bn; return true; }}
 {w}void rt_fault_set_stack_overflow_detection(int64_t v) {{ (void)v; }}
 {w}void rt_fault_set_timeout(int64_t v) {{ (void)v; }}

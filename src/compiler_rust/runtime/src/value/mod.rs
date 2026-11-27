@@ -453,6 +453,7 @@ pub use sffi::{
     rt_file_size,
     rt_file_hash_sha256,
     rt_file_fsync,
+    rt_dir_sync,
     rt_file_fsync_cached,
     rt_file_lock,
     rt_file_unlock,

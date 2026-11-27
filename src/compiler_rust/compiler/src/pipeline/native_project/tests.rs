@@ -3019,6 +3019,7 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_crc32_text"));
     assert!(core_c_symbols.contains("rt_file_create_excl"));
     assert!(core_c_symbols.contains("rt_file_sync"));
+    assert!(core_c_symbols.contains("rt_dir_sync"));
     for symbol in [
         "rt_file_view_open_beneath_no_follow_v1",
         "rt_file_view_pread_exact_v1",
@@ -5231,6 +5232,7 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         "rt_mem_snapshot_close",
         "rt_file_create_excl",
         "rt_file_sync",
+        "rt_dir_sync",
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
         "rt_sosix_directory_pair_check_v1",
