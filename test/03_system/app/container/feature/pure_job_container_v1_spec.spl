@@ -13,7 +13,8 @@
 use std.spec.*
 use std.platform.{is_windows, get_current_dir, get_temp_dir}
 use std.nogc_sync_mut.io_runtime.{file_exists, getpid, time_now_monotonic_ms}
-use std.nogc_sync_mut.io.dir_ops.{dir_create_all, is_dir, dir_walk}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, is_dir, dir_walk, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{thread_sleep}
 use std.common.contracts.container.capability_report_v1.{ContainerCapabilityFlagV1, ContainerCapabilityRequirementV1, container_capability_requirement_v1_empty, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1}
 use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, pure_container_capability_report_v1}
 use std.common.contracts.container.backend_identity_v1.{CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1}
@@ -106,7 +107,7 @@ fn job_policy() -> PureContainerOwnerPolicyV1:
     PureContainerOwnerPolicyV1(store: store_root(), view_root: view_root(), base_root: "main", quota: ViewBytesV1(1048576),
         limits: SosixContainLimitsV1(memory: SosixContainBytesV1(CAP_BYTES), processes: SosixContainCountV1(0),
             cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(WALL_MS)),
-        identity: "restricted", requirement: requirement_sandbox(), evidence: evidence, hold_running: ContainerCapabilityFlagV1(true))
+        identity: "restricted", requirement: requirement_sandbox(), evidence: evidence, hold_running: PureContainerHoldV1(true))
 
 fn job_request(pod: text, op: text) -> ContainerExecutionRequestV2:
     val wire = PureContainerRequestV1(pod_uid: pod, attempt: ContainerAttemptNumberV1(1), operation_id: op,
@@ -202,3 +203,69 @@ describe "pure container hold_running job lifecycle":
         val report = pure_container_capability_report_v1(sosix_contain_support_v1(), evidence)
         expect(report.filesystem_confinement.value).to_equal(false)
         expect(report.memory_hard_limit.value).to_equal(true)
+
+fn request_with(pod: text, op: text, script: text) -> ContainerExecutionRequestV2:
+    var request = job_request(pod, op)
+    val wire = PureContainerRequestV1(pod_uid: pod, attempt: ContainerAttemptNumberV1(1), operation_id: op,
+        program: SEED, program_digest: digest_of(SEED), args: ["run", repo() + "/test/fixtures/container/" + script],
+        environment: ["SystemRoot=C:\Windows", "PATH=C:\Windows\System32"], network: "host")
+    val bytes = pure_container_request_encode_v1(wire).unwrap()
+    request.request_bytes = bytes
+    request.plan.request_digest = pure_container_request_digest_v1(bytes)
+    request
+
+describe "pure container hold_running close and natural exit":
+    it "refuses close while a container holds a job or view, and closes after stop and destroy":
+        if not ready(): return
+        var owner = open_job().unwrap()
+        val request = job_request("job-pod-c", "job-op-c")
+        owner = launch(owner, request, "job-op-c")
+        val refused_running = simple_container_close_v2(owner)
+        expect(refused_running.closed).to_equal(false)
+        expect(refused_running.error).to_equal("container-api-pure-container-resources-held")
+        val stopped = control(refused_running.owner.unwrap(), request, "job-op-c", "stop")
+        # Stopped, but the view and scratch still exist until destroy.
+        expect(simple_container_close_v2(stopped.owner).closed).to_equal(false)
+        val destroyed = control(stopped.owner, request, "job-op-c", "destroy")
+        expect(simple_container_close_v2(destroyed.owner).closed).to_equal(true)
+
+    it "refuses close for a created container that owns a view, and releases it on destroy":
+        if not ready(): return
+        val opened = open_job().unwrap()
+        val request = job_request("job-pod-d", "job-op-d")
+        val now_ms = sosix_time_now_unix_micros() / 1000
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, "job-op-d", ["create"], now_ms + WALL_MS).unwrap()
+        val prepared = simple_container_apply_v2(opened, "prepare", request, deadline)
+        val created = simple_container_apply_v2(prepared.owner, "create", request, deadline)
+        expect(created.operation.state.phase).to_equal("created")
+        expect(simple_container_close_v2(created.owner).closed).to_equal(false)
+        val destroyed = control(created.owner, request, "job-op-d", "destroy")
+        expect(destroyed.operation.state.phase).to_equal("destroyed")
+        expect(entries_under(view_root())).to_equal(0)
+        expect(simple_container_close_v2(destroyed.owner).closed).to_equal(true)
+
+    it "observes a child that exited on its own: inspect and wait move running to exited":
+        if not ready(): return
+        var owner = open_job().unwrap()
+        val request = request_with("job-pod-e", "job-op-e", "exit_soon_probe.spl")
+        owner = launch(owner, request, "job-op-e")
+        var turn = simple_container_read_v2(owner, "inspect", request)
+        var tries = 0
+        while turn.operation.state.phase == "running" and tries < 600:
+            thread_sleep(100)
+            turn = simple_container_read_v2(turn.owner, "inspect", request)
+            tries = tries + 1
+        expect(turn.operation.state.phase).to_equal("exited")
+        val waited = simple_container_read_v2(turn.owner, "wait", request)
+        expect(waited.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(waited.operation.exit_code).to_equal(0)
+        expect(held_lease_of(waited.owner, request).is_none()).to_equal(true)
+        val destroyed = control(waited.owner, request, "job-op-e", "destroy")
+        expect(destroyed.operation.state.phase).to_equal("destroyed")
+        expect(entries_under(view_root())).to_equal(0)
+        expect(simple_container_close_v2(destroyed.owner).closed).to_equal(true)
+
+    it "removes its scratch directory":
+        if not ready(): return
+        val _removed = dir_remove_all(base_dir())
+        expect(is_dir(base_dir())).to_equal(false)

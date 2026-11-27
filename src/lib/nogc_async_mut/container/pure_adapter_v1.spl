@@ -26,10 +26,13 @@ use std.common.contracts.sosix.containment_v1.{SosixContainLimitsV1, SosixContai
 use std.common.container_policy.attempt_dir_plan_v1.{ContainerAttemptNumberV1}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, PureContainerSessionV1, pure_container_run_v1, _prepare_v1, _begin_v1, _stop_v1, _teardown_v1}
-use std.nogc_sync_mut.sosix.containment_v1.sosix_contain_support_v1
+use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, PureContainerSessionV1, pure_container_run_v1, _prepare_v1, _begin_v1, _stop_v1, _finish_v1, _teardown_v1}
+
 use std.nogc_sync_mut.sosix.time.sosix_time_now_unix_micros
+use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1, sosix_contain_poll_v1}
 use std.nogc_sync_mut.storage.storage_view_v1.ViewBytesV1
+
+pub unit PureContainerHoldV1: bool
 
 pub const PURE_CONTAINER_REQUEST_MAGIC_V1 = "simple-pure-request-v1"
 const _PURE_REQUEST_MAX_BYTES = 1048576
@@ -49,7 +52,7 @@ pub struct PureContainerOwnerPolicyV1:
     # storage view, start launches the job and RETURNS while it runs, stop cancels and collects the
     # job, destroy tears the view down. The per-container view is the A2 seam: store, view_root,
     # base_root and quota above are passed to _prepare_v1 untouched.
-    hold_running: ContainerCapabilityFlagV1 = ContainerCapabilityFlagV1(false)
+    hold_running: PureContainerHoldV1 = PureContainerHoldV1(false)
 
 pub struct PureContainerRequestV1:
     pod_uid: text
@@ -195,6 +198,9 @@ impl PureSimpleContainerAdapterV1:
     pub fn unproven_cleanup_reason() -> text:
         for record in self.records.values():
             if record.phase == RUNTIME_PHASE_UNKNOWN: return "pure-container-cleanup-unproven"
+        # A hold_running record that still owns a job, view or scratch is closed by stop + destroy, never dropped.
+        for record in self.records.values():
+            if record.session.is_some() or record.lease.is_some(): return "pure-container-resources-held"
         ""
 
     fn _decode(request: ContainerExecutionRequestV2) -> Result<PureContainerRequestV1, text>:
@@ -267,10 +273,33 @@ impl PureSimpleContainerAdapterV1:
             return _pure_op_refused_v1(action, "pure-container-" + action + "-unsupported", RUNTIME_STATUS_REJECTED)
         val key = self._key(decoded)
         if not self.records.contains_key(key): return _pure_op_refused_v1(action, "pure-container-not-retained", RUNTIME_STATUS_BLOCKED)
-        val record = self.records[key]
+        val record = self._refresh(key)
         if action == "wait" and record.phase != RUNTIME_PHASE_EXITED:
             return self._op(action, decoded, record, RUNTIME_STATUS_BLOCKED, "pure-container-not-exited")
         self._op(action, decoded, record, RUNTIME_STATUS_OK, "")
+
+    # Observe a held job: a child that exited on its own, or was killed at its wall limit by the poll
+    # (the owner enforces the wall deadline only inside poll), moves RUNNING -> EXITED here. The job is
+    # collected; the view stays until destroy. Called by inspect/wait.
+    me fn _refresh(key: text) -> PureRetainedV1:
+        val current = self.records[key]
+        if current.phase != RUNTIME_PHASE_RUNNING or current.lease.is_none() or current.session.is_none(): return current
+        val lease = current.lease.unwrap()
+        val polled = sosix_contain_poll_v1(lease)
+        if polled.is_err() or not polled.unwrap().terminal.value: return current
+        val session = current.session.unwrap()
+        val done = _finish_v1(session, session.life, lease, false, "")
+        var next = current
+        next.session = Some(done.session)
+        if done.status == "cleanup-unproven":
+            next.reason = done.reason
+            return self._set(key, next)
+        next.lease = None
+        next.phase = RUNTIME_PHASE_EXITED
+        next.has_exit = true
+        next.exit_code = done.exit_code.value
+        next.reason = ""
+        self._set(key, next)
 
     fn _admission() -> text:
         _pure_admission_reason_v1(self.policy)
@@ -395,16 +424,26 @@ impl PureSimpleContainerAdapterV1:
         if next.phase == RUNTIME_PHASE_RUNNING:
             val session = next.session.unwrap()
             val stopped = _stop_v1(session, session.life, next.lease.unwrap())
+            if stopped.status == "cleanup-unproven":
+                # Keep the lease and session: the job may still be live and the stop can be retried.
+                next.reason = "pure-container-cleanup-unproven"
+                return self._op(action, decoded, self._set(key, next), RUNTIME_STATUS_BLOCKED, stopped.reason)
             next.session = Some(stopped.session)
             next.lease = None
-            if stopped.status != "exited":
-                next.phase = RUNTIME_PHASE_UNKNOWN
-                next.reason = "pure-container-cleanup-unproven"
-                return self._op(action, decoded, self._set(key, next), RUNTIME_STATUS_BLOCKED, next.reason)
+            if stopped.status == "rejected":
+                # The abort path proved the tree empty and collected: teardown-able, not unknown.
+                next.phase = RUNTIME_PHASE_STOPPED
+                next.has_exit = false
+                next.reason = ""
+                return self._finish_held_tail(action, decoded, key, next)
             next.phase = RUNTIME_PHASE_STOPPED
             next.has_exit = stopped.reason == ""
             next.exit_code = stopped.exit_code.value
             next.reason = ""
+        self._finish_held_tail(action, decoded, key, next)
+
+    me fn _finish_held_tail(action: text, decoded: PureContainerRequestV1, key: text, held: PureRetainedV1) -> RuntimeOperationV1:
+        var next = held
         if action == "stop":
             if next.phase == RUNTIME_PHASE_DESTROYED: return self._op(action, decoded, next, RUNTIME_STATUS_OK, "")
             next.phase = RUNTIME_PHASE_STOPPED
@@ -455,6 +494,6 @@ impl PureSimpleContainerAdapterV1:
     pub me fn execution_user(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<ContainerExecutionUserReceiptV2, text>:
         Err("pure-container-execution-user-unsupported")
 
-export PureContainerOwnerPolicyV1, PureContainerRequestV1, PureSimpleContainerAdapterV1
+export PureContainerOwnerPolicyV1, PureContainerRequestV1, PureSimpleContainerAdapterV1, PureContainerHoldV1
 export pure_container_request_encode_v1, pure_container_request_decode_v1, pure_container_request_digest_v1
 export pure_container_provider_pin_v1, PURE_CONTAINER_REQUEST_MAGIC_V1
