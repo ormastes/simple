@@ -130,15 +130,16 @@ jobs:
 
       # Release promotion (2026-11-27): a PR based on main whose head is already
       # published on a versioned release/<x.y> line, with main an ancestor of
-      # it, carries 0 unreviewed commits — every commit was gated by this same
+      # it, carries no content that was not already gated by this same
       # job when it landed on the release line. Scanning base..head instead
       # (21,916 commits on the first promotion) cannot pass the 64-commit
       # bound or the +-0.15% size band, and the depth fetch below would pull
       # most of the repository. release-promotion-admission.shs decides, fail
       # closed, in a private commit-only scratch repository (this clone is not
-      # touched); exit 0 is the only admission. --expect-tree binds the verdict
-      # to the tree checked out here, so the tip checks in the gate step are
-      # checks of the promoted tree. Decided BEFORE the endpoint fetch.
+      # touched), by the predicate as committed at the BASE; exit 0 is the only
+      # admission. --expect-tree binds the verdict to the tree checked out
+      # here, so the tree checks in the gate step are checks of the promoted
+      # tree. Decided BEFORE the endpoint fetch.
       - name: Release promotion admission
         shell: sh
         env:
@@ -150,11 +151,45 @@ jobs:
           sh scripts/check/release-promotion-admission.shs --selftest ||
               { echo "fast-gates: release-promotion-admission selftest failed"; exit 1; }
           if [ "$BASE_REF" = main ] && [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
-            _promo_rc=0
-            sh scripts/check/release-promotion-admission.shs --base-ref "$BASE_REF" \
-                --base "$BASE_SHA" --head "$HEAD_SHA" --remote origin \
-                --expect-tree "$(git rev-parse 'HEAD^{tree}')" --scratch-fetch \
-                > "$RUNNER_TEMP/release-promotion.out" || _promo_rc=$?
+            # The predicate that admits the PR is read from the BASE commit,
+            # not from the PR's checkout, so a PR cannot edit the script that
+            # admits it (same trust root as --manifest-rev "$BASE_SHA" below).
+            # It is read through a private blob-less depth-1 repository; this
+            # clone is not touched. ONE stated exception: while the base does
+            # not carry the script at all (the first promotion, which is what
+            # brings it to main), the checked-out copy runs and the log says
+            # so. A base that cannot be fetched admits nothing.
+            _pin="$RUNNER_TEMP/release-promotion-pin.git"
+            _promo_script=""
+            rm -rf "$_pin" "$RUNNER_TEMP/release-promotion-admission.base.shs"
+            if git init -q --bare "$_pin" &&
+                git -C "$_pin" remote add origin "$(git config --get remote.origin.url)" &&
+                git -C "$_pin" fetch --no-tags --no-recurse-submodules --quiet --depth=1 --filter=blob:none origin "$BASE_SHA"; then
+              if [ -n "$(git -C "$_pin" ls-tree --name-only "$BASE_SHA" scripts/check/release-promotion-admission.shs)" ]; then
+                if git -C "$_pin" show "$BASE_SHA:scripts/check/release-promotion-admission.shs" > "$RUNNER_TEMP/release-promotion-admission.base.shs" &&
+                    [ -s "$RUNNER_TEMP/release-promotion-admission.base.shs" ]; then
+                  _promo_script="$RUNNER_TEMP/release-promotion-admission.base.shs"
+                  echo "fast-gates: release-promotion predicate pinned to base $BASE_SHA"
+                else
+                  echo "fast-gates: could not read the base's release-promotion predicate; nothing is admitted"
+                fi
+              else
+                _promo_script=scripts/check/release-promotion-admission.shs
+                echo "fast-gates: NOTE — base $BASE_SHA has no release-promotion predicate (first promotion); using the checked-out copy"
+              fi
+            else
+              echo "fast-gates: could not fetch base $BASE_SHA to pin the release-promotion predicate; nothing is admitted"
+            fi
+            rm -rf "$_pin"
+            _promo_rc=1
+            : > "$RUNNER_TEMP/release-promotion.out"
+            if [ -n "$_promo_script" ]; then
+              _promo_rc=0
+              sh "$_promo_script" --base-ref "$BASE_REF" \
+                  --base "$BASE_SHA" --head "$HEAD_SHA" --remote origin \
+                  --expect-tree "$(git rev-parse 'HEAD^{tree}')" --scratch-fetch \
+                  > "$RUNNER_TEMP/release-promotion.out" || _promo_rc=$?
+            fi
             cat "$RUNNER_TEMP/release-promotion.out"
             if [ "$_promo_rc" -eq 0 ]; then
               tail -n 1 "$RUNNER_TEMP/release-promotion.out" > "$RUNNER_TEMP/release-promotion-admitted"
@@ -356,18 +391,45 @@ jobs:
           # runs against the real PR content even though its COMMAND TEXT
           # came from BASE.
           #
-          # Release promotion: the range-bound rows are not run (0 unreviewed
-          # commits; see the admission step). The promoted TIP is still
-          # checked here, on the checked-out merge ref whose tree the
-          # admission bound with --expect-tree: no conflict tree, and the
-          # absolute size band, duplicate-entry, src/ band and path-floor
-          # checks of the tree-size guard.
+          # Release promotion: the range-bound rows are not run (see the
+          # admission step). The promoted TREE is still checked here, on the
+          # checked-out merge ref whose tree the admission bound with
+          # --expect-tree: no conflict tree; the tree-size guard's absolute
+          # band, duplicate-entry, src/ band and path-floor checks; every
+          # sealed *.sdn against its seal; and no conflict markers in any
+          # file that differs from the base (the base's trees are fetched
+          # blob-less at depth 1 for that diff).
           _tier_rc=0
           if [ "$_promoted" -eq 1 ]; then
             sh scripts/check/check-no-conflict-tree-push.shs --rev-list-args-or-tips HEAD -- HEAD --not HEAD || _tier_rc=1
             sh scripts/check/check-tree-size-push.shs --push-tip "HEAD..HEAD" || _tier_rc=1
+            if git fetch --no-tags --no-recurse-submodules --quiet --depth=1 --filter=blob:none origin "$BASE_SHA"; then
+              # This clone is blob-less (sparse checkout): fetch the blobs
+              # the two content checks read in ONE batch (28,342 blobs / 23 s
+              # measured) instead of one lazy fetch per file.
+              _pf="$RUNNER_TEMP/release-promotion-prefetch"
+              rm -rf "$_pf"; mkdir -p "$_pf"
+              {
+                git diff --raw --no-abbrev --no-renames "$BASE_SHA" HEAD | awk '$2 != "160000" && $4 !~ /^0+$/ { print $4 }'
+                git ls-tree -r HEAD | awk '$2 == "blob" && $0 ~ /\.(sdn|csm)$/ { print $3 }'
+              } | sort -u > "$_pf/want"
+              git cat-file --batch-all-objects --unordered --batch-check='%(objectname)' | sort -u > "$_pf/have"
+              comm -23 "$_pf/want" "$_pf/have" > "$_pf/missing"
+              if [ -s "$_pf/missing" ]; then
+                git -c fetch.negotiationAlgorithm=noop fetch origin --no-tags --no-write-fetch-head \
+                    --recurse-submodules=no --filter=blob:none --quiet --stdin < "$_pf/missing" ||
+                    echo "fast-gates: NOTE — batched blob prefetch failed; the checks below fall back to per-blob fetches"
+              fi
+              echo "fast-gates: release promotion: $(wc -l < "$_pf/want" | tr -d ' ') blob(s) needed by the seal and conflict-marker checks, $(wc -l < "$_pf/missing" | tr -d ' ') fetched in one batch"
+              sh scripts/check/check-sdn-crc32-sealed.shs --rev HEAD || _tier_rc=1
+              sh scripts/check/check-no-conflict-markers-push.shs "$BASE_SHA..HEAD" || _tier_rc=1
+            else
+              echo "fast-gates: could not fetch base $BASE_SHA for the seal and conflict-marker checks"
+              _tier_rc=1
+            fi
             if [ "$_tier_rc" -eq 0 ]; then
               echo "fast-gates: $(cat "$RUNNER_TEMP/release-promotion-admitted")"
+              echo "fast-gates: PASS — release promotion: range gates not run; conflict-tree, tree-size, SDN seal and conflict-marker checks of the promoted tree passed"
             fi
           elif [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
             PRIVATE_IMPORT_BASE="$BASE_SHA" sh scripts/check/run-gate-tier.shs --tier local \

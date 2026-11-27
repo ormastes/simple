@@ -17,10 +17,10 @@
 #   (ii)  the head is published on a versioned release line of the LIVE remote
 #         (`git ls-remote`, never a local tracking ref, which can be forged):
 #         the head commit is the advertised refs/heads/release/<x.y> tip or an
-#         ancestor of it, or its tree is byte-identical (same tree object id)
-#         to the tree of a commit of that line which itself descends from main
-#         (a release commit from before main was merged in does not vouch:
-#         its tree lacks main's content);
+#         ancestor of it; or its tree is byte-identical (same tree object id)
+#         to the tree of that TIP, the tip descends from main, and the head
+#         adds no history beyond itself (`rev-list <head> --not <main> <tip>`
+#         is exactly the head — no extra parent);
 #   (iii) the live remote main — and --base, when given — is an ancestor of the
 #         head, so the promotion is fast-forward-equivalent and drops nothing
 #         of main.
@@ -51,7 +51,9 @@
 #                    history fetch (35 MB / 55 s measured on this repo).
 #
 # Last stdout line and exit status:
-#   PASS — release promotion: <head> tree == published release/<x.y> <sha>; 0 unreviewed commits   exit 0
+#   PASS — release promotion: <head> tree == published release/<x.y> <head>; 0 unreviewed commits   exit 0
+#   PASS — release promotion: <head> tree == published release/<x.y> tip <tip>; the head is 1 new
+#          commit carrying that tree, 0 other unpublished commits                                 exit 0
 #   NOT ADMITTED — <reason> (normal gates apply)                                                 exit 1
 #   ERROR — nothing was checked (<usage or selftest problem>)                                     exit 2
 # Callers admit on exit 0 ONLY.
@@ -104,40 +106,33 @@ live_refs() {
     done
 }
 
-# head_on_tip <repo> <head> <head-tree> <tip> <main...> : prints the published
-# commit that vouches for the head: the head itself when it is on the line,
-# else the newest commit of the line with the same tree THAT DESCENDS FROM
-# EVERY GIVEN MAIN COMMIT. The descent test is the point: a release commit
-# from before main was merged into the line has a tree that lacks main's
-# content, and a forged `commit-tree -p <main> -p <old> <old>^{tree}` would
-# otherwise pass (main is its graph ancestor) and rewind main on merge.
-head_on_tip() {
-    _ht_repo=$1; _ht_head=$2; _ht_tree=$3; _ht_tip=$4
-    shift 4
-    if [ "$_ht_head" = "$_ht_tip" ] ||
-        GIT_NO_LAZY_FETCH=1 git -C "$_ht_repo" merge-base --is-ancestor "$_ht_head" "$_ht_tip" 2>/dev/null; then
-        printf '%s\n' "$_ht_head"
-        return 0
-    fi
-    for _ht_hit in $(GIT_NO_LAZY_FETCH=1 git -C "$_ht_repo" log --format='%H %T' "$_ht_tip" --not "$@" 2>/dev/null |
-        awk -v t="$_ht_tree" '$2 == t { print $1 }'); do
-        _ht_ok=1
-        for _ht_m in "$@"; do
-            GIT_NO_LAZY_FETCH=1 git -C "$_ht_repo" merge-base --is-ancestor "$_ht_m" "$_ht_hit" 2>/dev/null || { _ht_ok=0; break; }
-        done
-        if [ "$_ht_ok" -eq 1 ]; then
-            printf '%s\n' "$_ht_hit"
-            return 0
-        fi
-    done
-    return 1
+# is_anc <repo> <ancestor> <descendant>
+is_anc() {
+    GIT_NO_LAZY_FETCH=1 git -C "$1" merge-base --is-ancestor "$2" "$3" 2>/dev/null
+}
+
+# tree_of <repo> <commit> : the tree id recorded in the commit object (works in
+# a commit-only repository, where the tree object itself is absent).
+tree_of() {
+    GIT_NO_LAZY_FETCH=1 git -C "$1" log -1 --format=%T "$2" 2>/dev/null
 }
 
 # decide <repo> <head> <base|''> <expect-tree|''> <live-refs-text>
+#
+# Two ways a head is vouched for by a live release tip T, both requiring that
+# every main commit is an ancestor of the head:
+#   line  the head is T or an ancestor of T: the commit itself was published.
+#   tree  the head's tree is T's tree, and T itself descends from main. Only
+#         the TIP vouches: an interior commit of the line (even a
+#         first-parent one) is a state the line has moved past, and a commit
+#         from before main was merged in would rewind main.
+# In both, `rev-list <head> --not <main> <T>` must be empty or exactly the
+# head: an extra parent would otherwise smuggle history that no gate has seen
+# into main behind an identical tree.
 decide() {
     _d_repo=$1; _d_head=$2; _d_base=$3; _d_expect=$4; _d_live=$5
     has_commit "$_d_repo" "$_d_head" || { refuse "head $_d_head is not available in the repository"; return 1; }
-    _d_tree=$(GIT_NO_LAZY_FETCH=1 git -C "$_d_repo" log -1 --format=%T "$_d_head" 2>/dev/null) || _d_tree=""
+    _d_tree=$(tree_of "$_d_repo" "$_d_head") || _d_tree=""
     is_sha "$_d_tree" || { refuse "cannot read the tree id of head $_d_head"; return 1; }
     if [ -n "$_d_expect" ] && [ "$_d_expect" != "$_d_tree" ]; then
         refuse "head $_d_head has tree $_d_tree, not the expected $_d_expect"; return 1
@@ -147,21 +142,48 @@ decide() {
     [ "$_d_main" != "$_d_head" ] || { refuse "head $_d_head is already the remote main; there is nothing to promote"; return 1; }
     for _d_m in "$_d_main" $_d_base; do
         has_commit "$_d_repo" "$_d_m" || { refuse "main commit $_d_m is not available locally; fetch main and retry"; return 1; }
-        GIT_NO_LAZY_FETCH=1 git -C "$_d_repo" merge-base --is-ancestor "$_d_m" "$_d_head" 2>/dev/null ||
+        is_anc "$_d_repo" "$_d_m" "$_d_head" ||
             { refuse "main $_d_m is not an ancestor of head $_d_head, so the promotion would drop or merge main commits"; return 1; }
     done
-    _d_seen=0
+    _d_seen=0; _d_why="is neither on a published release/<x.y> line nor tree-identical to its tip"
     for _d_row in $(printf '%s\n' "$_d_live" | awk '$2 != "main" { print $1 ":" $2 }'); do
         _d_tip=${_d_row%%:*}; _d_ver=${_d_row#*:}
         _d_seen=$(( _d_seen + 1 ))
         has_commit "$_d_repo" "$_d_tip" || continue
-        if _d_pub=$(head_on_tip "$_d_repo" "$_d_head" "$_d_tree" "$_d_tip" "$_d_main" $_d_base); then
-            echo "PASS — release promotion: $_d_head tree == published release/$_d_ver $_d_pub; 0 unreviewed commits"
-            return 0
+        if [ "$_d_head" = "$_d_tip" ] || is_anc "$_d_repo" "$_d_head" "$_d_tip"; then
+            _d_mode=line
+        elif [ "$(tree_of "$_d_repo" "$_d_tip")" = "$_d_tree" ]; then
+            _d_mode=tree
+            _d_ok=1
+            for _d_m in "$_d_main" $_d_base; do
+                is_anc "$_d_repo" "$_d_m" "$_d_tip" || _d_ok=0
+            done
+            if [ "$_d_ok" -ne 1 ]; then
+                _d_why="has the tree of release/$_d_ver tip $_d_tip, which does not descend from main"
+                continue
+            fi
+        else
+            continue
         fi
+        # shellcheck disable=SC2086
+        _d_new=$(GIT_NO_LAZY_FETCH=1 git -C "$_d_repo" rev-list "$_d_head" --not "$_d_main" $_d_base "$_d_tip" 2>/dev/null) || {
+            _d_why="has history that cannot be listed against release/$_d_ver"
+            continue
+        }
+        _d_extra=$(printf '%s\n' "$_d_new" | awk -v h="$_d_head" 'NF && $1 != h { n++ } END { print n + 0 }')
+        if [ "$_d_extra" -ne 0 ]; then
+            _d_why="carries $_d_extra commit(s) that are on neither main nor release/$_d_ver (an extra parent)"
+            continue
+        fi
+        if [ "$_d_mode" = line ]; then
+            echo "PASS — release promotion: $_d_head tree == published release/$_d_ver $_d_head; 0 unreviewed commits"
+        else
+            echo "PASS — release promotion: $_d_head tree == published release/$_d_ver tip $_d_tip; the head is 1 new commit carrying that tree, 0 other unpublished commits"
+        fi
+        return 0
     done
     [ "$_d_seen" -gt 0 ] || { refuse "the remote advertises no versioned release/<x.y> line"; return 1; }
-    refuse "head $_d_head is neither on nor tree-identical to a commit of a published release/<x.y> line"
+    refuse "head $_d_head $_d_why"
     return 1
 }
 
@@ -192,13 +214,13 @@ scratch_prepare() {
     for _sp_tip in $_sp_tips; do
         if [ "$_sp_head" = "$_sp_tip" ] ||
             GIT_NO_LAZY_FETCH=1 git -C "$_sp_git" merge-base --is-ancestor "$_sp_head" "$_sp_tip" 2>/dev/null ||
-            [ -n "$(GIT_NO_LAZY_FETCH=1 git -C "$_sp_git" log --format='%T' "$_sp_tip" 2>/dev/null | grep -Fx "$_sp_tree" | head -n 1)" ]; then
+            [ "$(tree_of "$_sp_git" "$_sp_tip")" = "$_sp_tree" ]; then
             _sp_candidate=1
             break
         fi
     done
     [ "$_sp_candidate" -eq 1 ] ||
-        { refuse "head $_sp_head is not within $SCRATCH_WINDOW commits of a published release/<x.y> tip, by ancestry or by tree"; return 1; }
+        { refuse "head $_sp_head is neither within $SCRATCH_WINDOW commits behind a published release/<x.y> tip nor tree-identical to one"; return 1; }
     _sp_main=$(printf '%s\n' "$_sp_live" | awk '$2 == "main" { print $1; exit }')
     _sp_deepen=""
     [ "$(git -C "$_sp_git" rev-parse --is-shallow-repository 2>/dev/null)" != true ] || _sp_deepen=--unshallow
@@ -264,7 +286,11 @@ selftest() {
     git -C "$w" merge -q --no-ff -m "merge main" main >/dev/null 2>&1 || return 1
     fx_commit "$w" c.txt q3
     tip8=$(git -C "$w" rev-parse release/8.8)
-    git -C "$w" push -q origin main release/9.9 release/8.8 >/dev/null 2>&1 || return 1
+    # a third line that branched before main's tip and NEVER merged main
+    git -C "$w" checkout -q -b release/7.7 main~1
+    fx_commit "$w" d.txt p1
+    tip7=$(git -C "$w" rev-parse release/7.7)
+    git -C "$w" push -q origin main release/9.9 release/8.8 release/7.7 >/dev/null 2>&1 || return 1
     git -C "$w" fetch -q origin >/dev/null 2>&1
 
     # unpublished continuation of the release line (never pushed)
@@ -276,31 +302,41 @@ selftest() {
     # forged promotions: main as a graph parent, tree taken from the line
     rewind=$(git -C "$w" commit-tree -p "$main" -p "$stale" -m "forged" "$stale^{tree}")
     same8=$(git -C "$w" commit-tree -p "$main" -p "$tip8" -m "promote" "$tip8^{tree}")
+    behind=$(git -C "$w" commit-tree -p "$main" -p "$tip7" -m "forged" "$tip7^{tree}")
+    # extra parent: main + the tip + an orphan nobody reviewed, tip's tree
+    orphan=$(git -C "$w" commit-tree -m "orphan" "$main^{tree}")
+    extra=$(git -C "$w" commit-tree -p "$main" -p "$tip" -p "$orphan" -m "promote+orphan" "$tip^{tree}")
+    # interior tree: parents main + tip, tree of an INTERIOR commit of the line
+    interior=$(git -C "$w" commit-tree -p "$main" -p "$tip" -m "promote-old" "$mid^{tree}")
     # a non-versioned release/* branch carrying its own commit
     git -C "$w" checkout -q -b release/foo release/9.9
     fx_commit "$w" b.txt foo-only
     foo=$(git -C "$w" rev-parse release/foo)
     git -C "$w" push -q origin release/foo >/dev/null 2>&1 || return 1
 
-    expect() {  # <name> <want-rc> <args...>
+    expect() {  # <name> <want: 0 line | T tree | 1 refused> <args...>
         e_name=$1; e_want=$2; shift 2
         ran=$(( ran + 1 ))
         e_out=$( admit "$@" 2>/dev/null ); e_rc=$?
         e_last=$(printf '%s\n' "$e_out" | tail -n 1)
         case "$e_want:$e_rc:$e_last" in
             0:0:"PASS — release promotion: "*"; 0 unreviewed commits") ;;
+            T:0:"PASS — release promotion: "*" tip "*"; the head is 1 new commit carrying that tree, 0 other unpublished commits") ;;
             1:1:"NOT ADMITTED — "*) ;;
-            *) echo "  [selftest FAIL] $e_name: want rc=$e_want, got rc=$e_rc ($e_last)"; fail=$(( fail + 1 )) ;;
+            *) echo "  [selftest FAIL] $e_name: want $e_want, got rc=$e_rc ($e_last)"; fail=$(( fail + 1 )) ;;
         esac
     }
 
     # --- admitted -----------------------------------------------------------
     expect "head is the published release tip" 0 "$w" main "$tip" origin "$main" "" 0
     expect "head is an ancestor of an advanced release tip" 0 "$w" refs/heads/main "$mid" origin "" "" 0
-    expect "new commit, tree identical to the published tip" 0 "$w" main "$same" origin "$main" "$(git -C "$w" rev-parse "$tip^{tree}")" 0
-    expect "new commit, tree identical to a tip that merged main" 0 "$w" main "$same8" origin "$main" "" 0
+    expect "new commit, tree identical to the published tip" T "$w" main "$same" origin "$main" "$(git -C "$w" rev-parse "$tip^{tree}")" 0
+    expect "new commit, tree identical to a tip that merged main" T "$w" main "$same8" origin "$main" "" 0
     # --- refused ------------------------------------------------------------
     expect "forged head carrying a pre-merge release tree (would rewind main)" 1 "$w" main "$rewind" origin "$main" "" 0
+    expect "forged head carrying the tree of a tip that never merged main" 1 "$w" main "$behind" origin "$main" "" 0
+    expect "extra parent smuggles an unreviewed commit behind the tip's tree" 1 "$w" main "$extra" origin "$main" "" 0
+    expect "tree identical to an INTERIOR commit of the line, not its tip" 1 "$w" main "$interior" origin "$main" "" 0
     expect "pre-merge release commit itself (main not its ancestor)" 1 "$w" main "$stale" origin "" "" 0
     expect "tree differs (unpublished commit on top of the tip)" 1 "$w" main "$unpub" origin "$main" "" 0
     expect "base is not main" 1 "$w" release/9.9 "$tip" origin "" "" 0
@@ -325,6 +361,9 @@ selftest() {
     expect "scratch fetch: unpublished work commit" 1 "$c" main "$unpub" origin "$main" "" 1
     git -C "$w" push -q origin "$rewind:refs/heads/work/rewind" >/dev/null 2>&1 || return 1
     expect "scratch fetch: forged head carrying a pre-merge release tree" 1 "$c" main "$rewind" origin "$main" "" 1
+    git -C "$w" push -q origin "$extra:refs/heads/work/extra" "$same:refs/heads/work/same" >/dev/null 2>&1 || return 1
+    expect "scratch fetch: extra parent behind the tip's tree" 1 "$c" main "$extra" origin "$main" "" 1
+    expect "scratch fetch: new commit, tree identical to the published tip" T "$c" main "$same" origin "$main" "" 1
     ran=$(( ran + 1 ))
     if [ -n "$(git -C "$c" config --get remote.origin.promisor 2>/dev/null)" ] ||
         [ -n "$(git -C "$c" config --get remote.origin.partialclonefilter 2>/dev/null)" ]; then
@@ -341,11 +380,11 @@ selftest() {
 
     rm -rf "$st"
     echo "  selftest: $ran fixture(s) run, $fail failure(s)"
-    [ "$fail" -eq 0 ] && [ "$ran" -eq 20 ]
+    [ "$fail" -eq 0 ] && [ "$ran" -eq 25 ]
 }
 
 if [ "${1:-}" = --selftest ]; then
-    if selftest; then echo "PASS — 20 release-promotion fixture(s) checked (selftest only)"; exit 0; fi
+    if selftest; then echo "PASS — 25 release-promotion fixture(s) checked (selftest only)"; exit 0; fi
     echo "ERROR — nothing was checked (selftest failed)"; exit 2
 fi
 
