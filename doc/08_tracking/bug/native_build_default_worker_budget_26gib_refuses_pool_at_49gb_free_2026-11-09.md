@@ -1,6 +1,6 @@
 # native-build: default per-worker budget (26 GiB) refuses the per-file pool with 49 GB free
 
-- **Status:** verification-pending (P3, bootstrap)
+- **Status:** fix-implemented-verification-pending (P3, bootstrap)
 - **Found:** 2026-11-09, Windows, `C:/dev/p3new/stage2new/stage2_new4.exe native-build src/app/mcp/main.spl` in a clean `origin/main` worktree.
 
 ## Observed
@@ -34,5 +34,8 @@ a ~3000-module closure). A per-file worker never holds the whole-program HIR; it
 5.04-5.65 GiB. The pool now prices MIR at `FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1`
 (= `SHARD_HIR_WORKER_KB_V1`, 9 GB) via `file_worker_pool_mir_default_price_kb_v1(modules, per_file)`;
 the MIR shard path keeps the closure price. 72 GB free -> 60% = 43.2 GB / 9 GB = 4 workers (was 1).
-Specs: `test/01_unit/app/cli/file_worker_pool_per_file_price_spec.spl` (4/4 GREEN, RED before).
-Needs native verification on a < 91 GB host without the `SIMPLE_*_SHARD_WORKER_KB` workaround.
+Specs: `test/01_unit/app/cli/file_worker_pool_per_file_price_spec.spl` (4/4 GREEN, RED before),
+`test/01_unit/app/cli/file_worker_pool_host_key_price_spec.spl` (4/4 GREEN), and
+`test/01_unit/app/cli/native_build_49gb_pool_admission_spec.spl` (4/4 GREEN, pins `49251808` kB
+free commit through `shard_mem_clamp` + `file_worker_pool_refusal` admitting 3–4 workers).
+Waiting for live native verification (`native-build src/app/mcp/main.spl`) on a < 91 GB host without the `SIMPLE_*_SHARD_WORKER_KB` workaround.
