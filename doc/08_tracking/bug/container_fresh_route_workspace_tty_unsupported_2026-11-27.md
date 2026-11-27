@@ -191,3 +191,10 @@ the "Fix" section of `container_fresh_route_wait_logs_unsupported_2026-11-27.md`
 That record also names what may still stop these cases live: a fast-exit
 workload can be refused at `start` (`machine-fresh-workload-running-unproven`),
 and the guest profile skeleton above is unchanged.
+
+
+**Update (2026-11-27, later still):** `start` now accepts a workload that ran
+and already exited (source only, live-unverified). What stops these cases live
+is now settlement: `destroy` of such a workload is refused
+(`container_fresh_route_exited_start_settlement_2026-11-27.md`), so the
+after-each cleanup stays retained. The guest profile skeleton is unchanged.

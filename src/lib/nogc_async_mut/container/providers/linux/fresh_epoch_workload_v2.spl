@@ -126,11 +126,15 @@ pub class LinuxFreshWorkloadOwnerV2:
             val started = self.transfer.run_action_v2(LinuxFreshWorkloadActionV2.Start, deadline)?
             val before = self.transfer.run_action_v2(LinuxFreshWorkloadActionV2.Inspect)?
             val associated = self.transfer.associate_v2()?
+            # A short workload may already be gone. Both forms are a proven start: an exited start confirmed
+            # by the owner's own two post-Start samples, or the associated subject observed empty.
+            if self.transfer.exited_start_v3()?: return self.reply_v2(request, action, RUNTIME_PHASE_EXITED, started)
             val native = self.transfer.subject_v2()?
-            if native.state != LinuxContainerContainmentPopulationV1.Populated: return Err("machine-fresh-workload-running-unproven")
-            return self.reply_v2(request, action, RUNTIME_PHASE_RUNNING, started)
+            val phase = if native.state == LinuxContainerContainmentPopulationV1.Populated: RUNTIME_PHASE_RUNNING else: RUNTIME_PHASE_EXITED
+            return self.reply_v2(request, action, phase, started)
         if action == "stop":
             val stopped = self.transfer.run_action_v2(LinuxFreshWorkloadActionV2.Stop)?
+            if self.transfer.exited_start_v3()?: return self.reply_v2(request, action, RUNTIME_PHASE_STOPPED, stopped)
             val native = self.transfer.subject_v2()?
             if native.state != LinuxContainerContainmentPopulationV1.EmptySnapshot: return Err("machine-fresh-workload-stop-unproven")
             return self.reply_v2(request, action, RUNTIME_PHASE_STOPPED, stopped)
@@ -230,6 +234,11 @@ pub class LinuxFreshWorkloadOwnerV2:
         if self.transfer.settled_v2().is_ok() and self.transfer.settled_v2().unwrap():
             val reply = self.reply_v2(request, action, RUNTIME_PHASE_DESTROYED, MachineFreshWorkloadActionResultV2(true, "", 0, ""))
             return if reply.is_ok(): reply.unwrap() else: self.refused_v2(action, reply.unwrap_err())
+        val exited = self.transfer.exited_start_v3()
+        if exited.is_err(): return self.refused_v2(action, exited.unwrap_err())
+        if exited.unwrap():
+            val gone = self.reply_v2(request, action, RUNTIME_PHASE_EXITED, MachineFreshWorkloadActionResultV2(true, "", 0, ""))
+            return if gone.is_ok(): gone.unwrap() else: self.refused_v2(action, gone.unwrap_err())
         val native = self.transfer.subject_v2()
         if native.is_err(): return self.refused_v2(action, native.unwrap_err())
         val phase = if native.unwrap().state == LinuxContainerContainmentPopulationV1.Populated: RUNTIME_PHASE_RUNNING else: RUNTIME_PHASE_EXITED
@@ -241,14 +250,16 @@ pub class LinuxFreshWorkloadOwnerV2:
         var phase = RUNTIME_PHASE_PREPARED
         if self.done_v2(LinuxFreshWorkloadActionV2.Create): phase = RUNTIME_PHASE_CREATED
         if self.transfer.settled_v2()?: phase = RUNTIME_PHASE_DESTROYED
+        elif self.done_v2(LinuxFreshWorkloadActionV2.Start) and self.transfer.exited_start_v3()?:
+            phase = if self.done_v2(LinuxFreshWorkloadActionV2.Stop): RUNTIME_PHASE_STOPPED else: RUNTIME_PHASE_EXITED
         elif self.done_v2(LinuxFreshWorkloadActionV2.Start):
             val native = self.transfer.subject_v2()?
             if self.done_v2(LinuxFreshWorkloadActionV2.Stop):
                 if native.state != LinuxContainerContainmentPopulationV1.EmptySnapshot: return Err("machine-fresh-workload-stop-unproven")
                 phase = RUNTIME_PHASE_STOPPED
             else:
-                if native.state != LinuxContainerContainmentPopulationV1.Populated: return Err("machine-fresh-workload-running-unproven")
-                phase = RUNTIME_PHASE_RUNNING
+                # The associated subject observed empty is a workload that ran and exited, as in `start` and `inspect`.
+                phase = if native.state == LinuxContainerContainmentPopulationV1.Populated: RUNTIME_PHASE_RUNNING else: RUNTIME_PHASE_EXITED
         Ok(RuntimeIntentV1(actual.pod_uid, actual.attempt, actual.provider_generation, actual.operation_id,
             actual.engine, actual.native_id, actual.node_boot_id, phase))
 
