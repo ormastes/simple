@@ -28,17 +28,22 @@ pub struct LinuxEngineExecInspectV3:
     pid: i64
     can_remove: bool
 
-fn engine_exec_request_error_v3(request: ContainerExecRequestV3) -> Result<text, text>:
+# `terminal_admission` is the installed policy's exec terminal mode ("none" or
+# "tty"). Default "none" refuses any TTY; stdin is refused under every admission.
+fn engine_exec_request_error_v3(request: ContainerExecRequestV3, terminal_admission: text) -> Result<text, text>:
     val digest = container_exec_request_digest_v3(request)?
     if request.parent.backend != "linux-podman" or request.parent_runtime.engine != "podman":
         return Err("engine-exec-podman-required")
-    if request.terminal_mode != "none" or request.stdin_requested:
+    if terminal_admission != "none" and terminal_admission != "tty": return Err("engine-exec-terminal-admission-invalid")
+    if request.stdin_requested or (request.terminal_mode != "none" and
+            (request.terminal_mode != "tty" or terminal_admission != "tty")):
         return Err("engine-exec-finite-noninteractive-required")
     if request.timeout_ms > 60000: return Err("engine-exec-timeout-bound")
     Ok(digest)
 
-pub fn linux_engine_exec_create_request_v3(request: ContainerExecRequestV3) -> Result<LinuxEngineExecHttpRequestV3, text>:
-    val digest = engine_exec_request_error_v3(request)?
+pub fn linux_engine_exec_create_request_v3(request: ContainerExecRequestV3,
+        terminal_admission: text = "none") -> Result<LinuxEngineExecHttpRequestV3, text>:
+    val digest = engine_exec_request_error_v3(request, terminal_admission)?
     var command: [JsonValue] = []
     for argument in request.argv: command.push(JsonValue.Str(argument))
     var environment: [JsonValue] = []
@@ -51,7 +56,7 @@ pub fn linux_engine_exec_create_request_v3(request: ContainerExecRequestV3) -> R
     val body = json_value_serialize(JsonValue.Object(
         ["Cmd", "Env", "User", "WorkingDir", "Privileged", "Tty", "AttachStdin", "AttachStdout", "AttachStderr"],
         [JsonValue.Array(command), JsonValue.Array(environment), JsonValue.Str(request.selected_user),
-            JsonValue.Str(request.working_directory), JsonValue.Bool(false), JsonValue.Bool(false),
+            JsonValue.Str(request.working_directory), JsonValue.Bool(false), JsonValue.Bool(request.terminal_mode == "tty"),
             JsonValue.Bool(false), JsonValue.Bool(false), JsonValue.Bool(false)]))
     if str_len(body) > LINUX_ENGINE_EXEC_BODY_LIMIT_V3: return Err("engine-exec-body-bound")
     Ok(LinuxEngineExecHttpRequestV3(action: "create", method: "POST",
@@ -60,8 +65,8 @@ pub fn linux_engine_exec_create_request_v3(request: ContainerExecRequestV3) -> R
         parent_native_id: request.parent_runtime.native_id, native_exec_id: ""))
 
 pub fn linux_engine_exec_inspect_request_v3(request: ContainerExecRequestV3,
-        native_exec_id: text) -> Result<LinuxEngineExecHttpRequestV3, text>:
-    val digest = engine_exec_request_error_v3(request)?
+        native_exec_id: text, terminal_admission: text = "none") -> Result<LinuxEngineExecHttpRequestV3, text>:
+    val digest = engine_exec_request_error_v3(request, terminal_admission)?
     if (not builder_digest_valid_v1(native_exec_id) or native_exec_id == request.parent_runtime.native_id):
         return Err("engine-exec-native-id-invalid")
     Ok(LinuxEngineExecHttpRequestV3(action: "inspect", method: "GET", path: "/v5.2.5/libpod/exec/" + native_exec_id + "/json",
@@ -69,12 +74,13 @@ pub fn linux_engine_exec_inspect_request_v3(request: ContainerExecRequestV3,
         parent_native_id: request.parent_runtime.native_id, native_exec_id: native_exec_id))
 
 pub fn linux_engine_exec_start_request_v3(request: ContainerExecRequestV3,
-        native_exec_id: text) -> Result<LinuxEngineExecHttpRequestV3, text>:
-    var result = linux_engine_exec_inspect_request_v3(request, native_exec_id)?
+        native_exec_id: text, terminal_admission: text = "none") -> Result<LinuxEngineExecHttpRequestV3, text>:
+    var result = linux_engine_exec_inspect_request_v3(request, native_exec_id, terminal_admission)?
     result.action = "start"
     result.method = "POST"
     result.path = "/v5.2.5/libpod/exec/" + native_exec_id + "/start"
-    result.body = "{\"Detach\":true,\"Tty\":false}"
+    # Always detached: a TTY exec is finite and non-interactive, never attached.
+    result.body = if request.terminal_mode == "tty": "{\"Detach\":true,\"Tty\":true}" else: "{\"Detach\":true,\"Tty\":false}"
     Ok(result)
 
 fn engine_exec_json_v3(body: text) -> Result<JsonValue, text>:
@@ -137,8 +143,8 @@ pub fn linux_engine_exec_create_id_v3(body: text, parent_native_id: text) -> Res
     Ok(native)
 
 pub fn linux_engine_exec_inspect_decode_v3(body: text, request: ContainerExecRequestV3,
-        native_exec_id: text) -> Result<LinuxEngineExecInspectV3, text>:
-    val validated = linux_engine_exec_inspect_request_v3(request, native_exec_id)?
+        native_exec_id: text, terminal_admission: text = "none") -> Result<LinuxEngineExecInspectV3, text>:
+    val validated = linux_engine_exec_inspect_request_v3(request, native_exec_id, terminal_admission)?
     val value = engine_exec_json_v3(body)?
     val known = engine_exec_known_v3(value, ["CanRemove", "ContainerID", "DetachKeys", "ExitCode", "ID",
         "OpenStderr", "OpenStdin", "OpenStdout", "Running", "Pid", "ProcessConfig"])?
@@ -150,7 +156,8 @@ pub fn linux_engine_exec_inspect_decode_v3(body: text, request: ContainerExecReq
         return Err("engine-exec-interactive-inspect-refused")
     val process = engine_exec_field_v3(value, "ProcessConfig")?
     val process_known = engine_exec_known_v3(process, ["arguments", "entrypoint", "privileged", "tty", "user"])?
-    if (engine_exec_bool_v3(process, "privileged")? or engine_exec_bool_v3(process, "tty")? or
+    # The observed process TTY must equal the requested mode, in both directions.
+    if (engine_exec_bool_v3(process, "privileged")? or engine_exec_bool_v3(process, "tty")? != (request.terminal_mode == "tty") or
             engine_exec_text_v3(process, "entrypoint")? != request.argv[0] or
             engine_exec_text_v3(process, "user")? != request.selected_user):
         return Err("engine-exec-process-config-mismatch")

@@ -191,3 +191,29 @@ nil" rather than the real upstream error — print the error field first.
 - `oci_engine_policy_spec` "executes an exact scripted absolute route" and
   `oci_execution_user_v2_spec:34` (`with` not found) fail for unrelated reasons.
 - Provider journal compaction and a provider-level label sweep are not built.
+
+## Fresh route workspace/TTY admission (2026-11-27)
+
+The shared-API fresh install route (`simple_container_open_fresh_v2`) admits
+build roots and a workload TTY only when the root-installed
+`/etc/simple/container/fresh-epoch-profile.sdn` carries both optional keys
+`workloadBuildRootPrefix` and `workloadTerminalMode` (refused by default, reason
+`machine-fresh-workload-profile-unsupported` unchanged). The gate that matters is
+`linux_fresh_workload_argv_v2`, which re-derives the admission from the profile
+the installed owner holds; the record keeps what was used in
+`admitted_build_root_prefix` / `admitted_terminal_mode`. A secondary exec TTY
+needs `execTerminalMode: tty` in the installed exec policy and is always
+detached. Records and traps:
+`doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md`.
+
+Traps hit while doing it:
+- The chain is exact-byte at five places (request projection, command
+  canonical bytes, argv, created-config inspect, profile key set). Changing one
+  alone yields `fresh-workload-command-request-fields-differ`, not a refusal.
+- `}}` inside a Simple string literal is an escaped `}`. A JSON fixture ending
+  in `}}` silently loses a brace (`Unclosed object`); write `"}" + "}"`.
+- Canonical SDN writes bare strings (`execTerminalMode: tty`, no quotes), so a
+  `replace` on the quoted form is a silent no-op; assert the text changed.
+- The fresh route still has no `wait`/`logs` read
+  (`container_fresh_route_wait_logs_unsupported_2026-11-27.md`), so
+  `podman_shared_api_live_spec` cannot go green on admission alone.
