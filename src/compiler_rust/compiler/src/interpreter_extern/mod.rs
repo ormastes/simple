@@ -2171,6 +2171,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_stdout_state", system::rt_process_stdout_state);
     insert_simple!("rt_process_is_alive", system::rt_process_is_alive);
     insert_simple!("rt_process_close_piped", system::rt_process_close_piped);
+    insert_simple!("rt_process_spawn_piped_environment_v1", system::rt_process_spawn_piped_environment_v1);
+    insert_simple!("rt_process_wait_readable_v1", system::rt_process_wait_readable_v1);
+    insert_simple!("rt_process_spawn_async_env_v1", system::rt_process_spawn_async_env_v1);
     insert_simple!("rt_process_spawn_guarded", system::rt_process_spawn_guarded);
     insert_simple!("rt_process_wait", system::rt_process_wait);
     insert_simple!("rt_profiler_is_active", time::rt_profiler_is_active_fn);

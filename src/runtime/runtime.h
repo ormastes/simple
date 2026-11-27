@@ -1380,6 +1380,16 @@ int64_t* rt_process_run_bounded_environment_tuple_v1(const char* cmd,uint64_t cm
 int64_t rt_process_spawn_async_environment_v1(const char* cmd,uint64_t cmd_len,
     SplArray* args,SplArray* environment,int64_t mode);
 #endif
+/* Text-ABI explicit child environment ("KEY=VALUE" entries; mode 0 overlay,
+ * 1 exact). PID > 0, -22 rejected request, -1 spawn failure. The piped form
+ * joins the rt_process_spawn_piped registry; the async form the wait registry. */
+int64_t rt_process_spawn_piped_environment_v1(const char* cmd, SplArray* args,
+    SplArray* environment, int64_t mode);
+int64_t rt_process_spawn_async_env_v1(const char* cmd, SplArray* args,
+    SplArray* environment, int64_t mode);
+/* Bounded readiness of a piped child stream (1 stdout, 2 stderr): 1 ready,
+ * 0 timeout, -2 unknown child, -3 stream not piped, -5 OS error, -22 invalid. */
+int64_t rt_process_wait_readable_v1(int64_t pid, int64_t stream, int64_t timeout_ms);
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 /* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
 int64_t  rt_process_spawn_inherit(void);

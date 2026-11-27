@@ -2746,6 +2746,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_run_bounded_environment_tuple_v1",
     "rt_process_run_bounded_admitted_tuple_v1",
     "rt_process_spawn_async_environment_v1",
+    "rt_process_spawn_async_env_v1",
     "rt_pty_close",
     "rt_pty_exit_code_v1",
     "rt_pty_hangup",
