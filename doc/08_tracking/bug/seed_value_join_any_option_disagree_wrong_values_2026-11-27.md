@@ -496,6 +496,10 @@ and the int-slot and float-index errors are new. Re-run in the final
 | run/JIT, flattened import closure | the same 1,351 unit specs | 1,232 | 119 (100 stopped on a HIR error, 3 MIR, 3 module load, 13 no verdict) | 1: the float index in `embedding.spl` (fixed above); no value-join rejection |
 | `compile`, per file, 15 s cap | first 1,507 files of `src/compiler` (stopped there: about 35 files a minute on the loaded host) | 889 | 618 capped; `src/lib`, `src/app`, `src/os` not re-run | 0 |
 
+Both sweeps ran on the first `z` build, before the match-chain hollow-literal
+relaxation and the rebase onto #12253; the probe sets and the five specs were
+re-run on the final build.
+
 So the file-kind switch rejected no spec in the sample, and it was kept. The
 int-slot and float-index rules were NOT swept over `src/lib`, `src/app` or
 `src/os` per file; they are covered only as far as the 1,232 spec closures
