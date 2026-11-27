@@ -151,3 +151,11 @@ The [remote completion plan](simple_orchestrator_remote_completion.md) tracks
 operator prerequisites, platform blockers and Todo DB rows. Re-estimate the
 full release once the trace is resolved and the platform owners have confirmed
 fixtures. The estimate above covers signed Linux provisioning.
+
+## Update 2026-11-27 (late)
+
+- **#12122** (`str_slice` byte offsets) and **#12126** (planning braced qualified re-exports) landed.
+  The release-head bootstrap `967f9178950e` no longer hits `FILE-WORKER-E-CLOSURE-INCOMPLETE`.
+- **New blocker:** `compiler_cli_build` aborted with `rss-cap-exceeded` (60 GiB). Record:
+  `doc/08_tracking/bug/stage2_cli_build_rss_cap_leak_check_closure_2026-11-27.md`.
+  Resume with `BOOTSTRAP_VERIFY_MODULE_WORKERS=1`. The `test_runner_build` row (the #12122 fix) is still unexercised.
