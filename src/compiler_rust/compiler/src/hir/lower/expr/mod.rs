@@ -819,7 +819,9 @@ impl Lowerer {
                 // One type variable, one type: `max(0, x)` with `x: f64` does
                 // not instantiate `T` to the first argument's `i64`.
                 let agree = spec.same_type_params.iter().all(|(index, name)| {
-                    arg_of(*index, name).is_some_and(|other| self.infer_type(&other.value, ctx).ok() == Some(ty))
+                    arg_of(*index, name)
+                        .and_then(|other| self.infer_type(&other.value, ctx).ok())
+                        .is_some_and(|other| other == ty || self.module.types.get(other) == self.module.types.get(ty))
                 });
                 if agree && self.is_instantiable_type(ty) {
                     return ty;

@@ -1120,6 +1120,7 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         let lowered_receiver = self.lower_expr(receiver, ctx)?;
+        self.reject_uninferred(&lowered_receiver, "a tuple index", ctx)?;
         // `.0`/`.1` on a `(A, B)?` local read after a nil check: the value may
         // be the boxed `Some` enum, so project the payload first (same as the
         // FieldAccess path); raw payloads pass through unchanged.

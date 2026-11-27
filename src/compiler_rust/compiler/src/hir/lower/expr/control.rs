@@ -813,6 +813,7 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         // Lower the subject once and store in a local variable to avoid re-evaluation
         let subject_hir = self.lower_subject_for_patterns(subject, arms.iter().map(|a| &a.pattern), false, ctx)?;
+        self.reject_uninferred(&subject_hir, "a match subject", ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value

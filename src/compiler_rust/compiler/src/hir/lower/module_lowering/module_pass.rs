@@ -2083,7 +2083,7 @@ impl Lowerer {
         mut self,
         ast_module: &Module,
     ) -> LowerResult<(HirModule, HashMap<String, TypeId>)> {
-        self.entry_is_script = self.is_script_entry(ast_module);
+        self.entry_is_script = self.is_script_file() || self.is_script_entry(ast_module);
         // Hoist nested type definitions (e.g. `class Foo:` defined inside an
         // SPipe `it` block) to module scope so the rest of the lowering
         // pipeline registers them as if they were authored at the top level.
@@ -2654,7 +2654,7 @@ impl Lowerer {
 
     /// Lower an AST module to HIR and return warnings along with the module
     pub fn lower_module_with_warnings(mut self, ast_module: &Module) -> LowerResult<super::super::LoweringOutput> {
-        self.entry_is_script = self.is_script_entry(ast_module);
+        self.entry_is_script = self.is_script_file() || self.is_script_entry(ast_module);
         // Hoist nested type definitions to module scope (see `lower_module`).
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);

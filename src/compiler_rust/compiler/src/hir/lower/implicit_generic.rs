@@ -157,6 +157,15 @@ impl Lowerer {
         ctx.unsafe_depth > 0 || (self.entry_is_script && self.current_function_owner.is_none())
     }
 
+    /// Script file kinds (`.shs`, `.sscript`), as the driver classifies them.
+    pub(super) fn is_script_file(&self) -> bool {
+        self.current_file
+            .as_ref()
+            .and_then(|path| path.extension())
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| matches!(ext, "shs" | "sscript"))
+    }
+
     /// The origin of `expr` when its type could not be inferred: an
     /// unannotated parameter, a local bound from one, or a call to an
     /// unannotated function that stage 1 could not instantiate. The second
@@ -165,11 +174,14 @@ impl Lowerer {
     fn uninferred_origin(&self, expr: &HirExpr, ctx: &FunctionContext) -> Option<(String, Option<String>)> {
         // A call to a function declared further down is typed `()` until its
         // body is lowered, so `()` is as untyped here as `any`.
-        if !matches!(expr.ty, TypeId::ANY | TypeId::VOID) {
+        if let HirExprKind::Local(index) = &expr.kind {
+            return ctx.uninferred_locals.get(index).cloned();
+        }
+        let forward_call = expr.ty == TypeId::VOID && matches!(expr.kind, HirExprKind::Call { .. });
+        if expr.ty != TypeId::ANY && !forward_call {
             return None;
         }
         match &expr.kind {
-            HirExprKind::Local(index) => ctx.uninferred_locals.get(index).cloned(),
             HirExprKind::Block(stmts) => match stmts.last() {
                 Some(HirStmt::Expr(tail)) => self.uninferred_origin(tail, ctx),
                 _ => None,
@@ -185,6 +197,15 @@ impl Lowerer {
                 }
                 _ => None,
             },
+            // A value read out of an uninferred one is as untyped as its source.
+            HirExprKind::MethodCall { receiver, .. } | HirExprKind::FieldAccess { receiver, .. } => {
+                self.uninferred_origin(receiver, ctx)
+            }
+            HirExprKind::BuiltinCall { args, .. } => args.first().and_then(|arg| self.uninferred_origin(arg, ctx)),
+            HirExprKind::Unary { operand, .. } => self.uninferred_origin(operand, ctx),
+            HirExprKind::Binary { left, right, .. } => {
+                self.uninferred_origin(left, ctx).or_else(|| self.uninferred_origin(right, ctx))
+            }
             _ => None,
         }
     }
@@ -211,28 +232,34 @@ impl Lowerer {
         let Some((origin, pending_callee)) = self.uninferred_origin(expr, ctx) else {
             return Ok(());
         };
+        let function = self.current_function_name.clone().unwrap_or_default();
         let error = LowerError::UninferredType {
             origin,
             usage: usage.to_string(),
+            function,
         };
-        match pending_callee {
-            Some(callee) => {
-                self.pending_uninferred_uses.push((callee, error));
-                Ok(())
-            }
-            None => Err(error),
-        }
+        // Every site of the unit is reported together once all bodies are
+        // lowered (`judge_pending_uninferred_uses`).
+        self.pending_uninferred_uses.push((pending_callee, error));
+        Ok(())
     }
 
-    /// Once every body is lowered: a pending use is an error unless its callee
+    /// Once every body is lowered: report every recorded use and fail with the
+    /// first. A use of a forward-referenced callee counts unless the callee
     /// turned out to be a procedure.
     pub(crate) fn judge_pending_uninferred_uses(&mut self) -> LowerResult<()> {
+        let mut first = None;
         for (callee, error) in std::mem::take(&mut self.pending_uninferred_uses) {
-            if self.unannotated_return_fns.get(&callee) == Some(&Some(true)) {
-                return Err(error);
+            let is_value = match &callee {
+                Some(callee) => self.unannotated_return_fns.get(callee) == Some(&Some(true)),
+                None => true,
+            };
+            if is_value {
+                eprintln!("error[uninferred-any]: {error}");
+                first.get_or_insert(error);
             }
         }
-        Ok(())
+        first.map_or(Ok(()), Err)
     }
 
     /// Arithmetic, bitwise and ordered comparison need operand types.

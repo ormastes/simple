@@ -342,10 +342,10 @@ pub struct Lowerer {
     /// `generic_identity_param` uses (see `implicit_generic.rs`). The value is
     /// whether the body yields a value, known once the body is lowered.
     pub(super) unannotated_return_fns: HashMap<String, Option<bool>>,
-    /// Typed uses of a call to an unannotated function whose body was not yet
-    /// lowered: (callee, error), judged once every body is lowered (a
-    /// procedure's call is `()`, not an uninferred value).
-    pub(super) pending_uninferred_uses: Vec<(String, super::error::LowerError)>,
+    /// Typed uses of an uninferred value: (callee whose body was not yet
+    /// lowered, error), judged once every body is lowered (a procedure's call
+    /// is `()`, not an uninferred value).
+    pub(super) pending_uninferred_uses: Vec<(Option<String>, super::error::LowerError)>,
     /// The entry module is a script (top-level statements wrapped as `main`).
     pub(super) entry_is_script: bool,
     /// Run lane: a unit with top-level statements and no `main` is handed to

@@ -177,3 +177,35 @@ fn shadowing_local_is_not_rejected_for_an_earlier_uninferred_name() {
     let source = "fn opaque(x):\n    val y = x\n    y\nfn probe(xs: [f64]) -> f64:\n    val r = opaque(xs)\n    print(r)\n    val r = xs\n    r[0] + 0.25\n";
     lower_run_lane(source).expect("the second `r` is `[f64]`");
 }
+
+#[test]
+fn value_read_out_of_an_uninferred_one_is_rejected_too() {
+    let opaque = "fn opaque(x):\n    val y = x\n    y\n";
+    let method = format!("{opaque}fn probe(xs: [f64]) -> f64:\n    val r = opaque(xs)\n    if r.len() > 0: r.first() + 0.25 else: -2.0\n");
+    assert!(rejected(&method).contains("arithmetic"));
+    let tuple = format!("{opaque}fn probe(t: (i64, f64)) -> f64:\n    val r = opaque(t)\n    r.1 + 0.25\n");
+    assert!(rejected(&tuple).contains("a tuple index"));
+    let join = format!("{opaque}fn probe(xs: [f64], c: bool) -> f64:\n    val r = opaque(xs)\n    val v = if c: r.first() else: -2.0\n    v\n");
+    assert!(rejected(&join).contains("joined with a typed arm"));
+    let subject = format!("{opaque}fn probe(a: f64?) -> f64:\n    val r = opaque(a)\n    match r:\n        case Some(v): v\n        case None: -3.0\n");
+    assert!(rejected(&subject).contains("a match subject"));
+}
+
+#[test]
+fn diagnostic_names_the_function_and_every_site_is_reported() {
+    let text = rejected("fn add(a, b):\n    a + b\nfn sub(a, b):\n    a - b\nfn main():\n    0\n");
+    assert!(text.contains("in `add`"), "{text}");
+}
+
+#[test]
+fn array_typed_type_variable_agrees_structurally() {
+    let source = "fn pick<T>(a: T, b: T) -> T:\n    b\nfn probe(xs: [f64], ys: [f64]) -> f64:\n    val r = pick(xs, ys)\n    if r.len() > 0: r[0] + 0.25 else: -2.0\n";
+    let module = lower_run_lane(source).unwrap();
+    assert!(is_f64_array(&module, local_ty(&module, "probe", "r")));
+}
+
+#[test]
+fn statement_match_arm_is_not_a_join() {
+    let source = "enum K:\n    A\n    B\nfn opaque(x):\n    val y = x\n    y\nfn ok(n: i64) -> bool:\n    n > 0\nfn probe(k: K, xs: [i64]) -> i64:\n    val r = opaque(xs)\n    match k:\n        case K.A: r.len()\n        case K.B: ok(2)\n    7\n";
+    lower_run_lane(source).expect("a statement match yields no value to join");
+}
