@@ -8,6 +8,7 @@
 # SIMPLE_ORCH_FIXTURE_HOST_ID (simple-orch-host), SIMPLE_ORCH_FIXTURE_SCOPE (fixture-scope),
 # SIMPLE_ORCH_FIXTURE_MACHINE_ID_FILE (/etc/machine-id), SIMPLE_ORCH_FIXTURE_CARET_CONTROLLER (ctrl-qual).
 # Profiles (todo 481): SIMPLE_ORCH_FIXTURE_PROFILE_DIR (e.g. /etc/simple/container) plus the installed-host facts
+#   SIMPLE_ORCH_FIXTURE_PODMAN_VERSION (computes the observed engine identity; unset = BLOCKED provider-identity),
 #   SIMPLE_ORCH_FIXTURE_SERVICE_NAME, _SERVICE_UID, _SERVICE_GID, _PODMAN_PATH, _PODMAN_SHA256, _BROKER_SHA256 (no
 #   defaults; absent = BLOCKED) and _RUN_ROOT, _GRAPH_ROOT, _PARTITION_CGROUP, _HOST_UNIT, _PROVIDER_UNIT,
 #   _PROVIDER_SOCKET_UNIT, _BROKER_PATH, _SUBID_START/_COUNT, _WORKLOAD_BUILD_ROOT_PREFIX, _WORKLOAD_TERMINAL_MODE
@@ -80,7 +81,7 @@ fn gen_host_profile_v1() -> Result<EnrolledFixtureHostProfileInputsV1, text>:
         host_unit: gen_env_v1("SIMPLE_ORCH_FIXTURE_HOST_UNIT", "simple-orchestrator-host.service"),
         provider_unit: gen_env_v1("SIMPLE_ORCH_FIXTURE_PROVIDER_UNIT", "simple-podman.service"),
         provider_socket_unit: gen_env_v1("SIMPLE_ORCH_FIXTURE_PROVIDER_SOCKET_UNIT", "simple-podman.socket"),
-        partition_cgroup: gen_env_v1("SIMPLE_ORCH_FIXTURE_PARTITION_CGROUP", "/sys/fs/cgroup/simple.slice"),
+        partition_cgroup: gen_env_v1("SIMPLE_ORCH_FIXTURE_PARTITION_CGROUP", "/sys/fs/cgroup/system.slice"),
         provider_executable: gen_required_v1("SIMPLE_ORCH_FIXTURE_PODMAN_PATH")?,
         provider_executable_sha256: gen_required_v1("SIMPLE_ORCH_FIXTURE_PODMAN_SHA256")?,
         broker_executable: gen_env_v1("SIMPLE_ORCH_FIXTURE_BROKER_PATH", "/opt/simple/bin/simple"),
@@ -167,7 +168,15 @@ fn gen_caret_request_v1():
 fn gen_main_v1():
     gen_caret_request_v1()
     match gen_inputs_v1():
-        case Ok(inputs):
+        case Ok(base):
+            var inputs = base
+            val host = gen_host_profile_v1()
+            if host.is_ok():
+                match enrolled_fixture_engine_identity_v1(host.unwrap(), env_get("SIMPLE_ORCH_FIXTURE_PODMAN_VERSION")):
+                    case Ok(identity):
+                        inputs.provider_identity_digest = identity
+                        print "FIXTURE OK provider-identity " + identity
+                    case Err(_): print "FIXTURE BLOCKED provider-identity: SIMPLE_ORCH_FIXTURE_PODMAN_VERSION unset; the machine policy and binding keep SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST, which is not the observed engine identity"
             gen_profiles_v1(inputs)
             match gen_authority_v1(inputs):
                 case Ok(authority): gen_binding_v1(inputs, authority)

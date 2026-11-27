@@ -26,7 +26,8 @@ use app.orchestrator.host_identity_key_v1.host_identity_private_encode_v1
 use app.orchestrator.controller_authority_issue_v1.{controller_authority_key_leaf_v1, controller_linux_enrollment_issue_v3}
 use app.orchestrator.controller_gateway_v1.{ControllerGatewayRequestV1, controller_gateway_request_encode_v1}
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1, LINUX_OCI_ENGINE_MODE_TRUSTED_ADMIN_V1,
-    linux_oci_engine_policy_encode_v1}
+    LinuxOciEngineObservationV1, linux_oci_engine_policy_encode_v1, linux_oci_engine_policy_digest_v1,
+    linux_oci_engine_identity_digest_v1}
 use std.nogc_async_mut.container.providers.linux.installed_policy_v3.{LinuxOciInstalledPolicyV3, linux_oci_installed_policy_encode_v3}
 use std.common.contracts.container.machine_policy_v1.{MachineContainerPolicyV1, MachineContainerProviderPolicyV1,
     machine_container_policy_bytes_v1}
@@ -208,6 +209,21 @@ pub fn enrolled_fixture_engine_policy_v1(host: EnrolledFixtureHostProfileInputsV
         expected_uid: host.service_uid, expected_graph_root: host.graph_root, expected_run_root: host.run_root,
         expected_storage_driver: "vfs", storage_options: [])
 
+# The provider identity the machine policy pins is the OBSERVED engine identity (host_observation_v2 takes
+# engine.identity_digest), not the podman sha256. With zero storage options the observer's graph-option record is
+# the empty dict, so the identity is a pure function of the engine policy, the executable sha256, the rootless UID,
+# the policy roots and the podman version; the live observer still refuses if any of these differ.
+pub fn enrolled_fixture_engine_identity_v1(host: EnrolledFixtureHostProfileInputsV1,
+        engine_version: text) -> Result<text, text>:
+    if engine_version == "": return Err("fixture-engine-version-required")
+    val engine = enrolled_fixture_engine_policy_v1(host)
+    val empty: Dict<text, SdnValue> = {}
+    Ok(linux_oci_engine_identity_digest_v1(LinuxOciEngineObservationV1(policy_digest: linux_oci_engine_policy_digest_v1(engine)?,
+        executable_path: host.provider_executable, executable_digest: host.provider_executable_sha256, uid: host.service_uid,
+        rootless: true, graph_root: host.graph_root, run_root: host.run_root, storage_driver: "vfs",
+        engine_version: engine_version, identity_digest: "", storage_options: [],
+        storage_options_observation_digest: sha256_text(sdn_encode_canonical(SdnValue.Dict(empty))))))
+
 pub fn enrolled_fixture_delegated_cgroup_v1(host: EnrolledFixtureHostProfileInputsV1) -> text:
     host.partition_cgroup + "/" + host.host_unit
 
@@ -343,9 +359,6 @@ pub fn enrolled_fixture_remote_build_template_v1(inputs: EnrolledFixtureInputsV1
         t: EnrolledFixtureTemplateInputsV1) -> Result<text, text>:
     Ok(enrolled_fixture_template_wrap_v1(1, "linux-host-service-remote-build-helper-template",
         enrolled_fixture_launch_template_v1(inputs, t, ["version"])?))
-
-# host-config.sdn has a decoder (decode_host_config) but no canonical encoder anywhere in src/.
-pub val ENROLLED_FIXTURE_HOST_CONFIG_BLOCKED_V1: text = "no canonical HostConfig encoder: std.common.contracts.orchestration.host_config_v1 has decode_host_config only (todo 484)"
 
 # sha256 pins of the five binding inputs read from `input_dir`; Err names the first missing input.
 pub fn enrolled_fixture_pins_v1(input_dir: text) -> Result<[text], text>:
