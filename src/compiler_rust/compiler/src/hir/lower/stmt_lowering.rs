@@ -839,6 +839,31 @@ impl Lowerer {
                     self.untyped_empty_array_locals.insert(local_index);
                 }
 
+                // An explicitly annotated numeric binding whose initializer
+                // lowers to a DIFFERENT numeric type used to reach the backend
+                // as a bare store of the initializer's value: the JIT slot then
+                // read back 0 (`val m: i64 = 7.9` printed 0, and the
+                // renderer's `var ix0: i64 = min_x` rasterized with a zeroed
+                // origin), while the interpreter coerced at the binding. Reuse
+                // the explicit `as` cast so both engines honour the annotation
+                // identically: truncate toward zero and narrow to the declared
+                // width, exactly like `x as T` in both engines.
+                // Bug: engine_specs_spec_runner_interpreter_divergence_2026-09-16 (shape 4).
+                if has_explicit_type
+                    && value
+                        .as_ref()
+                        .is_some_and(|v| v.ty != ty && Self::is_numeric_type_id(v.ty) && Self::is_numeric_type_id(ty))
+                {
+                    let init = value.take().expect("checked above");
+                    value = Some(HirExpr {
+                        kind: HirExprKind::Cast {
+                            expr: Box::new(init),
+                            target: ty,
+                        },
+                        ty,
+                    });
+                }
+
                 Ok(vec![HirStmt::Let { local_index, ty, value }])
             }
 

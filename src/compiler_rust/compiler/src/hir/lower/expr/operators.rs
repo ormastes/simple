@@ -446,7 +446,7 @@ impl Lowerer {
     }
 
     /// Primitive int / float target of an `as` cast.
-    fn is_numeric_type_id(ty: TypeId) -> bool {
+    pub(crate) fn is_numeric_type_id(ty: TypeId) -> bool {
         matches!(
             ty,
             TypeId::I8

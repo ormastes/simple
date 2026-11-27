@@ -23,9 +23,9 @@ use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer}
 # The bitmap-font atlas lane lives in backend_vulkan_font.spl, which imports this
-# module back — the same mutual pair backend_vulkan_helpers.spl already forms.
-# Importing the provenance constant keeps that dependency explicit and loaded.
-use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_TEXT_PATH_CPU_RASTER, VULKAN_TEXT_PATH_NOT_DRAWN}
+# module back — a mutual pair. Class/fn imports tolerate that cycle; module-level
+# val imports do not, so every shared val now lives in backend_vulkan_font_types.spl
+# (import-free) and is re-exported from there by both sides.
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassMaterialConfig, ENGINE2D_GLASS_MAX_WORK_PIXELS,
@@ -45,9 +45,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     vulkan_image_pack_note_byte_fallback,
     vulkan_image_upload_u32_requested, vulkan_image_upload_note,
     vulkan_image_upload_last_mode, vulkan_image_upload_last_reason,
-    VK_DISPATCH_COMPLETED_INELIGIBLE, RECT_BATCH_MIN_RECTS,
-    VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER, VK_IMAGE_COMPOSITE_SRC_OVER_SOLID,
-    VK_SPEC_MAX_WORKGROUP_COUNT, vulkan_clear_dispatch_groups_x, vulkan_clear_dispatch_groups_y
+    vulkan_clear_dispatch_groups_x, vulkan_clear_dispatch_groups_y
 }
 use std.gpu.engine2d.backend_emu.{
     emu_draw_rect, emu_draw_line, emu_line_host_work_admitted_v1, emu_draw_circle, emu_draw_circle_filled,
@@ -89,6 +87,24 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
+# Constants this module originally defined and still owes its consumers (the
+# gc_sync_mut facade, specs, and sibling modules) after they moved to the
+# import-free backend_vulkan_font_types.spl to break the val-level import cycle.
+export use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{
+    VULKAN_FONT_ATLAS_MIRROR_MAX,
+    VK_T_FONT_COMPOSITE, VK_T_FONT_ATLAS_BUILD, VK_T_FONT_ATLAS_PACK,
+    VK_T_FONT_ATLAS_UPLOAD, VK_T_FONT_ATLAS_DIGEST, VK_T_FONT_PACKED_PARAMS,
+    VK_T_FONT_QUAD_VALIDATE, VK_T_FONT_OWNER_IDENTITY,
+    VK_T_ENQUEUE, VK_T_FLUSH, VK_T_SFFI_BEGIN, VK_T_SFFI_REAP,
+    VK_T_SFFI_DESC, VK_T_SFFI_BIND_PIPE, VK_T_SFFI_BIND_DESC, VK_T_SFFI_PUSH,
+    VK_T_SFFI_DISPATCH, VK_T_SFFI_END, VK_T_SFFI_SUBMIT, VK_T_SFFI_WAIT_FENCE}
+# Constants moved out of backend_vulkan_font.spl / backend_vulkan_helpers.spl
+# for the same cycle break; consumed internally only.
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{
+    VULKAN_TEXT_PATH_CPU_RASTER, VULKAN_TEXT_PATH_NOT_DRAWN,
+    VK_DISPATCH_COMPLETED_INELIGIBLE, RECT_BATCH_MIN_RECTS,
+    VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER,
+    VK_IMAGE_COMPOSITE_SRC_OVER_SOLID, VK_SPEC_MAX_WORKGROUP_COUNT}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 # ============================================================================
@@ -225,12 +241,6 @@ class VulkanFontAtlasMirror:
     # published none and the global +1 rule applies instead.
     owner_sequence: i64 = -1
     bytes: [u8]
-
-# Parked host mirrors, one per font owner besides the active one. Matches the
-# producer's `FONT_ATLAS_PARK_MAX` (11 parks + 1 active = 12 owners): a mirror
-# evicted while the producer still holds that owner's atlas costs a full
-# 1,048,576-pixel repack on the owner's next run.
-val VULKAN_FONT_ATLAS_MIRROR_MAX: i32 = 11
 
 class VulkanBackend:
     """Vulkan compute shader 2D renderer.
@@ -3993,29 +4003,13 @@ val VK_T_TEXT: i64 = 5
 val VK_T_TEXT_BG: i64 = 6
 val VK_T_READBACK: i64 = 7
 val VK_T_PRESENT: i64 = 8
-val VK_T_ENQUEUE: i64 = 9
-val VK_T_FLUSH: i64 = 10
-val VK_T_SFFI_BEGIN: i64 = 11
-val VK_T_SFFI_REAP: i64 = 12
-val VK_T_SFFI_DESC: i64 = 13
-val VK_T_SFFI_BIND_PIPE: i64 = 14
-val VK_T_SFFI_BIND_DESC: i64 = 15
-val VK_T_SFFI_PUSH: i64 = 16
-val VK_T_SFFI_DISPATCH: i64 = 17
-val VK_T_SFFI_END: i64 = 18
-val VK_T_SFFI_SUBMIT: i64 = 19
-val VK_T_SFFI_WAIT_FENCE: i64 = 20
+# Buckets VK_T_ENQUEUE .. VK_T_SFFI_WAIT_FENCE (9..20) moved to
+# backend_vulkan_font_types.spl: backend_vulkan_helpers.spl imports this module
+# back, and a val cannot be imported from a module that is still loading.
 val VK_T_UPLOAD: i64 = 21
-val VK_T_FONT_COMPOSITE: i64 = 22
-val VK_T_FONT_ATLAS_BUILD: i64 = 23
-# Sub-steps of `composite_font_batch`, which the first attribution run measured
-# at 27.3 s across 5 calls on a 300x253 page -- 58% of the whole frame.
-val VK_T_FONT_ATLAS_PACK: i64 = 24
-val VK_T_FONT_ATLAS_UPLOAD: i64 = 25
-val VK_T_FONT_ATLAS_DIGEST: i64 = 26
-val VK_T_FONT_PACKED_PARAMS: i64 = 27
-val VK_T_FONT_QUAD_VALIDATE: i64 = 28
-val VK_T_FONT_OWNER_IDENTITY: i64 = 29
+# Font-pipeline buckets (VK_T_FONT_COMPOSITE .. VK_T_FONT_OWNER_IDENTITY) moved
+# to backend_vulkan_font_types.spl: backend_vulkan_font.spl imports this module
+# back, and a val cannot be imported from a module that is still loading.
 # Sub-steps of `_draw_image_composite_native_impl`, which the 900x760
 # attribution run measured at 544 s across 264 calls -- 69% of the whole frame,
 # with the split between host packing, device allocation and dispatch

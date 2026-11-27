@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use simple_parser::{self as ast, Expr, Module, Node};
 
 use crate::hir::lower::context::FunctionContext;
-use crate::hir::lower::error::{LowerError, LowerResult};
+use crate::hir::lower::error::{LowerError, LowerResult, LOWERING_TYPE_ERROR_TAG};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
     ConcurrencyMode, HirAopAdvice, HirArchRule, HirCapabilityItem, HirCapabilityPolicy, HirDiBinding, HirDomainBlock,
@@ -442,6 +442,15 @@ fn is_domain_block_kind(kind: &str) -> bool {
         kind,
         "schema" | "style" | "ui" | "music" | "bim" | "cad" | "city" | "rtl"
     )
+}
+
+/// One E1003-class verdict collected during the second module pass, paired
+/// with the entry file at the moment it was raised: afterwards the lowerer's
+/// `current_function_*` fields describe whichever function was attempted
+/// last, so the attribution has to be captured at raise time.
+struct CollectedTypeError {
+    file: String,
+    error: LowerError,
 }
 
 impl Lowerer {
@@ -2076,6 +2085,67 @@ impl Lowerer {
             .map(|(module, _)| module)
     }
 
+    /// E1003-class verdicts (`Unsupported` carrying the `error[E1003]` tag)
+    /// are collected across the whole second module pass instead of aborting
+    /// the pass at the first hit, so independent type errors in later
+    /// functions are reported before the compile fails. Every other lowering
+    /// error keeps aborting the pass immediately.
+    /// doc/08_tracking/bug/db/seed_lowering_reports_only_first_type_error_2026-11-26.sdn
+    fn is_collected_type_error(error: &LowerError) -> bool {
+        matches!(error, LowerError::Unsupported(message) if message.starts_with(LOWERING_TYPE_ERROR_TAG))
+    }
+
+    /// Lower one function body for the second module pass. An E1003-class
+    /// type error is pushed into `type_errors` (and the function skipped)
+    /// instead of aborting the pass; every other error aborts as before —
+    /// after printing everything collected so far, so an E1003 is reported
+    /// no matter which verdict stops the pass. The module pass then fails
+    /// with the FIRST collected error after printing the rest, so the
+    /// returned error and the exit status are identical to the historical
+    /// first-error-only behaviour — only completeness changes.
+    fn lower_function_collecting_type_errors(
+        &mut self,
+        f: &ast::FunctionDef,
+        owner_type: Option<&str>,
+        type_errors: &mut Vec<CollectedTypeError>,
+    ) -> LowerResult<Option<HirFunction>> {
+        match self.lower_function(f, owner_type) {
+            Ok(hir_func) => Ok(Some(hir_func)),
+            Err(error) if Self::is_collected_type_error(&error) => {
+                let file = self
+                    .current_file
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                type_errors.push(CollectedTypeError { file, error });
+                Ok(None)
+            }
+            Err(error) => {
+                Self::report_collected_type_errors(type_errors, false);
+                Err(error)
+            }
+        }
+    }
+
+    /// Print collected E1003 verdicts that would otherwise be lost. The
+    /// end-of-pass path skips the first (`skip_first`: the driver prints it
+    /// as the primary error); the abort path prints all of them because the
+    /// primary error there is the aborting non-E1003 verdict.
+    fn report_collected_type_errors(type_errors: &[CollectedTypeError], skip_first: bool) {
+        for extra in type_errors.iter().skip(if skip_first { 1 } else { 0 }) {
+            eprintln!("error: semantic: {}: HIR lowering: {}", extra.file, extra.error);
+        }
+    }
+
+    /// Terminate a module pass that collected E1003-class type errors: print
+    /// every one after the first in the same shape the driver prints the
+    /// first (`semantic: <file>: HIR lowering: ...`), then return the first
+    /// error. `None` when nothing was collected.
+    fn fail_with_collected_type_errors(type_errors: Vec<CollectedTypeError>) -> Option<LowerError> {
+        Self::report_collected_type_errors(&type_errors, true);
+        type_errors.into_iter().next().map(|first| first.error)
+    }
+
     /// Preserve resolved callable result types for separately compiled modules.
     /// These TypeIds belong to the returned module's registry; re-resolving the
     /// project AST annotations in codegen would lose aliases and owner identity.
@@ -2422,16 +2492,21 @@ impl Lowerer {
 
         self.refine_module_global_types(ast_module);
 
-        // Second pass: lower function bodies and class/struct methods
+        // Second pass: lower function bodies and class/struct methods.
+        // E1003-class type errors are collected (not propagated) so every
+        // independent one is reported before the pass fails with the first;
+        // see `lower_function_collecting_type_errors`.
+        let mut type_errors: Vec<CollectedTypeError> = Vec::new();
         for item in &ast_module.items {
             match item {
                 Node::Function(f) => {
-                    let hir_func = self.lower_function(f, None)?;
-                    self.module.functions.push(hir_func);
+                    if let Some(hir_func) = self.lower_function_collecting_type_errors(f, None, &mut type_errors)? {
+                        self.module.functions.push(hir_func);
+                    }
                 }
                 Node::Class(c) => {
                     // Lower class methods with type invariant injection
-                    self.lower_methods_with_generics(&c.methods, Some(&c.name), &c.generic_params)?;
+                    self.lower_methods_with_generics(&c.methods, Some(&c.name), &c.generic_params, &mut type_errors)?;
 
                     // Lower mixin methods applied to this class
                     for mixin_ref in &c.mixins {
@@ -2448,16 +2523,19 @@ impl Lowerer {
                         }) {
                             // Lower mixin methods for this class
                             for method in &mixin_decl.methods {
-                                let hir_func = self.lower_function(method, Some(&c.name))?;
-                                self.module.functions.push(hir_func);
+                                if let Some(hir_func) =
+                                    self.lower_function_collecting_type_errors(method, Some(&c.name), &mut type_errors)?
+                                {
+                                    self.module.functions.push(hir_func);
+                                }
                             }
                         }
                     }
-                    self.record_class_with_trait_impls(c, &ast_module.items)?;
+                    self.record_class_with_trait_impls(c, &ast_module.items, &mut type_errors)?;
                 }
                 Node::Struct(s) => {
                     // Lower struct methods with type invariant injection
-                    self.lower_methods_with_generics(&s.methods, Some(&s.name), &s.generic_params)?;
+                    self.lower_methods_with_generics(&s.methods, Some(&s.name), &s.generic_params, &mut type_errors)?;
                     // `struct Name(Trait):` (parser-synthesised `implements`
                     // attribute): record the trait impl exactly as an
                     // `impl Trait for Name` block would, so the struct gets a
@@ -2517,10 +2595,15 @@ impl Lowerer {
                                 if let Some(declaration) = &imported_trait {
                                     self.current_file = Some(declaration.source_file.clone());
                                 }
-                                let lowered = self.lower_function(default_method, Some(&s.name));
+                                let lowered = self.lower_function_collecting_type_errors(
+                                    default_method,
+                                    Some(&s.name),
+                                    &mut type_errors,
+                                );
                                 self.current_file = previous_file;
-                                let hir_func = lowered?;
-                                self.module.functions.push(hir_func);
+                                if let Some(hir_func) = lowered? {
+                                    self.module.functions.push(hir_func);
+                                }
                                 methods_map.insert(
                                     default_method.name.clone(),
                                     format!("{}.{}", s.name, default_method.name),
@@ -2537,20 +2620,26 @@ impl Lowerer {
                     }
                 }
                 Node::Enum(e) => {
-                    self.lower_methods_with_generics(&e.methods, Some(&e.name), &e.generic_params)?;
+                    self.lower_methods_with_generics(&e.methods, Some(&e.name), &e.generic_params, &mut type_errors)?;
                 }
                 Node::Actor(a) => {
                     // Lower actor methods (actors are lowered like classes)
                     for method in &a.methods {
-                        let hir_func = self.lower_function(method, Some(&a.name))?;
-                        self.module.functions.push(hir_func);
+                        if let Some(hir_func) =
+                            self.lower_function_collecting_type_errors(method, Some(&a.name), &mut type_errors)?
+                        {
+                            self.module.functions.push(hir_func);
+                        }
                     }
                 }
                 Node::Impl(impl_block) => {
-                    self.lower_impl_block(impl_block, &ast_module.items, true)?;
+                    self.lower_impl_block(impl_block, &ast_module.items, true, &mut type_errors)?;
                 }
                 _ => {}
             }
+        }
+        if let Some(first_type_error) = Self::fail_with_collected_type_errors(type_errors) {
+            return Err(first_type_error);
         }
 
         // Copy global variables from HashMap to module's globals Vec.
@@ -2786,15 +2875,19 @@ impl Lowerer {
 
         self.refine_module_global_types(ast_module);
 
-        // Second pass: lower function bodies
+        // Second pass: lower function bodies. Same E1003 collection as
+        // `lower_module_with_return_types` — see
+        // `lower_function_collecting_type_errors`.
+        let mut type_errors: Vec<CollectedTypeError> = Vec::new();
         for item in &ast_module.items {
             match item {
                 Node::Function(f) => {
-                    let hir_func = self.lower_function(f, None)?;
-                    self.module.functions.push(hir_func);
+                    if let Some(hir_func) = self.lower_function_collecting_type_errors(f, None, &mut type_errors)? {
+                        self.module.functions.push(hir_func);
+                    }
                 }
                 Node::Class(c) => {
-                    self.lower_methods_with_generics(&c.methods, Some(&c.name), &c.generic_params)?;
+                    self.lower_methods_with_generics(&c.methods, Some(&c.name), &c.generic_params, &mut type_errors)?;
                     for mixin_ref in &c.mixins {
                         if let Some(mixin_decl) = ast_module.items.iter().find_map(|item| {
                             if let Node::Mixin(m) = item {
@@ -2808,30 +2901,39 @@ impl Lowerer {
                             }
                         }) {
                             for method in &mixin_decl.methods {
-                                let hir_func = self.lower_function(method, Some(&c.name))?;
-                                self.module.functions.push(hir_func);
+                                if let Some(hir_func) =
+                                    self.lower_function_collecting_type_errors(method, Some(&c.name), &mut type_errors)?
+                                {
+                                    self.module.functions.push(hir_func);
+                                }
                             }
                         }
                     }
                 }
                 Node::Struct(s) => {
-                    self.lower_methods_with_generics(&s.methods, Some(&s.name), &s.generic_params)?;
+                    self.lower_methods_with_generics(&s.methods, Some(&s.name), &s.generic_params, &mut type_errors)?;
                 }
                 Node::Enum(e) => {
-                    self.lower_methods_with_generics(&e.methods, Some(&e.name), &e.generic_params)?;
+                    self.lower_methods_with_generics(&e.methods, Some(&e.name), &e.generic_params, &mut type_errors)?;
                 }
                 Node::Actor(a) => {
                     // Lower actor methods (actors are lowered like classes)
                     for method in &a.methods {
-                        let hir_func = self.lower_function(method, Some(&a.name))?;
-                        self.module.functions.push(hir_func);
+                        if let Some(hir_func) =
+                            self.lower_function_collecting_type_errors(method, Some(&a.name), &mut type_errors)?
+                        {
+                            self.module.functions.push(hir_func);
+                        }
                     }
                 }
                 Node::Impl(impl_block) => {
-                    self.lower_impl_block(impl_block, &ast_module.items, false)?;
+                    self.lower_impl_block(impl_block, &ast_module.items, false, &mut type_errors)?;
                 }
                 _ => {}
             }
+        }
+        if let Some(first_type_error) = Self::fail_with_collected_type_errors(type_errors) {
+            return Err(first_type_error);
         }
 
         // Module-init dynamic pass (chunked; see lower_dynamic_module_init).
@@ -3173,12 +3275,16 @@ impl Lowerer {
         methods: &[simple_parser::ast::FunctionDef],
         owner_name: Option<&str>,
         generics: &[String],
+        type_errors: &mut Vec<CollectedTypeError>,
     ) -> LowerResult<()> {
         let prev = std::mem::replace(&mut self.active_impl_generic_params, generics.to_vec());
         let res = (|| -> LowerResult<()> {
             for method in methods {
-                let hir_func = self.lower_function(method, owner_name)?;
-                self.module.functions.push(hir_func);
+                if let Some(hir_func) =
+                    self.lower_function_collecting_type_errors(method, owner_name, type_errors)?
+                {
+                    self.module.functions.push(hir_func);
+                }
             }
             Ok(())
         })();
@@ -3191,6 +3297,7 @@ impl Lowerer {
         impl_block: &simple_parser::ast::ImplBlock,
         items: &[simple_parser::ast::Node],
         record_hir_impl: bool,
+        type_errors: &mut Vec<CollectedTypeError>,
     ) -> LowerResult<()> {
         let Some(ref type_name) = Self::impl_target_type_name(&impl_block.target_type) else {
             return Ok(());
@@ -3199,8 +3306,11 @@ impl Lowerer {
         let res = (|| -> LowerResult<()> {
             for method in &impl_block.methods {
                 let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
-                let hir_func = self.lower_function(&method, Some(type_name))?;
-                self.module.functions.push(hir_func);
+                if let Some(hir_func) =
+                    self.lower_function_collecting_type_errors(&method, Some(type_name), type_errors)?
+                {
+                    self.module.functions.push(hir_func);
+                }
             }
 
             if let Some(ref trait_name) = impl_block.trait_name {
@@ -3228,10 +3338,15 @@ impl Lowerer {
                         if let Some(ref source_file) = imported_source {
                             self.current_file = Some(source_file.clone());
                         }
-                        let lowered = self.lower_function(&default_method, Some(type_name));
+                        let lowered = self.lower_function_collecting_type_errors(
+                            &default_method,
+                            Some(type_name),
+                            type_errors,
+                        );
                         self.current_file = previous_file;
-                        let hir_func = lowered?;
-                        self.module.functions.push(hir_func);
+                        if let Some(hir_func) = lowered? {
+                            self.module.functions.push(hir_func);
+                        }
 
                         let fn_name = format!("{}.{}", type_name, default_method.name);
                         methods_map.insert(default_method.name.clone(), fn_name);
@@ -3305,7 +3420,12 @@ impl Lowerer {
     ///
     /// A class that does not define every abstract trait method keeps the old
     /// (duck-typed) behaviour instead of becoming a new lowering error.
-    fn record_class_with_trait_impls(&mut self, c: &ast::ClassDef, items: &[Node]) -> LowerResult<()> {
+    fn record_class_with_trait_impls(
+        &mut self,
+        c: &ast::ClassDef,
+        items: &[Node],
+        type_errors: &mut Vec<CollectedTypeError>,
+    ) -> LowerResult<()> {
         // An object carries ONE vtable header and `MethodCallVirtual` carries
         // only a slot number, so a class conforming to two traits would index
         // the first trait's vtable with the second trait's slots. Publish an
@@ -3360,9 +3480,11 @@ impl Lowerer {
                 if let Some(declaration) = &imported_trait {
                     self.current_file = Some(declaration.source_file.clone());
                 }
-                let lowered = self.lower_function(default_method, Some(&c.name));
+                let lowered = self.lower_function_collecting_type_errors(default_method, Some(&c.name), type_errors);
                 self.current_file = previous_file;
-                self.module.functions.push(lowered?);
+                if let Some(hir_func) = lowered? {
+                    self.module.functions.push(hir_func);
+                }
                 methods_map.insert(default_method.name.clone(), format!("{}.{}", c.name, default_method.name));
             }
             let type_id = self

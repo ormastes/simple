@@ -18,7 +18,7 @@ use std.spec.{describe, it, expect, step}
 use app.io.mod (file_exists, dir_create)
 use std.scv.store.{scv_init_repo}
 use std.scv.identity.{scv_identity_allocate, scv_identity_record_move, scv_identity_record_copy}
-use std.scv.metadata_db.{scv_metadb_open, scv_metadb_path, scv_metadb_tables, scv_metadb_columns, scv_metadb_migrate_identity}
+use std.scv.metadata_db.{ScvMetaInsert, scv_metadb_open, scv_metadb_path, scv_metadb_tables, scv_metadb_columns, scv_metadb_migrate_identity}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 fn _repo(tag: text) -> text:
@@ -124,3 +124,35 @@ describe "scv metadata db (SdnDatabase backend, WAL)":
         var m3 = scv_metadb_open(root)
         val verdict2 = scv_metadb_migrate_identity(root, m3)
         expect(verdict2).to_equal("files=0,edges=0")
+
+    it "fails closed on settled-alias writes and never re-allocates a settled key":
+        step("Settle one identity_relation row, then attempt to re-settle its key")
+        val root = _repo("admission")
+        var m = scv_metadb_open(root)
+        expect(m.insert("identity_relation", ["rel_1", "file_1", "file_2", "copy", "c1", "900", "evidence_a", "mv1", "accepted"])).to_equal(true)
+        expect(m.insert("identity_relation", ["rel_1", "file_3", "file_4", "move", "c2", "800", "evidence_b", "mv1", "accepted"])).to_equal(false)
+        step("The settled row survives untouched and the refused write appended no WAL entry")
+        expect(m.count("identity_relation")).to_equal(1)
+        expect(m.wal.entries.len()).to_equal(1)
+        expect(m.wal.sequence_counter).to_equal(1)
+        val settled = m.row("identity_relation", "rel_1")
+        expect(settled.?).to_equal(true)
+        match settled:
+            Some(r):
+                expect(r.get("to_id") ?? "").to_equal("file_2")
+                expect(r.get("relation") ?? "").to_equal("copy")
+            nil:
+                pass
+        step("next_key skips a settled alias that occupies the count-based candidate")
+        expect(m.insert("identity_relation", ["rel_2", "file_3", "file_4", "copy", "c2", "850", "evidence_b", "mv1", "accepted"])).to_equal(true)
+        expect(m.insert("identity_relation", ["rel_4", "file_5", "file_6", "copy", "c3", "700", "evidence_c", "mv1", "accepted"])).to_equal(true)
+        expect(m.next_key("identity_relation", "rel")).to_equal("rel_5")
+        expect(m.insert("identity_relation", ["rel_5", "file_7", "file_8", "copy", "c4", "600", "evidence_d", "mv1", "accepted"])).to_equal(true)
+        step("A batch re-settling an existing key is rejected wholesale before any WAL write")
+        expect(m.insert_batch([ScvMetaInsert(table: "identity_relation", values: ["rel_9", "file_9", "file_10", "copy", "c5", "500", "evidence_e", "mv1", "accepted"]), ScvMetaInsert(table: "identity_relation", values: ["rel_5", "file_11", "file_12", "move", "c6", "400", "evidence_f", "mv1", "accepted"])])).to_equal(false)
+        expect(m.count("identity_relation")).to_equal(4)
+        step("A batch duplicating a key within itself is likewise rejected wholesale")
+        expect(m.insert_batch([ScvMetaInsert(table: "identity_relation", values: ["rel_9", "file_9", "file_10", "copy", "c5", "500", "evidence_e", "mv1", "accepted"]), ScvMetaInsert(table: "identity_relation", values: ["rel_9", "file_11", "file_12", "move", "c6", "400", "evidence_f", "mv1", "accepted"])])).to_equal(false)
+        expect(m.count("identity_relation")).to_equal(4)
+        expect(m.wal.entries.len()).to_equal(4)
+        expect(m.wal.sequence_counter).to_equal(4)
