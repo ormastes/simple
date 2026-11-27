@@ -376,6 +376,40 @@ describe "immutable_store_v1 garbage collection":
         expect(file_exists(destination)).to_equal(false)
         _store_cleanup(root)
 
+    it "open restores a reachable collected key to objects/ so the reference is not dangling":
+        val root = _store_root("gc-open-restore")
+        val payload = "reachable after gc".bytes()
+        val kept = immutable_store_v1_ingest(root, payload, HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_collect(root, StoreFlagV1(false)).moved.value).to_equal(1)
+        expect(immutable_store_v1_pin(root, "late", "owner-a", [kept.object_key])).to_equal("")
+        val opened = immutable_store_v1_open(root, kept.object_key)
+        expect(opened.status).to_equal("ok")
+        expect(opened.bytes == payload).to_equal(true)
+        expect(_count_objects(root)).to_equal(1)
+        expect(dir_remove_all(root + "/quarantine")).to_equal(true)
+        expect(immutable_store_v1_open(root, kept.object_key).status).to_equal("ok")
+        _store_cleanup(root)
+
+    it "open reports missing for an unreachable collected key":
+        val root = _store_root("gc-open-unreachable")
+        val orphan = immutable_store_v1_ingest(root, "unreachable".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_collect(root, StoreFlagV1(false)).moved.value).to_equal(1)
+        expect(immutable_store_v1_open(root, orphan.object_key).status).to_equal("missing")
+        expect(_count_objects(root)).to_equal(0)
+        _store_cleanup(root)
+
+    it "never restores a corrupt quarantined copy":
+        val root = _store_root("gc-open-corrupt")
+        val kept = immutable_store_v1_ingest(root, "will be corrupted".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_collect(root, StoreFlagV1(false)).moved.value).to_equal(1)
+        val dates = dir_list(root + "/quarantine")
+        val destination = root + "/quarantine/" + dates[0].trim() + "/" + kept.object_key + ".obj"
+        expect(file_write_bytes(destination, "tampered".bytes())).to_equal(true)
+        expect(immutable_store_v1_pin(root, "late", "owner-a", [kept.object_key])).to_equal("")
+        expect(immutable_store_v1_open(root, kept.object_key).status).to_equal("missing")
+        expect(_count_objects(root)).to_equal(0)
+        _store_cleanup(root)
+
     it "dry-run lists unreachable objects without moving them":
         val root = _store_root("gcdry")
         val orphan = immutable_store_v1_ingest(root, "orphan payload".bytes(), HASH_POLICY_V1_XXH3_128)
