@@ -6,6 +6,11 @@ use app.io.process_ops.{process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use app.test_daemon.light_protocol.{light_lock_claim, light_lock_release, light_atomic_publish, LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE, LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER, light_request_deadline, light_request_parse_v2, light_request_matches_daemon_v2, timeout_verdict_line, has_verdict_line, exit_code_reason, light_request_inflight_path, light_request_is_pollable}
 use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1}
+use app.test_daemon.worker_cache.{
+    WORKER_CACHE_DIR, WORKER_SOURCE_PATH, WorkerExitClass, WorkerLaunchKind,
+    WorkerSmfProbeStatus, worker_cache_build_args, worker_cache_classify_failure,
+    worker_cache_default_deps, worker_cache_poison, worker_cache_resolve_or_compile
+}
 
 use std.io_runtime.{dir_create_all}
 use std.io_runtime.{dir_list_or_empty}
@@ -215,14 +220,52 @@ fn handle_request(binary: text, name: text, environment_digest: text,
             "{LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE}\n{LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER}")
         file_delete(inflight_path)
         return
-    val previous_child_marker = enter_daemon_child_env()
-    val (stdout, stderr, code) = process_run_bounded(
+    val simple_lib = env_get("SIMPLE_LIB") ?? ""
+    val worker_target = worker_cache_resolve_or_compile(
         binary,
-        ["run", "src/app/test_runner_new/test_runner_single.spl", test_path, "--no-session-daemon", "--sequential", "--timeout", timeout_secs.to_string()],
+        WORKER_CACHE_DIR,
+        WORKER_SOURCE_PATH,
+        environment_digest,
+        simple_lib,
+        worker_cache_default_deps()
+    )
+    val launch_args = worker_cache_build_args(worker_target, test_path, timeout_secs.to_string())
+    val previous_child_marker = enter_daemon_child_env()
+    var run_res = process_run_bounded(
+        binary,
+        launch_args,
         timeout_ms,
         TEST_OUTPUT_CAPTURE_BYTES
     )
+    val exit_class = if run_res.2 == 0: WorkerExitClass.ZeroExit else: WorkerExitClass.NonZeroExit
+    match worker_target.kind:
+        case WorkerLaunchKind.CachedSmf:
+            match worker_cache_classify_failure(run_res.0, run_res.1, exit_class):
+                case WorkerSmfProbeStatus.LoadOrRelocationFailed:
+                    worker_cache_poison(worker_target, "smf-load-or-relocation-failed:{run_res.2}")
+                    val fallback_args = [
+                        "run",
+                        WORKER_SOURCE_PATH,
+                        test_path,
+                        "--no-session-daemon",
+                        "--sequential",
+                        "--timeout",
+                        timeout_secs.to_string()
+                    ]
+                    run_res = process_run_bounded(
+                        binary,
+                        fallback_args,
+                        timeout_ms,
+                        TEST_OUTPUT_CAPTURE_BYTES
+                    )
+                case WorkerSmfProbeStatus.Usable:
+                    pass
+        case WorkerLaunchKind.SourceFallback:
+            pass
     restore_daemon_child_env(previous_child_marker)
+    val stdout = run_res.0
+    val stderr = run_res.1
+    val code = run_res.2
     var body = stdout
     if stderr != "":
         body = body + stderr

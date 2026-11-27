@@ -16,7 +16,7 @@ use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
 use app.test_runner_new.sdn_wrapper.{run_test_sdn_wrapper}
 use app.test_daemon.light_protocol.{ensure_daemon_at, LIGHT_REQUEST_RESPONSE_GRACE_MS, LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT, light_response_client_result, light_request_encode_v2, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, early_death_verdict_line, bounded_run_classification, has_verdict_line, exit_code_reason}
-use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1, test_daemon_environment_can_reuse_v1}
+use app.test_daemon.environment_identity.{TestDaemonEnvironmentIdentityV1, test_daemon_environment_identity_v1, test_daemon_environment_can_reuse_v1}
 
 use std.io_runtime.{dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
@@ -859,107 +859,46 @@ fn main() -> i64:
     # seed_test_runner_kills_child_at_600s_ignoring_timeout_2026-08-02.md.
     val timeout_ms = light_request_timeout_ms_from_seconds(run.timeout_secs)
     val long_timeout_bypass = run.timeout_secs * 1000 > timeout_ms
-    ensure_dirs()
-    # Capture once for this suite invocation. Hashing is not repeated per spec.
-    # A legacy daemon has no second lock line and therefore fails this check.
-    val caller_environment = test_daemon_environment_identity_v1()
-    # The light daemon may be unable to start (e.g. it relies on runtime
-    # methods the seed interpreter lacks). Degrade to direct execution rather
-    # than refusing, but decide once for the whole batch.
-    # SIMPLE_COVERAGE: the daemon's environment predates this request, so a
-    # daemon-run child would not have coverage enabled. Bypass the daemon and
-    # run directly so the child inherits SIMPLE_COVERAGE=1.
-    val cov_env = env_get("SIMPLE_COVERAGE") ?? ""
-    val cov_bypass = cov_env != "" and cov_env != "0"
-    # SIMPLE_REQUIRE_GPU: same frozen-environment defect class again, and it
-    # fails OPEN, which is the worst variant. The GPU conformance specs
-    # (test/03_system/gpu_lane/*_debug_session_conformance_spec.spl) are
-    # host-aware skip-clean by default; SIMPLE_REQUIRE_GPU=1 is the opt-in
-    # switch that turns "no device" into a FAILURE so CI can demand real
-    # device evidence. Served by the daemon, the spec body reads the DAEMON's
-    # environment, observes the variable as UNSET, and silently takes the
-    # permissive branch -- so a lane that asked for a hard device requirement
-    # gets a green that proves nothing, which is exactly what the switch
-    # exists to prevent. Measured 2026-08-09: `SIMPLE_REQUIRE_GPU=1
-    # bin/simple test <cuda spec>` had the spec body observe the var as unset
-    # (nil via env_get, false via test_env_available) while the caller had it
-    # set to "1". Bypass the daemon so the value reaches the spec.
-    val require_gpu_env = env_get("SIMPLE_REQUIRE_GPU") ?? ""
-    val require_gpu_bypass = require_gpu_env != "" and require_gpu_env != "0"
-    # Same defect class as SIMPLE_COVERAGE, one step worse because it fails
-    # SILENTLY instead of just under-reporting.
-    #
-    # The light daemon is a long-lived process whose environment is frozen at
-    # whichever invocation happened to start it; the v1 request
-    # (light_request_encode) carries only a header, an expiry and a path — no
-    # environment at all. So a spec that resolves "which binary do I exercise"
-    # from the environment reads the DAEMON's stale value, not the caller's.
-    # Measured 2026-08-02 on the Rust seed: with a daemon already running,
-    # `SIMPLE_TEST_BINARY=VALUE_SIX bin/simple test <spec>` had the spec body
-    # observe VALUE_FIVE (the previous run's value), and a child
-    # `process_run("/bin/sh", ...)` saw VALUE_FIVE too. Resolving the override
-    # in the child shell rather than via env_get does NOT help — the shell
-    # inherits the daemon's environment either way. Kill the daemon first and
-    # both forms immediately read the caller's value.
-    #
-    # A silently-ignored binary override means the spec exercised the default
-    # binary while claiming to test the selected one, so a sabotage check can
-    # pass for the wrong reason. Fail-safe: any request that names one of these
-    # overrides takes the direct lane, where the child really does inherit it.
-    val binary_override_bypass = _has_binary_override()
-    # test_env_gate family: see _test_env_gate_vars above. Bypass the daemon
-    # whenever the caller sets one, so the value actually reaches the spec.
-    # Residual gap stated plainly: this cannot repair the OPPOSITE direction --
-    # a daemon started WITH a gate var set keeps reporting it available to
-    # later runs that do not set it, and there is nothing here to detect that
-    # because the v1 request carries no environment. The real fix is to put the
-    # caller's environment in the request; this is the same fail-safe divert the
-    # four bypasses above use.
-    val env_gate_names = _test_env_gate_names()
-    val env_gate_bypass = env_gate_names != ""
-    # Same defect class again, and the reason the 2026-07-27 fix did not hold.
-    # The light daemon is pinned for its ENTIRE LIFETIME to whichever binary
-    # spawned it, and the v1 request carries only a path + expiry — no binary.
-    # So a daemon-served run executes the spec with the DAEMON's compiler while
-    # the caller reads the result as if its own compiler had produced it. A
-    # lane that rebuilds the compiler and runs `test` to verify the fix then
-    # measures the old binary and calls it green. Divert to the direct lane
-    # whenever the daemon's binary is not the one running this process. A
-    # daemon predating this record has unavailable identity and must not serve
-    # qualification work.
-    val invoker = candidate_binary
     val daemon_host = host_os()
     val daemon_host_bypass = daemon_platform_bypass(daemon_host)
-    val daemon_binary = if daemon_host_bypass: "" else: daemon_recorded_binary()
-    val daemon_was_alive = not daemon_host_bypass and daemon_lock_alive()
-    val invoker_bypass = daemon_was_alive and daemon_binary != invoker
-    val environment_bypass = daemon_was_alive and not test_daemon_environment_can_reuse_v1(
-        caller_environment, lock_environment_digest())
-    # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
-    # (the request would be clamped and the spec killed at ~600s); run
-    # directly so the full requested timeout is honored.
-    # HEAD-OF-LINE BLOCKING. The light daemon drains its request FIFO with a
-    # SINGLE worker (light_daemon.spl main(): `handle_request` blocks inside
-    # process_run_bounded for the served spec's whole budget), so N concurrent
-    # `simple test` clients are executed strictly one at a time no matter how
-    # many cores are free. Measured: every client parks waiting for its .resp
-    # at ~0% CPU while exactly one spec computes, and clients then die together
-    # as their request deadlines expire while still queued.
-    # daemon_backlog.spl already decided the policy and pinned it with a unit
-    # spec, but had ZERO production call sites -- the decision was never
-    # consulted, so clients joined the queue unconditionally. This is that wiring.
-    # Count only `.req` entries. A raw dir_list_or_empty().len() also counts the
-    # `.req.tmp` files produced by the atomic tmp+rename write above, so a
-    # client could bypass on the in-flight write that is about to become its
-    # OWN request -- and, worse, on leftover `.resp`/lock names. That is what
-    # `count_pending_requests` exists for; it was pinned by a unit spec but had
-    # zero production call sites. This is that wiring.
-    val backlog_pending = if not daemon_host_bypass and file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list_or_empty(LIGHT_REQ_DIR)) else: 0
-    val backlog_bypass = daemon_backlog_bypass(backlog_pending)
-    # The daemon is pinned to its own binary for life; a `--compiler` selection
-    # can only be honoured by the direct single lane.
+    # SIMPLE_COVERAGE / SIMPLE_REQUIRE_GPU / binary overrides / env gates /
+    # --compiler / --timeout beyond daemon cap must reach the child directly.
+    # Avoid creating daemon directories or hashing the full environment on
+    # non-daemon platforms (Windows/macOS) or when a static direct-lane bypass
+    # has already been selected.
+    val cov_env = env_get("SIMPLE_COVERAGE") ?? ""
+    val cov_bypass = cov_env != "" and cov_env != "0"
+    val require_gpu_env = env_get("SIMPLE_REQUIRE_GPU") ?? ""
+    val require_gpu_bypass = require_gpu_env != "" and require_gpu_env != "0"
+    val binary_override_bypass = _has_binary_override()
+    val env_gate_names = _test_env_gate_names()
+    val env_gate_bypass = env_gate_names != ""
     val compiler_bypass = client_options.compiler != ""
-    var daemon_ok = if daemon_host_bypass or cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass or environment_bypass or compiler_bypass or not caller_environment.valid: false else: ensure_daemon()
+    val static_bypass = daemon_host_bypass or cov_bypass or binary_override_bypass or long_timeout_bypass or require_gpu_bypass or env_gate_bypass or compiler_bypass
+    # See doc/08_tracking/bug/test_daemon_freezes_env_binary_override_dead_2026-08-02.md,
+    # light_test_daemon_serializes_concurrent_test_invocations_2026-08-21.md, and
+    # test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17.md.
+    var caller_environment = TestDaemonEnvironmentIdentityV1(true, "", "bypassed")
+    var invoker = candidate_binary
+    var daemon_binary = ""
+    var daemon_was_alive = false
+    var invoker_bypass = false
+    var environment_bypass = false
+    var backlog_pending = 0
+    var backlog_bypass = false
+    if not static_bypass:
+        ensure_dirs()
+        # Capture once for this suite invocation. Hashing is not repeated per spec.
+        # A legacy daemon has no second lock line and therefore fails this check.
+        caller_environment = test_daemon_environment_identity_v1()
+        daemon_binary = daemon_recorded_binary()
+        daemon_was_alive = daemon_lock_alive()
+        invoker_bypass = daemon_was_alive and daemon_binary != invoker
+        environment_bypass = daemon_was_alive and not test_daemon_environment_can_reuse_v1(
+            caller_environment, lock_environment_digest())
+        backlog_pending = if file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list_or_empty(LIGHT_REQ_DIR)) else: 0
+        backlog_bypass = daemon_backlog_bypass(backlog_pending)
+    var daemon_ok = if static_bypass or invoker_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
     if daemon_ok:
         val active_daemon_binary = daemon_recorded_binary()
         if active_daemon_binary == "" or active_daemon_binary != candidate_binary:

@@ -1,0 +1,256 @@
+# Compiled Single-File Test Worker Cache
+#
+# Avoids re-parsing and compiling `src/app/test_runner_new/test_runner_single.spl`
+# on every single-file test request handled by `light_daemon.spl`.
+# Each cached `.smf` artifact is bound to the exact compiler binary fingerprint,
+# worker source/dependency digests, SIMPLE_LIB, and daemon environment digest.
+# When compilation fails or an SMF fails to load/relocate (for example a seed
+# runtime missing `rt_text_is_ascii`), that key is negatively cached and execution
+# cleanly falls back to source `test_runner_single.spl` while preserving child
+# failures verbatim.
+
+use app.io.process_ops.{process_run_bounded}
+use app.test_daemon.light_protocol.{has_verdict_line, light_atomic_publish}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{
+    dir_create_all, dir_list_or_empty, file_delete, file_exists,
+    file_rename, file_size, getpid, read_file_text
+}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+
+pub val WORKER_SOURCE_PATH: text = "src/app/test_runner_new/test_runner_single.spl"
+pub val WORKER_CACHE_DIR: text = ".build/test_daemon_light/worker_cache"
+val WORKER_COMPILE_TIMEOUT_MS: i64 = 60000
+val WORKER_CACHE_MAX_ARTIFACTS: i64 = 4
+
+pub enum WorkerLaunchKind:
+    CachedSmf
+    SourceFallback
+
+pub enum WorkerExitClass:
+    ZeroExit
+    NonZeroExit
+
+pub enum WorkerSmfProbeStatus:
+    Usable
+    LoadOrRelocationFailed
+
+pub struct WorkerCacheTarget:
+    kind: WorkerLaunchKind
+    launch_path: text
+    cache_key: text
+    smf_path: text
+    disabled_path: text
+    reason: text
+
+pub fn worker_cache_kind_label(kind: WorkerLaunchKind) -> text:
+    match kind:
+        case WorkerLaunchKind.CachedSmf: "cached-smf"
+        case WorkerLaunchKind.SourceFallback: "source-fallback"
+
+pub fn worker_cache_probe_status_label(status: WorkerSmfProbeStatus) -> text:
+    match status:
+        case WorkerSmfProbeStatus.Usable: "usable"
+        case WorkerSmfProbeStatus.LoadOrRelocationFailed: "load-or-relocation-failed"
+
+pub fn worker_cache_default_deps() -> [text]:
+    [
+        "src/app/test_runner_new/test_runner_single.spl",
+        "src/app/test_runner_new/client_arg_shape.spl",
+        "src/app/test_runner_new/timeout_budget.spl",
+        "src/app/test_daemon/light_protocol.spl",
+        "src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl",
+        "src/lib/nogc_sync_mut/test_runner/test_runner_args.spl",
+        "src/lib/nogc_sync_mut/test_runner/test_runner_config.spl",
+        "src/lib/nogc_sync_mut/test_runner/test_runner_files.spl",
+        "src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl",
+        "src/lib/nogc_sync_mut/test_runner/test_runner_types.spl"
+    ]
+
+fn _binary_fingerprint(binary: text) -> text:
+    if binary == "" or not file_exists(binary):
+        return binary + "|missing"
+    val sz = file_size(binary)
+    val mt = file_modified_time(binary)
+    "{binary}|{sz}|{mt}"
+
+fn _source_tree_fingerprint(worker_source: text, dep_sources: [text]) -> text:
+    var parts: [text] = []
+    if worker_source != "" and file_exists(worker_source):
+        parts.push("src:{worker_source}=" + sha256_text(read_file_text(worker_source)))
+    else:
+        parts.push("src:{worker_source}=missing")
+    for dep in dep_sources:
+        if dep != "" and dep != worker_source:
+            if file_exists(dep):
+                parts.push("dep:{dep}=" + sha256_text(read_file_text(dep)))
+            else:
+                parts.push("dep:{dep}=missing")
+    parts.join("\n")
+
+pub fn worker_cache_key(
+    binary: text,
+    worker_source: text,
+    environment_digest: text,
+    simple_lib: text,
+    dep_sources: [text]
+) -> text:
+    val payload = _binary_fingerprint(binary) + "\n" +
+        "env:" + environment_digest + "\n" +
+        "lib:" + simple_lib + "\n" +
+        _source_tree_fingerprint(worker_source, dep_sources)
+    val full_digest = sha256_text(payload)
+    if full_digest.byte_len() > 24:
+        return full_digest.slice(0, 24)
+    full_digest
+
+pub fn worker_cache_target(
+    cache_dir: text,
+    binary: text,
+    worker_source: text,
+    environment_digest: text,
+    simple_lib: text,
+    dep_sources: [text]
+) -> WorkerCacheTarget:
+    val key = worker_cache_key(binary, worker_source, environment_digest, simple_lib, dep_sources)
+    val smf_path = "{cache_dir}/test_runner_single_{key}.smf"
+    val disabled_path = "{cache_dir}/test_runner_single_{key}.smf.disabled"
+    WorkerCacheTarget(
+        kind: WorkerLaunchKind.SourceFallback,
+        launch_path: worker_source,
+        cache_key: key,
+        smf_path: smf_path,
+        disabled_path: disabled_path,
+        reason: "uninitialized"
+    )
+
+fn _entry_basename(entry: text) -> text:
+    var cur = entry
+    val slash_parts = cur.split("/")
+    if slash_parts.len() > 0:
+        cur = slash_parts[slash_parts.len() - 1]
+    val bslash_parts = cur.split("\\")
+    if bslash_parts.len() > 0:
+        cur = bslash_parts[bslash_parts.len() - 1]
+    cur
+
+fn _prune_stale_smf(cache_dir: text, keep_name: text):
+    val entries = dir_list_or_empty(cache_dir)
+    var smf_names: [text] = []
+    for entry in entries:
+        val base_name = _entry_basename(entry)
+        if base_name.ends_with(".smf") and not base_name.starts_with(".tmp_") and base_name != keep_name:
+            smf_names.push(base_name)
+    if smf_names.len() < WORKER_CACHE_MAX_ARTIFACTS:
+        return
+    var idx = 0
+    val excess = smf_names.len() - (WORKER_CACHE_MAX_ARTIFACTS - 1)
+    while idx < excess and idx < smf_names.len():
+        val victim = "{cache_dir}/{smf_names[idx]}"
+        file_delete(victim)
+        file_delete(victim + ".disabled")
+        idx = idx + 1
+
+pub fn worker_cache_poison(target: WorkerCacheTarget, detail: text):
+    if target.smf_path != "" and file_exists(target.smf_path):
+        file_delete(target.smf_path)
+    if target.disabled_path != "":
+        val _ = light_atomic_publish(target.disabled_path, detail + "\n")
+
+pub fn worker_cache_resolve_or_compile(
+    binary: text,
+    cache_dir: text,
+    worker_source: text,
+    environment_digest: text,
+    simple_lib: text,
+    dep_sources: [text]
+) -> WorkerCacheTarget:
+    val base = worker_cache_target(cache_dir, binary, worker_source, environment_digest, simple_lib, dep_sources)
+    if file_exists(base.disabled_path):
+        return WorkerCacheTarget(
+            kind: WorkerLaunchKind.SourceFallback,
+            launch_path: worker_source,
+            cache_key: base.cache_key,
+            smf_path: base.smf_path,
+            disabled_path: base.disabled_path,
+            reason: "poisoned"
+        )
+    if file_exists(base.smf_path) and file_size(base.smf_path) > 0:
+        return WorkerCacheTarget(
+            kind: WorkerLaunchKind.CachedSmf,
+            launch_path: base.smf_path,
+            cache_key: base.cache_key,
+            smf_path: base.smf_path,
+            disabled_path: base.disabled_path,
+            reason: "cache-hit"
+        )
+    if binary == "" or not file_exists(worker_source):
+        return WorkerCacheTarget(
+            kind: WorkerLaunchKind.SourceFallback,
+            launch_path: worker_source,
+            cache_key: base.cache_key,
+            smf_path: base.smf_path,
+            disabled_path: base.disabled_path,
+            reason: "missing-input"
+        )
+    dir_create_all(cache_dir)
+    val tmp_smf = "{cache_dir}/.tmp_{base.cache_key}_{getpid()}.smf"
+    val (_out, _err, compile_code) = process_run_bounded(
+        binary,
+        ["compile", worker_source, "-o", tmp_smf],
+        WORKER_COMPILE_TIMEOUT_MS,
+        TEST_OUTPUT_CAPTURE_BYTES
+    )
+    if compile_code == 0 and file_exists(tmp_smf) and file_size(tmp_smf) > 0:
+        if file_exists(base.smf_path) and file_size(base.smf_path) > 0:
+            file_delete(tmp_smf)
+        else:
+            val renamed = file_rename(tmp_smf, base.smf_path)
+            if not renamed and file_exists(tmp_smf):
+                file_delete(tmp_smf)
+        if file_exists(base.smf_path) and file_size(base.smf_path) > 0:
+            _prune_stale_smf(cache_dir, "test_runner_single_{base.cache_key}.smf")
+            return WorkerCacheTarget(
+                kind: WorkerLaunchKind.CachedSmf,
+                launch_path: base.smf_path,
+                cache_key: base.cache_key,
+                smf_path: base.smf_path,
+                disabled_path: base.disabled_path,
+                reason: "compiled"
+            )
+    if file_exists(tmp_smf):
+        file_delete(tmp_smf)
+    worker_cache_poison(base, "compile-failed:{compile_code}")
+    WorkerCacheTarget(
+        kind: WorkerLaunchKind.SourceFallback,
+        launch_path: worker_source,
+        cache_key: base.cache_key,
+        smf_path: base.smf_path,
+        disabled_path: base.disabled_path,
+        reason: "compile-failed"
+    )
+
+pub fn worker_cache_build_args(target: WorkerCacheTarget, test_path: text, timeout_token: text) -> [text]:
+    ["run", target.launch_path, test_path, "--no-session-daemon", "--sequential", "--timeout", timeout_token]
+
+pub fn worker_cache_classify_failure(stdout: text, stderr: text, exit_class: WorkerExitClass) -> WorkerSmfProbeStatus:
+    match exit_class:
+        case WorkerExitClass.ZeroExit:
+            return WorkerSmfProbeStatus.Usable
+        case WorkerExitClass.NonZeroExit:
+            pass
+    if has_verdict_line(stdout) or has_verdict_line(stderr):
+        return WorkerSmfProbeStatus.Usable
+    val combined = stdout + "\n" + stderr
+    val markers = [
+        "load failed:",
+        "relocation failed:",
+        "Undefined symbol:",
+        "invalid smf",
+        "bad magic"
+    ]
+    for marker in markers:
+        if combined.contains(marker):
+            return WorkerSmfProbeStatus.LoadOrRelocationFailed
+    WorkerSmfProbeStatus.Usable

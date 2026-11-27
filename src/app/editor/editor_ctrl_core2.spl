@@ -11,9 +11,11 @@ use std.editor.core.session.*
 use std.editor.services.file_watcher.*
 use std.editor.view.lsp_result_panel.*
 use std.editor.view.md_editing.*
+use std.editor.view.md_editing.{md_apply_result}
 use std.editor.extensions.builtin.md_commands.{md_buffer_content}
 use app.editor.commands.*
 use app.editor.editor_path_text_helpers.*
+use app.editor.editor_jit_helpers.*
 use app.editor.editor_ctrl_core.*
 
 fn ctrl_open_palette(ctrl: EditorController):
@@ -26,7 +28,7 @@ fn ctrl_open_palette(ctrl: EditorController):
         while mi < md_entries.len():
             all_entries.push(md_entries[mi])
             mi = mi + 1
-    ctrl.palette_state = palette_show(palette_new(all_entries))
+    ctrl.palette_state = app_palette_show(palette_new(all_entries))
 
 fn ctrl_execute_palette_command(ctrl: EditorController, command_name: text, command_payload: text) -> EditorAction:
     if command_name == "debug-process-start":
@@ -46,14 +48,14 @@ fn ctrl_execute_palette_command(ctrl: EditorController, command_name: text, comm
         ctrl.extension_host.emit_event("onDidExecuteCommand", command_name)
         return action
     val registered_command = ctrl.extension_host.find_command(command_name)
-    val registered_command_id = extension_command_entry_command_id(registered_command)
-    if registered_command_id != "" and extension_command_entry_name(registered_command) == "markdown-language":
+    val registered_command_id = registered_command.command.id
+    if registered_command_id != "" and registered_command.extension_name == "markdown-language":
         val action = ctrl_execute_markdown_extension_command(ctrl, command_name)
         ctrl.extension_host.emit_event("onDidExecuteCommand", command_name)
         return action
     if registered_command_id != "":
         val invocation = ctrl.extension_host.dispatch_external_command(command_name, command_payload)
-        ctrl.status_msg = "extension command queued: " + extension_command_invocation_command_id(invocation)
+        ctrl.status_msg = "extension command queued: " + invocation.command_id
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     if command_name.starts_with("markdown."):
         ctrl.status_msg = "extension command not registered: " + command_name
@@ -259,7 +261,7 @@ fn ctrl_focus_lsp_target_doc(ctrl: EditorController, doc_id: EditorDocumentId):
         return
     var group = editor_layout_group_at(layout, group_idx)
     if group.select_matching_doc(doc_id):
-        layout = editor_layout_with_group(layout, group_idx, group)
+        layout = app_editor_layout_with_group(layout, group_idx, group)
         ctrl.session.layout = layout
         return
 
@@ -560,7 +562,7 @@ fn ctrl_notify_active_lsp_changed(ctrl: EditorController):
     if ctrl.session.dock_layout.active_right_panel() == "problems":
         ctrl_refresh_diagnostics_panel_view(ctrl)
     if doc.language_id == "markdown" and ctrl.md_lsp_state.running:
-        ctrl.md_lsp_state = md_lsp_change_active(ctrl.md_lsp_state, doc.path(), content)
+        ctrl.md_lsp_state = app_md_lsp_change_active(ctrl.md_lsp_state, doc.path(), content)
     elif (doc.language_id == "simple" or doc.language_id == "shell") and ctrl.simple_lsp_state.running:
         ctrl.simple_lsp_state = simple_lsp_change_active(ctrl.simple_lsp_state, doc.path(), content)
     if should_refresh_inlay_hints:

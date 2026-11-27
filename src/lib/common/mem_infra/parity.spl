@@ -1,0 +1,161 @@
+# Memory Infrastructure Backend Parity Probe Evaluation
+#
+# Shared pure evaluation helpers used by mem_infra backend-parity specs to
+# ensure that child probes executed on the `"jit"` lane never pass via silent
+# interpreter demotion, missing startup banners, or launch errors.
+
+pub enum MemInfraBackendLane:
+    Interpreter
+    Jit
+
+pub enum MemInfraGateMode:
+    Off
+    On
+
+pub enum MemInfraExitOutcome:
+    Zero
+    NonZero
+
+pub enum MemInfraRunStatus:
+    Passed
+    DemotedToInterpreter
+    ProbeFailed
+    LaunchError
+
+pub struct MemInfraProbeEvaluation:
+    status: MemInfraRunStatus
+    detail: text
+
+pub fn mem_infra_status_label(status: MemInfraRunStatus) -> text:
+    match status:
+        case MemInfraRunStatus.Passed: "passed"
+        case MemInfraRunStatus.DemotedToInterpreter: "demoted-to-interpreter"
+        case MemInfraRunStatus.ProbeFailed: "probe-failed"
+        case MemInfraRunStatus.LaunchError: "launch-error"
+
+pub fn mem_infra_demotion_reason(output: text) -> text:
+    val markers = [
+        "[jit-fallback]",
+        "[engine-demotion]",
+        "hybrid-interp-splice",
+        "SIMPLE_JIT_STRICT",
+        "falling back to interpreter",
+        "dropped to the interpreter",
+        "unknown extern function",
+        "rt_interp_call error"
+    ]
+    for marker in markers:
+        if output.contains(marker):
+            return marker
+    ""
+
+fn _check_lane_preconditions(lane: MemInfraBackendLane, output: text) -> text:
+    val demotion = mem_infra_demotion_reason(output)
+    match lane:
+        case MemInfraBackendLane.Jit:
+            if demotion != "":
+                return "demoted:" + demotion
+        case MemInfraBackendLane.Interpreter:
+            if output.contains("unknown extern function"):
+                return "launch:unknown extern function"
+    ""
+
+pub fn mem_infra_evaluate_guard_probe(
+    lane: MemInfraBackendLane,
+    gate: MemInfraGateMode,
+    output: text,
+    exit_outcome: MemInfraExitOutcome
+) -> MemInfraProbeEvaluation:
+    val pre = _check_lane_preconditions(lane, output)
+    if pre.starts_with("demoted:"):
+        return MemInfraProbeEvaluation(
+            status: MemInfraRunStatus.DemotedToInterpreter,
+            detail: pre.replace("demoted:", "")
+        )
+    if pre.starts_with("launch:"):
+        return MemInfraProbeEvaluation(
+            status: MemInfraRunStatus.LaunchError,
+            detail: pre.replace("launch:", "")
+        )
+    if not output.contains("uaf_probe: start"):
+        return MemInfraProbeEvaluation(
+            status: MemInfraRunStatus.LaunchError,
+            detail: "missing uaf_probe: start banner"
+        )
+    val survived = output.contains("uaf_probe: survived")
+    match gate:
+        case MemInfraGateMode.Off:
+            match exit_outcome:
+                case MemInfraExitOutcome.Zero:
+                    if survived:
+                        return MemInfraProbeEvaluation(status: MemInfraRunStatus.Passed, detail: "uaf survived without guard")
+                    return MemInfraProbeEvaluation(status: MemInfraRunStatus.ProbeFailed, detail: "expected uaf_probe to survive when guard is off")
+                case MemInfraExitOutcome.NonZero:
+                    return MemInfraProbeEvaluation(status: MemInfraRunStatus.ProbeFailed, detail: "guard-off probe exited non-zero")
+        case MemInfraGateMode.On:
+            if survived:
+                return MemInfraProbeEvaluation(status: MemInfraRunStatus.ProbeFailed, detail: "uaf write survived under SIMPLE_MEM_GUARD_RATE=1")
+            match exit_outcome:
+                case MemInfraExitOutcome.NonZero:
+                    return MemInfraProbeEvaluation(status: MemInfraRunStatus.Passed, detail: "uaf trapped with non-zero exit")
+                case MemInfraExitOutcome.Zero:
+                    return MemInfraProbeEvaluation(status: MemInfraRunStatus.ProbeFailed, detail: "uaf_probe exited 0 instead of trapping")
+
+pub fn mem_infra_evaluate_harden_poison_probe(
+    lane: MemInfraBackendLane,
+    gate: MemInfraGateMode,
+    output: text,
+    exit_outcome: MemInfraExitOutcome
+) -> MemInfraProbeEvaluation:
+    val pre = _check_lane_preconditions(lane, output)
+    if pre.starts_with("demoted:"):
+        return MemInfraProbeEvaluation(
+            status: MemInfraRunStatus.DemotedToInterpreter,
+            detail: pre.replace("demoted:", "")
+        )
+    if pre.starts_with("launch:") or not output.contains("harden_poison_workload:"):
+        return MemInfraProbeEvaluation(
+            status: MemInfraRunStatus.LaunchError,
+            detail: "harden poison probe failed before completion"
+        )
+    match exit_outcome:
+        case MemInfraExitOutcome.NonZero:
+            return MemInfraProbeEvaluation(status: MemInfraRunStatus.LaunchError, detail: "harden poison probe exited non-zero")
+        case MemInfraExitOutcome.Zero:
+            pass
+    val expected = match gate:
+        case MemInfraGateMode.On: "tampered_check=1"
+        case MemInfraGateMode.Off: "tampered_check=0"
+    if output.contains(expected):
+        return MemInfraProbeEvaluation(status: MemInfraRunStatus.Passed, detail: expected)
+    MemInfraProbeEvaluation(status: MemInfraRunStatus.ProbeFailed, detail: "missing " + expected)
+
+pub fn mem_infra_evaluate_harden_tamper_probe(
+    lane: MemInfraBackendLane,
+    gate: MemInfraGateMode,
+    output: text,
+    exit_outcome: MemInfraExitOutcome
+) -> MemInfraProbeEvaluation:
+    val pre = _check_lane_preconditions(lane, output)
+    if pre.starts_with("demoted:"):
+        return MemInfraProbeEvaluation(
+            status: MemInfraRunStatus.DemotedToInterpreter,
+            detail: pre.replace("demoted:", "")
+        )
+    if pre.starts_with("launch:") or not output.contains("harden_tamper_probe:"):
+        return MemInfraProbeEvaluation(
+            status: MemInfraRunStatus.LaunchError,
+            detail: "harden tamper probe failed before completion"
+        )
+    match exit_outcome:
+        case MemInfraExitOutcome.NonZero:
+            return MemInfraProbeEvaluation(status: MemInfraRunStatus.LaunchError, detail: "harden tamper probe exited non-zero")
+        case MemInfraExitOutcome.Zero:
+            pass
+    val tokens = match gate:
+        case MemInfraGateMode.On: ["t0=0", "t1=1", "t2=2", "t3=3"]
+        case MemInfraGateMode.Off: ["t0=0", "t1=0", "t2=0", "t3=0"]
+    for tok in tokens:
+        if not output.contains(tok):
+            return MemInfraProbeEvaluation(status: MemInfraRunStatus.ProbeFailed, detail: "missing " + tok)
+    MemInfraProbeEvaluation(status: MemInfraRunStatus.Passed, detail: "tamper sequence matched")
