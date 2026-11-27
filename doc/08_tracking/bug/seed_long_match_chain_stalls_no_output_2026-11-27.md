@@ -1,7 +1,7 @@
 # Seed: a 1500-arm value `match` chain stalls (no output in 300 s)
 
 **Date:** 2026-11-27
-**Status:** OPEN, cause unknown (pre-existing; not fixed in the dict-index/match-join lane)
+**Status:** FIXED (2026-11-27) — JIT-only; quadratic-or-worse liveness solver
 **Component:** Rust seed (`src/compiler_rust`), JIT/run path
 
 ## Symptom
@@ -24,3 +24,23 @@ stalls identically).
 also walks the else chain in `hir_value_is_concrete` per level (quadratic in
 arm count; but m, without that walk, stalls too, so the stall predates it).
 Needs a profile before any fix.
+
+## Root cause (found 2026-11-27)
+
+Layer: JIT codegen, NOT parse/HIR. `SIMPLE_EXECUTION_MODE=interpret` runs the
+1500-arm probe in ~150 ms; `jit` stalls (cliff between 900 arms ~230 ms and
+1100 arms >100 s, with RSS growing to >4 GB). An lldb stack of the stalled seed
+sits in `MirFunction::compute_live_ins` (`mir/function.rs`) called from
+`codegen::instr::body::compile_function_body`.
+
+The solver was a round-robin sweep to a fixed point. A value-position `match`
+lowers to a nested if/else chain whose merge blocks are created BEFORE the
+inner else-chain blocks, so the block vector is in reverse flow order and each
+sweep propagated liveness one hop: N sweeps x N blocks x per-block set clones.
+
+## Fix
+
+`compute_live_ins` now uses a predecessor-driven worklist (revisit a block only
+when a successor's live-in changed). Regression test:
+`test_compute_live_ins_long_reverse_ordered_chain` (5000-block reverse-ordered
+chain) in `compiler/src/mir/function.rs`.
