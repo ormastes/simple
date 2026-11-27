@@ -992,17 +992,17 @@ function map_verdict(sym, st,    hi, got) {
   MV = "FAIL"; MR = "host-gap-on-" (4 - got) "-hosted-profile(s)"
 }
 function pointer_verdict(sym, ty,    base) {
-  if (!(sym in CSTATE)) { PV = "UNKNOWN"; PR = "no-c-pointer-definition"; return }
+  if (!(sym in CSTATE)) { PV = "UNKNOWN"; PVR = "no-c-pointer-definition"; return }
   base = ty; sub(/\?+$/, "", base)
-  if (base in NAR) { PV = "FAIL"; PR = "narrow-pointer"; return }
-  if (base == "i64" || base == "u64" || base == "usize" || base == "isize" || base == "void") { PV = "UNKNOWN"; PR = "raw-handle"; return }
+  if (base in NAR) { PV = "FAIL"; PVR = "narrow-pointer"; return }
+  if (base == "i64" || base == "u64" || base == "usize" || base == "isize" || base == "void") { PV = "UNKNOWN"; PVR = "raw-handle"; return }
   if (substr(ty, length(ty), 1) == "?") {
-    if (CSTATE[sym] == "nil") { PV = "PASS"; PR = "nullable-declared"; return }
-    PV = "UNKNOWN"; PR = "nullable-declared-c-unproven"; return
+    if (CSTATE[sym] == "nil") { PV = "PASS"; PVR = "nullable-declared"; return }
+    PV = "UNKNOWN"; PVR = "nullable-declared-c-unproven"; return
   }
-  if (CSTATE[sym] == "nil") { PV = "FAIL"; PR = "nil-mismatch"; return }
-  if (CSTATE[sym] == "enforced") { PV = "PASS"; PR = "enforced"; return }
-  PV = "UNKNOWN"; PR = "c-return-unproven"
+  if (CSTATE[sym] == "nil") { PV = "FAIL"; PVR = "nil-mismatch"; return }
+  if (CSTATE[sym] == "enforced") { PV = "PASS"; PVR = "enforced"; return }
+  PV = "UNKNOWN"; PVR = "c-return-unproven"
 }
 # scan all spl files once: extern records (tops) and, for contract mode, type names (all of src/)
 function spl_pass(want_types,    i, rel, n, L, intop, insrc, j, line, m, nm, tg) {
@@ -1049,7 +1049,7 @@ function index_build(want_types,    i, k, n, sym, sig, states, hi, h, rec, tally
     XSIG[i] = sig
     for (hi = 1; hi <= 5; hi++) { h = HL[hi]; ST5[hi] = provider_state(h, sym) }
     map_verdict(sym, ST5); XMV[i] = MV; XMR[i] = MR
-    pointer_verdict(sym, XRET[i]); XPV[i] = PV; XPR[i] = PR
+    pointer_verdict(sym, XRET[i]); XPV[i] = PV; XPR[i] = PVR
     for (hi = 1; hi <= 5; hi++) XST[i, hi] = ST5[hi]
     KEYS[i] = XPATH[i] "\001" sym "\001" sig "\001" i
   }
@@ -1588,7 +1588,7 @@ function pt_par(idx, c, spl, wc, wsrt, wnar, wsn, wunp,    got, codes, nsrt) {
   return 1
 }
 function P_UNPARSED() { return set_count(PUNP) }
-function run_selftest_ptr(    nilc, okc, enf, i, t, n_ret, n_enf, n_par, got, row, held) {
+function run_selftest_ptr(    nilc, okc, enf, i, t, n_ret, n_enf, n_par, got, brow, held) {
   nilc = "char *rt_x(void) {\n  if (a) return NULL;\n  return b;\n}\n"
   okc = "char *rt_x(void) {\n  return b;\n}\n"
   n_ret = 15; n_enf = 8; n_par = 28
@@ -1651,10 +1651,10 @@ function run_selftest_ptr(    nilc, okc, enf, i, t, n_ret, n_enf, n_par, got, ro
   VF[PP_BASELINE] = VF[PP_BASELINE] "src/lib/a.spl:rt_gone:0:text?\n"
   if (ptr_run(0, 0) != 1) { print "ERROR — selftest stale param row should fail"; return 2 }
   pt_tree(nilc, "extern fn rt_x() -> text\n")
-  row = "src/lib/a.spl:rt_x:text\n"
-  VF[PM_BASELINE] = row
+  brow = "src/lib/a.spl:rt_x:text\n"
+  VF[PM_BASELINE] = brow
   held = ptr_run(0, 0)
-  VF[PM_BASELINE] = row "src/lib/a.spl:rt_y:text\n"
+  VF[PM_BASELINE] = brow "src/lib/a.spl:rt_y:text\n"
   if (held != 0 || ptr_run(0, 0) != 1) { print "ERROR — selftest baseline held/stale"; return 2 }
   printf "PASS — selftest %d return, %d enforced, %d parameter cases\n", n_ret, n_enf, i
   return 0
