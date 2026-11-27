@@ -1038,7 +1038,14 @@ fn _isv1_publish_root_prepare(root: text, name: text, manifest: text,
         return _isv1_root_prep_done("roots-dir-failed")
     val path = _isv1_root_path(root, name)
     if expected_generation == 0:
-        val created = _isv1_doc_encode(name, 1, keys)
+        # A half-finished retire leaves claims/floors of this name without a pointer; a fresh
+        # generation-0 pointer would resurrect that old chain, so refuse until the retire is finished.
+        val leftover = match _isv1_root_scan(root, name):
+            case Ok(value): value
+            case Err(reason): return _isv1_root_prep_done(reason)
+        if not file_exists(path) and (leftover.floors.len() > 0 or leftover.claims.len() > 0):
+            return _isv1_root_prep_done("root-retire-incomplete")
+        val created =_isv1_doc_encode(name, 1, keys)
         if created.byte_len() > _ISV1_MAX_ROOT_BYTES:
             return _isv1_root_prep_done("manifest-too-large")
         val published = _isv1_publish_text_noreplace(root, "root.sdn", created, path)
@@ -1104,7 +1111,7 @@ pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
 # Retire a root: tombstone every file of `name` under roots/ (pointer first, so GC stops
 # counting its keys at the first rename; then claims and floors, so the name can be
 # published again from generation 0) into staging/rootret-*/ and delete the tomb. Crash-safe
-# in the pin-release style: a crash leaves only the tomb (swept like any aged staging dir)
+# in the pin-release style: a crash leaves only the tomb (removed by `immutable_store_v1_sweep_staging` once aged)
 # or a pointer-less remainder, and retrying finishes the job. "root-missing" = nothing of
 # `name` is left. The caller must be the root's only writer; a concurrent publish of the
 # same name is not arbitrated here.
@@ -1139,9 +1146,12 @@ pub fn immutable_store_v1_retire_root(root: text, name: text) -> text:
         return "root-retire-failed"
     for leaf in leaves:
         if not rename_path(_isv1_join(roots_dir, leaf), tomb + "/" + leaf):
+            dir_remove_all(tomb)
             return "root-retire-failed"
+    # The renames must be durable before the tomb goes, or a crash could bring the root back.
+    if not dir_sync(roots_dir):
+        return "roots-dir-sync-failed"
     dir_remove_all(tomb)
-    dir_sync(roots_dir)
     ""
 
 
@@ -1634,7 +1644,7 @@ fn _isv1_restore_moved(root: text, keys: [text], destinations: [text],
         i = i + 1
     settled
 
-# Removes crash residue under staging/ (`pinrel-*`, `pincreate-*`, `ingest-*`, `publish-*`)
+# Removes crash residue under staging/ (`pinrel-*`, `pincreate-*`, `rootret-*`, `ingest-*`, `publish-*`)
 # whose directory mtime is at least `min_age_secs` old; younger entries may be
 # a live ingest/publish and are kept. An entry whose mtime is unavailable (0)
 # is kept (fail-safe). Collect passes _ISV1_STAGING_MIN_AGE_SECS: an ingest
@@ -1650,7 +1660,7 @@ pub fn immutable_store_v1_sweep_staging(root: text, min_age_secs: StoreCountV1) 
     var removed: i64 = 0
     for entry in dir_list(staging_root):
         val name = entry.trim()
-        if not (name.starts_with("pinrel-") or name.starts_with("pincreate-") or name.starts_with("ingest-") or name.starts_with("publish-")):
+        if not (name.starts_with("pinrel-") or name.starts_with("pincreate-") or name.starts_with("rootret-") or name.starts_with("ingest-") or name.starts_with("publish-")):
             continue
         val path = staging_root + "/" + name
         if not is_dir(path):

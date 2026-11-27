@@ -343,6 +343,47 @@ describe "pure container hold_running close and natural exit":
         expect(container_roots()).to_equal(0)
         expect(simple_container_close_v2(destroyed.owner).closed).to_equal(true)
 
+    it "a failed natural-exit save is surfaced by inspect and a later stop retries it":
+        if not ready(): return
+        var owner = open_job().unwrap()
+        val request = request_with("job-pod-x", "job-op-x", "exit_soon_probe.spl")
+        owner = launch(owner, request, "job-op-x")
+        val listed = dir_list(view_root())
+        expect(listed.len()).to_equal(1)
+        val blocker = store_root() + "/roots/" + container_view_root_name_v1(listed[0].trim()) + ".sdn"
+        expect(file_write_bytes(blocker, "not a root document".bytes())).to_equal(true)
+        var turn = simple_container_read_v2(owner, "inspect", request)
+        var tries = 0
+        while turn.operation.state.phase == "running" and tries < 600:
+            thread_sleep(100)
+            turn = simple_container_read_v2(turn.owner, "inspect", request)
+            tries = tries + 1
+        expect(turn.operation.state.phase).to_equal("exited")
+        expect(turn.operation.reason.contains("stop-save-failed")).to_equal(true)
+        expect(file_delete(blocker)).to_equal(true)
+        val stopped = control(turn.owner, request, "job-op-x", "stop")
+        expect(stopped.operation.reason).to_equal("")
+        expect(container_roots()).to_equal(1)
+        val destroyed = control(stopped.owner, request, "job-op-x", "destroy")
+        expect(container_roots()).to_equal(0)
+        expect(simple_container_close_v2(destroyed.owner).closed).to_equal(true)
+
+    it "stop of a created, never started container publishes no root":
+        if not ready(): return
+        var owner = open_job().unwrap()
+        val request = job_request("job-pod-k", "job-op-k")
+        val now_ms = sosix_time_now_unix_micros() / 1000
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, "job-op-k", ["create", "start"], now_ms + WALL_MS).unwrap()
+        val prepared = simple_container_apply_v2(owner, "prepare", request, deadline)
+        val created = simple_container_apply_v2(prepared.owner, "create", request, deadline)
+        expect(created.operation.state.phase).to_equal("created")
+        val stopped = control(created.owner, request, "job-op-k", "stop")
+        expect(stopped.operation.reason).to_equal("")
+        expect(container_roots()).to_equal(0)
+        val destroyed = control(stopped.owner, request, "job-op-k", "destroy")
+        expect(entries_under(view_root())).to_equal(0)
+        expect(simple_container_close_v2(destroyed.owner).closed).to_equal(true)
+
     it "removes its scratch directory":
         if not ready(): return
         val _removed = dir_remove_all(base_dir())

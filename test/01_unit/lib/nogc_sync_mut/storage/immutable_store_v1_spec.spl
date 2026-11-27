@@ -16,7 +16,7 @@ use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, St
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
-use std.nogc_sync_mut.sosix.fs_v1.{rename_path}
+use std.nogc_sync_mut.sosix.fs_v1.{rename_path, file_delete}
 use app.io.file_ops.{path_absolute}
 
 val HELLO_XXH3_128 = "b5e9c1ad071b3e7fc779cfaa5e523818"
@@ -1152,4 +1152,35 @@ describe "immutable_store_v1 object publish lost race":
         expect(immutable_store_v1_publish_root(root, "drop", kept.object_key + "\n", StoreGenerationV1(0))).to_equal("")
         expect(immutable_store_v1_root_head(root, "drop").generation.value).to_equal(1)
         expect(immutable_store_v1_retire_root(root, "bad/name")).to_equal("root-name-invalid")
+        _store_cleanup(root)
+
+    it "refuses a generation-0 publish over a half-finished retire and finishes it on retry":
+        val root = _store_root("retire-half")
+        val old = immutable_store_v1_ingest(root, "old bytes".bytes(), HASH_POLICY_V1_XXH3_128)
+        val fresh = immutable_store_v1_ingest(root, "new bytes".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_publish_root(root, "r", old.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        var g = 1
+        while g < 4:
+            expect(immutable_store_v1_publish_root(root, "r", old.object_key + "\n", StoreGenerationV1(g))).to_equal("")
+            g = g + 1
+        # Crash after the pointer moved but before the claims: pointer gone, claims left.
+        expect(file_delete(root + "/roots/r.sdn")).to_equal(true)
+        expect(immutable_store_v1_publish_root(root, "r", fresh.object_key + "\n", StoreGenerationV1(0))).to_equal("root-retire-incomplete")
+        expect(file_exists(root + "/roots/r.sdn")).to_equal(false)
+        expect(immutable_store_v1_retire_root(root, "r")).to_equal("")
+        expect(immutable_store_v1_publish_root(root, "r", fresh.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        val head = immutable_store_v1_root_head(root, "r")
+        expect(head.generation.value).to_equal(1)
+        expect(head.keys.contains(old.object_key)).to_equal(false)
+        val gc = immutable_store_v1_collect(root, StoreFlagV1(false))
+        expect(gc.unreachable.contains(fresh.object_key)).to_equal(false)
+        expect(immutable_store_v1_open(root, fresh.object_key).status).to_equal("ok")
+        _store_cleanup(root)
+
+    it "sweeps a leftover rootret tomb":
+        val root = _store_root("retire-sweep")
+        dir_create_all(root + "/staging/rootret-leftover")
+        expect(file_write_bytes(root + "/staging/rootret-leftover/r.sdn", "x".bytes())).to_equal(true)
+        expect(immutable_store_v1_sweep_staging(root, StoreCountV1(0)).value >= 1).to_equal(true)
+        expect(is_dir(root + "/staging/rootret-leftover")).to_equal(false)
         _store_cleanup(root)

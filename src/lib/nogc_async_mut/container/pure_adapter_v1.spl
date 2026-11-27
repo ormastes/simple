@@ -277,7 +277,9 @@ impl PureSimpleContainerAdapterV1:
         val record = self._refresh(key)
         if action == "wait" and record.phase != RUNTIME_PHASE_EXITED:
             return self._op(action, decoded, record, RUNTIME_STATUS_BLOCKED, "pure-container-not-exited")
-        self._op(action, decoded, record, RUNTIME_STATUS_OK, "")
+        var note = ""
+        if record.reason.starts_with("pure-container-stop-save-failed"): note = record.reason
+        self._op(action, decoded, record, RUNTIME_STATUS_OK, note)
 
     # Observe a held job: a child that exited on its own, or was killed at its wall limit by the poll
     # (the owner enforces the wall deadline only inside poll), moves RUNNING -> EXITED here. The job is
@@ -447,9 +449,11 @@ impl PureSimpleContainerAdapterV1:
                 next.has_exit = stopped.reason == ""
                 next.exit_code = stopped.exit_code.value
                 next.reason = ""
-        # A real stop saves the view once the job is terminal; destroy never does. A failed save is
+        # A real stop saves the view once the job is terminal; destroy never does, nor does a
+        # container that was created but never started (its root would just duplicate the base). A failed save is
         # surfaced and leaves the container stopped (upper/ kept), so the stop can be retried.
-        if action == "stop" and next.session.is_some() and not next.saved:
+        val never_started = current.phase == RUNTIME_PHASE_CREATED or current.phase == RUNTIME_PHASE_PREPARED
+        if action == "stop" and next.session.is_some() and not next.saved and not never_started:
             val save_failure = _save_view_v1(next.session.unwrap())
             if save_failure != "":
                 next.phase = if next.phase == RUNTIME_PHASE_EXITED: RUNTIME_PHASE_EXITED else: RUNTIME_PHASE_STOPPED

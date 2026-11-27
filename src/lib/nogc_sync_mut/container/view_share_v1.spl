@@ -95,6 +95,9 @@ pub fn container_system32_v1() -> text:
         root = env_get("windir").trim()
     if root.byte_len() < 4 or root.substring(1, 3) != ":\\" or root.contains(".."):
         return ""
+    val drive = root.bytes()[0]
+    if not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)):
+        return ""
     root + "\\System32"
 
 # Root name of a container's saved state. It lives in the store's root namespace, so
@@ -112,7 +115,7 @@ fn _read_only(path: text) -> bool:
 pub fn container_file_id_v1(path: text) -> text:
     if container_system32_v1() == "":
         return ""
-    val ran =process_run(container_system32_v1() + "\\fsutil.exe", ["file", "queryfileid", _native(path)])
+    val ran = process_run(container_system32_v1() + "\\fsutil.exe", ["file", "queryfileid", _native(path)])
     if ran.2 != 0:
         return ""
     val out = ran.0.trim()
@@ -136,7 +139,7 @@ fn _seal_lower(view: StorageViewV1, paths: [text]) -> text:
         return "seal-failed"
     if container_system32_v1() == "":
         return "system-root-unavailable"
-    val ran =process_run(container_system32_v1() + "\\attrib.exe", ["+R", _native(lower) + "\\*", "/S"])
+    val ran = process_run(container_system32_v1() + "\\attrib.exe", ["+R", _native(lower) + "\\*", "/S"])
     if ran.2 != 0:
         return "attrib-failed"
     for rel in paths:
@@ -214,6 +217,12 @@ pub fn container_view_stop_v1(view: StorageViewV1) -> ContainerViewStopV1:
 # the container's saved root, then require zero residue. Idempotent: a view that is already
 # gone is ok. Used by destroy as well, so a destroyed container leaves no root behind.
 pub fn container_view_remove_v1(view: StorageViewV1) -> ContainerViewOpV1:
+    # The root is retired BEFORE the view dir goes: the view dir is the container's lock on its
+    # root name, so a crash in between leaves the dir and a retry finishes, never an orphan root.
+    # Store level: a publisher prepared before the retire can still win (not enforced there).
+    val retired = immutable_store_v1_retire_root(view.store, container_view_root_name_v1(view.view_id))
+    if retired != "" and retired != "root-missing":
+        return _op("rejected", "retire-root: " + retired)
     val demat = rootfs_dematerialize_v1(view)
     if demat != "":
         return _op("rejected", "dematerialize: " + demat)
@@ -224,9 +233,6 @@ pub fn container_view_remove_v1(view: StorageViewV1) -> ContainerViewOpV1:
             return _op("rejected", "destroy: " + destroyed.reason)
         if is_dir(vdir) and (not dir_remove_all(vdir) or is_dir(vdir)):
             return _op("rejected", "view-dir-remove-failed")
-    val retired = immutable_store_v1_retire_root(view.store, container_view_root_name_v1(view.view_id))
-    if retired != "" and retired != "root-missing":
-        return _op("rejected", "retire-root: " + retired)
     if container_view_residue_v1(view).value != 0:
         return _op("rejected", "residue-remains")
     _op("ok", "")
