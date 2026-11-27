@@ -237,6 +237,12 @@ pub struct Lowerer {
     /// enum-slot check consumes it only for a receiver declared in the file
     /// being lowered; the float-into-int check consumes every row.
     pub(super) method_param_type_names: HashMap<String, Vec<Option<String>>>,
+    /// Declared numeric element type per array parameter (`[i64]`, `List<u32>`),
+    /// parallel to `fn_param_type_names` / `method_param_type_names`, keyed the
+    /// same way. Lets the `[u8]`-into-word-array check see a slot whose type is
+    /// known only by its AST spelling.
+    pub(super) fn_param_array_elems: HashMap<String, Vec<Option<TypeId>>>,
+    pub(super) method_param_array_elems: HashMap<String, Vec<Option<TypeId>>>,
     /// `Owner.method` keys of `method_param_type_names` declared `static`:
     /// only these rows are checked at a `Type.method(args)` call, so an
     /// instance method called with an explicit receiver never shifts slots.
@@ -571,6 +577,8 @@ impl Lowerer {
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
             method_param_type_names: HashMap::new(),
+            fn_param_array_elems: HashMap::new(),
+            method_param_array_elems: HashMap::new(),
             static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
@@ -686,6 +694,8 @@ impl Lowerer {
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
             method_param_type_names: HashMap::new(),
+            fn_param_array_elems: HashMap::new(),
+            method_param_array_elems: HashMap::new(),
             static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
@@ -824,6 +834,8 @@ impl Lowerer {
             fn_param_bool: HashMap::new(),
             fn_param_type_names: HashMap::new(),
             method_param_type_names: HashMap::new(),
+            fn_param_array_elems: HashMap::new(),
+            method_param_array_elems: HashMap::new(),
             static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,

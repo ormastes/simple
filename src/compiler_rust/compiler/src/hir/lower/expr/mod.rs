@@ -1597,12 +1597,19 @@ impl Lowerer {
         if args.iter().all(|a| a.name.is_none() && !matches!(a.value, Expr::Spread(_))) {
             // The float-into-int check can only reject a float argument.
             let has_float_arg = hir_args.iter().any(|a| matches!(a.ty, TypeId::F32 | TypeId::F64));
+            // The `[u8]`-into-word-array check can only reject a `[u8]` argument.
+            let has_u8_array_arg = hir_args.iter().any(|a| self.is_u8_array_value(a));
             if let Some(HirType::Struct { name: owner, .. }) = self.module.types.get(receiver_hir.ty) {
                 let bare_owner = owner.rsplit('.').next().unwrap_or(owner).to_string();
                 let declared_here = self
                     .struct_decl_files
                     .get(&bare_owner)
                     .is_some_and(|decl_file| *decl_file == self.current_file);
+                if has_u8_array_arg {
+                    if let Some(row) = self.method_param_array_elems.get(&format!("{bare_owner}.{method}")) {
+                        self.reject_u8_arrays_in_row(row, &hir_args, &format!("{bare_owner}.{method}"))?;
+                    }
+                }
                 if declared_here || has_float_arg {
                     let slot_types: Vec<Option<TypeId>> = self
                         .method_param_type_names
@@ -1625,9 +1632,9 @@ impl Lowerer {
             // A trait-typed receiver is erased to ANY. A `val x: Trait` local
             // carries the exact declaring TraitDef; a parameter keeps only its
             // declared type name, resolved the same way.
-            if let (true, HirExprKind::Local(idx)) = (has_float_arg, &receiver_hir.kind) {
+            if let (true, HirExprKind::Local(idx)) = (has_float_arg || has_u8_array_arg, &receiver_hir.kind) {
                 let idx = *idx;
-                let trait_slots: Option<(String, Vec<Option<String>>)> = ctx
+                let trait_slots: Option<(String, Vec<Option<String>>, Vec<Option<TypeId>>)> = ctx
                     .locals
                     .get(idx)
                     .and_then(|l| {
@@ -1638,10 +1645,16 @@ impl Lowerer {
                     .and_then(|d| {
                         let m = d.declaration.methods.iter().find(|m| m.name == method)?;
                         let user = if m.params.first().is_some_and(|p| p.name == "self") { &m.params[1..] } else { &m.params[..] };
-                        (!user.iter().any(|p| p.variadic))
-                            .then(|| (d.declaration.name.clone(), user.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect()))
+                        (!user.iter().any(|p| p.variadic)).then(|| {
+                            (
+                                d.declaration.name.clone(),
+                                user.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect(),
+                                self.numeric_array_param_row(user),
+                            )
+                        })
                     });
-                if let Some((trait_name, names)) = trait_slots {
+                if let Some((trait_name, names, array_row)) = trait_slots {
+                    self.reject_u8_arrays_in_row(&array_row, &hir_args, &format!("{trait_name}.{method}"))?;
                     for (i, (arg, name)) in hir_args.iter().zip(names.iter()).enumerate() {
                         if let Some(pty) = name.as_deref().and_then(|n| self.module.types.lookup(n)) {
                             self.reject_float_for_int_slot(pty, arg, &format!("argument {} of `{trait_name}.{method}`", i + 1))?;
