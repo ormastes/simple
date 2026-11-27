@@ -1,0 +1,63 @@
+# Bug unsafe_capabilities_block_unsupported_in_expression_position_2026-08-30:
+# `unsafe(capabilities: [...])` written in value position WITHOUT its trailing
+# `: block` decayed into an ordinary call to an undeclared `unsafe` callee and
+# failed - when it failed at all - as a bare "unresolved name" at HIR
+# (warning-only on lenient lanes, an LLVM codegen failure on strict ones).
+# The parser cannot reject the shape on its own (a function or variable
+# genuinely named `unsafe` must keep working as an ordinary call), so HIR
+# lowering fails fast instead: a `capabilities:`-named argument on a callee
+# that no surface declares is conclusively a block header missing its block.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+
+fn lower_source(source: text) -> (i64, [text]):
+    val parsed = parse_full_frontend(source, "unsafe_value_position.spl", "unsafe_value_position", Logger(level: 0))
+    var lowering = HirLowering.with_filename("unsafe_value_position.spl")
+    val module = lowering.lower_module(parsed)
+    (lowering.errors.len(), lowering.diagnostic_messages)
+
+fn has_diagnostic(messages: [text], fragment: text) -> bool:
+    for raw in messages:
+        val msg: text = raw
+        if msg.contains(fragment):
+            return true
+    false
+
+describe "unsafe capabilities header in value position":
+    it "lowers a value-position unsafe block with a known capability cleanly":
+        val (errors, _) = lower_source("fn f() -> i64:\n    val x = unsafe(capabilities: [ffi]): 7\n    x\n")
+        expect(errors).to_equal(0)
+
+    it "keeps the statement form working with a known capability":
+        val (errors, _) = lower_source("fn f() -> i64:\n    unsafe(capabilities: [ffi]):\n        1\n    2\n")
+        expect(errors).to_equal(0)
+
+    it "fails fast on a value-position header without its block":
+        val (errors, messages) = lower_source("fn f() -> i64:\n    val x = unsafe(capabilities: [ffi])\n    x\n")
+        expect(errors > 0).to_equal(true)
+        expect(has_diagnostic(messages, "is an unsafe block header without its `: block`")).to_equal(true)
+        expect(has_diagnostic(messages, "unresolved name: unsafe")).to_equal(false)
+
+    it "fails fast on the same misuse in statement position":
+        val (errors, messages) = lower_source("fn f() -> i64:\n    unsafe(capabilities: [ffi])\n    2\n")
+        expect(errors > 0).to_equal(true)
+        expect(has_diagnostic(messages, "is an unsafe block header without its `: block`")).to_equal(true)
+
+    it "fails fast for the danger spelling too":
+        val (errors, messages) = lower_source("fn f() -> i64:\n    val x = danger(capabilities: [ffi])\n    x\n")
+        expect(errors > 0).to_equal(true)
+        expect(has_diagnostic(messages, "`danger(capabilities: ...)` is an unsafe block header without its `: block`")).to_equal(true)
+
+    it "leaves an ordinary call to a declared unsafe function alone":
+        val (errors, _) = lower_source("fn unsafe(capabilities: [text]) -> i64:\n    5\nfn f() -> i64:\n    unsafe(capabilities: [\"ffi\"])\n")
+        expect(errors).to_equal(0)
+
+    it "still reports unknown capability names inside a recognized block":
+        val (errors, messages) = lower_source("fn f() -> i64:\n    val x = unsafe(capabilities: [bogus_name]): 7\n    x\n")
+        expect(errors > 0).to_equal(true)
+        expect(has_diagnostic(messages, "unknown unsafe capability `bogus_name`")).to_equal(true)

@@ -231,6 +231,27 @@ impl Value {
                     .collect();
                 format!("{}{{{}}}", class, parts.join(","))
             }
+            // Reference-class instances are keyed identically to value structs:
+            // the same canonical sorted-field form the `Value::Object` arm
+            // produces. Without this arm a `class`-keyed Dict keyed on
+            // `format!("{other:?}")` below, whose HashMap field order is
+            // randomized per instance -- two structurally equal class keys
+            // landed in different buckets, so a copied/equal class key missed
+            // lookups and memoization under-reported, even though `==` on the
+            // same pair is structural (residual of
+            // dict_struct_key_identity_keyed_copied_key_misses_2026-09-13 on
+            // the interpreter lane). The snapshot under the read lock is a
+            // plain HashMap, exactly like the Object arm's `fields`.
+            Value::ClassInstance(instance) => {
+                let fields = instance.fields_snapshot();
+                let mut names: Vec<&String> = fields.keys().collect();
+                names.sort();
+                let parts: Vec<String> = names
+                    .into_iter()
+                    .map(|name| format!("{}={}", name, fields.get(name).unwrap().to_key_string()))
+                    .collect();
+                format!("{}{{{}}}", instance.class(), parts.join(","))
+            }
             Value::Enum {
                 enum_name,
                 variant,

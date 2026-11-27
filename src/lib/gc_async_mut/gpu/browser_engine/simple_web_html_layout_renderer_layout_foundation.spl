@@ -534,6 +534,11 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     var bottom_margin_box_h = 0
     var baseline_i = 0
     var any_valign = false
+    # Every participant a sub/super-shifted plain element: a line with no
+    # baseline-aligned content at all. Chrome grows such a line by the
+    # shifted box's CONTENT-level reach past the strut, not the whole
+    # half-leading box (see the recompute after the loop).
+    var only_shifted = true
     # `middle` boxes: half the parent's x-height, and the furthest any margin
     # box reaches above / below the baseline, all in 1/64 px (Chrome lands on
     # fractions: a 10 px box in 16px Liberation Sans sits at y 4.765625).
@@ -548,6 +553,12 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val node_index = nodes[baseline_i]
         val node_style = styles[node_index]
         val node_valign = inline_atomic_valign(html_nodes[node_index], node_style)
+        if not (
+            node_valign == "" and
+            inline_box_is_plain_element(html_nodes[node_index], node_style) and
+            (node_style.vertical_align == "sub" or node_style.vertical_align == "super")
+        ):
+            only_shifted = false
         if node_valign != "":
             val margin_box_h = margin_ts[baseline_i] + bh[node_index] + margin_bs[baseline_i]
             if node_valign == "middle":
@@ -609,6 +620,40 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         if node_descent > descent:
             descent = node_descent
         baseline_i = baseline_i + 1
+    if only_shifted and nodes.len() > 0:
+        # A line whose only participants are sub/super-shifted plain elements
+        # has no baseline-aligned box to hang the half-leading box union on.
+        # Chrome 159 (bug doc sub_sup_line_box_strut_contradiction_2026-09-14,
+        # harvested off Chrome 152): such a line is the strut grown by the
+        # shifted box's CONTENT reach past the strut's own content edge --
+        # the half-leading below/above the content area is not part of the
+        # extension. 16px serif: normal strut 18 + 3 = 21 (sub) / + 4 = 22
+        # (sup); line-height:24px strut 24 + 3 = 27; 32px strut 37 + 6 = 43.
+        # The full half-leading box still applies once ANY baseline-aligned
+        # box shares the line (Chrome 29.19 for `ab <sub>x</sub> ef` at 24px,
+        # pinned by sub_sup_baseline_shift_chrome159_spec).
+        val strut_ascent = inline_line_strut_baseline_offset(line_style)
+        val strut_descent = inline_line_baseline_descent(line_style)
+        val strut_content_ascent = inline_content_area_ascent(line_style)
+        val strut_content_descent = inline_content_area_height(line_style) - strut_content_ascent
+        # Replace, not extend, the loop's full half-leading box extents: those
+        # only apply once a baseline-aligned box shares the line.
+        ascent = strut_ascent
+        descent = strut_descent
+        var si = 0
+        while si < nodes.len():
+            val nst = styles[nodes[si]]
+            val nshift = vertical_align_baseline_shift(nst, line_style.font_size)
+            val n_content_ascent = inline_content_area_ascent(nst)
+            val n_content_descent = inline_content_area_height(nst) - n_content_ascent
+            val above = 0 - nshift + n_content_ascent - strut_content_ascent
+            if above > 0 and strut_ascent + above > ascent:
+                ascent = strut_ascent + above
+            val below = nshift + n_content_descent - strut_content_descent
+            if below > 0 and strut_descent + below > descent:
+                descent = strut_descent + below
+            si = si + 1
+        below64 = descent * 64
     # A `middle` margin box reaching past the strut and the baseline-aligned
     # boxes sets the line's ascent / descent at its own fraction. The baseline
     # every other box hangs from is that ascent snapped to a whole px; the
@@ -1801,6 +1846,7 @@ pub fn inline_item_width_err_milli(nodes: [HNode], styles: [Style], child_index:
             k = k + 1
         # The same box with its edge space(s) kerned against the run's glyph.
         if rst.resolved_lead_space_milli > 0 or rst.resolved_trail_space_milli > 0:
+
             val raw_lead_m = if rst.resolved_lead_space_milli > 0: rst.resolved_lead_space_milli else: rst.resolved_space_milli
             val raw_trail_m = if rst.resolved_trail_space_milli > 0: rst.resolved_trail_space_milli else: rst.resolved_space_milli
             val lead_m = layout_unit_ceil_milli(raw_lead_m)
