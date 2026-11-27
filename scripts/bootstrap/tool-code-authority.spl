@@ -1,0 +1,287 @@
+# Verify an independently pinned bootstrap orchestration tree, never source authority.
+#
+# Pure-Simple twin of tool-code-authority.py for phase 3 and later
+# (doc/08_tracking/todo/python_phase_census_2026-11-27.md, BOTH row). Phases 1-2
+# keep the Python owner; lib/product-tool-authority.shs routes by phase.
+#
+#   <stage> run scripts/bootstrap/tool-code-authority.spl --stage-binary <stage> \
+#     --root DIR --manifest FILE --sha256 HEX --entry FILE
+#
+# Trust anchor: instead of a pinned Python interpreter, the running verified
+# stage binary must match the admitted stage provenance record
+# (SIMPLE_VERIFIED_STAGE_PIN, lib/verified_stage_pin.spl). Any trust failure
+# exits 2 before the tree is read.
+#
+# Parity with the Python owner: stdout is empty in every case; success exits 0;
+# a rejected tree exits 1 with "ValueError: <same message>" as the last stderr
+# line; a usage error exits 2. Git blob identity uses
+# `git hash-object --no-filters` (raw bytes, exactly the Python sha1 of
+# "blob <size>\0" + bytes) so autocrlf/eol filters never change the answer.
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_size, file_hash_sha256_or_empty, get_args, exit, host_os, env_get}
+use std.nogc_sync_mut.io.process_ops.{process_run, eprint}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk, dir_is_real_no_follow}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.common.json.value.{JsonValue, json_parse_value}
+use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_check, verified_stage_pin_recheck}
+
+@unsafe(reason: "no-follow regular-file predicate; the closure must reject links", capabilities: [ffi])
+extern fn rt_file_is_regular_no_follow(path: text) -> bool
+
+val PREFIXES = ["scripts/bootstrap/", "scripts/check/lib/"]
+val MANIFEST_LIMIT = 8 * 1024 * 1024
+# Bounded argv bytes per `git hash-object` call: Windows caps a command line
+# at 32 KiB, so batch by length (one call for today's ~500-member closure).
+val HASH_BATCH_CHARS = 24000
+
+fn reject(message: text):
+    eprint("ValueError: " + message)
+    exit(1)
+
+fn usage(message: text):
+    eprint("usage: tool-code-authority.spl --root ROOT --manifest MANIFEST --sha256 SHA256 --entry ENTRY")
+    eprint("tool-code-authority.spl: error: " + message)
+    exit(2)
+
+fn is_regular(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_is_regular_no_follow(path)
+
+fn is_hex(value: text, width: i64) -> bool:
+    if value.len() != width:
+        return false
+    for i in 0..width:
+        val c = value.substring(i, i + 1)
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+    true
+
+fn sha(path: text) -> text:
+    if not is_regular(path):
+        reject("tool input must be a regular file: " + path)
+    file_hash_sha256_or_empty(path)
+
+fn strip_slash(path: text) -> text:
+    var p = path.replace("\\", "/")
+    while p.len() > 1 and p.ends_with("/"):
+        p = p.substring(0, p.len() - 1)
+    p
+
+fn git_out(root: text, args: [text]) -> text:
+    var full = ["-C", root]
+    for a in args:
+        full.push(a)
+    val (out, err, code) = process_run("git", full)
+    if code != 0:
+        eprint(err)
+        reject("git " + args[0] + " failed with exit " + "{code}")
+    out
+
+fn has_part(name: text, part: text) -> bool:
+    for seg in name.split("/"):
+        if seg == part:
+            return true
+    false
+
+fn safe_member(name: text) -> bool:
+    if name.starts_with("/") or name.contains("\\") or has_part(name, ".."):
+        return false
+    name.starts_with(PREFIXES[0]) or name.starts_with(PREFIXES[1])
+
+fn index_of(keys: [text], key: text) -> i64:
+    for i in 0..keys.len():
+        if keys[i] == key:
+            return i
+    -1
+
+fn field(value: JsonValue, key: text) -> JsonValue?:
+    # Python dict semantics: the last duplicate key wins.
+    match value:
+        case JsonValue.Object(keys, values):
+            var found: JsonValue? = None
+            for i in 0..keys.len():
+                if keys[i] == key:
+                    found = Some(values[i])
+            found
+        case _: None
+
+fn text_of(value: JsonValue?) -> text?:
+    match value:
+        case Some(v):
+            match v:
+                case JsonValue.Str(s): Some(s)
+                case _: None
+        case None: None
+
+pub fn validate(root_arg: text, manifest: text, expected: text, entry: text):
+    if not dir_is_real_no_follow(root_arg) or sha(manifest) != expected:
+        reject("tool root or manifest identity differs")
+    val root = strip_slash(path_absolute(root_arg))
+    if file_size(manifest) > MANIFEST_LIMIT:
+        reject("tool manifest exceeds bounded size")
+    val parsed = json_parse_value(file_read(manifest))
+    if parsed.is_err():
+        reject("tool manifest is not JSON")
+    val value = parsed.unwrap()
+    if (text_of(field(value, "schema")) ?? "") != "simple-bootstrap-tool-code-v1":
+        reject("unsupported tool authority schema")
+    val head = text_of(field(value, "tool_head")) ?? ""
+    if not is_hex(head, 40):
+        reject("tool commit identity required")
+    if git_out(root, ["rev-parse", "HEAD"]).trim() != head:
+        reject("tool commit differs")
+    # Ordered member table, Python dict semantics (first position, last value).
+    var names: [text] = []
+    var digests: [JsonValue] = []
+    match field(value, "files"):
+        case Some(files):
+            match files:
+                case JsonValue.Object(keys, values):
+                    for i in 0..keys.len():
+                        val at = index_of(names, keys[i])
+                        if at < 0:
+                            names.push(keys[i])
+                            digests.push(values[i])
+                        else:
+                            digests[at] = values[i]
+                case _: reject("nonempty tool closure required")
+        case None: reject("nonempty tool closure required")
+    if names.len() == 0:
+        reject("nonempty tool closure required")
+    # Pin complete script directories, including transitive shell/Perl imports.
+    val catalog = git_out(root, ["ls-tree", "-rz", "--full-tree", head, "--", PREFIXES[0], PREFIXES[1]])
+    var committed_names: [text] = []
+    var committed_oids: [text] = []
+    for row in catalog.split("\0"):
+        if row == "":
+            continue
+        val tab = row.index_of("\t") ?? -1
+        if tab < 0:
+            reject("nonregular committed tool member")
+        val meta = row.substring(0, tab).split(" ")
+        if meta.len() != 3 or (meta[0] != "100644" and meta[0] != "100755") or meta[1] != "blob":
+            reject("nonregular committed tool member")
+        committed_names.push(row.substring(tab + 1, row.len()))
+        committed_oids.push(meta[2])
+    if not same_set(names, committed_names):
+        reject("tool manifest differs from committed closure")
+    var physical: [text] = []
+    for prefix in PREFIXES:
+        val directory = root + "/" + prefix.substring(0, prefix.len() - 1)
+        if not dir_is_real_no_follow(directory):
+            reject("tool closure directory unavailable")
+        for raw in dir_walk(directory):
+            val path = strip_slash(raw)
+            if path == directory:
+                continue
+            if is_regular(path):
+                if not has_part(path, "__pycache__"):
+                    physical.push(path.substring(root.len() + 1, path.len()))
+            elif not dir_is_real_no_follow(path):
+                reject("linked tool closure member")
+    if not same_set(names, physical):
+        reject("tool manifest does not cover the complete physical closure")
+    val blobs = blob_ids(root, names)
+    for i in 0..names.len():
+        val name = names[i]
+        val expected_sha = match digests[i]:
+            case JsonValue.Str(s): s
+            case _: ""
+        if not safe_member(name) or not is_hex(expected_sha, 64):
+            reject("unsafe tool manifest member")
+        if sha(root + "/" + name) != expected_sha:
+            reject("tool bytes differ: " + name)
+        if blobs[i] != committed_oids[index_of(committed_names, name)]:
+            reject("tool bytes are not from pinned commit: " + name)
+    val entry_path = strip_slash(path_absolute(entry))
+    if not entry_path.starts_with(root + "/"):
+        reject("executing tool is outside pinned closure")
+    if index_of(names, entry_path.substring(root.len() + 1, entry_path.len())) < 0:
+        reject("executing tool is outside pinned closure")
+
+fn same_set(left: [text], right: [text]) -> bool:
+    var a = dedupe(left)
+    var b = dedupe(right)
+    if a.len() != b.len():
+        return false
+    a.sort()
+    b.sort()
+    for i in 0..a.len():
+        if a[i] != b[i]:
+            return false
+    true
+
+fn dedupe(items: [text]) -> [text]:
+    var sorted = items
+    sorted.sort()
+    var out: [text] = []
+    for item in sorted:
+        if out.len() == 0 or out[out.len() - 1] != item:
+            out.push(item)
+    out
+
+# Git blob ids of every safe member, in member order ("" for unsafe names,
+# which the ordered loop rejects before comparing).
+fn blob_ids(root: text, names: [text]) -> [text]:
+    var ids: [text] = []
+    var batch: [text] = []
+    var batch_at: [i64] = []
+    var batch_chars = 0
+    for i in 0..names.len():
+        ids.push("")
+    for i in 0..names.len():
+        if safe_member(names[i]):
+            batch.push(names[i])
+            batch_at.push(i)
+            batch_chars = batch_chars + names[i].len() + 3
+        if batch.len() > 0 and (batch_chars >= HASH_BATCH_CHARS or i == names.len() - 1):
+            var args = ["hash-object", "--no-filters", "--"]
+            for b in batch:
+                args.push(b)
+            val lines = git_out(root, args).trim().split("\n")
+            if lines.len() != batch.len():
+                reject("git hash-object returned a partial answer")
+            for k in 0..lines.len():
+                ids[batch_at[k]] = lines[k].trim()
+            batch = []
+            batch_at = []
+            batch_chars = 0
+    ids
+
+fn arg_value(args: [text], flag: text) -> text:
+    var found = ""
+    for i in 0..args.len():
+        if args[i] == flag and i + 1 < args.len():
+            found = args[i + 1]
+        elif args[i].starts_with(flag + "="):
+            found = args[i].substring(flag.len() + 1, args[i].len())
+    found
+
+fn main():
+    val argv = get_args()
+    var start = 0
+    for k in 0..argv.len():
+        if argv[k].ends_with("tool-code-authority.spl"):
+            start = k + 1
+    val args = argv[start..argv.len()]
+    for flag in ["--root", "--manifest", "--sha256", "--entry"]:
+        if arg_value(args, flag) == "":
+            usage("the following arguments are required: " + flag)
+    # Trust anchor before any tree is read.
+    val stage_binary = arg_value(args, "--stage-binary")
+    val binary = if stage_binary != "": stage_binary else: env_get("SIMPLE_VERIFIED_STAGE_BINARY")
+    val linux = host_os() == "linux"
+    val pin = match verified_stage_pin_check(arg_value(args, "--stage-pin"), binary, linux):
+        case Ok(p): p
+        case Err(e):
+            eprint("FAIL: " + e)
+            exit(2)
+            return
+    validate(arg_value(args, "--root"), arg_value(args, "--manifest"), arg_value(args, "--sha256"), arg_value(args, "--entry"))
+    match verified_stage_pin_recheck(pin, binary, linux):
+        case Ok(_): pass
+        case Err(e):
+            eprint("FAIL: " + e)
+            exit(2)
+    exit(0)
+
+main()

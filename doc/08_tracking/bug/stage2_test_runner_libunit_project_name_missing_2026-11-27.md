@@ -98,3 +98,10 @@ To tell them apart, natively build a probe that prints `content.byte_len()` and 
 ## Consequence
 
 No qualified self-hosted `SIMPLE_BIN` or test runner exists. This blocks native qualification of the Linux orchestrator rows (`doc/03_plan/agent_tasks/simple_orchestrator_status_20261126.md`).
+
+
+## Shard Registration (2026-11-27)
+
+- **Workaround site:** `src/compiler/10.frontend/core/types.spl:36-38` (`str_slice` delegates to `s.substring(start, end_idx)`, tagged `# @workaround bug=stage2_test_runner_libunit_project_name_missing_2026-11-27`).
+- **Seed fix commit:** `3850673f958` (`src/compiler_rust/compiler/src/pipeline/native_project/imports.rs`, `resolve_name_variants` gated by `is_builtin_receiver_type`).
+- **Shard:** `doc/08_tracking/bug/db/stage2_test_runner_libunit_project_name_missing_2026-11-27.sdn` (`status=fix-implemented-verification-pending`, waiting for rebuilt Stage 2 passing `test_runner_build` end-to-end before retiring `str_slice` workaround).

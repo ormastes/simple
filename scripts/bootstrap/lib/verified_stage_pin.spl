@@ -1,0 +1,83 @@
+# Trust anchor for pure-Simple bootstrap twins (phase 3 and later).
+#
+# The Python owners pin their interpreter (python_sha256 = digest of
+# sys.executable, re-checked after the run). A Simple twin runs on the verified
+# stage binary instead, so it pins THAT binary: the digest of the running image
+# must equal stage3_sha256 in an admitted stage provenance record
+# (bootstrap/stage3/<host>/provenance.env, schema
+# simple-bootstrap-stage3-provenance-v4/v5, status=pass). Any other state —
+# no pin, unreadable pin, malformed digest, not admitted, mismatch, or an
+# unhashable running image — fails closed. Shared by the Hello matrix twin and
+# the perf-runner twin; keep one implementation.
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_hash_sha256_or_empty, env_get}
+
+val VERIFIED_STAGE_PIN_ENV = "SIMPLE_VERIFIED_STAGE_PIN"
+
+struct VerifiedStagePin:
+    path: text
+    sha256: text
+
+fn _is_sha256_hex(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for i in 0..64:
+        val c = value.substring(i, i + 1)
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+    true
+
+fn _pin_field(content: text, key: text) -> text:
+    var found = ""
+    var count = 0
+    for raw in content.split("\n"):
+        val line = if raw.ends_with("\r"): raw.substring(0, raw.len() - 1) else: raw
+        if line.starts_with(key + "="):
+            found = line.substring(key.len() + 1, line.len())
+            count = count + 1
+    if count == 1: found else: ""
+
+# Pure decision: pin record text + digest of the running image -> pinned digest.
+pub fn verified_stage_pin_decide(pin_content: text, running_sha256: text) -> Result<text, text>:
+    val schema = _pin_field(pin_content, "schema")
+    if schema != "simple-bootstrap-stage3-provenance-v4" and schema != "simple-bootstrap-stage3-provenance-v5":
+        return Err("verified stage pin: unsupported or missing schema")
+    if _pin_field(pin_content, "status") != "pass":
+        return Err("verified stage pin: stage is not admitted (status != pass)")
+    if _pin_field(pin_content, "artifact_kind") != "pure-simple-bootstrap-compiler":
+        return Err("verified stage pin: artifact is not the pure-Simple bootstrap compiler")
+    val pinned = _pin_field(pin_content, "stage3_sha256")
+    if not _is_sha256_hex(pinned):
+        return Err("verified stage pin: stage3_sha256 missing, duplicated or malformed")
+    if not _is_sha256_hex(running_sha256):
+        return Err("verified stage pin: running stage binary could not be hashed")
+    if running_sha256 != pinned:
+        return Err("verified stage pin: running stage binary " + running_sha256 + " differs from pinned " + pinned)
+    Ok(pinned)
+
+# Digest of the running image. Linux hashes /proc/self/exe (the image the
+# kernel actually mapped, independent of any caller-supplied path); other hosts
+# hash the stage binary path the wrapper resolved and launched.
+pub fn verified_stage_running_sha256(stage_binary: text, linux: bool) -> text:
+    if linux and file_exists("/proc/self/exe"):
+        return file_hash_sha256_or_empty("/proc/self/exe")
+    if stage_binary == "" or not file_exists(stage_binary):
+        return ""
+    file_hash_sha256_or_empty(stage_binary)
+
+# Resolve the pin (explicit path, else SIMPLE_VERIFIED_STAGE_PIN) and check it.
+pub fn verified_stage_pin_check(pin_path: text, stage_binary: text, linux: bool) -> Result<VerifiedStagePin, text>:
+    val path = if pin_path != "": pin_path else: env_get(VERIFIED_STAGE_PIN_ENV)
+    if path == "":
+        return Err("verified stage pin: no pin (pass --stage-pin or set " + VERIFIED_STAGE_PIN_ENV + ")")
+    if not file_exists(path):
+        return Err("verified stage pin: pin record " + path + " does not exist")
+    match verified_stage_pin_decide(file_read(path), verified_stage_running_sha256(stage_binary, linux)):
+        case Ok(sha): Ok(VerifiedStagePin(path: path, sha256: sha))
+        case Err(e): Err(e)
+
+# Re-check after the work (the Python owners re-hash their producer at the end).
+pub fn verified_stage_pin_recheck(pin: VerifiedStagePin, stage_binary: text, linux: bool) -> Result<bool, text>:
+    val now = verified_stage_running_sha256(stage_binary, linux)
+    if now != pin.sha256:
+        return Err("verified stage pin: running stage binary identity changed during execution")
+    Ok(true)

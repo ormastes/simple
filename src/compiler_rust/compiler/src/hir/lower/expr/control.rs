@@ -1915,7 +1915,16 @@ impl Lowerer {
                 // path below, became irrefutable, and `Ok(nil)` took the
                 // `Ok(Some(c))` arm with `c` unbound.
                 // Bug: doc/08_tracking/bug/native_enum_nil_payload_pattern_2026_10_11.md
-                if self.is_builtin_optional_variant_name(variant) {
+                // `is_builtin_optional_variant_name` is a MODULE-wide name test:
+                // any user enum in the flattened module declaring a `None`/`Some`
+                // variant turns it false, and a `Result<Struct?, E>`'s `Ok(None)`
+                // then fell to the discriminant test below, which is false on the
+                // raw-nil form (match exhausted). The slot's own static type
+                // decides first: a builtin-`Option` slot is always presence/absence.
+                // Bug: doc/08_tracking/bug/native_build_jit_nested_option_result_match_exhausted_2026-11-27.md
+                if self.is_builtin_optional_variant_name(variant)
+                    || ((variant == "Some" || variant == "None") && self.slot_is_builtin_option(slot_ty))
+                {
                     let probe = if variant == "None" { "rt_is_none" } else { "rt_is_some" };
                     let presence = HirExpr {
                         kind: HirExprKind::BuiltinCall {
@@ -2477,6 +2486,25 @@ impl Lowerer {
                 .any(|(variant, fields)| variant == name && fields.as_ref().is_none_or(|f| f.is_empty())),
             // Empty local list: the global-summary fallback is already unit-only.
             _ => self.subject_enum_has_variant(subject_ty, name),
+        }
+    }
+
+    /// Is a slot of type `ty` an optional (`T?`) in nil-boxed form? True for the
+    /// builtin generic `Option<T>` enum (not a user enum named `Option`) and for
+    /// a source-declared `T?` (`optional_inner`; a genuine pointer never gets
+    /// Optional semantics). `rt_is_none` checks the enum id, so `T` may itself
+    /// be an enum that owns a `None`/`Some` variant.
+    pub(crate) fn slot_is_builtin_option(&self, ty: TypeId) -> bool {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, variants, generic_params, .. }) => {
+                name == "Option"
+                    && !generic_params.is_empty()
+                    && variants.len() == 2
+                    && variants.iter().any(|(n, p)| n == "Some" && p.is_some())
+                    && variants.iter().any(|(n, p)| n == "None" && p.is_none())
+            }
+            Some(HirType::Pointer { .. }) => self.module.types.optional_inner(ty).is_some(),
+            _ => false,
         }
     }
 
