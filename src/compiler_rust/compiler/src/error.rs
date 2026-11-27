@@ -496,6 +496,22 @@ impl ContextualError {
     }
 }
 
+/// Owner keys are normalized absolute paths (`\\?\C:\...` on Windows); show
+/// them cwd-relative with `/` separators like the entry path used to read.
+fn display_source_path(raw: &str) -> String {
+    let plain = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    let path = std::path::Path::new(plain);
+    let shown = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            let cwd = cwd.to_string_lossy().to_string();
+            let cwd = cwd.strip_prefix(r"\\?\").unwrap_or(&cwd).to_string();
+            path.strip_prefix(&cwd).ok().map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| plain.to_string());
+    shown.replace('\\', "/")
+}
+
 /// Compilation errors with optional rich context.
 #[derive(Error, Debug)]
 pub enum CompileError {
@@ -629,8 +645,15 @@ impl CompileError {
             context.span = crate::interpreter::get_current_node_span();
         }
         if context.file.is_none() {
-            context.file = crate::interpreter::get_current_file()
-                .map(|path| path.display().to_string());
+            // The span is the executing statement's, so the file must be the
+            // executing function's owning module, not the entry file: a library
+            // error used to print `spec.spl:<lib line>`. The owner lookup falls
+            // back to the entry file, and "<entry>" (in-memory source) means
+            // no file at all. Bug: seed_semantic_error_wrong_file_library_line_2026-11-28.
+            let file = crate::interpreter::current_coverage_file();
+            if file != "<entry>" {
+                context.file = Some(display_source_path(&file));
+            }
         }
         Self::SemanticWithContext(Box::new(ContextualError {
             message: message.into(),
@@ -864,5 +887,22 @@ mod tests {
         // Also test the From trait
         let err2: CompileError = "another error".into();
         assert_eq!(err2.message(), "another error");
+    }
+
+    /// A semantic error raised while a library function executes must name
+    /// the library's file, not the entry/spec file (the span is the library
+    /// statement's). Bug: seed_semantic_error_wrong_file_library_line_2026-11-28.
+    #[test]
+    fn semantic_with_context_uses_executing_module_file() {
+        let lib = "C:/repo/src/lib/x/decompress.spl";
+        crate::interpreter::CURRENT_FILE
+            .with(|c| *c.borrow_mut() = Some(std::path::PathBuf::from("C:/repo/test/di_spec.spl")));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = Some(std::sync::Arc::from(lib)));
+        let err = CompileError::semantic_with_context("boom", ErrorContext::new().with_span(Span::new(0, 1, 25, 9)));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = None);
+        crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = None);
+        let shown = err.to_string();
+        assert!(shown.contains("decompress.spl:25:9"), "{shown}");
+        assert!(!shown.contains("di_spec.spl"), "{shown}");
     }
 }
