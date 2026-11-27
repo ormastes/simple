@@ -23,6 +23,11 @@ Batch 2 (work/strict-use-census-batch2-20261127) fixed 50 of the 70 wider-census
   - strict mode stops at the first error in each spec, so later sites are masked;
   - the database, common, crypto, gc_async_mut, nogc_async_mut, nogc_sync_mut, orchestration, scv and skia directories timed out at 1500s.
 
+Batch 3 (work/strict-use-census-batch3-20261127) fixed 4 of the 22 rows (plus names each fix unmasked); the rest are below, each re-checked as USED in its importer, so deleting the import would break the spec and the symbol exists nowhere (never stubbed):
+- `compile_to_vhdl_module` (`soc_vhdl_gen_rv64_spec`), `synthesis_project_default` plus unmasked `add_verilog_sources`, `enable_axi_hp_port`, `SynthesisProject` (`synthesis_wrapper_vexriscv_spec`; the block also duplicated an existing `generate_vivado_tcl_rv64` import): unused imports deleted. That spec now loads and runs 16 examples; 5 fail on assertions that the import error had masked (separate pre-existing failures, not touched here).
+- `chacha20_keystream`: unused in `chacha20_spec`, removed from that import. `dead_braced_import_reported_spec` keeps naming it on purpose (fixture text).
+- `simple_web_layout_last_render_degraded` (+ `_degrade_reason`): the renderer facade now `export use`s them from `..._renderer_foundation`. Unmasked `_scalar_fill_row`: `gc_async_mut.gpu.engine2d.simd_kernels` facade lagged its owner, now exports it.
+
 Columns: distinct importers, symbol, via-module, reason it is still open.
 
 ```
@@ -33,8 +38,6 @@ Columns: distinct importers, symbol, via-module, reason it is still open.
 1	PropertyTrees	std.cc.entity.property_tree.{...}	cc module has no PropertyTrees/property_trees_new/ScrollNode; only an unrelated render_opt.PropertyTrees class exists, not rebound
 1	TextBlitCache	std.gpu.engine2d.helpers_text.{...}	undefined anywhere
 1	build_gcm_explicit_nonce_hex	std.http_server.worker.{...}	undefined anywhere
-1	chacha20_keystream	std.crypto.chacha20.{...}	undefined anywhere (dead_braced_import_reported_spec names it on purpose)
-1	compile_to_vhdl_module	lib.hardware.fpga_linux.riscv_fpga_linux.{...}	undefined (comment mention only)
 1	create_slide_from_layout_id	app.office.slides.slide.{...}	undefined (comment mention only)
 1	default_rate_limit_config	std.http_server.rate_limit.{...}	undefined anywhere
 1	default_security_headers_config	std.http_server.security_headers.{...}	undefined anywhere
@@ -43,11 +46,9 @@ Columns: distinct importers, symbol, via-module, reason it is still open.
 1	rt_file_read_bytes	std.nogc_sync_mut.ffi.io.{...}	skipped: only scattered per-file extern decls, no owner module; importer test/03_system/os/os_crypto_ref_helpers.spl actually imports sffi.io
 1	rt_vulkan_init	std.nogc_sync_mut.io.vulkan_sffi.{...}	skipped: io.vulkan_sffi and gpu.engine2d.sffi_vulkan import each other and the ownership spec pins that layout
 1	simd_isa_copy_span	std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{...}	undefined anywhere
-1	synthesis_project_default	lib.hardware.fpga_linux.synthesis_wrapper.{...}	undefined anywhere
 1	validate_csrf_token	std.http_server.csrf.{...}	undefined anywhere
 1	validate_request_path	std.http_server.request_validation.{...}	undefined anywhere
 1	hal_smp_ipi_window	os.kernel.arch.riscv64.hal_smp.{...}	newly unmasked, undefined (riscv_noalloc_dtb_capability_spec)
-1	simple_web_layout_last_render_degraded	std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{...}	newly unmasked (before_after_generated_content_chrome159_spec), not triaged
 ```
 
 ## Fix direction
