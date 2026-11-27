@@ -337,6 +337,45 @@ pub(crate) fn present_value_as_bool_arg(value: &Value, ty: Option<&Type>) -> Opt
 /// native-build of the self-hosted compiler took a whole lane to place. Every
 /// binder call site holds the `FunctionDef`, so the name is free; the caller
 /// chain is populated only under `SIMPLE_DEBUG_FIELD_ACCESS=1`.
+/// Implicit `T -> T?` at the call boundary, SCALAR payloads only: a plain
+/// non-nil scalar bound to a scalar `T?` parameter becomes `Some(value)`. The pure-Simple MIR lowering does the
+/// same (`mir_lowering_stmts.spl` Optional arm -> `ensure_option_handle`) and
+/// `-> T?` returns are already Some-wrapped (`function_exec.rs`). Without it,
+/// `param?` saw a raw array and failed with "? operator requires Result or
+/// Option type" while `match param: case Some(x)` accepted it.
+/// `nil` stays nil (the interpreter's None) and `any?` is left untouched,
+/// matching the return-side rule. `?` itself stays strict on non-Options.
+/// Bug: doc/08_tracking/bug/gzip_header_parse_optional_arg_question_op_2026-11-28.md
+pub(crate) fn wrap_plain_into_optional_param(value: Value, ty: Option<&Type>) -> Value {
+    let Some(Type::Optional(inner)) = ty else {
+        return value;
+    };
+    // Scalar payloads only, exactly MIR's `scalar_payload` gate
+    // (mir_lowering_stmts.spl Optional arm): a heap `T?` (array, text, record)
+    // is natively the same raw nullable pointer as `T`, and library code uses
+    // it directly (`for b in member` on a `[u8]?` field), so wrapping it here
+    // would diverge from native. `any?` is not scalar and stays untouched.
+    let scalar = matches!(
+        inner.as_ref(),
+        Type::Simple(name) if matches!(
+            name.as_str(),
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "f32" | "f64" | "float" | "bool" | "char"
+        )
+    );
+    if !scalar {
+        return value;
+    }
+    match &value {
+        Value::Nil => value,
+        Value::Enum { enum_name, .. } if enum_name == "Option" => value,
+        _ => Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(Box::new(value)),
+        },
+    }
+}
+
 pub(crate) fn name_callee(err: CompileError, func: &FunctionDef) -> CompileError {
     match err {
         CompileError::SemanticWithContext(mut e) => {
@@ -470,7 +509,7 @@ pub(crate) fn bind_args_with_injected(
                 }
             }
         }
-        value
+        wrap_plain_into_optional_param(value, ty)
     };
 
     for arg in args {
@@ -848,7 +887,7 @@ pub(crate) fn bind_args_with_values_named(
                 }
             }
         }
-        value
+        wrap_plain_into_optional_param(value, ty)
     };
 
     let mut bound = HashMap::new();

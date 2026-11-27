@@ -1,0 +1,48 @@
+# Implicit `T -> T?` at the call boundary for SCALAR payloads must make
+# `param?` and `match param: case Some(x)` agree, matching native MIR's
+# `scalar_payload` boxing (mir_lowering_stmts.spl Optional arm). Before the
+# fix the seed bound a plain i64 to an `i64?` parameter unwrapped, so `n?`
+# failed with "? operator requires Result or Option type".
+# Heap payloads (arrays, text) are intentionally NOT wrapped: natively a heap
+# `T?` is the same raw nullable pointer as `T` (open question, see bug doc).
+# Bug: doc/08_tracking/bug/gzip_header_parse_optional_arg_question_op_2026-11-28.md
+use std.spec.step
+use std.spec.*
+
+fn int_via_try(n: i64?) -> i64?:
+    val v = n?
+    Some(v + 1)
+
+fn int_via_match(n: i64?) -> i64?:
+    val v: i64 = match n:
+        case Some(x): x
+        case None: return None
+    Some(v + 1)
+
+fn bool_via_try(b: bool?) -> bool?:
+    val v = b?
+    Some(not v)
+
+fn none_int() -> i64?:
+    None
+
+describe "? on a scalar T? parameter receiving a plain T":
+    it "unwraps a plain scalar argument like match does":
+        step("unwraps a plain scalar argument like match does")
+        expect(int_via_try(41) ?? 0).to_equal(42)
+        expect(int_via_match(41) ?? 0).to_equal(42)
+
+    it "treats zero and false as present, not None":
+        step("treats zero and false as present, not None")
+        expect(int_via_try(0) ?? -1).to_equal(1)
+        expect(bool_via_try(false) ?? false).to_equal(true)
+
+    it "propagates None for a None argument in both forms":
+        step("propagates None for a None argument in both forms")
+        expect(int_via_try(none_int()) ?? -1).to_equal(-1)
+        expect(int_via_match(none_int()) ?? -1).to_equal(-1)
+
+    it "accepts an explicit Some argument":
+        step("accepts an explicit Some argument")
+        val wrapped: i64? = Some(9)
+        expect(int_via_try(wrapped) ?? -1).to_equal(10)

@@ -1,0 +1,91 @@
+#!/bin/sh
+# check-optional-param-try.shs — ratchet on `param?` applied to a `T?` parameter
+# in src/lib. Verdict is the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+#
+# Why: until the seed interpreter wrapped a plain `T` argument into `Some` at a
+# `T?` parameter (arg_binding.rs wrap_plain_into_optional_param, 2026-11-28),
+# `param?` failed on every plain argument while `match param: case Some(x)`
+# accepted it (gzip_decompress returned [] — see
+# doc/08_tracking/bug/gzip_header_parse_optional_arg_question_op_2026-11-28.md).
+# Library code still runs on seeds that predate the fix, so a NEW site must not
+# appear. Existing sites are frozen in optional_param_try_baseline.txt.
+# Retire this check once every deployed seed carries the boundary wrap.
+#
+# Usage: sh scripts/check/check-optional-param-try.shs [--root DIR] [--list] [--generate-baseline]
+set -u
+root="."
+mode="check"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) root="$2"; shift 2 ;;
+        --list) mode="list"; shift ;;
+        --generate-baseline) mode="gen"; shift ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+base="$root/scripts/check/optional_param_try_baseline.txt"
+[ -d "$root/src/lib" ] || { echo "ERROR — nothing was checked (no $root/src/lib)"; exit 2; }
+
+# One finding per line: path:line:param. A function header declares params of
+# the form `name: <type>?`; inside its body (until the next top-level-or-same
+# indent `fn`/`me`), `name?` not followed by `?`, `.` (`.?`) or `=` is a site.
+scan() {
+    # One awk process over every file (a per-file spawn took >10 min on Windows).
+    find "$root/src/lib" -name '*.spl' -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 awk -v R="$root/" '
+        function reset_params() { n = 0; delete P }
+        FNR == 1 { reset_params(); F = FILENAME; if (index(F, R) == 1) F = substr(F, length(R) + 1) }
+        /^[[:space:]]*(pub[[:space:]]+)?(fn|me)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*.*\(/ {
+            reset_params()
+            hdr = $0
+            while (match(hdr, /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*[^,()]*\?[[:space:]]*[,)]/)) {
+                seg = substr(hdr, RSTART, RLENGTH)
+                hdr = substr(hdr, RSTART + RLENGTH)
+                split(seg, parts, ":")
+                name = parts[1]; gsub(/[[:space:]]/, "", name)
+                P[name] = 1; n++
+            }
+            next
+        }
+        n > 0 {
+            line = $0
+            sub(/#.*/, "", line)
+            for (name in P) {
+                rest = line
+                while (match(rest, "(^|[^A-Za-z0-9_.])" name "\\?")) {
+                    after = substr(rest, RSTART + RLENGTH, 1)
+                    if (after != "?" && after != "." && after != "=" && after != "[") {
+                        print F ":" FNR ":" name
+                    }
+                    rest = substr(rest, RSTART + RLENGTH)
+                }
+            }
+        }'
+}
+
+selftest() {
+    st=$(mktemp -d) || return 1
+    mkdir -p "$st/src/lib/x"
+    printf 'fn f(data: [u8]?, base: i64) -> [i64]?:\n    val input = data?\n    if data.? and input.len() > 0:\n        return None\n' > "$st/src/lib/x/a.spl"
+    printf 'fn g(data: [u8]) -> i64:\n    data.len()\n' > "$st/src/lib/x/b.spl"
+    got=$(root="$st"; scan)
+    rm -rf "$st"
+    [ "$got" = "src/lib/x/a.spl:2:data" ]
+}
+selftest || { echo "ERROR — nothing was checked (selftest: scanner missed the gzip_header_parse_at shape)"; exit 2; }
+
+out=$(scan)
+count=$(printf '%s\n' "$out" | grep -c . || true)
+case "$mode" in
+    list) printf '%s\n' "$out"; echo "PASS — $count site(s) listed"; exit 0 ;;
+    gen) printf '%s\n' "$out" | sed 's/:[0-9]*:/:/' | LC_ALL=C sort -u > "$base"
+         echo "PASS — baseline regenerated ($count site(s))"; exit 0 ;;
+esac
+[ -f "$base" ] || { echo "ERROR — nothing was checked (missing $base)"; exit 2; }
+# Compare path:param identities (line numbers drift).
+new=$(printf '%s\n' "$out" | sed 's/:[0-9]*:/:/' | grep . | LC_ALL=C sort -u | LC_ALL=C comm -23 - "$base")
+if [ -n "$new" ]; then
+    echo "$new" | sed 's/^/new: /'
+    echo "FAIL — $count site(s) scanned, $(printf '%s\n' "$new" | grep -c .) new \`param?\` on a T? parameter; use match/?? or rely on a fixed seed"
+    exit 1
+fi
+echo "PASS — $count \`param?\` site(s) on T? parameters in src/lib, 0 new vs baseline"
