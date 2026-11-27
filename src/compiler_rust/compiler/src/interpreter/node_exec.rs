@@ -146,7 +146,23 @@ pub(crate) fn record_let_declared_width(let_stmt: &simple_parser::ast::LetStmt, 
 /// (follow-up of 2026-10-30_seed_uint_scrutinee_never_matches_int_patterns.md),
 /// and `val x: i32 = 3000000000` kept the i64
 /// (follow-up of seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md).
+/// An f64/f32 initializer honours the declared integer annotation exactly like
+/// the explicit `as iN` cast (and the JIT path): truncate toward zero, then
+/// narrow. Without this the RHS type won, so `var i: i64 = 0.0` stayed f64 and
+/// `arr[i]` failed with "cannot index array with type 'f64'"
+/// (engine_specs_spec_runner_interpreter_divergence_2026-09-16, shape 4).
 pub(crate) fn coerce_to_declared_signed(value: Value, type_name: &str) -> Value {
+    if let Some(f) = match &value {
+        Value::Float(f) => Some(*f),
+        Value::Float32(f) => Some(*f as f64),
+        _ => None,
+    } {
+        let target = crate::semantics::NumericType::from_name(type_name).unwrap_or(crate::semantics::NumericType::I64);
+        return match crate::semantics::cast_float_to_numeric(f, target) {
+            crate::semantics::CastNumericResult::Int(v) => Value::Int(v),
+            crate::semantics::CastNumericResult::Float(v) => Value::Float(v),
+        };
+    }
     let raw: i64 = match value {
         Value::Int(i) => i,
         Value::UInt { value, .. } => value as i64,
@@ -181,10 +197,31 @@ pub(crate) fn coerce_to_declared_unsigned(value: Value, ty: Option<&Type>) -> Va
             };
             Value::UInt { value: masked, width }
         }
+        // f64/f32 initialisers honour the declared width exactly like the
+        // explicit `as uN` cast (and the JIT path); see the note on
+        // [`coerce_to_declared_signed`].
+        Value::Float(f) => float_to_declared_unsigned(f, width),
+        Value::Float32(f) => float_to_declared_unsigned(f as f64, width),
         // Already-typed UInt (literal-suffix path) and non-integers (e.g.
         // object newtypes around u32) pass through.
         other => other,
     }
+}
+
+/// f64 half of the float arms of [`coerce_to_declared_unsigned`]: truncate
+/// toward zero and mask to the declared width through the unified cast rules,
+/// so an annotated binding converts identically to an explicit `as uN` cast.
+fn float_to_declared_unsigned(f: f64, width: u8) -> Value {
+    let target = match width {
+        8 => crate::semantics::NumericType::U8,
+        16 => crate::semantics::NumericType::U16,
+        32 => crate::semantics::NumericType::U32,
+        _ => crate::semantics::NumericType::U64,
+    };
+    let crate::semantics::CastNumericResult::Int(v) = crate::semantics::cast_float_to_numeric(f, target) else {
+        unreachable!("integer cast target never yields a float result")
+    };
+    Value::UInt { value: v as u64, width }
 }
 
 /// Field half of [`coerce_to_declared_unsigned`]: a value stored into a class

@@ -1277,6 +1277,15 @@ pub struct CowEnv {
     /// global write. Every consumer re-checks membership in `overlay`,
     /// `is_local` and `is_refreshed_global`, so over-approximation is
     /// unobservable.
+    ///
+    /// The call-path consumers (`publish_live_bound_globals`,
+    /// `drop_published_globals`, `mark_published_globals_refreshed` and the
+    /// sync/refresh walks) no longer iterate this set: they walk
+    /// `publish_candidate_entries` (dirty ∪ refreshed), which is provably the
+    /// same set after their filters but stays O(names written or synced)
+    /// instead of O(module globals) for a module-level caller frame. The
+    /// superset is retained for the `SIMPLE_ENV_AUDIT=1` gate and the
+    /// exact-set unit tests in `value_tests_nonlocal_overlay.rs`.
     nonlocal_overlay: Option<FrameSet<String>>,
     /// Names shadowed by currently executing nested blocks.
     block_local_bindings: FrameMap<String, usize>,
@@ -1701,13 +1710,11 @@ impl CowEnv {
         let Some(scope) = self.scope.as_ref() else {
             return;
         };
-        // Superset-driven (see CowEnv::nonlocal_overlay). `publish_and_repoint`
-        // reaches this on every call out of the frame, so walking the whole
-        // overlay here cost the caller's width a second time.
+        // Candidate-driven (see CowEnv::publish_candidate_entries): same set
+        // the superset walk produced after these filters, without the
+        // O(module globals) sweep for calls out of a module body.
         let names: Vec<String> = self
-            .nonlocal_overlay
-            .iter()
-            .flatten()
+            .publish_candidate_names()
             .filter(|name| self.overlay.contains_key(name.as_str()))
             .filter(|name| !self.is_local(name) && !self.tombstones.contains(name.as_str()))
             .filter(|name| scope.binding(name).is_some())
@@ -1734,7 +1741,7 @@ impl CowEnv {
     /// store and no later publish can replay it over a newer value.
     pub fn mark_published_globals_refreshed(&mut self) {
         let names: Vec<String> = self
-            .nonlocal_overlay_entries()
+            .publish_candidate_entries()
             .filter(|(name, _)| self.global_binding(name).is_some())
             .map(|(name, _)| name.clone())
             .collect();
@@ -1976,6 +1983,43 @@ impl CowEnv {
             .flatten()
             .filter(move |name| !self.is_local(name))
             .filter_map(move |name| self.overlay.get_key_value(name.as_str()))
+    }
+
+    /// Overlay entries a call-entry global publish/drop/refresh can act on:
+    /// the names this frame WROTE (`dirty_names`, recorded by `insert`,
+    /// `entry` and `get_mut`) or REFRESHED from the global store
+    /// (`refreshed_globals`), filtered through `is_local` and `overlay`
+    /// exactly the way [`CowEnv::nonlocal_overlay_entries`] filters the
+    /// superset. Callers that also exclude refreshed globals apply
+    /// `is_refreshed_global` themselves, exactly as before.
+    ///
+    /// Provably the same set the superset yields after those consumers'
+    /// filters: every overlay insertion records dirty or refreshed, and the
+    /// sole insertion that records neither (`restore_frame_owned`) only ever
+    /// holds frame-OWNED names — its `take_frame_owned` half refuses
+    /// shared-bound keys, and every consumer requires a global binding. A
+    /// name written and later refreshed appears in both sets, so the iterator
+    /// may yield it twice; every consumer is insert/remove-idempotent there.
+    ///
+    /// Why not walk the superset: module-level frames note EVERY declared
+    /// global in it, so each call out of a module body scanned
+    /// O(module globals) for zero publishes (measured: `PUBLISH_GLOBALS_SCANNED`
+    /// = caller width per call, `PUBLISH_GLOBALS_PUBLISHED` = 0). The sets
+    /// walked here stay O(names written or synced).
+    pub fn publish_candidate_entries(&self) -> impl Iterator<Item = (&String, &Value)> + '_ {
+        self.publish_candidate_names()
+            .filter(move |name| !self.is_local(name))
+            .filter_map(move |name| self.overlay.get_key_value(name.as_str()))
+    }
+
+    /// Entry count of [`CowEnv::publish_candidate_entries`], for counters.
+    pub fn publish_candidate_len(&self) -> usize {
+        self.dirty_names.len() + self.refreshed_globals.len()
+    }
+
+    /// Name-level source of [`CowEnv::publish_candidate_entries`] — see there.
+    fn publish_candidate_names(&self) -> impl Iterator<Item = &String> + '_ {
+        self.dirty_names.iter().chain(self.refreshed_globals.iter())
     }
 
     /// Entries in the superset, for counters. Not the publishable count.

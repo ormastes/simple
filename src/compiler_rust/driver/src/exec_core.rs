@@ -1201,6 +1201,7 @@ impl ExecCore {
         use std::collections::HashSet;
 
         let trace = std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").ok().as_deref() == Some("1");
+        let mut phase = RunPhaseTrace::from_env();
         if trace {
             eprintln!("[rust-jit] start path={}", path.display());
         }
@@ -1239,12 +1240,14 @@ impl ExecCore {
         let mut ast =
             load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("module load error: {}", e))?;
         drop(package_symbol_scope);
+        phase.mark("load_module_with_imports");
 
         // Drop wrong-arch @cfg(<arch>) fn variants: the JIT executes on the
         // HOST, and codegen's declare_functions is first-wins by source order,
         // so an unstripped wrong-arch variant declared first would be the one
         // that runs (bug x64_freestanding_cfg_multivariant_misdispatch).
         simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut ast);
+        phase.mark("cfg_strip");
 
         // Spec files declare their examples at module level and have no `main`.
         // Synthesize the spec entry (module statements in order, then the
@@ -1280,6 +1283,7 @@ impl ExecCore {
                 .contains(&simple_compiler::compilability::FallbackReason::Comprehension)
         })
         .map(|(name, _)| name);
+        phase.mark("compilability");
         if let Some(name) = comprehension_fn {
             return Err(jit_strict_fallback_error_for(
                 "list/dict comprehension has no JIT lowering",
@@ -1340,15 +1344,27 @@ impl ExecCore {
             std::collections::HashMap::new()
         };
         let _ = hir::take_dropped_unsupported_exprs();
+        // Script mode is the file kind (owner decision 2026-11-27): `.shs` and
+        // `.sscript` entries are scripts, `.spl` (specs included) is compiled.
+        // A script's own functions keep dynamically typed value joins.
+        // A file-header source-mode attribute, `--source-mode` and `simple.sdn [source_mode]` are
+        // not read here yet (plan lanes S4-A / S4-B).
+        let entry_is_script = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("shs" | "sscript")
+        );
+        hir::set_entry_script_mode(entry_is_script);
         let lowered = hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,
             path,
             project_hint.as_deref(),
             duplicate_structs,
         );
+        hir::set_entry_script_mode(false);
         // References to a private fn of another directory found in the
         // lowered unit; judged below, once it is known the JIT will run it.
         let private_refs = hir::take_private_ref_violations();
+        phase.mark("hir_lower");
         let hir_module = match lowered {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("HIR lowering error", &e, Some(path))),
@@ -1369,6 +1385,7 @@ impl ExecCore {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("MIR lowering error", &e, Some(path))),
         };
+        phase.mark("mir_lower");
         if trace {
             eprintln!(
                 "[rust-jit] lowered functions={} externs={}",
@@ -1457,6 +1474,7 @@ impl ExecCore {
 
         // Check for main function
         let has_main = mir_module.functions.iter().any(|f| f.name == "main");
+        phase.mark("reach_and_externs");
 
         if !has_main {
             // A demotion too: the JIT entry point calls `main`, so with no
@@ -1483,6 +1501,7 @@ impl ExecCore {
             // From here on the program itself runs: a failure is its verdict,
             // never a reason to fall back and run it again.
             let outcome = evaluate_module(&ast.items).map_err(|e| JitRunError::AlreadyExecuted(format!("{}", e)));
+            phase.mark("interpret_no_main");
             set_current_file(None);
             self.collect_gc();
             return Ok(outcome);
@@ -1561,6 +1580,7 @@ impl ExecCore {
             eprintln!("[rust-jit] compile start");
         }
         em.compile_module(&mir_module)?;
+        phase.mark("jit_compile");
         // The JIT is about to run this program (every demotion to the
         // interpreter, which applies the same rule per call, is behind us).
         // Product code reaching a private fn of another directory is rejected
@@ -1584,6 +1604,7 @@ impl ExecCore {
         simple_runtime::rt_set_jit_runtime(true);
         let exit_code = em.execute("main", &[]);
         simple_runtime::rt_set_jit_runtime(false);
+        phase.mark("execute_main");
         let mut exit_code = exit_code?;
         if trace {
             eprintln!("[rust-jit] execute main done exit={}", exit_code);
@@ -2066,7 +2087,64 @@ fn source_uses_jit_unsafe_graphics_runtime(path: &Path) -> bool {
     // gpu.engine2d sources JIT by default since the cross-module private-symbol
     // collision fix (cranelift_f32_trig_wrapper_codegen_2026-07-02 Residual).
     // Escape hatch: SIMPLE_EXECUTION_MODE=interpreter.
-    source.contains("window_winit")
+    //
+    // The gate keys on what the program IMPORTS, not on text it happens to
+    // contain: the old `source.contains("window_winit")` divert sent any file
+    // that merely mentioned the token in a comment or string literal to the
+    // interpreter, so lane choice depended on comment text and 2D startup
+    // timings were lane timings in disguise. Parse the entry file and divert
+    // only when a `use`-family declaration names `window_winit` as an exact
+    // module path segment or import target. A parse failure keeps the old
+    // conservative substring divert: a winit program must not reach the JIT
+    // lane through a gate-time parse hiccup. See
+    // doc/08_tracking/bug/seed_window_winit_substring_lane_gate_2026-11-26.md.
+    let Ok(ast) = Parser::new(&source).parse() else {
+        return source.contains("window_winit");
+    };
+    ast.items.iter().any(item_imports_window_winit)
+}
+
+/// A top-level item triggers the graphics gate when it is a `use`-family
+/// declaration naming `window_winit` as a module path segment or import
+/// target. Segment-exact, never substring: `std.io.window_winit` matches,
+/// `my_window_winit_utils` does not.
+fn item_imports_window_winit(item: &simple_parser::ast::Node) -> bool {
+    use simple_parser::ast::Node as N;
+    match item {
+        N::UseStmt(stmt) => import_names_window_winit(&stmt.path.segments, &stmt.target),
+        N::MultiUse(multi) => multi
+            .imports
+            .iter()
+            .any(|(path, target)| import_names_window_winit(&path.segments, target)),
+        N::ExportUseStmt(stmt) => import_names_window_winit(&stmt.path.segments, &stmt.target),
+        N::CommonUseStmt(stmt) => import_names_window_winit(&stmt.path.segments, &stmt.target),
+        _ => false,
+    }
+}
+
+fn import_names_window_winit(segments: &[String], target: &simple_parser::ast::ImportTarget) -> bool {
+    use simple_parser::ast::ImportTarget as T;
+    if segments.iter().any(|segment| segment == "window_winit") {
+        return true;
+    }
+    match target {
+        // `use std.io.window_winit` binds the module itself: the final segment
+        // lands in the single/aliased target instead of the path.
+        T::Single(name) => name == "window_winit",
+        T::Aliased { name, .. } => name == "window_winit",
+        T::Group(items) => items.iter().any(import_target_names_window_winit),
+        T::Glob => false,
+    }
+}
+
+fn import_target_names_window_winit(target: &simple_parser::ast::ImportTarget) -> bool {
+    use simple_parser::ast::ImportTarget as T;
+    match target {
+        T::Single(name) => name == "window_winit",
+        T::Aliased { name, .. } => name == "window_winit",
+        T::Group(items) => items.iter().any(import_target_names_window_winit),
+        T::Glob => false,
+    }
 }
 
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
@@ -2363,6 +2441,57 @@ mod tests {
 
         assert!(!source_uses_jit_unsafe_graphics_runtime(&script));
         assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
+    }
+
+    /// Regression for
+    /// doc/08_tracking/bug/seed_window_winit_substring_lane_gate_2026-11-26.md:
+    /// the gate used to be `source.contains("window_winit")`, so a COMMENT
+    /// mentioning the token diverted the whole program to the interpreter
+    /// (measured: ~4x faster "startup" that was just the cheaper lane). Only
+    /// an actual import may divert.
+    #[test]
+    fn comment_mention_of_window_winit_stays_on_jit_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("commented.spl");
+        fs::write(
+            &script,
+            "# window_winit\nuse std.gc_async_mut.gpu.engine2d.engine.{Engine2D}\nfn main():\n    print \"ok\"\n",
+        )
+        .unwrap();
+
+        assert!(!source_uses_jit_unsafe_graphics_runtime(&script));
+        assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
+    }
+
+    /// The string-literal twin of the comment case (the exact shape of
+    /// test/fixtures/engine_receipt/demote_graphics_text.spl): a program that
+    /// stores "window_winit" in a text value imports nothing and must keep
+    /// the JIT lane.
+    #[test]
+    fn string_literal_mention_of_window_winit_stays_on_jit_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("literal.spl");
+        fs::write(
+            &script,
+            "fn main():\n    val backend = \"window_winit\"\n    print \"backend={backend}\"\n",
+        )
+        .unwrap();
+
+        assert!(!source_uses_jit_unsafe_graphics_runtime(&script));
+        assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
+    }
+
+    /// The single-item form `use std.io.window_winit` binds the module itself:
+    /// the final path segment lands in the import target, not the path, and
+    /// must still divert.
+    #[test]
+    fn single_item_window_winit_import_uses_interpreter_fast_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("single.spl");
+        fs::write(&script, "use std.io.window_winit\nfn main():\n    print \"gui\"\n").unwrap();
+
+        assert!(source_uses_jit_unsafe_graphics_runtime(&script));
+        assert!(should_prefer_interpreter_for_source(&script, "spl", true));
     }
 
     #[test]
@@ -2806,5 +2935,36 @@ mod jit_top_level_statement_tests {
         let module = core.load_module(&plain_out).expect("load");
         assert!(module.interp_snapshot.is_none(), "natively compiled SMF must not carry a snapshot");
         assert_eq!(core.run_smf_with_args(&plain_out, vec![]), Ok(5));
+    }
+}
+
+/// Env-gated phase timer for the `run` JIT lane (`SIMPLE_RUN_PHASE_TRACE=1`).
+///
+/// Prints `[run-phase] <label> +<ms> (total <ms>)` to stderr after each phase
+/// so startup cost can be attributed without an external profiler. Disabled it
+/// costs one env lookup per run.
+struct RunPhaseTrace {
+    start: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+}
+
+impl RunPhaseTrace {
+    fn from_env() -> Self {
+        let now = std::env::var_os("SIMPLE_RUN_PHASE_TRACE")
+            .is_some_and(|v| v != "0")
+            .then(std::time::Instant::now);
+        Self { start: now, last: now }
+    }
+
+    fn mark(&mut self, label: &str) {
+        if let (Some(start), Some(last)) = (self.start, self.last) {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "[run-phase] {label} +{:.1}ms (total {:.1}ms)",
+                (now - last).as_secs_f64() * 1e3,
+                (now - start).as_secs_f64() * 1e3
+            );
+            self.last = Some(now);
+        }
     }
 }

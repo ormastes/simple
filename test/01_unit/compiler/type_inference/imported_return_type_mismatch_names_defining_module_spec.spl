@@ -1,0 +1,149 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: pin CORRECT diagnostic attribution in the PURE-SIMPLE compiler lane for
+doc/08_tracking/bug/seed_lowering_error_names_entry_file_not_defining_module_2026-11-26:
+when a module imported by a clean entry file contains a return-type mismatch,
+the verdict must be attributed to the DEFINING module, never to the entry file.
+
+The pure-Simple lane attributes per module by construction: the driver hands
+each module its own SOURCE PATH (`hirlowering_for_module`), so a declaration's
+`defining_module` is that path, and the HM typecheck receipt is keyed by the
+module's own `hir.name` (`[typecheck] <module path>: line:col: ...`). The
+mismatch inside the imported module is therefore inferred while inferring the
+IMPORTED module's HirModule, and the receipt names the imported file.
+
+This spec drives that exact flow in-process — parse (paths preserved) ->
+module surfaces -> per-module HIR lowering -> per-module `infer_module` — the
+same shape as the driver's entry-closure loop, and the same harness as
+test/01_unit/compiler/50.mir/stage2_imported_fn_foreign_struct_return_spec.spl.
+
+Audience: compiler maintainers guarding diagnostic attribution against the
+entry-file mis-attribution the Rust seed lane exhibited (see the bug doc).
+
+## Lane boundary (seed side)
+
+The Rust seed lane carried the defect (its flattening splices imported items
+into the entry unit, so body-lowering diagnostics named the entry path). The
+seed-side fix is a source patch in `src/compiler_rust/compiler/src/hir/lower/`
+(`Lowerer::body_diagnostic_file` + the two return-type wrap sites); seed
+sources are patch-only in this lane, so the deployed seed keeps naming the
+entry file until the next seed rebuild. This spec therefore guards the
+pure-Simple lane only; the seed lane is re-verified after that rebuild with
+the probe in the bug doc (m2a imports z from m2b, compile must name m2b.spl).
+"""
+
+# @tag: unit, compiler, type_inference, diagnostics, attribution
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.types.type_infer.inference_control.{HmInferContext}
+use compiler.types.type_infer.format_error.{format_type_infer_error_v1}
+
+# The imported module owns the defect: `Dict.get` yields `text?`, the function
+# is declared `-> text`. The entry module is clean.
+val m2b_source = "pub fn z(d: Dict<text, text>) -> text:\n    return d.get(\"k\")\n"
+val m2a_source = "use repro.m2b.\{z\}\n\npub fn main() -> i64:\n    val d: Dict<text, text> = \{\}\n    val s = z(d)\n    0\n"
+
+# Same mismatch living directly in the entry module: the control arm proving
+# the entry-module lane still attributes to its own file.
+val single_source = "fn z(d: Dict<text, text>) -> text:\n    return d.get(\"k\")\n\nfn main() -> i64:\n    0\n"
+
+struct Inferred:
+    hir_name: text
+    errors: [text]
+
+var _repro: (Inferred, Inferred)? = nil
+var _single: Inferred? = nil
+
+fn repro() -> (Inferred, Inferred):
+    if val cached = _repro:
+        return cached
+    val log = Logger(level: 0)
+    val b_ast = parse_full_frontend(m2b_source, "repro/m2b.spl", "repro.m2b", log)
+    val a_ast = parse_full_frontend(m2a_source, "repro/m2a.spl", "repro.m2a", log)
+    var modules: Dict<text, ParserModule> = {}
+    modules["repro.m2b"] = b_ast
+    modules["repro.m2a"] = a_ast
+    val sources = [SourceFile(path: "repro/m2b.spl", content: m2b_source, module_name: "repro.m2b"), SourceFile(path: "repro/m2a.spl", content: m2a_source, module_name: "repro.m2a")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var b_lowering = hirlowering_for_module("repro/m2b.spl", surfaces)
+    var a_lowering = hirlowering_for_module("repro/m2a.spl", surfaces)
+    val b_hir = b_lowering.lower_module(b_ast)
+    val a_hir = a_lowering.lower_module(a_ast)
+    expect(a_lowering.errors.len()).to_equal(0)
+    expect(b_lowering.errors.len()).to_equal(0)
+    var b_ctx = HmInferContext.with_builtins()
+    b_ctx.infer_module(b_hir)
+    var b_errors: [text] = []
+    for e in b_ctx.errors:
+        b_errors = b_errors.push(format_type_infer_error_v1(e))
+    var a_ctx = HmInferContext.with_builtins()
+    a_ctx.infer_module(a_hir)
+    var a_errors: [text] = []
+    for e in a_ctx.errors:
+        a_errors = a_errors.push(format_type_infer_error_v1(e))
+    val pair = (Inferred(hir_name: a_hir.name, errors: a_errors), Inferred(hir_name: b_hir.name, errors: b_errors))
+    _repro = Some(pair)
+    pair
+
+fn single() -> Inferred:
+    if val cached = _single:
+        return cached
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(single_source, "repro/single.spl", "repro.single", log)
+    var modules: Dict<text, ParserModule> = {}
+    modules["repro.single"] = ast
+    val sources = [SourceFile(path: "repro/single.spl", content: single_source, module_name: "repro.single")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("repro/single.spl", surfaces)
+    val hir = lowering.lower_module(ast)
+    expect(lowering.errors.len()).to_equal(0)
+    var ctx = HmInferContext.with_builtins()
+    ctx.infer_module(hir)
+    var formatted: [text] = []
+    for e in ctx.errors:
+        formatted = formatted.push(format_type_infer_error_v1(e))
+    val result = Inferred(hir_name: hir.name, errors: formatted)
+    _single = Some(result)
+    result
+
+describe "imported-module return mismatch is attributed to the defining module (pure-Simple lane)":
+    # @manual scenario evidence
+    it "AC-1: the clean entry module gets zero typecheck errors":
+        # @req REQ-SSPEC-COMPILER
+        step("infer the clean entry module m2a that imports z from m2b")
+        expect(repro().0.errors.len()).to_equal(0)
+
+    it "AC-2: the mismatch is inferred under the imported module, keyed by the m2b path":
+        # @req REQ-SSPEC-COMPILER
+        step("infer the imported module m2b and read back its HirModule name")
+        expect(repro().1.hir_name).to_equal("repro/m2b.spl")
+        expect(repro().1.errors.len()).to_equal(1)
+
+    it "AC-3: the verdict names function z at the return line and never the entry file":
+        # @req REQ-SSPEC-COMPILER
+        step("format the m2b mismatch and check its attribution")
+        val msg = repro().1.errors[0]
+        expect(msg.contains("of function 'z'")).to_equal(true)
+        expect(msg.contains("cannot satisfy the non-optional return type")).to_equal(true)
+        expect(msg.starts_with("2:")).to_equal(true)
+        expect(msg.contains("m2a")).to_equal(false)
+
+    it "AC-4: an entry-module mismatch still attributes to the entry module (control)":
+        # @req REQ-SSPEC-COMPILER
+        step("infer a single-file program whose own function z mismatches")
+        expect(single().hir_name).to_equal("repro/single.spl")
+        expect(single().errors.len()).to_equal(1)
+        expect(single().errors[0].contains("of function 'z'")).to_equal(true)

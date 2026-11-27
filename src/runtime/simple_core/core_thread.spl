@@ -1,0 +1,180 @@
+# Pure-Simple `simple-core` thread and thread-local ABI wrappers.
+#
+# Provides single-thread fail-closed isolated spawn/join lifecycle symbols,
+# OS-aware CPU count, yield/sleep_ms, and heap-backed single-thread TLS slots
+# so native closures linking against pure-Simple simple_core resolve cleanly.
+# Keeps `rt_thread_sleep` and `spl_thread_cpu_count` owned by core_process.spl.
+
+@unsafe(reason: "raw libc zeroed heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn calloc(count: i64, size: i64) -> i64
+@unsafe(reason: "raw libc owned heap-pointer release ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
+@unsafe(reason: "raw libc thread sleep status ABI", capabilities: [ffi])
+extern fn usleep(usec: i64) -> i64
+@unsafe(reason: "raw libc sysconf probe ABI; negative return means failure", capabilities: [ffi])
+extern fn sysconf(name: i64) -> i64
+@unsafe(reason: "raw pointer/offset i64 load ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer/offset i64 store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw tagged nil value ABI", capabilities: [ffi])
+extern fn rt_value_nil() -> i64
+
+@always_inline
+fn _sffi_core_thread_calloc(count: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        calloc(count, size)
+
+@always_inline
+fn _sffi_core_thread_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
+fn _sffi_core_thread_usleep(usec: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        usleep(usec)
+
+@always_inline
+fn _sffi_core_thread_sysconf(name: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        sysconf(name)
+
+@always_inline
+fn _sffi_core_thread_load_i64(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_i64(ptr, offset)
+
+@always_inline
+fn _sffi_core_thread_store_i64(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_i64(ptr, offset, value)
+
+@always_inline
+fn _sffi_core_thread_rt_value_nil() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_value_nil()
+
+@when(os="linux"):
+fn _core_thread_sc_nprocessors_onln() -> i64:
+    84
+@else:
+@when(os="macos"):
+fn _core_thread_sc_nprocessors_onln() -> i64:
+    58
+@else:
+@when(os="freebsd"):
+fn _core_thread_sc_nprocessors_onln() -> i64:
+    58
+@else:
+fn _core_thread_sc_nprocessors_onln() -> i64:
+    -1
+@end
+@end
+@end
+
+@allow(primitive_api)
+pub fn rt_thread_spawn_isolated(closure: i64, data: i64) -> i64:
+    val _ = closure
+    val _ = data
+    0
+
+@allow(primitive_api)
+pub fn rt_thread_spawn_isolated_with_args(fn_ptr: i64, data1: i64, data2: i64) -> i64:
+    val _ = fn_ptr
+    val _ = data1
+    val _ = data2
+    0
+
+@allow(primitive_api)
+pub fn rt_thread_spawn_isolated_kind(kind: i64, closure: i64, data: i64) -> i64:
+    val _ = kind
+    val _ = closure
+    val _ = data
+    0
+
+@allow(primitive_api)
+pub fn rt_thread_spawn_isolated_with_args_kind(kind: i64, fn_ptr: i64, data1: i64, data2: i64) -> i64:
+    val _ = kind
+    val _ = fn_ptr
+    val _ = data1
+    val _ = data2
+    0
+
+@allow(primitive_api)
+pub fn rt_thread_spawn_isolated2(closure: i64, data1: i64, data2: i64) -> i64:
+    val _ = closure
+    val _ = data1
+    val _ = data2
+    0
+
+@allow(primitive_api)
+pub fn rt_thread_join(handle: i64) -> i64:
+    val _ = handle
+    _sffi_core_thread_rt_value_nil()
+
+@allow(primitive_api)
+pub fn rt_thread_is_done(handle: i64) -> i64:
+    val _ = handle
+    1
+
+@allow(primitive_api)
+pub fn rt_thread_id(handle: i64) -> i64:
+    val _ = handle
+    0
+
+@allow(primitive_api)
+pub fn rt_thread_free(handle: i64):
+    val _ = handle
+
+@allow(primitive_api)
+pub fn rt_thread_available_parallelism() -> i64:
+    val sc_name = _core_thread_sc_nprocessors_onln()
+    if sc_name < 0:
+        return 1
+    val count = _sffi_core_thread_sysconf(sc_name)
+    if count > 0: count else: 1
+
+@allow(primitive_api)
+pub fn rt_thread_yield():
+    val _ = _sffi_core_thread_usleep(0)
+
+@allow(primitive_api)
+pub fn rt_thread_sleep_ms(ms: i64):
+    if ms > 0:
+        val _ = _sffi_core_thread_usleep(ms * 1000)
+
+@allow(primitive_api)
+pub fn rt_thread_local_new() -> i64:
+    _sffi_core_thread_calloc(2, 8)
+
+@allow(primitive_api)
+pub fn rt_thread_local_get_i64(tls: i64) -> i64:
+    if tls < 1:
+        return 0
+    _sffi_core_thread_load_i64(tls, 0)
+
+@allow(primitive_api)
+pub fn rt_thread_local_set_i64(tls: i64, value: i64):
+    if tls < 1:
+        return
+    _sffi_core_thread_store_i64(tls, 0, value)
+    _sffi_core_thread_store_i64(tls, 8, 1)
+
+@allow(primitive_api)
+pub fn rt_thread_local_get(tls: i64) -> i64:
+    if tls < 1 or _sffi_core_thread_load_i64(tls, 8) == 0:
+        return _sffi_core_thread_rt_value_nil()
+    _sffi_core_thread_load_i64(tls, 0)
+
+@allow(primitive_api)
+pub fn rt_thread_local_set(tls: i64, value: i64):
+    if tls < 1:
+        return
+    _sffi_core_thread_store_i64(tls, 0, value)
+    _sffi_core_thread_store_i64(tls, 8, 1)
+
+@allow(primitive_api)
+pub fn rt_thread_local_free(tls: i64):
+    if tls > 0:
+        _sffi_core_thread_free(tls)

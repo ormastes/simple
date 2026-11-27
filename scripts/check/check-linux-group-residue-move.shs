@@ -1,0 +1,23 @@
+#!/bin/sh
+# Real cgroup v2 evidence for the group runtime's leader-residue move
+# (rt_lg_move_residue_v3): compiles the C selfcheck with clang and runs it in a
+# delegated user scope. Not a guest run and not engine evidence.
+# Exit 0 = PASS, 77 = could not be checked on this host (not a PASS), else FAIL.
+set -eu
+if [ "$(uname -s)" != Linux ]; then
+    echo 'linux-group-residue-move: requires Linux (not a PASS)' >&2
+    exit 77
+fi
+if ! command -v systemd-run >/dev/null 2>&1; then
+    echo 'linux-group-residue-move: needs systemd-run for a delegated user scope (not a PASS)' >&2
+    exit 77
+fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/linux-group-residue-move.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+"${CC:-clang}" -std=c11 -O1 -Wall -Wextra -Werror \
+    "$root/src/runtime/test/runtime_linux_group_residue_move_selfcheck.c" \
+    -o "$scratch/selfcheck"
+status=0
+timeout 90 systemd-run --user --scope -q -p Delegate=yes "$scratch/selfcheck" || status=$?
+exit "$status"

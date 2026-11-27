@@ -1,0 +1,162 @@
+# Mach-O hosted-link capture: twin of hello-sanity-matrix-darwin.py.
+#
+# The capture record (link.json) is written with json_dump_sorted, which is
+# byte-identical to Python json.dump(record, sort_keys=True) for the record
+# shape used here (text, text lists and text->text objects). Pure decisions
+# live here; process launch stays in scripts/bootstrap/hello-sanity-matrix.spl.
+
+use std.common.json.value.{JsonValue, json_value_type, json_value_keys, json_value_field, json_value_items, json_value_as_text}
+
+pub fn _hex4(code: i64) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 12
+    while shift >= 0:
+        val d = (code / _pow2(shift)) % 16
+        out = out + digits.substring(d, d + 1)
+        shift = shift - 4
+    out
+
+pub fn _pow2(n: i64) -> i64:
+    var v = 1
+    for _ in 0..n:
+        v = v * 2
+    v
+
+# json.dumps string escaping with ensure_ascii=True, for ASCII input. A
+# non-ASCII byte is refused (fail closed) rather than risk a byte mismatch.
+pub fn json_quote(s: text) -> Result<text, text>:
+    var out = "\""
+    for i in 0..s.len():
+        val c = s.substring(i, i + 1)
+        val code = c.char_code_at(0)
+        if code > 126:
+            return Err("non-ASCII text in Darwin capture record")
+        if c == "\"":
+            out = out + "\\\""
+        elif c == "\\":
+            out = out + "\\\\"
+        elif c == "\n":
+            out = out + "\\n"
+        elif c == "\r":
+            out = out + "\\r"
+        elif c == "\t":
+            out = out + "\\t"
+        elif code == 8:
+            out = out + "\\b"
+        elif code == 12:
+            out = out + "\\f"
+        elif code < 32 or code == 127:
+            out = out + "\\u" + _hex4(code)
+        else:
+            out = out + c
+    Ok(out + "\"")
+
+pub fn _sorted(keys: [text]) -> [text]:
+    var out: [text] = []
+    for k in keys:
+        out.push(k)
+    var i = 1
+    while i < out.len():
+        val cur = out[i]
+        var j = i - 1
+        while j >= 0 and out[j] > cur:
+            out[j + 1] = out[j]
+            j = j - 1
+        out[j + 1] = cur
+        i = i + 1
+    out
+
+# Python json.dumps(value, sort_keys=True) for null/bool/int/text/list/object.
+pub fn json_dump_sorted(value: JsonValue) -> Result<text, text>:
+    val kind = json_value_type(value)
+    if kind == "string":
+        return json_quote(json_value_as_text(value) ?? "")
+    if kind == "array":
+        var parts = "["
+        var first = true
+        for item in json_value_items(value):
+            match json_dump_sorted(item):
+                case Ok(t):
+                    parts = parts + (if first: "" else: ", ") + t
+                case Err(e): return Err(e)
+            first = false
+        return Ok(parts + "]")
+    if kind == "object":
+        var parts = "{{"
+        var first = true
+        for key in _sorted(json_value_keys(value)):
+            match json_quote(key):
+                case Ok(k):
+                    match json_dump_sorted(json_value_field(value, key)):
+                        case Ok(v):
+                            parts = parts + (if first: "" else: ", ") + k + ": " + v
+                        case Err(e): return Err(e)
+                case Err(e): return Err(e)
+            first = false
+        return Ok(parts + "}")
+    Err("unsupported Darwin capture record value: " + kind)
+
+# validate_arguments(): no opaque response or competing linker selection.
+pub fn darwin_validate_arguments(argv: [text]) -> Result<bool, text>:
+    for arg in argv:
+        var parts: [text] = []
+        if arg.starts_with("-Wl,"):
+            parts = arg.substring(4, arg.len()).split(",")
+        else:
+            parts = [arg]
+        for index in 0..parts.len():
+            val part = parts[index]
+            var dyld_path = false
+            if index > 0 and (parts[index - 1] == "-rpath" or parts[index - 1] == "-install_name"):
+                for token in ["@loader_path", "@executable_path", "@rpath"]:
+                    if part == token or part.starts_with(token + "/"):
+                        dyld_path = true
+            val opaque = part.starts_with("@") and not dyld_path
+            val selector = part.starts_with("--ld-path=") or part.starts_with("-fuse-ld=") or part.starts_with("--config")
+            val named = part == "--ld-path" or part == "-fuse-ld" or part == "-filelist" or part == "--no-default-config"
+            if opaque or selector or named:
+                return Err("opaque response or competing linker selection in Darwin capture")
+    Ok(true)
+
+pub fn driver_environment_keep(key: text) -> bool:
+    key != "CCC_OVERRIDE_OPTIONS" and not key.starts_with("CLANG_CONFIG_FILE_")
+
+# One captured input: resolved absolute path and its sha256.
+pub struct DarwinInput:
+    path: text
+    sha256: text
+
+pub fn darwin_input_sha(inputs: [DarwinInput], path: text) -> text:
+    for item in inputs:
+        if item.path == path:
+            return item.sha256
+    ""
+
+# replay_inputs() argv substitution. resolved[i] is str((root / argv[i]).resolve())
+# computed by the caller; the record's argv/inputs come from verify.
+pub fn darwin_replay_argv(argv: [text], resolved: [text], inputs: [DarwinInput], main: text, main_sha: text, provider: text, provider_sha: text, output: text, driver: text) -> Result<[text], text>:
+    if main_sha == provider_sha:
+        return Err("Darwin main/provider identity collision")
+    var found_main = false
+    var found_provider = false
+    var out: [text] = [driver]
+    for i in 0..argv.len():
+        val sha = darwin_input_sha(inputs, resolved[i])
+        if sha != "" and sha == main_sha:
+            if found_main:
+                return Err("ambiguous duplicate Darwin main/provider input")
+            found_main = true
+            out.push(main)
+        elif sha != "" and sha == provider_sha:
+            if found_provider:
+                return Err("ambiguous duplicate Darwin main/provider input")
+            found_provider = true
+            out.push(provider)
+        else:
+            out.push(argv[i])
+    if not found_main or not found_provider:
+        return Err("Darwin capture did not consume exact emitted main/provider bytes")
+    out.push("-o")
+    out.push(output)
+    Ok(out)

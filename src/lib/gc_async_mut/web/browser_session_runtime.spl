@@ -1526,7 +1526,7 @@ impl BrowserSession:
             # Evaluation is tentative until its runtime/DOM mirrors publish as
             # one transaction.  Preserve the externally visible pre-eval state
             # so a rejected DOM candidate cannot leak runtime side effects.
-            val previous_runtime_state = self.runtime_state
+            val previous_runtime_state = Some(state.clone())
             val previous_pending_requests = self.pending_requests
             val previous_pending_request_head = self.pending_request_head
             val previous_inflight_requests = self.inflight_requests
@@ -1538,6 +1538,10 @@ impl BrowserSession:
             val previous_pending_cookie_writes = (
                 self.pending_script_cookie_writes
             )
+            val previous_cookies = self.cookies
+            val previous_cookie_overflow = self.script_cookie_write_overflow
+            val previous_current_title = self.current_title
+            val previous_current_body_html = self.current_body_html
             var runtime = state.runtime
             val result = runtime.eval(script)
             state.runtime = runtime
@@ -1556,6 +1560,10 @@ impl BrowserSession:
                 self.pending_script_cookie_writes = (
                     previous_pending_cookie_writes
                 )
+                self.cookies = previous_cookies
+                self.script_cookie_write_overflow = previous_cookie_overflow
+                self.current_title = previous_current_title
+                self.current_body_html = previous_current_body_html
                 return Err(error)
             match result:
                 Ok(value):
@@ -1583,7 +1591,7 @@ impl BrowserSession:
             # The restore set below is deliberately the same one eval_script
             # uses; the two must not drift apart. See
             # doc/08_tracking/bug/browser_session_fetch_body_not_disturbed_and_timer_rollback_2026-08-21.md
-            val previous_runtime_state = self.runtime_state
+            val previous_runtime_state = Some(state.clone())
             val previous_pending_requests = self.pending_requests
             val previous_pending_request_head = self.pending_request_head
             val previous_inflight_requests = self.inflight_requests
@@ -1595,6 +1603,9 @@ impl BrowserSession:
             val previous_pending_cookie_writes = (
                 self.pending_script_cookie_writes
             )
+            val previous_cookies = self.cookies
+            val previous_cookie_overflow = self.script_cookie_write_overflow
+            val previous_current_title = self.current_title
             val previous_body_html = self.current_body_html
             var runtime = state.runtime
             val js_ran = runtime.drain_due_timers(self.monotonic_time_ms)
@@ -1617,6 +1628,9 @@ impl BrowserSession:
                     self.pending_script_cookie_writes = (
                         previous_pending_cookie_writes
                     )
+                    self.cookies = previous_cookies
+                    self.script_cookie_write_overflow = previous_cookie_overflow
+                    self.current_title = previous_current_title
                     self.current_body_html = previous_body_html
                     return 0
             ran = ran + js_ran
@@ -2395,6 +2409,22 @@ impl BrowserSession:
             return Err("DOM event dispatch budget exceeded")
 
         if dispatch.default_action_allowed:
+            if (
+                (event_type == "click" and
+                 dispatch.default_action == "button-activate" and
+                 be_dom_submit_form_owner_route(
+                     self.current_dom, index, route
+                 ).is_some()) or
+                dispatch.default_action == "form-submit"
+            ):
+                if (
+                    self.csp_sandbox_policy.allow_forms and
+                    not self.csp_sandbox_policy.allow_top_navigation
+                ):
+                    self._append_warning(
+                        "CSP sandbox blocked top navigation"
+                    )
+                    return Ok(dispatch)
             if checkable_action == "":
                 self._consume_dom_dispatch_budget(1)?
             var focus_changed = focus_transitioned
@@ -2492,7 +2522,13 @@ impl BrowserSession:
                     self.current_dom, index, route
                 ):
                     val _ = self._reset_dom_form_route(form_route)?
-        self._sync_runtime_body_from_dom()
+        if (
+            checkable_action != "" or
+            focus_transitioned or
+            dispatch.actions.len() > 0 or
+            dispatch.default_action_allowed
+        ):
+            self._sync_runtime_body_from_dom()
         Ok(dispatch)
 
     me dispatch_dom_keyboard_code_event(
@@ -3089,7 +3125,10 @@ impl BrowserSession:
 
     me prepare_css_animation_instances_with_html(width: i32, html: text):
         if width != self.css_animation_viewport_width:
-            self._mark_css_animation_reconcile(false)
+            if self.css_animation_viewport_width >= 0:
+                self._mark_css_animation_reconcile(false)
+            else:
+                self.css_animation_reconcile_pending = true
             self.css_animation_viewport_width = width
         if not self.css_animation_reconcile_pending:
             return
@@ -3611,6 +3650,7 @@ impl BrowserSession:
         val body_changed = next_body_html != self.current_body_html
         val bridge_changed = inner_html_dirty or text_content_dirty
         val dom_mutation_changed = (
+            state.runtime.interpreter.host_dom_mutation_dirty or
             state.runtime.interpreter.host_dom_mutation_generation > 0
         )
         val structural_changed = body_changed or bridge_changed
@@ -3624,14 +3664,26 @@ impl BrowserSession:
             identity_changed: false,
             image_source_changed: false
         )
+        var sync_index = self.current_dom_identity_index()
+        if structural_changed:
+            if val Some(_) = sync_index:
+                val adopted_generation = self.dom_generation.next()?
+                val adopted_index = dom_identity_index_build(
+                    candidate_dom, adopted_generation
+                )?
+                if state.adopt_host_body_bridge(candidate_dom, adopted_generation):
+                    sync_index = Some(adopted_index)
         # Attribute mutations (id/class/value/style) must publish even in the
         # same task as a structural body.innerHTML/textContent write; the
         # structural path only replaces body children, so sync_dom still has
         # to apply per-element attribute diffs onto the candidate.
         if dom_mutation_changed:
-            if val Some(index) = self.current_dom_identity_index():
+            if val Some(index) = sync_index:
                 dom_sync = state.sync_dom(candidate_dom, index)
                 candidate_dom = dom_sync.root
+                var mutation_cleared = state.runtime.interpreter
+                mutation_cleared.host_dom_mutation_dirty = false
+                state.runtime.interpreter = mutation_cleared
         val document_changed = structural_changed or dom_sync.changed
         var candidate_body_html = next_body_html
         if dom_sync.changed:

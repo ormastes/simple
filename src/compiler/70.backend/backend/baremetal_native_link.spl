@@ -1,21 +1,46 @@
-# Baremetal native link: ld.lld + linker script, never the hosted cc driver.
+# Baremetal native link: ld.lld + linker script + freestanding runtime/crt0.
 #
 # `native-build --target <arch>-unknown-none[-elf]` without --emit-object used
 # to fall into the hosted link (host clang driver, host crt, host runtime), so
 # a RISC-V object either failed to link or came out as a host-arch image. A
-# freestanding target has no OS, crt or libc to link against: the image is the
+# freestanding target has no OS, crt or libc to link against: the image links
+# the committed crt0_<arch>.S + pure-Simple freestanding runtime (bm_rt.spl or
+# bm_rt32.spl with module-prefixed rt_* symbols rebound to the ABI names) with
 # user objects placed by a linker script. The caller may pass its own script
 # (`-T x.ld` / `-Wl,-T,x.ld` in the native linker flags, or the env knob
 # SIMPLE_BAREMETAL_LINKER_SCRIPT); otherwise a default per-arch script is
-# written next to the output. The image still needs `_start` and any extern
-# helpers (e.g. rt_mmio_write8) from the caller's objects: there is no
-# freestanding runtime yet (bug baremetal_no_freestanding_runtime_2026_11_15).
+# written next to the output.
 #
 # The default load bases match the real-firmware handoff used by the board
 # proxies (.claude/rules/board-runnable.md): riscv = OpenSBI next stage
 # (0x80200000), aarch64 = arm64 Image load (0x40080000), x86 = 1 MiB.
 
-use std.nogc_sync_mut.io_runtime.{env_get, file_write, process_run}
+use std.nogc_sync_mut.io_runtime.{
+    cwd, dir_create_all, dir_exists, env_get, file_delete, file_exists,
+    file_hash_sha256_or_empty, file_rename, file_write, getpid, hash_text,
+    host_os, process_run
+}
+use compiler.backend.llvm_capability.{
+    find_nm_portable, find_objcopy_portable, find_tool_portable
+}
+
+struct BaremetalFreestandingPlan:
+    arch: text
+    crt0_source: text
+    rt_source: text
+    rt_module: text
+    compile_target: text
+    redef_prefix: text
+    clang_target: text
+    clang_extra_flags: [text]
+
+struct BaremetalRuntimeNeeds:
+    include_crt0: bool
+    include_rt: bool
+
+struct BaremetalRuntimeInputs:
+    crt0_object: text
+    rt_object: text
 
 fn _baremetal_arch_of(field: text) -> text:
     if field.starts_with("riscv64"): return "riscv64"
@@ -24,8 +49,60 @@ fn _baremetal_arch_of(field: text) -> text:
         case "x86_64" | "amd64" | "x64": "x86_64"
         case "aarch64" | "arm64": "aarch64"
         case "i386" | "i486" | "i586" | "i686" | "x86": "x86"
-        case "arm" | "armv7" | "thumbv7em" | "thumbv7m" | "thumbv6m" | "thumbv8m.main" | "thumbv8m.base": "arm"
+        case "arm" | "arm32" | "armv7" | "thumbv7em" | "thumbv7m" | "thumbv6m" | "thumbv8m.main" | "thumbv8m.base": "arm"
         case _: ""
+
+fn _baremetal_env_or(key: text, fallback: text) -> text:
+    val v = env_get(key) ?? ""
+    if v != "": v else: fallback
+
+fn _baremetal_temp_dir() -> text:
+    val t1 = env_get("SIMPLE_TEMP_DIR") ?? ""
+    if t1 != "": return t1
+    val t2 = env_get("TMPDIR") ?? ""
+    if t2 != "": return t2
+    val t3 = env_get("TEMP") ?? ""
+    if t3 != "": return t3
+    if host_os() == "windows":
+        val t4 = env_get("USERPROFILE") ?? ""
+        if t4 != "": return t4 + "/AppData/Local/Temp"
+    "/tmp"
+
+fn _baremetal_freestanding_dir() -> text:
+    val rel = "src/lib/nogc_async_mut_noalloc/baremetal/freestanding"
+    if dir_exists(rel):
+        return rel
+    val lib_env = env_get("SIMPLE_LIB") ?? ""
+    if lib_env != "":
+        val candidate = lib_env + "/nogc_async_mut_noalloc/baremetal/freestanding"
+        if dir_exists(candidate):
+            return candidate
+    rel
+
+fn _baremetal_compiler_bin() -> text:
+    val env_bin = env_get("SIMPLE_BIN") ?? ""
+    if env_bin != "" and file_exists(env_bin):
+        return env_bin
+    val binary_env = env_get("SIMPLE_BINARY") ?? ""
+    if binary_env != "" and file_exists(binary_env):
+        return binary_env
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    if host_os() == "windows" and file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    ""
+
+fn _baremetal_find_clang() -> text:
+    val configured = env_get("CLANG") ?? ""
+    if configured != "":
+        return configured
+    val simple_cc = env_get("SIMPLE_CC") ?? ""
+    if simple_cc != "" and simple_cc.contains("clang"):
+        return simple_cc
+    find_tool_portable([
+        "clang-22", "clang-21", "clang-20", "clang-19",
+        "clang-18", "clang-17", "clang-16", "clang"
+    ])
 
 pub fn baremetal_link_arch_v1(target: text, host_arch: text) -> text:
     """Architecture of a freestanding link target, or "" for a hosted one."""
@@ -42,6 +119,337 @@ pub fn baremetal_link_arch_v1(target: text, host_arch: text) -> text:
     if parts.len() == 3 and parts[2] == "elf": return arch
     ""
 
+pub fn baremetal_runtime_symbol_names_v1() -> [text]:
+    """ABI symbol names provided by the freestanding pure-Simple runtime."""
+    [
+        "rt_string_new",
+        "rt_string_new_literal",
+        "rt_string_data",
+        "rt_string_len",
+        "rt_raw_i64_to_string",
+        "rt_strcat_tagged",
+        "rt_interp_cstr",
+        "rt_println_str",
+        "rt_println",
+        "rt_panic"
+    ]
+
+pub fn baremetal_freestanding_plan_v1(arch: text) -> BaremetalFreestandingPlan:
+    """Resolve freestanding crt0/bm_rt sources and target toolchain flags."""
+    val norm = _baremetal_arch_of(arch)
+    val rt_dir = _baremetal_freestanding_dir()
+    val a64_uart = _baremetal_env_or("BM_A64_UART", "0x09000000")
+    val a32_uart = _baremetal_env_or("BM_A32_UART", "0x09000000")
+    val rv_uart = _baremetal_env_or("BM_RV_UART", "0x10000000")
+    match norm:
+        case "x86_64":
+            BaremetalFreestandingPlan(
+                arch: "x86_64",
+                crt0_source: "{rt_dir}/crt0_x86_64.S",
+                rt_source: "{rt_dir}/bm_rt.spl",
+                rt_module: "bm_rt",
+                compile_target: "x86_64-unknown-none",
+                redef_prefix: "",
+                clang_target: "x86_64-unknown-elf",
+                clang_extra_flags: []
+            )
+        case "x86":
+            BaremetalFreestandingPlan(
+                arch: "x86",
+                crt0_source: "{rt_dir}/crt0_i686.S",
+                rt_source: "{rt_dir}/bm_rt32.spl",
+                rt_module: "bm_rt32",
+                compile_target: "i686-unknown-none",
+                redef_prefix: "",
+                clang_target: "i686-unknown-elf",
+                clang_extra_flags: []
+            )
+        case "aarch64":
+            BaremetalFreestandingPlan(
+                arch: "aarch64",
+                crt0_source: "{rt_dir}/crt0_aarch64.S",
+                rt_source: "{rt_dir}/bm_rt.spl",
+                rt_module: "bm_rt",
+                compile_target: "aarch64-unknown-none",
+                redef_prefix: "",
+                clang_target: "aarch64-unknown-elf",
+                clang_extra_flags: ["-DBM_UART=" + a64_uart]
+            )
+        case "arm":
+            BaremetalFreestandingPlan(
+                arch: "arm",
+                crt0_source: "{rt_dir}/crt0_arm32.S",
+                rt_source: "{rt_dir}/bm_rt.spl",
+                rt_module: "bm_rt",
+                compile_target: "armv7-unknown-none",
+                redef_prefix: "bm32_",
+                clang_target: "armv7-unknown-none-eabi",
+                clang_extra_flags: ["-mfloat-abi=soft", "-DBM_UART=" + a32_uart]
+            )
+        case "riscv64":
+            BaremetalFreestandingPlan(
+                arch: "riscv64",
+                crt0_source: "{rt_dir}/crt0_riscv64.S",
+                rt_source: "{rt_dir}/bm_rt.spl",
+                rt_module: "bm_rt",
+                compile_target: "riscv64-unknown-none",
+                redef_prefix: "",
+                clang_target: "riscv64-unknown-elf",
+                clang_extra_flags: ["-march=rv64imac", "-mabi=lp64", "-DBM_UART=" + rv_uart]
+            )
+        case "riscv32":
+            BaremetalFreestandingPlan(
+                arch: "riscv32",
+                crt0_source: "{rt_dir}/crt0_riscv32.S",
+                rt_source: "{rt_dir}/bm_rt32.spl",
+                rt_module: "bm_rt32",
+                compile_target: "riscv32-unknown-none",
+                redef_prefix: "",
+                clang_target: "riscv32-unknown-elf",
+                clang_extra_flags: ["-march=rv32imac", "-mabi=ilp32", "-DBM_UART=" + rv_uart]
+            )
+        case _:
+            BaremetalFreestandingPlan(
+                arch: norm,
+                crt0_source: "",
+                rt_source: "",
+                rt_module: "",
+                compile_target: "",
+                redef_prefix: "",
+                clang_target: "",
+                clang_extra_flags: []
+            )
+
+fn _baremetal_last_token(line: text) -> text:
+    var i = line.byte_len()
+    while i > 0 and (line.substring(i - 1, i) == " " or line.substring(i - 1, i) == "\t" or line.substring(i - 1, i) == "\r"):
+        i = i - 1
+    if i == 0:
+        return ""
+    var start = i
+    while start > 0 and line.substring(start - 1, start) != " " and line.substring(start - 1, start) != "\t":
+        start = start - 1
+    line.substring(start, i)
+
+fn _baremetal_nm_matches_module_sym(sym_name: text, rt_module: text, bare_sym: text) -> bool:
+    if sym_name == rt_module + "." + bare_sym:
+        return true
+    sym_name.ends_with("." + rt_module + "." + bare_sym)
+
+pub fn baremetal_redefine_sym_args_v1(nm_output: text, rt_module: text,
+        redef_prefix: text) -> Result<[text], text>:
+    """Build llvm-objcopy --redefine-sym arguments binding bm_rt definitions."""
+    var defined: [text] = []
+    for raw_line in nm_output.split("\n"):
+        val trimmed = raw_line.trim()
+        if trimmed == "" or trimmed.ends_with(":"):
+            continue
+        val name = _baremetal_last_token(trimmed)
+        if name != "":
+            defined.push(name)
+    var args: [text] = []
+    for sym in baremetal_runtime_symbol_names_v1():
+        var matched = ""
+        for name in defined:
+            if _baremetal_nm_matches_module_sym(name, rt_module, sym):
+                matched = name
+                break
+        if matched == "":
+            return Err("baremetal runtime: missing defined symbol {sym} in {rt_module}")
+        args.push("--redefine-sym")
+        args.push("{matched}={redef_prefix}{sym}")
+    Ok(args)
+
+pub fn baremetal_defined_symbol_set_v1(nm_output: text) -> Dict<text, bool>:
+    var out: Dict<text, bool> = {}
+    for raw_line in nm_output.split("\n"):
+        val trimmed = raw_line.trim()
+        if trimmed == "" or trimmed.ends_with(":"):
+            continue
+        val name = _baremetal_last_token(trimmed)
+        if name != "":
+            out[name] = true
+    out
+
+fn _baremetal_flags_disable_runtime(linker_flags: [text]) -> bool:
+    if (env_get("SIMPLE_BAREMETAL_NO_RUNTIME") ?? "") == "1":
+        return true
+    for flag in linker_flags:
+        if flag == "-nostdlib" or flag == "-nostartfiles":
+            return true
+        if flag.starts_with("-Wl,"):
+            for piece in flag.substring(4).split(","):
+                if piece == "-nostdlib" or piece == "-nostartfiles":
+                    return true
+    false
+
+pub fn baremetal_runtime_needs_from_nm_v1(defined_nm: text, undefined_nm: text,
+        linker_flags: [text]) -> BaremetalRuntimeNeeds:
+    """Decide which freestanding runtime inputs are missing from user objects."""
+    if _baremetal_flags_disable_runtime(linker_flags):
+        return BaremetalRuntimeNeeds(include_crt0: false, include_rt: false)
+    val defined = baremetal_defined_symbol_set_v1(defined_nm)
+    val undefined = baremetal_defined_symbol_set_v1(undefined_nm)
+    val user_has_start = defined.has("_start")
+    val user_has_rt = defined.has("rt_println_str") or defined.has("bm32_rt_println_str")
+    var has_undef_rt = false
+    for sym in baremetal_runtime_symbol_names_v1():
+        if undefined.has(sym):
+            has_undef_rt = true
+            break
+    if user_has_start:
+        return BaremetalRuntimeNeeds(
+            include_crt0: false,
+            include_rt: has_undef_rt and not user_has_rt
+        )
+    BaremetalRuntimeNeeds(
+        include_crt0: true,
+        include_rt: not user_has_rt
+    )
+
+fn _baremetal_inspect_user_needs(objects: [text], linker_flags: [text]) -> BaremetalRuntimeNeeds:
+    if _baremetal_flags_disable_runtime(linker_flags):
+        return BaremetalRuntimeNeeds(include_crt0: false, include_rt: false)
+    val nm = find_nm_portable()
+    if nm == "" or objects.len() == 0:
+        return BaremetalRuntimeNeeds(include_crt0: true, include_rt: true)
+    var existing: [text] = []
+    for obj in objects:
+        if file_exists(obj):
+            existing.push(obj)
+    if existing.len() == 0:
+        return BaremetalRuntimeNeeds(include_crt0: true, include_rt: true)
+    val (def_out, _def_err, def_code) = process_run(nm, ["--defined-only"] + existing)
+    if def_code != 0:
+        return BaremetalRuntimeNeeds(include_crt0: true, include_rt: true)
+    val (undef_out, _undef_err, undef_code) = process_run(nm, ["-u"] + existing)
+    val undef_text = if undef_code == 0: undef_out else: ""
+    baremetal_runtime_needs_from_nm_v1(def_out, undef_text, linker_flags)
+
+fn _baremetal_cache_dir(arch: text) -> text:
+    val base = _baremetal_temp_dir()
+    "{base}/simple_baremetal_rt_v1/{arch}"
+
+fn _baremetal_source_stamp(path: text, extra: text) -> text:
+    val digest = file_hash_sha256_or_empty(path)
+    if digest != "":
+        val raw = digest + ":" + extra
+        return "{hash_text(raw)}"
+    val content = file_read(path) ?? ""
+    "{hash_text(content + ":" + extra)}"
+
+fn _baremetal_commit_cache_object(tmp_path: text, cached_path: text, arch: text, kind: text) -> Result<text, text>:
+    if file_rename(tmp_path, cached_path):
+        return Ok(cached_path)
+    val _rm = file_delete(tmp_path)
+    if file_exists(cached_path):
+        return Ok(cached_path)
+    Err("baremetal link ({arch}): cannot publish cached {kind} object {cached_path}")
+
+fn _baremetal_prepare_crt0(plan: BaremetalFreestandingPlan) -> Result<text, text>:
+    val override_crt0 = env_get("SIMPLE_BAREMETAL_CRT0_OBJ") ?? ""
+    if override_crt0 != "":
+        if not file_exists(override_crt0):
+            return Err("baremetal link ({plan.arch}): SIMPLE_BAREMETAL_CRT0_OBJ missing: {override_crt0}")
+        return Ok(override_crt0)
+    val rt_dir_override = env_get("SIMPLE_BAREMETAL_RUNTIME_DIR") ?? ""
+    if rt_dir_override != "":
+        val candidate_crt0 = rt_dir_override + "/crt0.o"
+        if file_exists(candidate_crt0):
+            return Ok(candidate_crt0)
+    if plan.crt0_source == "" or not file_exists(plan.crt0_source):
+        return Err("baremetal link ({plan.arch}): missing freestanding crt0 source {plan.crt0_source}")
+    val clang = _baremetal_find_clang()
+    if clang == "":
+        return Err("baremetal link ({plan.arch}): clang is required to assemble {plan.crt0_source}")
+    val flags_key = plan.clang_target + "|" + plan.clang_extra_flags.join(" ") + "|" + clang
+    val stamp = _baremetal_source_stamp(plan.crt0_source, flags_key)
+    val cache_dir = _baremetal_cache_dir(plan.arch)
+    if not dir_create_all(cache_dir):
+        return Err("baremetal link ({plan.arch}): cannot create runtime cache {cache_dir}")
+    val cached = "{cache_dir}/crt0_{stamp}.o"
+    if file_exists(cached):
+        return Ok(cached)
+    val pid = getpid()
+    val tmp_obj = "{cache_dir}/crt0.{pid}.tmp.o"
+    val _rm_old = file_delete(tmp_obj)
+    val argv = ["--target=" + plan.clang_target] + plan.clang_extra_flags + ["-c", plan.crt0_source, "-o", tmp_obj]
+    val (_out, err, code) = process_run(clang, argv)
+    if code != 0 or not file_exists(tmp_obj):
+        val _rm = file_delete(tmp_obj)
+        return Err("baremetal link ({plan.arch}): crt0 assembly failed ({clang}): {err}")
+    _baremetal_commit_cache_object(tmp_obj, cached, plan.arch, "crt0")
+
+fn _baremetal_prepare_rt_object(plan: BaremetalFreestandingPlan) -> Result<text, text>:
+    val override_rt = env_get("SIMPLE_BAREMETAL_RUNTIME_OBJ") ?? ""
+    if override_rt != "":
+        if not file_exists(override_rt):
+            return Err("baremetal link ({plan.arch}): SIMPLE_BAREMETAL_RUNTIME_OBJ missing: {override_rt}")
+        return Ok(override_rt)
+    val rt_dir_override = env_get("SIMPLE_BAREMETAL_RUNTIME_DIR") ?? ""
+    if rt_dir_override != "":
+        val candidate_rt = rt_dir_override + "/bm_rt_abi.o"
+        if file_exists(candidate_rt):
+            return Ok(candidate_rt)
+    if plan.rt_source == "" or not file_exists(plan.rt_source):
+        return Err("baremetal link ({plan.arch}): missing freestanding runtime source {plan.rt_source}")
+    val simple_bin = _baremetal_compiler_bin()
+    if simple_bin == "":
+        return Err("baremetal link ({plan.arch}): Simple compiler binary unavailable to build {plan.rt_source}; set SIMPLE_BIN or SIMPLE_BAREMETAL_RUNTIME_OBJ")
+    val nm = find_nm_portable()
+    val objcopy = find_objcopy_portable()
+    if nm == "" or objcopy == "":
+        return Err("baremetal link ({plan.arch}): llvm-nm and llvm-objcopy are required for freestanding runtime symbol binding")
+    val stamp = _baremetal_source_stamp(plan.rt_source, plan.compile_target + "|" + plan.redef_prefix + "|" + simple_bin)
+    val cache_dir = _baremetal_cache_dir(plan.arch)
+    if not dir_create_all(cache_dir):
+        return Err("baremetal link ({plan.arch}): cannot create runtime cache {cache_dir}")
+    val cached = "{cache_dir}/bm_rt_abi_{stamp}.o"
+    if file_exists(cached):
+        return Ok(cached)
+    val pid = getpid()
+    val raw_tmp = "{cache_dir}/bm_rt_raw.{pid}.tmp.o"
+    val abi_tmp = "{cache_dir}/bm_rt_abi.{pid}.tmp.o"
+    val _rm1 = file_delete(raw_tmp)
+    val _rm2 = file_delete(abi_tmp)
+    val compile_args = ["native-build", plan.rt_source, "--target", plan.compile_target, "--emit-object", "-o", raw_tmp]
+    val (c_out, c_err, c_code) = process_run(simple_bin, compile_args)
+    if c_code != 0 or not file_exists(raw_tmp):
+        val _rm = file_delete(raw_tmp)
+        return Err("baremetal link ({plan.arch}): freestanding runtime compile failed: {c_err}{c_out}")
+    val (nm_out, nm_err, nm_code) = process_run(nm, ["--defined-only", raw_tmp])
+    if nm_code != 0:
+        val _rm = file_delete(raw_tmp)
+        return Err("baremetal link ({plan.arch}): runtime symbol scan failed ({nm}): {nm_err}")
+    val redef_args = match baremetal_redefine_sym_args_v1(nm_out, plan.rt_module, plan.redef_prefix):
+        case Ok(args): args
+        case Err(msg):
+            val _rm = file_delete(raw_tmp)
+            return Err(msg)
+    val (_oc_out, oc_err, oc_code) = process_run(objcopy, redef_args + [raw_tmp, abi_tmp])
+    val _rm_raw = file_delete(raw_tmp)
+    if oc_code != 0 or not file_exists(abi_tmp):
+        val _rm_abi = file_delete(abi_tmp)
+        return Err("baremetal link ({plan.arch}): runtime symbol redefine failed ({objcopy}): {oc_err}")
+    _baremetal_commit_cache_object(abi_tmp, cached, plan.arch, "runtime")
+
+pub fn baremetal_resolve_runtime_inputs_v1(arch: text, objects: [text],
+        linker_flags: [text]) -> Result<BaremetalRuntimeInputs, text>:
+    """Resolve/compile freestanding crt0 and bm_rt ABI objects if missing."""
+    val needs = _baremetal_inspect_user_needs(objects, linker_flags)
+    if not needs.include_crt0 and not needs.include_rt:
+        return Ok(BaremetalRuntimeInputs(crt0_object: "", rt_object: ""))
+    val plan = baremetal_freestanding_plan_v1(arch)
+    if plan.arch == "":
+        return Err("baremetal link: unsupported freestanding arch '{arch}'")
+    var crt0_obj = ""
+    var rt_obj = ""
+    if needs.include_crt0:
+        crt0_obj = _baremetal_prepare_crt0(plan)?
+    if needs.include_rt:
+        rt_obj = _baremetal_prepare_rt_object(plan)?
+    Ok(BaremetalRuntimeInputs(crt0_object: crt0_obj, rt_object: rt_obj))
+
 pub fn baremetal_default_linker_script_v1(arch: text) -> text:
     val base = match arch:
         case "riscv64" | "riscv32": "0x80200000"
@@ -54,45 +462,82 @@ pub fn baremetal_default_linker_script_v1(arch: text) -> text:
         "  .data : { *(.data*) *(.sdata*) }\n" +
         "  .bss : { *(.bss*) *(.sbss*) *(COMMON) }\n}\n"
 
-pub fn baremetal_link_argv_v1(objects: [text], output: text, default_script: text,
+pub fn baremetal_link_with_runtime_inputs_argv_v1(inputs: BaremetalRuntimeInputs,
+        objects: [text], output: text, default_script: text,
         linker_flags: [text]) -> [text]:
-    """ld.lld argv. A caller -T script replaces the default one."""
+    """ld.lld argv ordering crt0 before user objects and bm_rt ABI after."""
     var flags: [text] = []
     var has_script = false
     for flag in linker_flags:
         if flag.starts_with("-Wl,"):
             for piece in flag.substring(4).split(","):
-                if piece == "-T": has_script = true
-                flags.push(piece)
+                if piece == "":
+                    continue
+                if piece.starts_with("-T") or piece.starts_with("--script"): has_script = true
+                if piece != "-nostdlib" and piece != "-nostartfiles":
+                    flags.push(piece)
         else:
-            if flag.starts_with("-T"): has_script = true
-            flags.push(flag)
+            if flag.starts_with("-T") or flag.starts_with("--script"): has_script = true
+            if flag != "-nostdlib" and flag != "-nostartfiles":
+                flags.push(flag)
     var argv: [text] = []
     if not has_script:
         argv.push("-T")
         argv.push(default_script)
     argv.push("-o")
     argv.push(output)
-    for obj in objects: argv.push(obj)
-    for flag in flags: argv.push(flag)
+    if inputs.crt0_object != "":
+        argv.push(inputs.crt0_object)
+    for obj in objects:
+        argv.push(obj)
+    if inputs.rt_object != "":
+        argv.push(inputs.rt_object)
+    for flag in flags:
+        argv.push(flag)
     argv
+
+pub fn baremetal_link_argv_v1(objects: [text], output: text, default_script: text,
+        linker_flags: [text]) -> [text]:
+    """ld.lld argv. A caller -T script replaces the default one."""
+    baremetal_link_with_runtime_inputs_argv_v1(
+        BaremetalRuntimeInputs(crt0_object: "", rt_object: ""),
+        objects, output, default_script, linker_flags)
+
+fn _baremetal_find_lld() -> text:
+    val configured = env_get("SIMPLE_BAREMETAL_LD") ?? ""
+    if configured != "":
+        return configured
+    val found = find_tool_portable([
+        "ld.lld", "ld.lld-22", "ld.lld-21", "ld.lld-20",
+        "ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16"
+    ])
+    if found != "":
+        return found
+    "ld.lld"
 
 pub fn link_baremetal_native_v1(objects: [text], output: text, arch: text,
         linker_flags: [text]) -> Result<text, text>:
     val script = output + ".baremetal.ld"
     if not file_write(script, baremetal_default_linker_script_v1(arch)):
         return Err("baremetal link: cannot write linker script {script}")
-    val lld = env_get("SIMPLE_BAREMETAL_LD") ?? "ld.lld"
+    val lld = _baremetal_find_lld()
     # The CLI does not fill native_linker_flags; SIMPLE_BAREMETAL_LINKER_SCRIPT
     # is the CLI-reachable way to supply a board script.
     val board_script = env_get("SIMPLE_BAREMETAL_LINKER_SCRIPT") ?? ""
     val flags = if board_script != "": linker_flags + ["-T", board_script] else: linker_flags
-    val argv = baremetal_link_argv_v1(objects, output, script, flags)
+    val runtime_inputs = baremetal_resolve_runtime_inputs_v1(arch, objects, flags)?
+    val argv = baremetal_link_with_runtime_inputs_argv_v1(
+        runtime_inputs, objects, output, script, flags)
     val (_out, err, code) = process_run(lld, argv)
     val cmd = argv.join(" ")
     if code != 0:
         return Err("baremetal link ({arch}) failed: {lld} {cmd}: {err}")
     Ok(output)
 
+export BaremetalFreestandingPlan, BaremetalRuntimeNeeds, BaremetalRuntimeInputs
 export baremetal_link_arch_v1, baremetal_default_linker_script_v1
-export baremetal_link_argv_v1, link_baremetal_native_v1
+export baremetal_link_argv_v1, baremetal_link_with_runtime_inputs_argv_v1
+export baremetal_runtime_symbol_names_v1, baremetal_freestanding_plan_v1
+export baremetal_redefine_sym_args_v1, baremetal_defined_symbol_set_v1
+export baremetal_runtime_needs_from_nm_v1, baremetal_resolve_runtime_inputs_v1
+export link_baremetal_native_v1

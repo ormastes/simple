@@ -1,13 +1,44 @@
 # Regression: a baremetal `native-build --target <arch>-unknown-none[-elf]`
 # without --emit-object took the HOSTED link path (host clang driver, host
 # crt/runtime) and produced a host-arch image or a host link error for a
-# RISC-V object. Baremetal links must keep the target and run ld.lld with a
-# linker script (default per-arch script unless the caller passes -T).
+# RISC-V object, and later omitted freestanding crt0 + bm_rt objects
+# (baremetal_no_freestanding_runtime_2026_11_15). Baremetal links must keep
+# the target and run ld.lld with a linker script plus freestanding crt0/bm_rt.
 use std.spec
 use std.spec.step
-use std.nogc_sync_mut.io_runtime.{file_read}
-use compiler.backend.baremetal_native_link.{baremetal_link_arch_v1,
-    baremetal_default_linker_script_v1, baremetal_link_argv_v1}
+use std.nogc_sync_mut.io_runtime.{
+    dir_create_all, dir_remove_all, env_get, file_exists, file_read,
+    file_write, getpid, host_os, process_run
+}
+use compiler.backend.llvm_capability.{
+    find_nm_portable, find_objcopy_portable, find_tool_portable
+}
+use compiler.backend.baremetal_native_link.{
+    BaremetalRuntimeInputs, baremetal_link_arch_v1,
+    baremetal_default_linker_script_v1, baremetal_link_argv_v1,
+    baremetal_link_with_runtime_inputs_argv_v1, baremetal_freestanding_plan_v1,
+    baremetal_redefine_sym_args_v1, baremetal_runtime_needs_from_nm_v1,
+    baremetal_runtime_symbol_names_v1, link_baremetal_native_v1
+}
+
+fn _tmp_test_dir(tag: text) -> text:
+    val base = env_get("TEMP") ?? env_get("TMPDIR") ?? "/tmp"
+    val d = "{base}/simple_bm_link_spec_{tag}_{getpid()}"
+    val _ok = dir_create_all(d)
+    d
+
+fn _test_clang() -> text:
+    val configured = env_get("CLANG") ?? ""
+    if configured != "": return configured
+    find_tool_portable([
+        "clang-22", "clang-21", "clang-20", "clang-19",
+        "clang-18", "clang-17", "clang-16", "clang"
+    ])
+
+fn _test_lld() -> text:
+    val configured = env_get("SIMPLE_BAREMETAL_LD") ?? ""
+    if configured != "": return configured
+    find_tool_portable(["ld.lld-22", "ld.lld-21", "ld.lld-20", "ld.lld-19", "ld.lld"])
 
 describe "baremetal native link":
     it "classifies freestanding triples by architecture":
@@ -43,11 +74,155 @@ describe "baremetal native link":
         expect(argv).to_equal(["-o", "out.elf", "a.o", "-T", "board.ld"])
         val wl = baremetal_link_argv_v1(["a.o"], "out.elf", "def.ld", ["-Wl,-T,board.ld"])
         expect(wl).to_equal(["-o", "out.elf", "a.o", "-T", "board.ld"])
+        val wl_attached = baremetal_link_argv_v1(["a.o"], "out.elf", "def.ld", ["-Wl,-Tboard.ld"])
+        expect(wl_attached).to_equal(["-o", "out.elf", "a.o", "-Tboard.ld"])
 
-    it "is routed before the hosted cc link":
-        step("the orchestrator dispatches baremetal targets to ld.lld")
+    it "is routed before the hosted cc link and returns NativeLinkedArtifactV2":
+        step("the orchestrator dispatches baremetal targets through native_link_without_startup_v2")
         val src = file_read("src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl")
         val route = src.index_of("link_baremetal_native_v1(user_objects") ?? -1
         val hosted = src.index_of("val hosted_plan = hosted_c_compiler_plan(") ?? -1
+        val wrapper = src.index_of("native_link_without_startup_v2(") ?? -1
         expect(route > 0).to_equal(true)
         expect(route < hosted).to_equal(true)
+        expect(wrapper > 0).to_equal(true)
+        expect(src.contains("return native_link_without_startup_v2(\n            link_baremetal_native_v1(user_objects") or src.contains("native_link_without_startup_v2(link_baremetal_native_v1")).to_equal(true)
+
+    it "selects freestanding crt0, bm_rt/bm_rt32, and ABI rename policy per arch":
+        val rv64 = baremetal_freestanding_plan_v1("riscv64")
+        expect(rv64.crt0_source.ends_with("crt0_riscv64.S")).to_equal(true)
+        expect(rv64.rt_module).to_equal("bm_rt")
+        expect(rv64.redef_prefix).to_equal("")
+        expect(rv64.compile_target).to_equal("riscv64-unknown-none")
+        val rv32 = baremetal_freestanding_plan_v1("riscv32")
+        expect(rv32.crt0_source.ends_with("crt0_riscv32.S")).to_equal(true)
+        expect(rv32.rt_module).to_equal("bm_rt32")
+        val x86 = baremetal_freestanding_plan_v1("i686")
+        expect(x86.crt0_source.ends_with("crt0_i686.S")).to_equal(true)
+        expect(x86.rt_module).to_equal("bm_rt32")
+        val arm32 = baremetal_freestanding_plan_v1("armv7")
+        expect(arm32.crt0_source.ends_with("crt0_arm32.S")).to_equal(true)
+        expect(arm32.rt_module).to_equal("bm_rt")
+        expect(arm32.redef_prefix).to_equal("bm32_")
+
+    it "redefines all 10 module-prefixed bm_rt symbols and fails closed if any is absent":
+        var nm_lines: [text] = []
+        for sym in baremetal_runtime_symbol_names_v1():
+            nm_lines.push("0000000000000000 T lib.nogc_async_mut_noalloc.baremetal.freestanding.bm_rt.{sym}")
+        val nm_text = nm_lines.join("\n")
+        match baremetal_redefine_sym_args_v1(nm_text, "bm_rt", ""):
+            case Ok(args):
+                expect(args.len()).to_equal(20)
+                expect(args[0]).to_equal("--redefine-sym")
+                expect(args[1]).to_equal("lib.nogc_async_mut_noalloc.baremetal.freestanding.bm_rt.rt_string_new=rt_string_new")
+                expect(args[19]).to_equal("lib.nogc_async_mut_noalloc.baremetal.freestanding.bm_rt.rt_panic=rt_panic")
+            case Err(_): assert(false)
+        match baremetal_redefine_sym_args_v1(nm_text, "bm_rt", "bm32_"):
+            case Ok(args):
+                expect(args[1]).to_equal("lib.nogc_async_mut_noalloc.baremetal.freestanding.bm_rt.rt_string_new=bm32_rt_string_new")
+            case Err(_): assert(false)
+        val missing_panic = nm_lines.slice(0, nm_lines.len() - 1).join("\n")
+        match baremetal_redefine_sym_args_v1(missing_panic, "bm_rt", ""):
+            case Ok(_): assert(false)
+            case Err(msg): expect(msg).to_contain("rt_panic")
+
+    it "orders crt0 before user objects and bm_rt after user objects, respecting custom _start and -nostdlib":
+        val inputs = BaremetalRuntimeInputs(crt0_object: "crt0.o", rt_object: "bm_rt_abi.o")
+        val argv = baremetal_link_with_runtime_inputs_argv_v1(
+            inputs, ["user_a.o", "user_b.o"], "out.elf", "def.ld", [])
+        expect(argv).to_equal(["-T", "def.ld", "-o", "out.elf", "crt0.o", "user_a.o", "user_b.o", "bm_rt_abi.o"])
+        val need_both = baremetal_runtime_needs_from_nm_v1("0000 T __simple_main", "U rt_println_str", [])
+        expect(need_both.include_crt0).to_equal(true)
+        expect(need_both.include_rt).to_equal(true)
+        val custom_start_with_rt = baremetal_runtime_needs_from_nm_v1("0000 T _start\n0010 T __simple_main", "U rt_string_new_literal", [])
+        expect(custom_start_with_rt.include_crt0).to_equal(false)
+        expect(custom_start_with_rt.include_rt).to_equal(true)
+        val custom_start_self_contained = baremetal_runtime_needs_from_nm_v1("0000 T _start", "", [])
+        expect(custom_start_self_contained.include_crt0).to_equal(false)
+        expect(custom_start_self_contained.include_rt).to_equal(false)
+        val nostdlib = baremetal_runtime_needs_from_nm_v1("0000 T __simple_main", "U rt_println_str", ["-nostdlib"])
+        expect(nostdlib.include_crt0).to_equal(false)
+        expect(nostdlib.include_rt).to_equal(false)
+
+    it "assembles real crt0 and links freestanding __simple_main + rt symbols with ld.lld":
+        val clang = _test_clang()
+        val lld = _test_lld()
+        val nm = find_nm_portable()
+        val objcopy = find_objcopy_portable()
+        if clang == "" or lld == "" or nm == "" or objcopy == "":
+            fail("LLVM toolchain (clang/ld.lld/llvm-nm/llvm-objcopy) required for baremetal link probe")
+            return
+        val d = _tmp_test_dir("rv64")
+        val main_c = "{d}/main.c"
+        val main_o = "{d}/main.o"
+        val rt_c = "{d}/rt_stub.c"
+        val rt_raw_o = "{d}/rt_raw.o"
+        val rt_abi_o = "{d}/bm_rt_abi.o"
+        val out_elf = "{d}/hello.elf"
+        expect(file_write(main_c,
+            "extern long rt_string_new_literal(long p, long n);\n" +
+            "extern void rt_println_str(long s);\n" +
+            "extern void rt_panic(long s);\n" +
+            "long __simple_main(void) {{ long s = rt_string_new_literal(0, 0); rt_println_str(s); rt_panic(s); return 0; }}\n")).to_equal(true)
+        val (_c1_out, c1_err, c1_code) = process_run(clang, [
+            "--target=riscv64-unknown-elf", "-march=rv64imac", "-mabi=lp64",
+            "-ffreestanding", "-c", main_c, "-o", main_o])
+        expect(c1_code).to_equal(0)
+        # Synthesize module-prefixed bm_rt symbols that bm_rt.spl emits, then
+        # run the exact nm + objcopy --redefine-sym pipeline against bm_rt_abi.o.
+        expect(file_write(rt_c,
+            "extern void bm_putc(long ch);\n" +
+            "extern void bm_halt(void);\n" +
+            "long fn0(long p, long l) __asm__(\"bm_rt.rt_string_new\");\n" +
+            "long fn1(long p, long l) __asm__(\"bm_rt.rt_string_new_literal\");\n" +
+            "long fn2(long s) __asm__(\"bm_rt.rt_string_data\");\n" +
+            "long fn3(long s) __asm__(\"bm_rt.rt_string_len\");\n" +
+            "long fn4(long n) __asm__(\"bm_rt.rt_raw_i64_to_string\");\n" +
+            "long fn5(long a, long b) __asm__(\"bm_rt.rt_strcat_tagged\");\n" +
+            "long fn6(long a, long b) __asm__(\"bm_rt.rt_interp_cstr\");\n" +
+            "void fn7(long s) __asm__(\"bm_rt.rt_println_str\");\n" +
+            "void fn8(long s) __asm__(\"bm_rt.rt_println\");\n" +
+            "void fn9(long s) __asm__(\"bm_rt.rt_panic\");\n" +
+            "long fn0(long p, long l) {{ return 0; }}\n" +
+            "long fn1(long p, long l) {{ return 0; }}\n" +
+            "long fn2(long s) {{ return 0; }}\n" +
+            "long fn3(long s) {{ return 0; }}\n" +
+            "long fn4(long n) {{ return 0; }}\n" +
+            "long fn5(long a, long b) {{ return 0; }}\n" +
+            "long fn6(long a, long b) {{ return 0; }}\n" +
+            "void fn7(long s) {{ bm_putc(65); }}\n" +
+            "void fn8(long s) {{ bm_putc(65); }}\n" +
+            "void fn9(long s) {{ bm_halt(); }}\n")).to_equal(true)
+        val (_c2_out, c2_err, c2_code) = process_run(clang, [
+            "--target=riscv64-unknown-elf", "-march=rv64imac", "-mabi=lp64",
+            "-ffreestanding", "-c", rt_c, "-o", rt_raw_o])
+        expect(c2_code).to_equal(0)
+        val (nm_out, _nm_err, nm_code) = process_run(nm, ["--defined-only", rt_raw_o])
+        expect(nm_code).to_equal(0)
+        val redef = match baremetal_redefine_sym_args_v1(nm_out, "bm_rt", ""):
+            case Ok(args): args
+            case Err(msg):
+                fail("redef failed: {msg}")
+                []
+        expect(redef.len()).to_equal(20)
+        val (_oc_out, oc_err, oc_code) = process_run(objcopy, redef + [rt_raw_o, rt_abi_o])
+        expect(oc_code).to_equal(0)
+        # link_baremetal_native_v1 sees main_o + rt_abi_o lack _start, so it
+        # automatically assembles crt0_riscv64.S and links crt0 + user + bm_rt
+        # via ld.lld with zero undefined symbols.
+        val res = link_baremetal_native_v1([main_o, rt_abi_o], out_elf, "riscv64", [])
+        match res:
+            case Err(e):
+                val _rm = dir_remove_all(d)
+                fail("link_baremetal_native_v1 failed: {e}")
+            case Ok(path):
+                expect(file_exists(path)).to_equal(true)
+                val (u_out, _u_err, u_code) = process_run(nm, ["-u", path])
+                expect(u_code).to_equal(0)
+                expect(u_out.trim()).to_equal("")
+                val (def_out, _d_err, d_code) = process_run(nm, ["--defined-only", path])
+                expect(d_code).to_equal(0)
+                expect(def_out.contains("_start")).to_equal(true)
+                expect(def_out.contains("rt_println_str")).to_equal(true)
+                expect(def_out.contains("bm_putc")).to_equal(true)
+        val _rm = dir_remove_all(d)

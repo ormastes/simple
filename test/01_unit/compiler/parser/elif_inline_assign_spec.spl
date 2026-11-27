@@ -1,0 +1,88 @@
+"""
+# One-line `elif c: x = v` statement arms
+
+A one-line `elif` arm carrying an assignment statement must parse as an arm of
+the enclosing `if` chain, in both parsers. The pure-Simple parser is checked
+structurally (`parse_statement`); the runtime witnesses are parsed by whichever
+compiler runs this spec, so they pin the executing (seed) parser too.
+See doc/08_tracking/bug/seed_elif_inline_assign_2026-11-27.md.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.core.parser.{parser_init, parse_statement}
+use compiler.core.ast.{stmt_get_tag, stmt_get_type, stmt_get_body, elif_get_else}
+use compiler.core.ast.{STMT_IF, STMT_ASSIGN}
+
+fn rt_chain(c: i64) -> i64:
+    var x = 0
+    if c == 1: x = 10
+    elif c == 2: x = 20
+    else: x = 30
+    x
+
+fn rt_block_then(c: bool, d: bool) -> i64:
+    var x = 0
+    if c:
+        x = 1
+    elif d: x = 2
+    else:
+        x = 3
+    x
+
+fn rt_nested(c: bool, d: bool, i: i64) -> i64:
+    var x = 0
+    if i == 1:
+        if c: x = 5
+    elif d: x = i
+    x
+
+# Tag of the first statement in the arm chained after `if_stmt`'s then-arm,
+# or -1 when the chain has no elif arm (the dropped-arm symptom).
+fn elif_arm_first_tag(if_stmt: i64) -> i64:
+    val chain = stmt_get_type(if_stmt)
+    if chain < 0:
+        return -1
+    val tail = elif_get_else(chain)
+    if tail.len() != 1:
+        return -1
+    val elif_stmt = tail[0]
+    if stmt_get_tag(elif_stmt) != STMT_IF:
+        return -1
+    val body = stmt_get_body(elif_stmt)
+    if body.len() != 1:
+        return -1
+    stmt_get_tag(body[0])
+
+describe "one-line elif assignment at runtime":
+    it "selects each arm of an inline chain":
+        expect(rt_chain(1)).to_equal(10)
+        expect(rt_chain(2)).to_equal(20)
+        expect(rt_chain(3)).to_equal(30)
+
+    it "mixes block and inline arms":
+        expect(rt_block_then(true, true)).to_equal(1)
+        expect(rt_block_then(false, true)).to_equal(2)
+        expect(rt_block_then(false, false)).to_equal(3)
+
+    it "binds the elif to the outer if after a nested inline if":
+        expect(rt_nested(false, true, 1)).to_equal(0)
+        expect(rt_nested(false, true, 4)).to_equal(4)
+
+describe "one-line elif assignment in the pure-Simple parser":
+    it "keeps the inline elif arm as an assignment":
+        parser_init("if a: x = 1\nelif b: x = 2\nelse: x = 3\n")
+        val s = parse_statement()
+        expect(stmt_get_tag(s)).to_equal(STMT_IF)
+        expect(stmt_get_tag(stmt_get_body(s)[0])).to_equal(STMT_ASSIGN)
+        expect(elif_arm_first_tag(s)).to_equal(STMT_ASSIGN)
+
+    it "keeps an inline elif after a block then-arm":
+        parser_init("if a:\n    x = 1\nelif b: x = 2\n")
+        val s = parse_statement()
+        expect(stmt_get_tag(s)).to_equal(STMT_IF)
+        expect(elif_arm_first_tag(s)).to_equal(STMT_ASSIGN)
+
+    it "reports no elif arm for a plain if (probe is not vacuous)":
+        parser_init("if a: x = 1\n")
+        val s = parse_statement()
+        expect(elif_arm_first_tag(s)).to_equal(-1)

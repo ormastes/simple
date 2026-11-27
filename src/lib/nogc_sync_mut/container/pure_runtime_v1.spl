@@ -433,40 +433,83 @@ fn _wait_v1(lease: SosixContainLeaseV1, wall: SosixContainMillisV1) -> Result<te
         sosix_sleep_ms(20)
     Err("cancel-did-not-reach-terminal")
 
+# Admission half of a run: launch -> admitted. `lease` is Some only when the job is running and
+# owned by the caller, who must drive it to collect (finish) or abort it. Every other outcome is a
+# complete PureExecV1 with no job left behind (or cleanup-unproven).
+struct PureBeganV1:
+    exec: PureExecV1
+    lease: Option<SosixContainLeaseV1>
+
+fn _began_over_v1(exec: PureExecV1) -> PureBeganV1:
+    PureBeganV1(exec: exec, lease: None)
+
+fn _begin_v1(session: PureContainerSessionV1) -> PureBeganV1:
+    val pending = match _advance_v1(session.life, "launch"):
+        Ok(next): next
+        Err(reason): return _began_over_v1(_exec_stopped_v1(session, session.life, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0)))
+    match sosix_contain_start_v1(session.request):
+        SosixContainAdmissionV1.RejectedBeforeStart(reason):
+            return _began_over_v1(_exec_stopped_v1(session, pending, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0)))
+        SosixContainAdmissionV1.FailedAfterCleanup(reason):
+            return _began_over_v1(_exec_stopped_v1(session, pending, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0)))
+        SosixContainAdmissionV1.Unknown(reason):
+            return _began_over_v1(_exec_unknown_v1(session, pending, reason))
+        SosixContainAdmissionV1.Started(lease):
+            val running = match _advance_v1(pending, "admitted"):
+                Ok(next): next
+                Err(edge): return _began_over_v1(_exec_abort_v1(session, pending, lease, "lifecycle: " + edge))
+            PureBeganV1(exec: _exec_stopped_v1(session, running, "running", "", SosixContainExitCodeV1(-1), SosixContainBytesV1(0)),
+                lease: Some(lease))
+
+# Closing half: collect the (terminal) job and advance the lifecycle. `cancelled` selects the
+# stop edges over the leader-exit edge. A non-empty tree after collect is cleanup-unproven.
+fn _finish_v1(session: PureContainerSessionV1, running: PureLifecycleV1, lease: SosixContainLeaseV1,
+        cancelled: bool, reason: text) -> PureExecV1:
+    val collected = sosix_contain_collect_v1(lease)
+    if collected.is_err(): return _exec_unknown_v1(session, running, collected.unwrap_err())
+    val receipt = collected.unwrap()
+    val retire = if cancelled: ["stop", "retire"] else: ["leader-exit"]
+    val closing = if receipt.tree_empty.value: retire + ["absence-proven"] else: retire + ["uncertain"]
+    val final_life = match _chain_v1(running, closing):
+        Ok(next): next
+        Err(edge):
+            val status = if receipt.tree_empty.value: "rejected" else: "cleanup-unproven"
+            return _exec_stopped_v1(session, running, status, "lifecycle: " + edge, receipt.exit_code, receipt.peak_memory)
+    if not receipt.tree_empty.value:
+        return _exec_stopped_v1(session, final_life, "cleanup-unproven", "tree-not-empty", receipt.exit_code, receipt.peak_memory)
+    _exec_stopped_v1(session, final_life, "exited", reason, receipt.exit_code, receipt.peak_memory)
+
+# Stop a running job: cancel the job object, wait for a terminal state, collect. A job whose
+# leader already exited on its own is finished with the leader-exit edge (nothing was stopped).
+fn _stop_v1(session: PureContainerSessionV1, running: PureLifecycleV1, lease: SosixContainLeaseV1) -> PureExecV1:
+    val first = sosix_contain_poll_v1(lease)
+    if first.is_err(): return _exec_abort_v1(session, running, lease, "stop-poll-failed: " + first.unwrap_err())
+    var cancelled = false
+    if not first.unwrap().terminal.value:
+        val done = sosix_contain_cancel_v1(lease)
+        if done.is_err(): return _exec_abort_v1(session, running, lease, "stop-cancel-failed: " + done.unwrap_err())
+        cancelled = true
+        val reap = sosix_time_now_monotonic_ms() + _GRACE_MS
+        var terminal = false
+        while not terminal and sosix_time_now_monotonic_ms() < reap:
+            val observed = sosix_contain_poll_v1(lease)
+            if observed.is_err(): return _exec_abort_v1(session, running, lease, "stop-poll-failed: " + observed.unwrap_err())
+            terminal = observed.unwrap().terminal.value
+            if not terminal: sosix_sleep_ms(20)
+        if not terminal: return _exec_abort_v1(session, running, lease, "cancel-did-not-reach-terminal")
+    _finish_v1(session, running, lease, cancelled, if cancelled: "stopped" else: "")
+
 # launch -> admitted -> wait -> collect. `Unknown` admission, a lease that cannot be
 # driven and a non-empty tree after collect all return cleanup-unproven, which the
 # caller must not tear down.
 fn _execute_v1(session: PureContainerSessionV1) -> PureExecV1:
-    val pending = match _advance_v1(session.life, "launch"):
-        Ok(next): next
-        Err(reason): return _exec_stopped_v1(session, session.life, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
-    match sosix_contain_start_v1(session.request):
-        SosixContainAdmissionV1.RejectedBeforeStart(reason):
-            return _exec_stopped_v1(session, pending, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
-        SosixContainAdmissionV1.FailedAfterCleanup(reason):
-            return _exec_stopped_v1(session, pending, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
-        SosixContainAdmissionV1.Unknown(reason):
-            return _exec_unknown_v1(session, pending, reason)
-        SosixContainAdmissionV1.Started(lease):
-            val running = match _advance_v1(pending, "admitted"):
-                Ok(next): next
-                Err(edge): return _exec_abort_v1(session, pending, lease, "lifecycle: " + edge)
-            val waited = _wait_v1(lease, session.spec.limits.wall)
-            if waited.is_err(): return _exec_abort_v1(session, running, lease, "wait-failed: " + waited.unwrap_err())
-            val cancelled = waited.unwrap() != ""
-            val collected = sosix_contain_collect_v1(lease)
-            if collected.is_err(): return _exec_unknown_v1(session, running, collected.unwrap_err())
-            val receipt = collected.unwrap()
-            val retire = if cancelled: ["stop", "retire"] else: ["leader-exit"]
-            val closing = if receipt.tree_empty.value: retire + ["absence-proven"] else: retire + ["uncertain"]
-            val final_life = match _chain_v1(running, closing):
-                Ok(next): next
-                Err(edge):
-                    val status = if receipt.tree_empty.value: "rejected" else: "cleanup-unproven"
-                    return _exec_stopped_v1(session, running, status, "lifecycle: " + edge, receipt.exit_code, receipt.peak_memory)
-            if not receipt.tree_empty.value:
-                return _exec_stopped_v1(session, final_life, "cleanup-unproven", "tree-not-empty", receipt.exit_code, receipt.peak_memory)
-            _exec_stopped_v1(session, final_life, "exited", waited.unwrap(), receipt.exit_code, receipt.peak_memory)
+    val began = _begin_v1(session)
+    if began.lease.is_none(): return began.exec
+    val lease = began.lease.unwrap()
+    val running = began.exec.session.life
+    val waited = _wait_v1(lease, session.spec.limits.wall)
+    if waited.is_err(): return _exec_abort_v1(session, running, lease, "wait-failed: " + waited.unwrap_err())
+    _finish_v1(session, running, lease, waited.unwrap() != "", waited.unwrap())
 
 # Order matters: dematerialize first (destroy refuses while lower/ exists), then the
 # view, then the view directory and the attempt scratch.
@@ -561,4 +604,5 @@ pub fn pure_container_run_v1(spec: PureContainerSpecV1) -> PureContainerRunV1:
 export PureContainerSpecV1, PureContainerRunV1, PureContainerQualifyV1
 export pure_container_qualify_v1, pure_container_run_v1
 export PureContainerSessionV1, PurePreparedV1, PureExecV1, PureTeardownV1
-export _prepare_v1, _execute_v1, _teardown_v1
+export PureBeganV1
+export _prepare_v1, _execute_v1, _teardown_v1, _begin_v1, _stop_v1, _finish_v1

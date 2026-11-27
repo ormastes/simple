@@ -1,0 +1,148 @@
+# Trust anchor for pure-Simple bootstrap twins (phase 3 and later).
+#
+# The Python owners pin their interpreter (python_sha256 = digest of
+# sys.executable, re-checked after the run). A Simple twin runs on the verified
+# stage binary instead, so it pins THAT binary: the digest of the running image
+# must equal stage3_sha256 in an admitted stage provenance record
+# (bootstrap/stage3/<host>/provenance.env, schema
+# simple-bootstrap-stage3-provenance-v4/v5, status=pass). Any other state —
+# no pin, unreadable pin, malformed digest, not admitted, mismatch, or an
+# unhashable running image — fails closed. Shared by the Hello matrix twin and
+# the perf-runner twin; keep one implementation.
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_hash_sha256_or_empty, env_get, host_os}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.nogc_sync_mut.io.windows_image_owner.{windows_image_path}
+
+val VERIFIED_STAGE_PIN_ENV = "SIMPLE_VERIFIED_STAGE_PIN"
+
+struct VerifiedStagePin:
+    path: text
+    sha256: text
+
+fn _is_sha256_hex(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for i in 0..64:
+        val c = value.substring(i, i + 1)
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+    true
+
+fn _pin_field(content: text, key: text) -> text:
+    var found = ""
+    var count = 0
+    for raw in content.split("\n"):
+        val line = if raw.ends_with("\r"): raw.substring(0, raw.len() - 1) else: raw
+        if line.starts_with(key + "="):
+            found = line.substring(key.len() + 1, line.len())
+            count = count + 1
+    if count == 1: found else: ""
+
+# Pure decision: pin record text + digest of the running image -> pinned digest.
+pub fn verified_stage_pin_decide(pin_content: text, running_sha256: text) -> Result<text, text>:
+    val schema = _pin_field(pin_content, "schema")
+    if schema != "simple-bootstrap-stage3-provenance-v4" and schema != "simple-bootstrap-stage3-provenance-v5":
+        return Err("verified stage pin: unsupported or missing schema")
+    if _pin_field(pin_content, "status") != "pass":
+        return Err("verified stage pin: stage is not admitted (status != pass)")
+    if _pin_field(pin_content, "artifact_kind") != "pure-simple-bootstrap-compiler":
+        return Err("verified stage pin: artifact is not the pure-Simple bootstrap compiler")
+    val pinned = _pin_field(pin_content, "stage3_sha256")
+    if not _is_sha256_hex(pinned):
+        return Err("verified stage pin: stage3_sha256 missing, duplicated or malformed")
+    if not _is_sha256_hex(running_sha256):
+        return Err("verified stage pin: running stage binary could not be hashed")
+    if running_sha256 != pinned:
+        return Err("verified stage pin: running stage binary " + running_sha256 + " differs from pinned " + pinned)
+    Ok(pinned)
+
+# Digest of the running image, never a caller-supplied path: Linux hashes
+# /proc/self/exe; Windows hashes GetModuleFileNameW(NULL) through the typed
+# windows_image_owner wrapper. Hosts without an image query fail closed ("").
+pub fn verified_stage_image_path(linux: bool, windows: bool) -> text:
+    if linux:
+        return if file_exists("/proc/self/exe"): "/proc/self/exe" else: ""
+    if windows:
+        match windows_image_path():
+            case Ok(image): return image
+            case Err(_): return ""
+    ""
+
+pub fn verified_stage_running_sha256(linux: bool, windows: bool) -> text:
+    val image = verified_stage_image_path(linux, windows)
+    if image == "": "" else: file_hash_sha256_or_empty(image)
+
+fn _norm(path: text) -> text:
+    path.replace("\\", "/")
+
+# Windows and macOS volumes are case-insensitive by default; Linux and FreeBSD
+# are case-sensitive, where "Stage3" and "stage3" are different directories.
+pub fn verified_stage_host_folds_case(windows: bool) -> bool:
+    windows or host_os() == "macos"
+
+fn _under(path: text, root: text, fold_case: bool) -> bool:
+    if fold_case: path.lower().starts_with(root.lower()) else: path.starts_with(root)
+
+# LEXICAL shape check (pure): the pin may only be a bootstrap-owned stage3
+# record inside the source root: <source_root>/.../stage3/<platform>/
+# provenance.env, no "." / ".." components. It does not resolve symlinks, so it
+# is never sufficient on its own; verified_stage_pin_resolve applies it again
+# to the resolved paths.
+pub fn verified_stage_pin_location_ok(pin_path: text, source_root: text, fold_case: bool) -> bool:
+    val pin = _norm(pin_path)
+    var root = _norm(source_root)
+    if root == "" or pin == "": return false
+    if not root.ends_with("/"): root = root + "/"
+    if not _under(pin, root, fold_case): return false
+    val parts = pin.substring(root.len(), pin.len()).split("/")
+    for part in parts:
+        if part == ".." or part == ".": return false
+    val n = parts.len()
+    if n < 3 or parts[n - 2] == "": return false
+    val leaf = if fold_case: parts[n - 1].lower() else: parts[n - 1]
+    val stage = if fold_case: parts[n - 3].lower() else: parts[n - 3]
+    leaf == "provenance.env" and stage == "stage3"
+
+fn _resolved(path: text, what: text) -> Result<text, text>:
+    match path_final_existing(path):
+        case Ok(final): Ok(final.path)
+        case Err(code): Err("verified stage pin: cannot resolve " + what + " " + path + " (" + code + ")")
+
+# Authoritative location check: both paths are resolved through the host
+# final-path owner (realpath / GetFinalPathNameByHandle, symlinks and
+# junctions followed, must exist), then the lexical shape check is applied to
+# the RESOLVED pair. A provenance.env that is a symlink out of the tree, or
+# under a symlinked stage3/<platform> directory, resolves outside the root and
+# is refused. Returns the resolved pin path, which is the one to read: reading
+# the original spelling would reopen the symlink after the check. Residual: an
+# intermediate directory could still be swapped between this resolve and the
+# read (no dirfd/handle retention); the trust anchor is the running-image
+# digest compared against the record, so a swapped record cannot vouch for a
+# different binary.
+pub fn verified_stage_pin_resolve(pin_path: text, source_root: text, fold_case: bool) -> Result<text, text>:
+    if not verified_stage_pin_location_ok(pin_path, source_root, fold_case):
+        return Err("verified stage pin: pin record must be <source-root>/.../stage3/<platform>/provenance.env")
+    val real_pin = _resolved(pin_path, "pin record")?
+    val real_root = _resolved(source_root, "source root")?
+    if not verified_stage_pin_location_ok(real_pin, real_root, fold_case):
+        return Err("verified stage pin: pin record resolves outside <source-root>/.../stage3/<platform>/provenance.env (symlink?)")
+    Ok(real_pin)
+
+# Resolve the pin (explicit path, else SIMPLE_VERIFIED_STAGE_PIN) and check it.
+# The trust inputs are exactly: the pin record, the source root, and the digest
+# of the RUNNING image (never a caller-supplied binary path; --stage-binary is
+# not a trust input and is deliberately not a parameter here).
+pub fn verified_stage_pin_check(pin_path: text, source_root: text, linux: bool, windows: bool) -> Result<VerifiedStagePin, text>:
+    val path = if pin_path != "": pin_path else: env_get(VERIFIED_STAGE_PIN_ENV)
+    if path == "":
+        return Err("verified stage pin: no pin (pass --stage-pin or set " + VERIFIED_STAGE_PIN_ENV + ")")
+    val real = verified_stage_pin_resolve(path, source_root, verified_stage_host_folds_case(windows))?
+    match verified_stage_pin_decide(file_read(real), verified_stage_running_sha256(linux, windows)):
+        case Ok(sha): Ok(VerifiedStagePin(path: real, sha256: sha))
+        case Err(e): Err(e)
+
+# Re-check after the work (the Python owners re-hash their producer at the end).
+pub fn verified_stage_pin_recheck(pin: VerifiedStagePin, linux: bool, windows: bool) -> Result<bool, text>:
+    if verified_stage_running_sha256(linux, windows) != pin.sha256:
+        return Err("verified stage pin: running stage binary identity changed during execution")
+    Ok(true)

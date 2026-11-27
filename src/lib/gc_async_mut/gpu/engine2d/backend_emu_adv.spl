@@ -30,16 +30,37 @@ fn _emu_scale_image_pixels(dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixel
         (dst_h.to_i64() - 1) * src_h.to_i64() > 2147483647):
         return []
     var result: [u32] = [0u32; dst_count]
+    # Nearest-neighbour column map, built once per call: the same
+    # `dx * src_w / dst_w` expression the per-pixel loop evaluated for every
+    # pixel, so every source index is unchanged. Removes one i64 division per
+    # destination pixel on the interpreter lane
+    # (doc/08_tracking/bug/engine2d_interp_cold_glyph_and_image_scale_cost_2026-11-13.md).
+    var col_map: [i64] = [0; dst_w.to_i64()]
+    var dx: i32 = 0
+    while dx < dst_w:  # cpu-lane-loop-ok: one map entry per destination column
+        col_map[dx] = dx.to_i64() * src_w.to_i64() / dst_w.to_i64()
+        dx = dx + 1
+    var prev_sy: i64 = -1
     var dy: i32 = 0
     while dy < dst_h:
         val sy = dy.to_i64() * src_h.to_i64() / dst_h.to_i64()
-        var dx: i32 = 0
-        while dx < dst_w:
-            val sx = dx.to_i64() * src_w.to_i64() / dst_w.to_i64()
-            val dst_index = dy.to_i64() * dst_w.to_i64() + dx.to_i64()
-            val src_index = sy * src_w.to_i64() + sx
-            result[dst_index] = pixels[src_index]
-            dx = dx + 1
+        val dst_row = dy.to_i64() * dst_w.to_i64()
+        if sy == prev_sy:
+            # Consecutive destination rows sharing one source row copy the
+            # previous result row instead of re-mapping every pixel; the copied
+            # values are exactly what the per-pixel expression produced for
+            # this `sy` (the same row, the same column map).
+            var cx: i32 = 0
+            while cx < dst_w:  # cpu-lane-loop-ok: row copy for a repeated source row; one element per destination column
+                result[dst_row + cx.to_i64()] = result[dst_row - dst_w.to_i64() + cx.to_i64()]
+                cx = cx + 1
+        else:
+            val src_row = sy * src_w.to_i64()
+            var mx: i32 = 0
+            while mx < dst_w:  # cpu-lane-loop-ok: one mapped pixel per destination column
+                result[dst_row + mx.to_i64()] = pixels[src_row + col_map[mx]]
+                mx = mx + 1
+            prev_sy = sy
         dy = dy + 1
     result
 

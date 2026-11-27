@@ -1,44 +1,58 @@
-# Trie Node Operations — Persistent Prefix Tree
+# Trie Node Operations - Persistent Prefix Tree
 #
 # Core operations for a persistent (immutable) trie keyed by text strings.
-# Every mutation returns a NEW node tree with structural sharing — the
+# Every mutation returns a NEW node tree with structural sharing - the
 # original is never modified.
 #
-# Compact node representation (tag-packed flat arrays for minimal heap overhead):
-#   EMPTY   = nil
-#   NO_VAL  = [((k << 2) | TRIE_TAG_NO_VAL), ch_0, child_0, ..., ch_{k-1}, child_{k-1}]
-#   HAS_VAL = [((k << 2) | TRIE_TAG_HAS_VAL), value, ch_0, child_0, ..., ch_{k-1}, child_{k-1}]
-#
-# Packing the 2-bit node tag and child count `k` into the header word of a single
-# flat node array eliminates the outer children array and all `k` inner `[ch, child]`
-# pair arrays on every insert, lookup, and remove.
+# Node representation:
+#   EMPTY    = None
+#   TrieNode = (value_or_none, edges)
+#   TrieEdge = (ch, child)
+# A node holds a value when `value` is not None; `edges` are its children in
+# insertion order.
 
 # ============================================================================
-# Constants — Node type tags
+# Node Types
 # ============================================================================
 
-pub val TRIE_TAG_NO_VAL = 1
-pub val TRIE_TAG_HAS_VAL = 2
-pub val TRIE_TAG_MASK = 3
+pub struct TrieNode<V>:
+    value: V?
+    edges: [TrieEdge<V>]
 
-fn _trie_pack_header(child_count: i64, tag: i64) -> i64:
-    (child_count << 2) | tag
+pub struct TrieEdge<V>:
+    ch: text
+    node: TrieNode<V>
 
 # ============================================================================
 # Node Constructor
 # ============================================================================
 
 # Create a new empty trie node (no value, 0 children).
-pub fn trie_empty_node():
-    [TRIE_TAG_NO_VAL]
+pub fn trie_empty_node<V>() -> TrieNode<V>:
+    var edges: [TrieEdge<V>] = []
+    TrieNode(value: None, edges: edges)
 
 # ============================================================================
-# Flat Node & Children Helpers
+# Node Inspection
 # ============================================================================
 
-# Copy flat alternating `[ch_0, child_0, ...]` children slice for persistence.
-pub fn trie_copy_dict(children: []) -> []:
-    var result = []
+# True when the node stores a value.
+@allow(primitive_api)  # presence flag, plain bool
+pub fn trie_node_has_value<V>(node: TrieNode<V>) -> bool:
+    node.value != None
+
+# Number of direct children of the node.
+@allow(primitive_api)  # child count, plain integer
+pub fn trie_node_child_count<V>(node: TrieNode<V>) -> i64:
+    node.edges.len()
+
+# ============================================================================
+# Children Helpers
+# ============================================================================
+
+# Copy a children edge list for persistence.
+pub fn trie_copy_dict<V>(children: [TrieEdge<V>]) -> [TrieEdge<V>]:
+    var result: [TrieEdge<V>] = []
     var i = 0
     val n = children.len()
     while i < n:
@@ -46,139 +60,56 @@ pub fn trie_copy_dict(children: []) -> []:
         i = i + 1
     result
 
-fn trie_child_get<V>(children: [], ch: text) -> V?:
-    var i = 0
-    val n = children.len()
-    while i + 1 < n:
-        if children[i] == ch:
-            return children[i + 1]
-        i = i + 2
-    nil
+fn trie_child_get<V>(children: [TrieEdge<V>], ch: text) -> TrieNode<V>?:
+    for edge in children:
+        if edge.ch == ch:
+            return edge.node
+    None
 
-fn trie_child_set(children: [], ch, child) -> []:
-    var result = []
+fn trie_child_set<V>(children: [TrieEdge<V>], ch: text, child: TrieNode<V>) -> [TrieEdge<V>]:
+    var result: [TrieEdge<V>] = []
     var replaced = false
-    var i = 0
-    val n = children.len()
-    while i + 1 < n:
-        if children[i] == ch:
-            result.push(ch)
-            result.push(child)
+    for edge in children:
+        if edge.ch == ch:
+            result.push(TrieEdge(ch: ch, node: child))
             replaced = true
         else:
-            result.push(children[i])
-            result.push(children[i + 1])
-        i = i + 2
+            result.push(edge)
     if not replaced:
-        result.push(ch)
-        result.push(child)
+        result.push(TrieEdge(ch: ch, node: child))
     result
 
-fn _trie_node_child_get<V>(node: [], ch: text) -> V?:
-    val header = node[0]
-    val k = header >> 2
-    val base = if (header & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL: 2 else: 1
-    val limit = base + k * 2
-    var pos = base
-    while pos < limit:
-        if node[pos] == ch:
-            return node[pos + 1]
-        pos = pos + 2
-    nil
+# Look up the child of `node` reached by `ch`, or None.
+fn _trie_node_child_get<V>(node: TrieNode<V>, ch: text) -> TrieNode<V>?:
+    trie_child_get(node.edges, ch)
 
-fn _trie_node_set_value(node: [], value) -> []:
-    val header = node[0]
-    val k = header >> 2
-    val base = if (header & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL: 2 else: 1
-    val limit = base + k * 2
-    var result = if value == nil:
-        [_trie_pack_header(k, TRIE_TAG_NO_VAL)]
-    else:
-        [_trie_pack_header(k, TRIE_TAG_HAS_VAL), value]
-    var pos = base
-    while pos < limit:
-        result.push(node[pos])
-        result.push(node[pos + 1])
-        pos = pos + 2
-    result
+# Return a copy of `node` with its value replaced (None clears the value).
+fn _trie_node_set_value<V>(node: TrieNode<V>, value: V?) -> TrieNode<V>:
+    TrieNode(value: value, edges: node.edges)
 
-fn _trie_node_clear_value(node: []) -> []?:
-    val header = node[0]
-    val k = header >> 2
-    if k == 0:
-        return nil
-    if (header & TRIE_TAG_MASK) == TRIE_TAG_NO_VAL:
+# Clear the value of `node`. Returns None when the node has no children
+# (i.e. it becomes empty), the node itself when it holds no value.
+fn _trie_node_clear_value<V>(node: TrieNode<V>) -> TrieNode<V>?:
+    if node.edges.len() == 0:
+        return None
+    if node.value == None:
         return node
-    val limit = 2 + k * 2
-    var result = [_trie_pack_header(k, TRIE_TAG_NO_VAL)]
-    var pos = 2
-    while pos < limit:
-        result.push(node[pos])
-        result.push(node[pos + 1])
-        pos = pos + 2
-    result
+    TrieNode(value: None, edges: node.edges)
 
-fn _trie_node_put_child(node: [], ch, child) -> []:
-    val header = node[0]
-    val has_val = (header & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL
-    val k = header >> 2
-    val base = if has_val: 2 else: 1
-    val limit = base + k * 2
-    var found = false
-    var scan = base
-    while scan < limit:
-        if node[scan] == ch:
-            found = true
-            break
-        scan = scan + 2
-    val new_k = if found: k else: k + 1
-    var result = if has_val:
-        [_trie_pack_header(new_k, TRIE_TAG_HAS_VAL), node[1]]
-    else:
-        [_trie_pack_header(new_k, TRIE_TAG_NO_VAL)]
-    var pos = base
-    while pos < limit:
-        if node[pos] == ch:
-            result.push(ch)
-            result.push(child)
-        else:
-            result.push(node[pos])
-            result.push(node[pos + 1])
-        pos = pos + 2
-    if not found:
-        result.push(ch)
-        result.push(child)
-    result
+# Return a copy of `node` with child `ch` set to `child` (appended if new).
+fn _trie_node_put_child<V>(node: TrieNode<V>, ch: text, child: TrieNode<V>) -> TrieNode<V>:
+    TrieNode(value: node.value, edges: trie_child_set(node.edges, ch, child))
 
-fn _trie_node_without_child(node: [], skip_ch) -> []?:
-    val header = node[0]
-    val has_val = (header & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL
-    val k = header >> 2
-    val base = if has_val: 2 else: 1
-    val limit = base + k * 2
-    var new_k = 0
-    var scan = base
-    while scan < limit:
-        if node[scan] != skip_ch:
-            new_k = new_k + 1
-        scan = scan + 2
-    if not has_val and new_k == 0:
-        return nil
-    var result = if has_val:
-        [_trie_pack_header(new_k, TRIE_TAG_HAS_VAL), node[1]]
-    else:
-        [_trie_pack_header(new_k, TRIE_TAG_NO_VAL)]
-    var pos = base
-    while pos < limit:
-        if node[pos] != skip_ch:
-            result.push(node[pos])
-            result.push(node[pos + 1])
-        pos = pos + 2
-    result
+# Return a copy of `node` without child `skip_ch`.
+# Returns None if the result has no value and no children.
+fn _trie_node_without_child<V>(node: TrieNode<V>, skip_ch: text) -> TrieNode<V>?:
+    val kept = trie_dict_without(node.edges, skip_ch)
+    if node.value == None and kept.len() == 0:
+        return None
+    TrieNode(value: node.value, edges: kept)
 
-# Convert a text key once before recursive trie walks. Compiled native BDD
-# currently miscompiles recursive calls that carry text parameters.
-fn trie_key_chars(key: text) -> []:
+# Split `key` into single-character texts.
+fn trie_key_chars(key: text) -> [text]:
     var chars: [text] = []
     var i = 0
     val n = key.len()
@@ -188,234 +119,189 @@ fn trie_key_chars(key: text) -> []:
     chars
 
 # ============================================================================
-# Core Operations
+# Lookup
 # ============================================================================
 
-# Look up a key in the trie.
-# Returns the associated value, or nil if the key is not present.
-#
-# Parameters:
-#   node  — the current trie node (nil or tag-packed flat array)
-#   key   — the text key to search for
-#   depth — current character index (0 at root)
-pub fn trie_get(node, key: text, depth: i64):
+# Look up the value stored at `key` below `node` (depth = 0 at the root).
+@allow(primitive_api)  # depth is a raw character index, counts are plain integers
+pub fn trie_get<V>(node: TrieNode<V>?, key: text, depth: i64) -> V?:
     val chars = trie_key_chars(key)
     trie_get_chars(node, chars, depth)
 
-fn trie_get_chars<V>(node: [], chars: [], depth: i64) -> V?:
-    if node == nil:
-        return nil
+fn trie_get_chars<V>(node: TrieNode<V>?, chars: [text], depth: i64) -> V?:
+    if node == None:
+        return None
     val key_len = chars.len()
     if depth == key_len:
-        if (node[0] & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL:
-            return node[1]
-        return nil
+        return node.value
     val ch = chars[depth]
     val child = _trie_node_child_get(node, ch)
-    if child == nil:
-        return nil
+    if child == None:
+        return None
     trie_get_chars(child, chars, depth + 1)
 
-# Insert or update a key-value pair in the trie.
-# Returns a NEW node tree (structural sharing with the original).
-#
-# Parameters:
-#   node  — the current trie node (nil or tag-packed flat array)
-#   key   — the text key to insert/update
-#   value — the value to associate
-#   depth — current character index (0 at root)
-pub fn trie_set(node, key: text, value, depth: i64):
+# ============================================================================
+# Insert
+# ============================================================================
+
+# Return a NEW trie with `value` stored at `key` (None stores no value).
+@allow(primitive_api)  # depth is a raw character index, counts are plain integers
+pub fn trie_set<V>(node: TrieNode<V>?, key: text, value: V?, depth: i64) -> TrieNode<V>:
     val chars = trie_key_chars(key)
     trie_set_chars(node, chars, value, depth)
 
-fn trie_set_chars(node, chars: [], value, depth: i64) -> []:
+fn trie_set_chars<V>(node: TrieNode<V>?, chars: [text], value: V?, depth: i64) -> TrieNode<V>:
     val key_len = chars.len()
-    if node == nil:
-        # Build new flat path from here to the end of the key
+    if node == None:
+        var no_edges: [TrieEdge<V>] = []
         if depth == key_len:
-            if value == nil:
-                return [TRIE_TAG_NO_VAL]
-            return [TRIE_TAG_HAS_VAL, value]
+            return TrieNode(value: value, edges: no_edges)
         val ch = chars[depth]
-        val child = trie_set_chars(nil, chars, value, depth + 1)
-        return [_trie_pack_header(1, TRIE_TAG_NO_VAL), ch, child]
+        val child = trie_set_chars(None, chars, value, depth + 1)
+        return TrieNode(value: None, edges: [TrieEdge(ch: ch, node: child)])
     if depth == key_len:
-        # Set value at this node, preserve children in flat layout
         return _trie_node_set_value(node, value)
     val ch = chars[depth]
     val existing = _trie_node_child_get(node, ch)
     val new_child = trie_set_chars(existing, chars, value, depth + 1)
     _trie_node_put_child(node, ch, new_child)
 
-# Remove a key from the trie.
-# Returns a NEW node tree with the key's value removed.
-# Prunes empty subtrees to avoid waste.
-# Returns nil if the entire subtree becomes empty.
-#
-# Parameters:
-#   node  — the current trie node
-#   key   — the text key to remove
-#   depth — current character index (0 at root)
-pub fn trie_remove(node, key: text, depth: i64):
+# ============================================================================
+# Remove
+# ============================================================================
+
+# Return a NEW trie with the value at `key` removed, or None if it becomes empty.
+@allow(primitive_api)  # depth is a raw character index, counts are plain integers
+pub fn trie_remove<V>(node: TrieNode<V>?, key: text, depth: i64) -> TrieNode<V>?:
     val chars = trie_key_chars(key)
     trie_remove_chars(node, chars, depth)
 
-fn trie_remove_chars(node, chars: [], depth: i64) -> []?:
-    if node == nil:
-        return nil
+fn trie_remove_chars<V>(node: TrieNode<V>?, chars: [text], depth: i64) -> TrieNode<V>?:
+    if node == None:
+        return None
     val key_len = chars.len()
     if depth == key_len:
         return _trie_node_clear_value(node)
     val ch = chars[depth]
     val child = _trie_node_child_get(node, ch)
-    if child == nil:
-        # Key not in trie — return unchanged
+    if child == None:
         return node
     val new_child = trie_remove_chars(child, chars, depth + 1)
     if new_child == child:
-        # Nothing changed
         return node
-    if new_child == nil:
+    if new_child == None:
         return _trie_node_without_child(node, ch)
     _trie_node_put_child(node, ch, new_child)
 
-# Check whether a key exists in the trie (has a stored value).
-#
-# Parameters:
-#   node  — the current trie node
-#   key   — the text key to check
-#   depth — current character index (0 at root)
-pub fn trie_contains(node, key: text, depth: i64) -> bool:
+# ============================================================================
+# Contains / Count
+# ============================================================================
+
+# True when a value is stored at `key`.
+@allow(primitive_api)  # depth is a raw character index, counts are plain integers
+pub fn trie_contains<V>(node: TrieNode<V>?, key: text, depth: i64) -> bool:
     val chars = trie_key_chars(key)
     trie_contains_chars(node, chars, depth)
 
-fn trie_contains_chars(node, chars: [], depth: i64) -> bool:
-    if node == nil:
+fn trie_contains_chars<V>(node: TrieNode<V>?, chars: [text], depth: i64) -> bool:
+    if node == None:
         return false
     val key_len = chars.len()
     if depth == key_len:
-        return (node[0] & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL
+        return node.value != None
     val ch = chars[depth]
     val child = _trie_node_child_get(node, ch)
-    if child == nil:
+    if child == None:
         return false
     trie_contains_chars(child, chars, depth + 1)
 
-# Count all stored values in the trie (DFS traversal).
-pub fn trie_count(node) -> i64:
-    if node == nil:
+# Count the keys stored below `node`.
+pub fn trie_count<V>(node: TrieNode<V>?) -> i64:
+    if node == None:
         return 0
-    val header = node[0]
-    val has_val = (header & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL
-    var total = if has_val: 1 else: 0
-    val k = header >> 2
-    val base = if has_val: 2 else: 1
-    val limit = base + k * 2
-    var pos = base
-    while pos < limit:
-        total = total + trie_count(node[pos + 1])
-        pos = pos + 2
+    var total = 0
+    if node.value != None:
+        total = 1
+    for edge in node.edges:
+        total = total + trie_count(edge.node)
     total
 
 # ============================================================================
-# Traversal / Collection
+# Traversal
 # ============================================================================
 
-# Collect all [key, value] pairs from the trie via DFS.
-# Returns an array of [key, value] pairs.
-#
-# Parameters:
-#   node   — the current trie node
-#   prefix — the key built so far (characters traversed)
-pub fn trie_collect_entries(node, prefix: text) -> []:
-    var acc = []
+# Collect all (key, value) pairs below `node`, each key prefixed with `prefix`.
+pub fn trie_collect_entries<V>(node: TrieNode<V>?, prefix: text) -> [(text, V)]:
+    var acc: [(text, V)] = []
     _trie_collect_entries_into(node, prefix, acc)
 
-fn _trie_collect_entries_into(node, prefix: text, acc_in) -> []:
+fn _trie_collect_entries_into<V>(node: TrieNode<V>?, prefix: text, acc_in: [(text, V)]) -> [(text, V)]:
     var acc = acc_in
-    if node == nil:
+    if node == None:
         return acc
-    val header = node[0]
-    val has_val = (header & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL
-    if has_val:
-        acc.push([prefix, node[1]])
-    val k = header >> 2
-    val base = if has_val: 2 else: 1
-    val limit = base + k * 2
-    var pos = base
-    while pos < limit:
-        acc = _trie_collect_entries_into(node[pos + 1], prefix + node[pos], acc)
-        pos = pos + 2
+    if node.value != None:
+        acc.push((prefix, node.value))
+    for edge in node.edges:
+        acc = _trie_collect_entries_into(edge.node, prefix + edge.ch, acc)
     acc
 
-# Find all keys that start with the given prefix.
-# Navigates to the prefix node, then collects all keys below it.
-# Returns an array of matching keys.
-#
-# Parameters:
-#   node         — the current trie node
-#   prefix       — the prefix text to search for
-#   prefix_depth — current character index into the prefix
-#   full_prefix  — the original full prefix string (for building result keys)
-# @tag(prefix=prefix, full_prefix=full_prefix)
-pub fn trie_keys_with_prefix(node, prefix: text, prefix_depth: i64, full_prefix: text):
+# Collect the keys below `node` that start with the first `prefix_depth`
+# characters of `prefix`, each rendered with `full_prefix`.
+@allow(primitive_api)  # depth is a raw character index, counts are plain integers
+pub fn trie_keys_with_prefix<V>(node: TrieNode<V>?, prefix: text, prefix_depth: i64, full_prefix: text) -> [text]:
     val chars = trie_key_chars(prefix)
     trie_keys_with_prefix_chars(node, chars, prefix_depth, full_prefix)
 
-fn trie_keys_with_prefix_chars(node, chars: [], prefix_depth: i64, full_prefix: text) -> []:
-    if node == nil:
+fn trie_keys_with_prefix_chars<V>(node: TrieNode<V>?, chars: [text], prefix_depth: i64, full_prefix: text) -> [text]:
+    if node == None:
         return []
     val prefix_len = chars.len()
     if prefix_depth == prefix_len:
-        # Reached the prefix node — collect all keys below
         return trie_collect_keys(node, full_prefix)
     val ch = chars[prefix_depth]
     val child = _trie_node_child_get(node, ch)
-    if child == nil:
+    if child == None:
         return []
     trie_keys_with_prefix_chars(child, chars, prefix_depth + 1, full_prefix)
 
-# Collect all keys from a subtree. Used after navigating to a prefix node.
-# Returns an array of keys.
-pub fn trie_collect_keys(node, prefix: text) -> []:
-    var acc = []
+# Collect all keys below `node`, each prefixed with `prefix`.
+pub fn trie_collect_keys<V>(node: TrieNode<V>?, prefix: text) -> [text]:
+    var acc: [text] = []
     _trie_collect_keys_into(node, prefix, acc)
 
-fn _trie_collect_keys_into(node, prefix: text, acc_in) -> []:
+fn _trie_collect_keys_into<V>(node: TrieNode<V>?, prefix: text, acc_in: [text]) -> [text]:
     var acc = acc_in
-    if node == nil:
+    if node == None:
         return acc
-    val header = node[0]
-    val has_val = (header & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL
-    if has_val:
+    if node.value != None:
         acc.push(prefix)
-    val k = header >> 2
-    val base = if has_val: 2 else: 1
-    val limit = base + k * 2
-    var pos = base
-    while pos < limit:
-        acc = _trie_collect_keys_into(node[pos + 1], prefix + node[pos], acc)
-        pos = pos + 2
+    for edge in node.edges:
+        acc = _trie_collect_keys_into(edge.node, prefix + edge.ch, acc)
     acc
 
+# ============================================================================
+# Longest Prefix
+# ============================================================================
+
 # Find the longest key in the trie that is a prefix of the given query string.
-# Returns the longest matching prefix text, or nil if no prefix matches.
+# Returns the longest matching prefix text, or None if no prefix matches.
 #
 # Parameters:
-#   node  — the current trie node
-#   query — the query text to find prefixes of
-#   depth — current character index (0 at root)
-#   last_match — the longest prefix found so far (nil or text)
-pub fn trie_longest_prefix(node, query: text, depth: i64, last_match):
+#   node  - the current trie node
+#   query - the query text to find prefixes of
+#   depth - current character index (0 at root)
+#   last_match - the longest prefix found so far (None or text)
+@allow(primitive_api)  # depth is a raw character index, counts are plain integers
+pub fn trie_longest_prefix<V>(node: TrieNode<V>?, query: text, depth: i64, last_match: text?) -> text?:
     val chars = trie_key_chars(query)
     trie_longest_prefix_chars(node, chars, depth, last_match)
 
-fn trie_longest_prefix_chars(node, chars: [], depth: i64, last_match) -> text?:
-    if node == nil:
+fn trie_longest_prefix_chars<V>(node: TrieNode<V>?, chars: [text], depth: i64, last_match: text?) -> text?:
+    if node == None:
         return last_match
     var current_match = last_match
-    if (node[0] & TRIE_TAG_MASK) == TRIE_TAG_HAS_VAL:
-        # This node's prefix is a valid key — record it
+    if node.value != None:
+        # This node's prefix is a valid key - record it
         val prefix_len = depth
         var prefix_chars: [text] = []
         var j = 0
@@ -428,7 +314,7 @@ fn trie_longest_prefix_chars(node, chars: [], depth: i64, last_match) -> text?:
         return current_match
     val ch = chars[depth]
     val child = _trie_node_child_get(node, ch)
-    if child == nil:
+    if child == None:
         return current_match
     trie_longest_prefix_chars(child, chars, depth + 1, current_match)
 
@@ -436,28 +322,25 @@ fn trie_longest_prefix_chars(node, chars: [], depth: i64, last_match) -> text?:
 # Dict Helpers
 # ============================================================================
 
-# Check if a flat children array has any entries.
-fn trie_dict_has_keys(children: []) -> bool:
+# Check if a children edge list has any entries.
+pub fn trie_dict_has_keys<V>(children: [TrieEdge<V>]) -> bool:
     children.len() > 0
 
-# Return a copy of flat children `[ch_0, child_0, ...]` with key `skip_key` removed.
-fn trie_dict_without(children: [], skip_key) -> []:
-    var result = []
-    var i = 0
-    val n = children.len()
-    while i + 1 < n:
-        if children[i] != skip_key:
-            result.push(children[i])
-            result.push(children[i + 1])
-        i = i + 2
+# Return a copy of the children edge list with key `skip_key` removed.
+pub fn trie_dict_without<V>(children: [TrieEdge<V>], skip_key: text) -> [TrieEdge<V>]:
+    var result: [TrieEdge<V>] = []
+    for edge in children:
+        if edge.ch != skip_key:
+            result.push(edge)
     result
 
 # ============================================================================
 # Exports
 # ============================================================================
 
-export TRIE_TAG_NO_VAL, TRIE_TAG_HAS_VAL, TRIE_TAG_MASK
+export TrieNode, TrieEdge
 export trie_empty_node
+export trie_node_has_value, trie_node_child_count
 export trie_copy_dict
 export trie_get, trie_set, trie_remove
 export trie_contains, trie_count

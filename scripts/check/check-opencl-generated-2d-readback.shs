@@ -44,6 +44,22 @@ emit_env() {
         echo "opencl_generated_2d_readback_expected_checksum=0"
         echo "opencl_generated_2d_readback_actual_checksum=0"
         echo "opencl_generated_2d_readback_ops=fill,copy,alpha,scroll"
+        echo "opencl_generated_2d_readback_font_status=unavailable"
+        echo "opencl_generated_2d_readback_font_reason=$reason"
+        echo "opencl_generated_2d_readback_font_backend=opencl"
+        echo "opencl_generated_2d_readback_font_driver="
+        echo "opencl_generated_2d_readback_font_device_handle=0"
+        echo "opencl_generated_2d_readback_font_module_or_queue_handle=0"
+        echo "opencl_generated_2d_readback_font_kernel_or_pipeline_handle=0"
+        echo "opencl_generated_2d_readback_font_fence_handle=0"
+        echo "opencl_generated_2d_readback_font_fence_handle_kind=clevent-wait-for-events"
+        echo "opencl_generated_2d_readback_font_expected_checksum=0"
+        echo "opencl_generated_2d_readback_font_actual_checksum=0"
+        echo "opencl_generated_2d_readback_font_readback_checksum=0"
+        echo "opencl_generated_2d_readback_font_mismatch_count=0"
+        echo "opencl_generated_2d_readback_font_parity_status=unavailable"
+        echo "opencl_generated_2d_readback_font_submit_attempted=false"
+        echo "opencl_generated_2d_readback_font_readback_available=false"
     } >"$BUILD_DIR/evidence.env"
 }
 
@@ -54,16 +70,27 @@ emit_unavailable() {
 
 opencl_env_value() {
     key="$1"
-    grep "^$key=" "$BUILD_DIR/evidence.env" 2>/dev/null | head -1 | cut -d= -f2- || true
+    while IFS='=' read -r _k _v || [ -n "$_k" ]; do
+        if [ "$_k" = "$key" ]; then
+            printf '%s\n' "$_v"
+            return 0
+        fi
+    done <"$BUILD_DIR/evidence.env" 2>/dev/null || true
 }
 
 opencl_unsigned_decimal() {
-    printf '%s\n' "$1" | grep -Eq '^[0-9]+$'
+    case "${1:-}" in
+        '' | *[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
 }
 
 opencl_positive_decimal() {
     opencl_unsigned_decimal "$1" || return 1
-    printf '%s\n' "$1" | grep -Eq '[1-9]'
+    case "$1" in
+        *[1-9]*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 opencl_mark_claimed_pass_failed() {
@@ -129,6 +156,43 @@ opencl_validate_evidence() {
             opencl_validate_op_evidence "$op"
             [ "$(opencl_env_value opencl_generated_2d_readback_status)" = "pass" ] || break
         done
+    fi
+    if [ "$(opencl_env_value opencl_generated_2d_readback_status)" = "pass" ]; then
+        f_status="$(opencl_env_value opencl_generated_2d_readback_font_status)"
+        f_parity="$(opencl_env_value opencl_generated_2d_readback_font_parity_status)"
+        f_backend="$(opencl_env_value opencl_generated_2d_readback_font_backend)"
+        f_driver="$(opencl_env_value opencl_generated_2d_readback_font_driver)"
+        f_submit="$(opencl_env_value opencl_generated_2d_readback_font_submit_attempted)"
+        f_readback="$(opencl_env_value opencl_generated_2d_readback_font_readback_available)"
+        f_dev="$(opencl_env_value opencl_generated_2d_readback_font_device_handle)"
+        f_mod="$(opencl_env_value opencl_generated_2d_readback_font_module_or_queue_handle)"
+        f_kern="$(opencl_env_value opencl_generated_2d_readback_font_kernel_or_pipeline_handle)"
+        f_fence="$(opencl_env_value opencl_generated_2d_readback_font_fence_handle)"
+        f_ex="$(opencl_env_value opencl_generated_2d_readback_font_expected_checksum)"
+        f_act="$(opencl_env_value opencl_generated_2d_readback_font_actual_checksum)"
+        f_rb="$(opencl_env_value opencl_generated_2d_readback_font_readback_checksum)"
+        f_mm="$(opencl_env_value opencl_generated_2d_readback_font_mismatch_count)"
+
+        if [ "$f_status" != "pass" ] || [ "$f_parity" != "pass" ]; then
+            opencl_mark_claimed_pass_failed "font-parity-not-pass"
+        elif [ "$f_backend" != "opencl" ] || [ -z "$f_driver" ]; then
+            opencl_mark_claimed_pass_failed "font-provenance-missing"
+        elif [ "$f_submit" != "true" ] || [ "$f_readback" != "true" ]; then
+            opencl_mark_claimed_pass_failed "font-submit-or-readback-missing"
+        elif ! opencl_positive_decimal "$f_dev" \
+            || ! opencl_positive_decimal "$f_mod" \
+            || ! opencl_positive_decimal "$f_kern" \
+            || ! opencl_positive_decimal "$f_fence"; then
+            opencl_mark_claimed_pass_failed "font-handle-missing-or-zero"
+        elif ! opencl_positive_decimal "$f_ex" \
+            || ! opencl_positive_decimal "$f_act" \
+            || ! opencl_positive_decimal "$f_rb"; then
+            opencl_mark_claimed_pass_failed "font-checksum-missing-or-zero"
+        elif [ "$f_act" != "$f_ex" ] || [ "$f_rb" != "$f_act" ]; then
+            opencl_mark_claimed_pass_failed "font-checksum-mismatch"
+        elif [ "$f_mm" != "0" ]; then
+            opencl_mark_claimed_pass_failed "font-mismatch-count"
+        fi
     fi
 }
 
@@ -207,11 +271,58 @@ opencl_generated_2d_readback_alpha_mismatch_count=0
 opencl_generated_2d_readback_scroll_expected_checksum=1
 opencl_generated_2d_readback_scroll_actual_checksum=1
 opencl_generated_2d_readback_scroll_mismatch_count=0
+opencl_generated_2d_readback_font_status=pass
+opencl_generated_2d_readback_font_reason=straight-argb-pixels-matched
+opencl_generated_2d_readback_font_backend=opencl
+opencl_generated_2d_readback_font_driver=opencl-driver-3.0
+opencl_generated_2d_readback_font_device_handle=3001
+opencl_generated_2d_readback_font_module_or_queue_handle=3002
+opencl_generated_2d_readback_font_kernel_or_pipeline_handle=3003
+opencl_generated_2d_readback_font_fence_handle=3004
+opencl_generated_2d_readback_font_fence_handle_kind=clevent-wait-for-events
+opencl_generated_2d_readback_font_expected_checksum=14991786118
+opencl_generated_2d_readback_font_actual_checksum=14991786118
+opencl_generated_2d_readback_font_readback_checksum=14991786118
+opencl_generated_2d_readback_font_mismatch_count=0
+opencl_generated_2d_readback_font_parity_status=pass
+opencl_generated_2d_readback_font_submit_attempted=true
+opencl_generated_2d_readback_font_readback_available=true
 EOF
+    cp "$BUILD_DIR/evidence.env" "$BUILD_DIR/valid.env"
     opencl_validate_evidence
-    if ! grep -q '^opencl_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env"; then
+    if ! grep -q '^opencl_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_font_backend=opencl$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_font_fence_handle=3004$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_font_readback_checksum=14991786118$' "$BUILD_DIR/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=valid-readback-rejected"
+        exit 1
+    fi
+
+    grep -v '^opencl_generated_2d_readback_font_' "$BUILD_DIR/valid.env" >"$BUILD_DIR/evidence.env"
+    opencl_validate_evidence
+    if ! grep -q '^opencl_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_reason=font-parity-not-pass$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=missing-font-provenance-accepted"
+        exit 1
+    fi
+
+    sed 's/^opencl_generated_2d_readback_font_fence_handle=3004$/opencl_generated_2d_readback_font_fence_handle=0/' "$BUILD_DIR/valid.env" >"$BUILD_DIR/evidence.env"
+    opencl_validate_evidence
+    if ! grep -q '^opencl_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_reason=font-handle-missing-or-zero$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=zero-font-fence-accepted"
+        exit 1
+    fi
+
+    sed 's/^opencl_generated_2d_readback_font_actual_checksum=14991786118$/opencl_generated_2d_readback_font_actual_checksum=14991786119/' "$BUILD_DIR/valid.env" >"$BUILD_DIR/evidence.env"
+    opencl_validate_evidence
+    if ! grep -q '^opencl_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^opencl_generated_2d_readback_reason=font-checksum-mismatch$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=font-checksum-mismatch-accepted"
         exit 1
     fi
 
@@ -288,6 +399,7 @@ else
  * dependency on OpenCL SDK headers, matching the loader contract in
  * src/runtime/runtime_simd_dispatch.c. */
 typedef int32_t cl_int;
+typedef int64_t cl_long;
 typedef uint32_t cl_uint;
 typedef uint64_t cl_device_type;
 typedef uint64_t cl_mem_flags;
@@ -299,15 +411,18 @@ typedef void* cl_command_queue;
 typedef void* cl_program;
 typedef void* cl_kernel;
 typedef void* cl_mem;
+typedef void* cl_event;
 
 #define CL_SUCCESS 0
 #define CL_TRUE 1
 #define CL_DEVICE_TYPE_DEFAULT ((cl_device_type)1ULL << 0)
 #define CL_DEVICE_TYPE_GPU ((cl_device_type)1ULL << 2)
+#define CL_DEVICE_DRIVER_VERSION 0x102Du
 #define CL_MEM_READ_WRITE ((cl_mem_flags)1ULL << 0)
 
 typedef cl_int (*clGetPlatformIDs_fn)(cl_uint, cl_platform_id*, cl_uint*);
 typedef cl_int (*clGetDeviceIDs_fn)(cl_platform_id, cl_device_type, cl_uint, cl_device_id*, cl_uint*);
+typedef cl_int (*clGetDeviceInfo_fn)(cl_device_id, cl_uint, size_t, void*, size_t*);
 typedef cl_context (*clCreateContext_fn)(const cl_context_properties*, cl_uint, const cl_device_id*, void*, void*, cl_int*);
 typedef cl_command_queue (*clCreateCommandQueueWithProperties_fn)(cl_context, cl_device_id, const cl_context_properties*, cl_int*);
 typedef cl_program (*clCreateProgramWithSource_fn)(cl_context, cl_uint, const char**, const size_t*, cl_int*);
@@ -317,12 +432,18 @@ typedef cl_int (*clSetKernelArg_fn)(cl_kernel, cl_uint, size_t, const void*);
 typedef cl_mem (*clCreateBuffer_fn)(cl_context, cl_mem_flags, size_t, void*, cl_int*);
 typedef cl_int (*clEnqueueWriteBuffer_fn)(cl_command_queue, cl_mem, cl_uint, size_t, size_t, const void*, cl_uint, const void*, void*);
 typedef cl_int (*clEnqueueReadBuffer_fn)(cl_command_queue, cl_mem, cl_uint, size_t, size_t, void*, cl_uint, const void*, void*);
-typedef cl_int (*clEnqueueNDRangeKernel_fn)(cl_command_queue, cl_kernel, cl_uint, const size_t*, const size_t*, const size_t*, cl_uint, const void*, void*);
+typedef cl_int (*clEnqueueNDRangeKernel_fn)(cl_command_queue, cl_kernel, cl_uint, const size_t*, const size_t*, const size_t*, cl_uint, const void*, cl_event*);
+typedef cl_int (*clWaitForEvents_fn)(cl_uint, const cl_event*);
+typedef cl_int (*clReleaseEvent_fn)(cl_event);
+typedef cl_int (*clReleaseMemObject_fn)(cl_mem);
+typedef cl_int (*clReleaseKernel_fn)(cl_kernel);
+typedef cl_int (*clReleaseProgram_fn)(cl_program);
 typedef cl_int (*clFinish_fn)(cl_command_queue);
 
 typedef struct ClFns {
     clGetPlatformIDs_fn GetPlatformIDs;
     clGetDeviceIDs_fn GetDeviceIDs;
+    clGetDeviceInfo_fn GetDeviceInfo;
     clCreateContext_fn CreateContext;
     clCreateCommandQueueWithProperties_fn CreateCommandQueueWithProperties;
     clCreateProgramWithSource_fn CreateProgramWithSource;
@@ -333,6 +454,11 @@ typedef struct ClFns {
     clEnqueueWriteBuffer_fn EnqueueWriteBuffer;
     clEnqueueReadBuffer_fn EnqueueReadBuffer;
     clEnqueueNDRangeKernel_fn EnqueueNDRangeKernel;
+    clWaitForEvents_fn WaitForEvents;
+    clReleaseEvent_fn ReleaseEvent;
+    clReleaseMemObject_fn ReleaseMemObject;
+    clReleaseKernel_fn ReleaseKernel;
+    clReleaseProgram_fn ReleaseProgram;
     clFinish_fn Finish;
 } ClFns;
 
@@ -359,6 +485,7 @@ static int cl_load(const char **out_soname, const char **out_missing_symbol) {
 
     CL_LOAD(GetPlatformIDs, "clGetPlatformIDs")
     CL_LOAD(GetDeviceIDs, "clGetDeviceIDs")
+    CL_LOAD(GetDeviceInfo, "clGetDeviceInfo")
     CL_LOAD(CreateContext, "clCreateContext")
     CL_LOAD(CreateCommandQueueWithProperties, "clCreateCommandQueueWithProperties")
     CL_LOAD(CreateProgramWithSource, "clCreateProgramWithSource")
@@ -369,6 +496,11 @@ static int cl_load(const char **out_soname, const char **out_missing_symbol) {
     CL_LOAD(EnqueueWriteBuffer, "clEnqueueWriteBuffer")
     CL_LOAD(EnqueueReadBuffer, "clEnqueueReadBuffer")
     CL_LOAD(EnqueueNDRangeKernel, "clEnqueueNDRangeKernel")
+    CL_LOAD(WaitForEvents, "clWaitForEvents")
+    CL_LOAD(ReleaseEvent, "clReleaseEvent")
+    CL_LOAD(ReleaseMemObject, "clReleaseMemObject")
+    CL_LOAD(ReleaseKernel, "clReleaseKernel")
+    CL_LOAD(ReleaseProgram, "clReleaseProgram")
     CL_LOAD(Finish, "clFinish")
 #undef CL_LOAD
     return 1;
@@ -393,7 +525,49 @@ static const char *kernel_source =
 "  uint x = i % width; uint y = i / width; int sy = (int)y - delta_y;"
 "  if (sy < 0 || sy >= (int)height) { dst[i] = 0u; return; }"
 "  dst[i] = src[(uint)sy * width + x];"
-"}";
+"}"
+"__kernel void simple_font_atlas_composite_v1_u32(\n"
+"    __global const uint* atlas, __global uint* dst,\n"
+"    long atlas_width, long atlas_height, long atlas_count,\n"
+"    long atlas_x, long atlas_y, long quad_width, long quad_height,\n"
+"    long dst_width, long dst_height, long dst_count,\n"
+"    long dst_x, long dst_y, long color) {\n"
+"    long i = get_global_id(0);\n"
+"    if (i < 0 || atlas_width > 2147483647L || atlas_height > 2147483647L ||\n"
+"        quad_width > 2147483647L || quad_height > 2147483647L ||\n"
+"        dst_width > 2147483647L || dst_height > 2147483647L) { return; }\n"
+"    if (atlas_width <= 0 || atlas_height <= 0 || atlas_count <= 0 ||\n"
+"        quad_width <= 0 || quad_height <= 0 || dst_width <= 0 ||\n"
+"        dst_height <= 0 || dst_count <= 0 || atlas_x < 0 || atlas_y < 0) { return; }\n"
+"    if (atlas_count != atlas_width * atlas_height || dst_count != dst_width * dst_height) { return; }\n"
+"    if (atlas_x > atlas_width || atlas_y > atlas_height ||\n"
+"        quad_width > atlas_width - atlas_x || quad_height > atlas_height - atlas_y) { return; }\n"
+"    if (dst_x < -quad_width || dst_y < -quad_height || dst_x >= dst_width || dst_y >= dst_height) { return; }\n"
+"    if (i >= quad_width * quad_height) { return; }\n"
+"    long sx = atlas_x + i % quad_width;\n"
+"    long sy = atlas_y + i / quad_width;\n"
+"    if (sx < 0 || sy < 0 || sx >= atlas_width || sy >= atlas_height) { return; }\n"
+"    long si = sy * atlas_width + sx;\n"
+"    if (si < 0 || si >= atlas_count) { return; }\n"
+"    long dx = i % quad_width + dst_x;\n"
+"    long dy = i / quad_width + dst_y;\n"
+"    if (dx < 0 || dy < 0 || dx >= dst_width || dy >= dst_height) { return; }\n"
+"    long di = (long)dy * dst_width + (long)dx;\n"
+"    if (di < 0 || di >= dst_count) { return; }\n"
+"    uint color_u32 = (uint)color;\n"
+"    uint mask_a = atlas[si] >> 24u;\n"
+"    uint sa = (mask_a * (color_u32 >> 24u) + 127u) / 255u;\n"
+"    if (sa == 0u) { return; }\n"
+"    uint d = dst[di];\n"
+"    uint da = d >> 24u;\n"
+"    uint inv = 255u - sa;\n"
+"    uint dst_weight = (da * inv) / 255u;\n"
+"    uint out_a = sa + dst_weight;\n"
+"    uint out_r = (((color_u32 >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * dst_weight) / out_a;\n"
+"    uint out_g = (((color_u32 >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * dst_weight) / out_a;\n"
+"    uint out_b = ((color_u32 & 255u) * sa + (d & 255u) * dst_weight) / out_a;\n"
+"    dst[di] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;\n"
+"}\n";
 
 static uint64_t checksum_u32(const uint32_t *data, unsigned int count) {
     uint64_t sum = 0;
@@ -435,6 +609,28 @@ static uint32_t alpha_pixel(uint32_t s, uint32_t d, uint32_t alpha) {
     uint32_t rb = (((s & 0x00ff00ffu) * alpha) + ((d & 0x00ff00ffu) * inv)) >> 8;
     uint32_t g = (((s & 0x0000ff00u) * alpha) + ((d & 0x0000ff00u) * inv)) >> 8;
     return 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);
+}
+
+static uint32_t font_straight_argb_pixel(uint32_t mask, uint32_t d, uint32_t color) {
+    uint32_t sa = (((mask >> 24u) & 255u) * (color >> 24u) + 127u) / 255u;
+    if (sa == 0u) return d;
+    uint32_t da = d >> 24u;
+    uint32_t dst_weight = (da * (255u - sa)) / 255u;
+    uint32_t out_a = sa + dst_weight;
+    uint32_t out_r = ((((color >> 16u) & 255u) * sa) + (((d >> 16u) & 255u) * dst_weight)) / out_a;
+    uint32_t out_g = ((((color >> 8u) & 255u) * sa) + (((d >> 8u) & 255u) * dst_weight)) / out_a;
+    uint32_t out_b = (((color & 255u) * sa) + ((d & 255u) * dst_weight)) / out_a;
+    return (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;
+}
+
+static void sanitize_env_token(char *buf, size_t cap, const char *fallback) {
+    size_t i = 0;
+    for (; i + 1 < cap && buf[i] != '\0'; i++) {
+        unsigned char ch = (unsigned char)buf[i];
+        int ok = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '.' || ch == '_' || ch == '-';
+        if (!ok) buf[i] = '-';
+    }
+    if (i == 0) snprintf(buf, cap, "%s", fallback);
 }
 
 static void fail(const char *reason, cl_int code, uint64_t expected, uint64_t actual) {
@@ -501,6 +697,17 @@ int main(int argc, char **argv) {
     if (err != CL_SUCCESS) { fail("opencl-create-alpha-kernel", err, 0, 0); return 3; }
     cl_kernel k_scroll = g_fns.CreateKernel(program, "simple_2d_scroll_u32", &err);
     if (err != CL_SUCCESS) { fail("opencl-create-scroll-kernel", err, 0, 0); return 3; }
+    cl_kernel k_font = g_fns.CreateKernel(program, "simple_font_atlas_composite_v1_u32", &err);
+    if (err != CL_SUCCESS || !k_font) { fail("opencl-create-font-kernel", err, 0, 0); return 3; }
+
+    char driver_buf[128];
+    driver_buf[0] = '\0';
+    size_t driver_bytes = 0;
+    if (g_fns.GetDeviceInfo(device, CL_DEVICE_DRIVER_VERSION, sizeof(driver_buf), driver_buf, &driver_bytes) != CL_SUCCESS) {
+        driver_buf[0] = '\0';
+    }
+    driver_buf[sizeof(driver_buf) - 1] = '\0';
+    sanitize_env_token(driver_buf, sizeof(driver_buf), "opencl-icd");
 
     uint32_t *host = (uint32_t *)calloc(count, sizeof(uint32_t));
     uint32_t *expected_buf = (uint32_t *)calloc(count, sizeof(uint32_t));
@@ -598,12 +805,73 @@ int main(int argc, char **argv) {
     uint64_t scroll_mismatches = mismatch_u32(host, expected_buf, count);
     for (unsigned int i = 0; i < count; ++i) { expected_all[count * 3u + i] = expected_buf[i]; actual_all[count * 3u + i] = host[i]; }
 
+    const unsigned int font_count = 4u;
+    const size_t font_bytes = font_count * sizeof(uint32_t);
+    uint32_t font_atlas[] = {0x00000000u, 0x80ffffffu, 0xffffffffu, 0xffffffffu};
+    uint32_t font_initial[] = {0xff102030u, 0xff102030u, 0xff102030u, 0x00000000u};
+    uint32_t font_expected_pixels[4];
+    uint32_t font_actual_pixels[4];
+    cl_long font_color_l = (cl_long)0x80402010u;
+    for (unsigned int i = 0; i < font_count; ++i) {
+        font_expected_pixels[i] = font_straight_argb_pixel(font_atlas[i], font_initial[i], (uint32_t)font_color_l);
+    }
+    cl_mem font_atlas_buf = g_fns.CreateBuffer(context, CL_MEM_READ_WRITE, font_bytes, NULL, &err);
+    if (err != CL_SUCCESS || !font_atlas_buf) { fail("opencl-font-atlas-buffer", err, 0, 0); return 3; }
+    cl_mem font_dst_buf = g_fns.CreateBuffer(context, CL_MEM_READ_WRITE, font_bytes, NULL, &err);
+    if (err != CL_SUCCESS || !font_dst_buf) { fail("opencl-font-dst-buffer", err, 0, 0); return 3; }
+    err = g_fns.EnqueueWriteBuffer(queue, font_atlas_buf, CL_TRUE, 0, font_bytes, font_atlas, 0, NULL, NULL);
+    if (err != CL_SUCCESS) { fail("opencl-font-atlas-write", err, 0, 0); return 3; }
+    err = g_fns.EnqueueWriteBuffer(queue, font_dst_buf, CL_TRUE, 0, font_bytes, font_initial, 0, NULL, NULL);
+    if (err != CL_SUCCESS) { fail("opencl-font-dst-write", err, 0, 0); return 3; }
+
+    cl_long f_atlas_w = 4, f_atlas_h = 1, f_atlas_cnt = 4;
+    cl_long f_atlas_x = 0, f_atlas_y = 0, f_quad_w = 4, f_quad_h = 1;
+    cl_long f_dst_w = 4, f_dst_h = 1, f_dst_cnt = 4;
+    cl_long f_dst_x = 0, f_dst_y = 0;
+    err = g_fns.SetKernelArg(k_font, 0, sizeof(cl_mem), &font_atlas_buf);
+    err |= g_fns.SetKernelArg(k_font, 1, sizeof(cl_mem), &font_dst_buf);
+    err |= g_fns.SetKernelArg(k_font, 2, sizeof(cl_long), &f_atlas_w);
+    err |= g_fns.SetKernelArg(k_font, 3, sizeof(cl_long), &f_atlas_h);
+    err |= g_fns.SetKernelArg(k_font, 4, sizeof(cl_long), &f_atlas_cnt);
+    err |= g_fns.SetKernelArg(k_font, 5, sizeof(cl_long), &f_atlas_x);
+    err |= g_fns.SetKernelArg(k_font, 6, sizeof(cl_long), &f_atlas_y);
+    err |= g_fns.SetKernelArg(k_font, 7, sizeof(cl_long), &f_quad_w);
+    err |= g_fns.SetKernelArg(k_font, 8, sizeof(cl_long), &f_quad_h);
+    err |= g_fns.SetKernelArg(k_font, 9, sizeof(cl_long), &f_dst_w);
+    err |= g_fns.SetKernelArg(k_font, 10, sizeof(cl_long), &f_dst_h);
+    err |= g_fns.SetKernelArg(k_font, 11, sizeof(cl_long), &f_dst_cnt);
+    err |= g_fns.SetKernelArg(k_font, 12, sizeof(cl_long), &f_dst_x);
+    err |= g_fns.SetKernelArg(k_font, 13, sizeof(cl_long), &f_dst_y);
+    err |= g_fns.SetKernelArg(k_font, 14, sizeof(cl_long), &font_color_l);
+    if (err != CL_SUCCESS) { fail("opencl-font-args", err, 0, 0); return 3; }
+
+    size_t font_global = font_count;
+    cl_event font_event = NULL;
+    err = g_fns.EnqueueNDRangeKernel(queue, k_font, 1, NULL, &font_global, NULL, 0, NULL, &font_event);
+    if (err != CL_SUCCESS || !font_event) { fail("opencl-font-enqueue", err, 0, 0); return 3; }
+    err = g_fns.WaitForEvents(1, &font_event);
+    if (err != CL_SUCCESS) { fail("opencl-font-wait", err, 0, 0); return 3; }
+    uint64_t font_fence_handle = (uint64_t)(uintptr_t)font_event;
+    g_fns.ReleaseEvent(font_event);
+    err = g_fns.EnqueueReadBuffer(queue, font_dst_buf, CL_TRUE, 0, font_bytes, font_actual_pixels, 0, NULL, NULL);
+    if (err != CL_SUCCESS) { fail("opencl-font-readback", err, 0, 0); return 3; }
+    uint64_t font_expected = checksum_u32(font_expected_pixels, font_count);
+    uint64_t font_actual = checksum_u32(font_actual_pixels, font_count);
+    uint64_t font_mismatches = mismatch_u32(font_actual_pixels, font_expected_pixels, font_count);
+    uint64_t font_device_handle = (uint64_t)(uintptr_t)device;
+    uint64_t font_module_handle = (uint64_t)(uintptr_t)program;
+    uint64_t font_kernel_handle = (uint64_t)(uintptr_t)k_font;
+    g_fns.ReleaseMemObject(font_atlas_buf);
+    g_fns.ReleaseMemObject(font_dst_buf);
+    g_fns.ReleaseKernel(k_font);
+
     uint64_t actual = fill_actual + copy_actual + alpha_actual + scroll_actual;
     uint64_t expected = fill_expected + copy_expected + alpha_expected + scroll_expected;
     uint64_t mismatches = fill_mismatches + copy_mismatches + alpha_mismatches + scroll_mismatches;
     int wrote_expected = write_json_u32(expected_pixels_path, expected_all, count * 4u, "opencl-generated-2d-expected");
     int wrote_actual = write_json_u32(actual_pixels_path, actual_all, count * 4u, "opencl-generated-2d-readback");
-    if (actual == expected && mismatches == 0 && wrote_expected && wrote_actual) {
+    int font_ok = font_actual == font_expected && font_mismatches == 0 && font_device_handle > 0 && font_module_handle > 0 && font_kernel_handle > 0 && font_fence_handle > 0;
+    if (actual == expected && mismatches == 0 && font_ok && wrote_expected && wrote_actual) {
         printf("opencl_generated_2d_readback_status=pass\n");
         printf("opencl_generated_2d_readback_reason=readback-pixels-matched\n");
         printf("opencl_generated_2d_readback_backend_name=opencl\n");
@@ -631,6 +899,25 @@ int main(int argc, char **argv) {
         printf("opencl_generated_2d_readback_value=%u\n", value);
         printf("opencl_generated_2d_readback_expected_pixels_path=%s\n", expected_pixels_path);
         printf("opencl_generated_2d_readback_actual_pixels_path=%s\n", actual_pixels_path);
+        printf("opencl_generated_2d_readback_font_status=pass\n");
+        printf("opencl_generated_2d_readback_font_reason=straight-argb-pixels-matched\n");
+        printf("opencl_generated_2d_readback_font_entry=simple_font_atlas_composite_v1_u32\n");
+        printf("opencl_generated_2d_readback_font_oracle_semantics_revision=2\n");
+        printf("opencl_generated_2d_readback_font_submit_attempted=true\n");
+        printf("opencl_generated_2d_readback_font_readback_available=true\n");
+        printf("opencl_generated_2d_readback_font_fixture=straight-argb-v2-4x1\n");
+        printf("opencl_generated_2d_readback_font_backend=opencl\n");
+        printf("opencl_generated_2d_readback_font_driver=%s\n", driver_buf);
+        printf("opencl_generated_2d_readback_font_device_handle=%llu\n", (unsigned long long)font_device_handle);
+        printf("opencl_generated_2d_readback_font_module_or_queue_handle=%llu\n", (unsigned long long)font_module_handle);
+        printf("opencl_generated_2d_readback_font_kernel_or_pipeline_handle=%llu\n", (unsigned long long)font_kernel_handle);
+        printf("opencl_generated_2d_readback_font_fence_handle=%llu\n", (unsigned long long)font_fence_handle);
+        printf("opencl_generated_2d_readback_font_fence_handle_kind=clevent-wait-for-events\n");
+        printf("opencl_generated_2d_readback_font_expected_checksum=%llu\n", (unsigned long long)font_expected);
+        printf("opencl_generated_2d_readback_font_actual_checksum=%llu\n", (unsigned long long)font_actual);
+        printf("opencl_generated_2d_readback_font_readback_checksum=%llu\n", (unsigned long long)font_actual);
+        printf("opencl_generated_2d_readback_font_mismatch_count=%llu\n", (unsigned long long)font_mismatches);
+        printf("opencl_generated_2d_readback_font_parity_status=pass\n");
         return 0;
     }
     fail(wrote_expected && wrote_actual ? "readback-pixel-mismatch" : "readback-artifact-write-failed", 0, expected, actual);

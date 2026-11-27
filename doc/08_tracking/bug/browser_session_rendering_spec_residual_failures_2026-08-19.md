@@ -172,3 +172,18 @@ engine-lane churn. Kept OPEN, handed back with no new action by this lane.
 ## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
 
 **LIVE (confirmed; owner unchanged — JS-engine/browser lane)** — No re-measure this lane (no-green-rerun; the 2026-11-11 runner6 and 2026-11-13 UI-batch verdicts stand on this base class). All remaining mechanisms live in `src/lib/gc_async_mut/web/` / `src/lib/nogc_sync_mut/js/`; the record's own instruction to coordinate with the in-flight JS-engine work stands; group 2 (missing helpers/fields) needs that lane to land definitions; group 1 waits on the seed text-slice reversal (separate tracker).
+
+
+## Addendum 2026-11-27 — W6-1: 25/25 `script_css_animation`, 24/25 `dom_input` (only out-of-fence layout/seed mixed-case wrap remains)
+
+Fixed all in-fence JS-engine / DOM / session-flush defects and restored missing spec helpers/CSS specificity fixtures:
+
+- `src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl`: omitted raw `<script>` `#text` inside `be_dom_serialize_html_for_render` so `<script>` source strings containing `<style>...</style>` do not leak into `extract_css_vw`.
+- `src/lib/gc_async_mut/web/browser_session_runtime.spl`: preserved initial CSS animation `epoch_ms` on first render when `advance_time` runs beforehand; blocked `button-activate` / `form-submit` under `sandbox allow-forms` without `allow-top-navigation` before mutating focus/DOM; guarded tail `_sync_runtime_body_from_dom()` so non-mutating dispatches (such as `keydown` before blocked implicit submit) do not re-serialize unchanged `current_body_html`.
+- `src/lib/nogc_sync_mut/js/engine/{interpreter,interpreter_eval_member}.spl` + `browser_session*.spl`: added `host_dom_mutation_dirty` so `host_dom_mutation_generation` wraparound to `0` still flushes pending `style` mutations to DOM; added `_retire_dom_objects_except` and `adopt_host_body_bridge` to retain live `body.innerHTML` element identity without aliasing detached nodes.
+- `test/02_integration/rendering/browser_session_script_css_animation_spec.spl`: fixed interpreter import, restored `_open_raf_promise_microtask_frame`, `_duplicate_offset_animation_html`, and `"bounds retained DOM bridge allocations without aliasing detached nodes"`, and removed dead `dom_mutation_generation`/`dom_bridge_generation` wrapper references.
+- `test/02_integration/rendering/browser_session_dom_input_spec.spl`: added `appearance:none;` to custom checkbox CSS and raised `#stage.blurred`/`#stage.focused` rule specificity without weakening any assertions.
+
+Measured with `wa3_shared_bin/simple.exe test <spec> --mode=interpreter`:
+- `test/02_integration/rendering/browser_session_script_css_animation_spec.spl`: **25 total, 25 passed, 0 failed (`outcome=OK`)**.
+- `test/02_integration/rendering/browser_session_dom_input_spec.spl`: **25 total, 24 passed, 1 failed (`outcome=ERROR`)** — only `should parse mixed-case document tags through layout Draw IR and pixels` remains (fails on seed codepoint slice `Case İ<` and out-of-fence `simple_web_html_layout_renderer_layout.spl` text wrapping owned by `W5-5`). Row remains **OPEN**.

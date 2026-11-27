@@ -75,3 +75,8 @@ why it looked like a lowering bug and why the interpreter was right.
 
 The `@workaround` stays until a Linux seed carrying f63e2e35906d and this
 change is redeployed and the phase-ladder rung 2 hello build passes natively.
+
+## Shard Registration (2026-11-27)
+
+- **Workaround site:** `src/app/cli/shard_worker_reap_v1.spl:217-229` (`shard_worker_reaped_stopped_v1`, tagged `# @workaround bug=seed_native_inline_if_else_or_chain_false_2026-11-27`).
+- **Shard:** `doc/08_tracking/bug/db/seed_native_inline_if_else_or_chain_false_2026-11-27.sdn` (`status=open`, pending Rust seed native lowering fix for inline `if/else` short-circuit `or`/`and` chains).

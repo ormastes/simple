@@ -1,0 +1,238 @@
+# Mock - Test doubles for the spec framework.
+#
+# Pure-Simple mock double: stubbed return values and recorded call arguments
+# are text, matching the MockFunction convention in
+# std.common.testing.mock.builder.spl. (The Rust seed's bundled
+# std/src/spec/mock.spl is Any-valued; Any has no pure-Simple counterpart,
+# so this module is the text-valued equivalent rather than a port.)
+
+struct MockCall:
+    method_name: text
+    args: [text]
+
+struct MockStub:
+    method_name: text
+    values: [text]
+    index: i32
+
+# Fluent builder returned by Mock.when(method).
+struct MockWhenBuilder:
+    target: Mock
+    method_name: text
+
+    fn returns(self, value: text):
+        self.target.set_return_values(self.method_name, [value])
+
+    fn returns_sequence(self, values: [text]):
+        self.target.set_return_values(self.method_name, values)
+
+# Records every call made to a Mock; shared by verify().
+pub class CallRecorder:
+    calls: [MockCall]
+
+    static fn new() -> CallRecorder:
+        CallRecorder(calls: [])
+
+    me record(method: text, args: [text]) -> CallRecorder:
+        var calls = self.calls
+        calls.push(MockCall(method_name: method, args: args))
+        self.calls = calls
+        self
+
+    fn call_count(method: text) -> i32:
+        var count: i32 = 0
+        for call in self.calls:
+            if call.method_name == method:
+                count = count + 1
+        count
+
+    fn was_called(method: text) -> bool:
+        self.call_count(method) > 0
+
+    fn was_called_with(method: text, args: [text]) -> bool:
+        for call in self.calls:
+            if call.method_name == method and call.args.len() == args.len():
+                var matches = true
+                for i in 0..call.args.len():
+                    if call.args[i] != args[i]:
+                        matches = false
+                        break
+                if matches:
+                    return true
+        false
+
+    fn calls_for(method: text) -> [MockCall]:
+        var matched: [MockCall] = []
+        for call in self.calls:
+            if call.method_name == method:
+                matched.push(call)
+        matched
+
+    me reset():
+        self.calls = []
+
+# Fluent verification DSL: mock.verify("get").was_called().verify()
+pub class CallVerifier:
+    recorder: CallRecorder
+    method_name: text
+    check_times: bool
+    expected_times: i32
+    check_args: bool
+    expected_args: [text]
+
+    static fn new(recorder: CallRecorder, method: text) -> CallVerifier:
+        CallVerifier(
+            recorder: recorder,
+            method_name: method,
+            check_times: false,
+            expected_times: 0,
+            check_args: false,
+            expected_args: []
+        )
+
+    fn was_called() -> CallVerifier:
+        self
+
+    fn was_called_n_times(times: i32) -> CallVerifier:
+        self.check_times = true
+        self.expected_times = times
+        self
+
+    fn with_args(args: [text]) -> CallVerifier:
+        self.check_args = true
+        self.expected_args = args
+        self
+
+    fn get_matching_calls() -> [MockCall]:
+        self.recorder.calls_for(self.method_name)
+
+    me verify():
+        if self.check_times:
+            val actual = self.recorder.call_count(self.method_name)
+            if actual != self.expected_times:
+                panic("Expected '{self.method_name}' to be called {self.expected_times} time(s), but was called {actual} time(s)")
+        elif not self.recorder.was_called(self.method_name):
+            panic("Expected '{self.method_name}' to have been called, but it was not")
+        if self.check_args:
+            if not self.recorder.was_called_with(self.method_name, self.expected_args):
+                panic("Expected '{self.method_name}' to have been called with {self.expected_args}, but it was not")
+
+pub class Mock:
+    name: text
+    stubs: [MockStub]
+    recorder: CallRecorder
+
+    static fn new(name: text) -> Mock:
+        Mock(name: name, stubs: [], recorder: CallRecorder.new())
+
+    me when(method: text) -> MockWhenBuilder:
+        MockWhenBuilder(target: self, method_name: method)
+
+    me set_return_values(method: text, values: [text]):
+        var i = 0
+        while i < self.stubs.len():
+            if self.stubs[i].method_name == method:
+                var stub = self.stubs[i]
+                stub.values = values
+                stub.index = 0
+                self.stubs[i] = stub
+                return
+            i = i + 1
+        var stubs = self.stubs
+        stubs.push(MockStub(method_name: method, values: values, index: 0))
+        self.stubs = stubs
+
+    fn call(method: text, args: [text]) -> text:
+        self.recorder.record(method, args)
+        var i = 0
+        while i < self.stubs.len():
+            if self.stubs[i].method_name == method:
+                var stub = self.stubs[i]
+                if stub.index < stub.values.len() as i32:
+                    val value = stub.values[stub.index]
+                    stub.index = stub.index + 1
+                    self.stubs[i] = stub
+                    return value
+                return ""
+            i = i + 1
+        ""
+
+    fn verify(method: text) -> CallVerifier:
+        CallVerifier.new(self.recorder, method)
+
+    fn call_count(method: text) -> i32:
+        self.recorder.call_count(method)
+
+    me reset():
+        self.stubs = []
+        self.recorder.reset()
+
+# Records calls against a real collaborator; no stubbed returns.
+pub class Spy:
+    name: text
+    recorder: CallRecorder
+
+    static fn new(name: text) -> Spy:
+        Spy(name: name, recorder: CallRecorder.new())
+
+    me record_call(method: text, args: [text]) -> Spy:
+        self.recorder.record(method, args)
+        self
+
+    fn was_called(method: text) -> bool:
+        self.recorder.was_called(method)
+
+    fn call_count(method: text) -> i32:
+        self.recorder.call_count(method)
+
+    fn calls_for(method: text) -> [MockCall]:
+        self.recorder.calls_for(method)
+
+    me reset():
+        self.recorder.reset()
+
+# Key-value double for configuration/lookup surfaces.
+pub class Stub:
+    name: text
+    keys: [text]
+    values: [text]
+
+    static fn new(name: text) -> Stub:
+        Stub(name: name, keys: [], values: [])
+
+    me set(key: text, value: text) -> Stub:
+        var i = 0
+        while i < self.keys.len():
+            if self.keys[i] == key:
+                var values = self.values
+                values[i] = value
+                self.values = values
+                return self
+            i = i + 1
+        var keys = self.keys
+        keys.push(key)
+        self.keys = keys
+        var values = self.values
+        values.push(value)
+        self.values = values
+        self
+
+    fn get(key: text) -> text:
+        var i = 0
+        while i < self.keys.len():
+            if self.keys[i] == key:
+                return self.values[i]
+            i = i + 1
+        ""
+
+    fn has(key: text) -> bool:
+        var i = 0
+        while i < self.keys.len():
+            if self.keys[i] == key:
+                return true
+            i = i + 1
+        false
+
+    me reset():
+        self.keys = []
+        self.values = []

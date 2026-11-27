@@ -1,0 +1,45 @@
+#!/bin/sh
+# Phase routing of lib/product-tool-authority.shs: producer phases 1-2 run the
+# Python validator, phase 3+ the pure-Simple twin on the verified stage binary,
+# and phase 3+ without a stage binary + pin fails closed (no Python fallback).
+set -u
+repo=$(CDPATH= cd -P -- "$(dirname -- "$0")/../../.." && pwd -P) || exit 2
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+pass=0 fail=0
+src="$tmp/source" tool="$tmp/tool"
+mkdir -p "$src" "$tool/scripts/bootstrap/lib"
+cp "$repo/scripts/bootstrap/lib/product-tool-authority.shs" "$tool/scripts/bootstrap/lib/"
+# Recording stand-ins for the interpreter and the stage binary.
+printf '#!/bin/sh\necho "python $*" >"%s/called"\n' "$tmp" >"$tmp/python"
+printf '#!/bin/sh\necho "stage $*" >"%s/called"\n' "$tmp" >"$tmp/stage"
+chmod +x "$tmp/python" "$tmp/stage"
+printf '#!/bin/sh\nsource_root=%s\nscript_root=%s\nproduct_phase=${1:-}\n. "$script_root/lib/product-tool-authority.shs"\necho admitted\n' \
+  "$src" "$tool/scripts/bootstrap" >"$tool/scripts/bootstrap/entry.shs"
+
+check() {  # name expected-rc expected-called-prefix phase [env...]
+  name=$1 want_rc=$2 want=$3 phase=$4; shift 4
+  rm -f "$tmp/called"
+  env SIMPLE_BOOTSTRAP_TOOL_ROOT="$tool" SIMPLE_BOOTSTRAP_TOOL_MANIFEST="$tmp/m.json" \
+    SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256=abc "$@" sh "$tool/scripts/bootstrap/entry.shs" "$phase" \
+    >/dev/null 2>"$tmp/err"; rc=$?
+  got=$(cat "$tmp/called" 2>/dev/null || echo none)
+  case "$got" in "$want"*) called_ok=1 ;; *) called_ok=0 ;; esac
+  if [ "$rc" = "$want_rc" ] && [ "$called_ok" = 1 ]; then
+    pass=$((pass + 1)); printf 'ok   %s\n' "$name"
+  else
+    fail=$((fail + 1)); printf 'FAIL %s: rc=%s called=%s\n' "$name" "$rc" "$got"
+  fi
+}
+check phase2-python 0 "python -B $tool/scripts/bootstrap/tool-code-authority.py --root $tool --manifest $tmp/m.json --sha256 abc --entry $tool/scripts/bootstrap/entry.shs" phase2 SIMPLE_BOOTSTRAP_TOOL_PYTHON="$tmp/python"
+check phase4-twin 0 "stage run $tool/scripts/bootstrap/tool-code-authority.spl --stage-binary $tmp/stage --root $tool --manifest $tmp/m.json --sha256 abc --entry $tool/scripts/bootstrap/entry.shs" phase4 \
+  SIMPLE_BOOTSTRAP_TOOL_PYTHON="$tmp/python" SIMPLE_VERIFIED_STAGE_BINARY="$tmp/stage" SIMPLE_VERIFIED_STAGE_PIN="$tmp/pin.env"
+check phase4-no-stage-fails-closed 2 none phase4 SIMPLE_BOOTSTRAP_TOOL_PYTHON="$tmp/python"
+check phase3-no-pin-fails-closed 2 none phase3 SIMPLE_BOOTSTRAP_TOOL_PYTHON="$tmp/python" SIMPLE_VERIFIED_STAGE_BINARY="$tmp/stage"
+check inherited-phase4-twin 0 "stage run" "" SIMPLE_BOOTSTRAP_TOOL_PHASE=phase4 \
+  SIMPLE_VERIFIED_STAGE_BINARY="$tmp/stage" SIMPLE_VERIFIED_STAGE_PIN="$tmp/pin.env"
+check phase2-overrides-inherited 0 "python" phase2 SIMPLE_BOOTSTRAP_TOOL_PHASE=phase4 SIMPLE_BOOTSTRAP_TOOL_PYTHON="$tmp/python"
+check unknown-phase-refused 2 none phase5 SIMPLE_BOOTSTRAP_TOOL_PYTHON="$tmp/python"
+check empty-phase-refused 2 none "" SIMPLE_BOOTSTRAP_TOOL_PYTHON="$tmp/python"
+printf 'product-tool-authority routing: %s passed, %s failed\n' "$pass" "$fail"
+[ "$fail" = 0 ] && [ "$pass" -gt 0 ]

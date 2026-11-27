@@ -1,0 +1,41 @@
+# Regression for compiler_interpreter_integration_real_gaps_found_2026-09-06
+# gap 3 (error-location reporting, REQ-COMPINT-ERR-004): a runtime
+# division-by-zero diagnostic must name its source line, not only
+# `file:line:col`. Runs the real seed binary as a subprocess against a
+# 3-line fixture whose error is on line 3.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{write_file, file_exists, env_get}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+val FIXTURE = "print(\"line1\")\nprint(\"line2\")\nval x = 1 / 0\n"
+
+describe "division-by-zero diagnostic carries its source line":
+    it "reports the error on line 3 of a 3-line fixture and exits 1":
+        step("Write a 3-line fixture whose division by zero is on line 3 and run it")
+        val dir = get_temp_dir().replace("\\", "/") + "/p3_gap3_span"
+        expect(dir_create_all(dir)).to_equal(true)
+        val file = dir + "/div_zero_line3.spl"
+        val _w = write_file(file, FIXTURE)
+        val (out, err, rc) = process_run_timeout(binary(), ["run", file], 300000)
+        expect(rc).to_equal(1)
+        expect(err.contains("division by zero")).to_equal(true)
+        expect(err.contains("line 3")).to_equal(true)
+
+    it "still renders positioned diagnostics for modulo by zero":
+        step("Run a fixture whose modulo by zero is on line 2")
+        val dir = get_temp_dir().replace("\\", "/") + "/p3_gap3_span"
+        expect(dir_create_all(dir)).to_equal(true)
+        val file = dir + "/mod_zero_line2.spl"
+        val _w = write_file(file, "val a = 10\nval b = a % 0\n")
+        val (out, err, rc) = process_run_timeout(binary(), ["run", file], 300000)
+        expect(rc).to_equal(1)
+        expect(err.contains("modulo by zero")).to_equal(true)
+        expect(err.contains("line 2")).to_equal(true)

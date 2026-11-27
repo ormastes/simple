@@ -1,0 +1,296 @@
+# Pure-Simple phase-3 twin of hello-sanity-matrix.py (phases 1 and 2 stay on
+# the Python owner; the .shs/.cmd wrappers route --phase 3 here).
+#
+# Runs on the verified stage binary, which is pinned instead of a Python
+# interpreter: the running image's SHA-256 must equal stage3_sha256 of an
+# admitted provenance record (--stage-pin / SIMPLE_VERIFIED_STAGE_PIN), checked
+# before any work and again at the end; any mismatch fails closed (exit 2).
+#
+# Documented deltas from the Python owner (phase-3 scope):
+#   * identity.sdn adds stage_binary_sha256/stage_pin (trust anchor).
+#   * lanes run sequentially; --jobs 0 is accepted but not parallel.
+#     ponytail: sequential lanes; upgrade = one --lane-worker subprocess per lane.
+#   * --prior-interpreter-evidence reuse fails closed (not ported).
+#   * Darwin native lanes fail closed until the capture proxy twin is verified
+#     on a macOS host (pure Darwin logic lives in lib/hello_matrix_darwin.spl).
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, get_args, exit, host_os, is_dir, dir_create_all, process_run, env_get, list_dir, cwd}
+use scripts.bootstrap.lib.hello_matrix_lane.{compile}
+use std.nogc_sync_mut.io.env_ops.{env_vars}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use scripts.bootstrap.lib.hello_matrix_run.{signal_install}
+use scripts.bootstrap.lib.hello_matrix_policy.{SdnField, EnvPair, sdn_s, sdn_i, sdn_b, env_put, env_value, has_text, inherited_build_settings, runtime_identity_member, buildrunner_summary, apply_buildrunner_status, matrix_exit_code, matrix_status, LANES, FIXTURES, canonical_positive_i64}
+use scripts.bootstrap.lib.hello_matrix_run.{MatrixContext, run_command, digest, join, write_sdn, set_native_windows, which_in, retained_children_count, mkdir_exclusive}
+use scripts.bootstrap.lib.hello_matrix_cases.{ReuseOptions, run_lane, run_interpreter}
+use scripts.bootstrap.lib.hello_matrix_windows.{windows_install_memory_budget}
+use scripts.bootstrap.lib.hello_buildrunner_entry.{matrix_buildrunner_run_lane}
+use scripts.bootstrap.lib.verified_stage_pin.{VerifiedStagePin, verified_stage_pin_check, verified_stage_pin_recheck, verified_stage_image_path}
+
+val USAGE = "usage: hello-sanity-matrix.py [-h] [--trace-stages] --compiler COMPILER --phase {{1,2,3}} --source-root SOURCE_ROOT --runtime-path RUNTIME_PATH --output OUTPUT"
+
+fn usage_error(message: text):
+    eprint(USAGE)
+    eprint("hello-sanity-matrix.py: error: " + message)
+    exit(2)
+
+struct Args:
+    values: [EnvPair]
+    lanes: [text]
+    trace: bool
+    skip_interpreter: bool
+
+fn arg_get(a: Args, key: text, default_value: text) -> text:
+    val v = env_value(a.values, key)
+    if v == "": default_value else: v
+
+val VALUE_OPTIONS: [text] = ["--compiler", "--phase", "--source-root", "--runtime-path", "--output", "--backend", "--compile-route", "--timeout-seconds", "--max-rss-kib", "--jobs", "--min-free-disk-bytes", "--max-log-bytes", "--linker", "--windows-abi", "--prior-version-evidence", "--reuse-build-evidence", "--reuse-shared-evidence", "--prior-interpreter-evidence", "--memory-policy", "--buildrunner-manager", "--buildrunner-manifest-writer", "--buildrunner-template", "--buildrunner-target", "--stage-pin", "--stage-binary"]
+
+fn parse_args(argv: [text]) -> Args:
+    var values: [EnvPair] = []
+    var lanes: [text] = []
+    var trace = false
+    var skip = false
+    var i = 0
+    while i < argv.len():
+        var arg = argv[i]
+        var inline = ""
+        var has_inline = false
+        val eq = arg.index_of("=") ?? -1
+        if arg.starts_with("--") and eq > 0:
+            inline = arg.substring(eq + 1, arg.len())
+            arg = arg.substring(0, eq)
+            has_inline = true
+        if arg == "--trace-stages": trace = true
+        elif arg == "--skip-interpreter": skip = true
+        elif arg == "--lanes":
+            if has_inline: lanes.push(inline)
+            while i + 1 < argv.len() and not argv[i + 1].starts_with("-"):
+                i = i + 1
+                lanes.push(argv[i])
+            if lanes.len() == 0: usage_error("argument --lanes: expected at least one argument")
+        elif has_text(VALUE_OPTIONS, arg):
+            if has_inline: values = env_put(values, arg, inline)
+            elif i + 1 < argv.len():
+                i = i + 1
+                values = env_put(values, arg, argv[i])
+            else: usage_error("argument " + arg + ": expected one argument")
+        else: usage_error("unrecognized arguments: " + argv[i])
+        i = i + 1
+    var missing: [text] = []
+    for key in ["--compiler", "--phase", "--source-root", "--runtime-path", "--output"]:
+        if env_value(values, key) == "": missing.push(key)
+    if missing.len() > 0:
+        usage_error("the following arguments are required: " + missing.join(", "))
+    Args(values: values, lanes: if lanes.len() == 0: LANES else: lanes, trace: trace, skip_interpreter: skip)
+
+fn _choice(a: Args, key: text, default_value: text, choices: [text]) -> text:
+    val v = arg_get(a, key, default_value)
+    if not has_text(choices, v):
+        usage_error("argument " + key + ": invalid choice: '" + v + "' (choose from " + choices.join(", ") + ")")
+    v
+
+fn _int(a: Args, key: text, default_value: text) -> i64:
+    val v = arg_get(a, key, default_value)
+    val n = v.to_int() ?? -1
+    if not canonical_positive_i64(v) and v != "0":
+        usage_error("argument " + key + ": invalid int value: '" + v + "'")
+    n
+
+fn _abs(path: text, windows: bool) -> text:
+    var p = path
+    val absolute = p.starts_with("/") or (p.len() > 1 and p.substring(1, 2) == ":")
+    while p.starts_with("./") or p.starts_with(".\\"): p = p.substring(2, p.len())
+    if not absolute: p = if p == "." or p == "": cwd() else: cwd() + "/" + p
+    while p.len() > 3 and (p.ends_with("/.") or p.ends_with("\.")): p = p.substring(0, p.len() - 2)
+    if windows: p.replace("/", "\\") else: p
+
+fn runtime_identity(root: text) -> [EnvPair]:
+    var out: [EnvPair] = []
+    for child in list_dir(root):
+        var leaf = child
+        val fwd = child.last_index_of("/") ?? -1
+        val back = child.last_index_of("\\") ?? -1
+        val slash = if fwd > back: fwd else: back
+        if slash >= 0: leaf = child.substring(slash + 1, child.len())
+        if runtime_identity_member(leaf):
+            out = env_put(out, leaf, digest(join(root, leaf)))
+    out
+
+fn _pin_arg(a: Args, windows: bool) -> text:
+    val raw = arg_get(a, "--stage-pin", env_get("SIMPLE_VERIFIED_STAGE_PIN"))
+    if raw == "": "" else: _abs(raw, windows)
+
+fn main_matrix() -> i64:
+    var argv = get_args()
+    var start = 0
+    for k in 0..argv.len():
+        if argv[k].ends_with("hello-sanity-matrix.spl"): start = k + 1
+    val a = parse_args(argv[start..argv.len()])
+    val os = host_os()
+    val windows = os == "windows"
+    val linux = os == "linux"
+    set_native_windows(windows)
+    val phase = _int(a, "--phase", "")
+    if phase != 3:
+        usage_error("argument --phase: the pure-Simple twin admits phase 3 only (phases 1-2 use hello-sanity-matrix.py)")
+    val backend = _choice(a, "--backend", "cranelift", ["llvm", "cranelift"])
+    val route = _choice(a, "--compile-route", "coordinator", ["coordinator", "positional"])
+    val abi = _choice(a, "--windows-abi", "msvc", ["msvc", "gnu"])
+    val jobs = _int(a, "--jobs", if os == "macos": "1" else: "0")
+    if jobs != 0 and jobs != 1: usage_error("argument --jobs: invalid choice: '{jobs}' (choose from 0, 1)")
+    if route == "positional": usage_error("positional diagnostic route is qualified only for phase 2")
+    val br_raw = [arg_get(a, "--buildrunner-manager", ""), arg_get(a, "--buildrunner-manifest-writer", ""), arg_get(a, "--buildrunner-template", ""), arg_get(a, "--buildrunner-target", "")]
+    val br_win = os == "windows"
+    val br = if br_raw[0] != "" and br_raw[1] != "" and br_raw[2] != "" and br_raw[3] != "": [_abs(br_raw[0], br_win), _abs(br_raw[1], br_win), _abs(br_raw[2], br_win), br_raw[3]] else: br_raw
+    var br_count = 0
+    for v in br_raw:
+        if v != "": br_count = br_count + 1
+    if br_count > 0 and br_count < 4: usage_error("BuildRunner requires manager, manifest writer, template, and target together")
+    for i in 0..a.lanes.len():
+        if not has_text(LANES, a.lanes[i]): usage_error("argument --lanes: invalid choice: '" + a.lanes[i] + "'")
+        for j in 0..i:
+            if a.lanes[j] == a.lanes[i]: usage_error("native lanes must be unique")
+    val timeout = _int(a, "--timeout-seconds", "900")
+    val rss = _int(a, "--max-rss-kib", "4194304")
+    val log_bytes = _int(a, "--max-log-bytes", "4194304")
+    val disk = _int(a, "--min-free-disk-bytes", "1610612736")
+    if timeout <= 0 or rss <= 0 or log_bytes <= 0 or disk < 0: usage_error("resource bounds must be positive")
+    if not linux and not windows and os != "macos":
+        usage_error("UNSUPPORTED: exact hosted-link adapters support Linux/ELF, macOS/Mach-O and native Windows/COFF")
+    val linker_name = arg_get(a, "--linker", if windows: "lld-link" elif os == "macos": "ld64.lld" else: "ld.lld")
+    val path_env = env_get("PATH")
+    val tools = if windows: [linker_name, "llvm-readobj"] elif os == "macos": ["perl", linker_name, "clang", "otool", "nm"] else: ["perl", linker_name, "readelf", "nm"]
+    for tool in tools:
+        if which_in(tool, path_env, windows) == "": usage_error("missing required tool: " + tool)
+    # Trust anchor before any work.
+    # Informational only (recorded in the context): NOT a trust input. Trust is
+    # the pin record + the digest of the running image (verified_stage_pin.spl).
+    # The wrappers reject a user-supplied --stage-binary and append their own
+    # last; parse_args (env_put) keeps the last occurrence, so theirs wins.
+    val stage_binary = arg_get(a, "--stage-binary", env_get("SIMPLE_VERIFIED_STAGE_BINARY"))
+    val pin = match verified_stage_pin_check(_pin_arg(a, windows), _abs(arg_get(a, "--source-root", ""), windows), linux, windows):
+        case Ok(p): p
+        case Err(e):
+            eprint("FAIL: " + e)
+            return 2
+    if os == "macos":
+        eprint("FAIL: Darwin phase-3 twin path is not verified on a macOS host; use hello-sanity-matrix.py")
+        return 2
+    signal_install(2)
+    signal_install(15)
+    val compiler = _abs(arg_get(a, "--compiler", ""), windows)
+    val root = _abs(arg_get(a, "--source-root", ""), windows)
+    val out = _abs(arg_get(a, "--output", ""), windows)
+    val runtime = _abs(arg_get(a, "--runtime-path", ""), windows)
+    val linker_found = which_in(linker_name, path_env, windows)
+    val linker = _abs(linker_found, windows)
+    val hashes = runtime_identity(runtime)
+    if hashes.len() == 0:
+        eprint("FAIL: runtime contains no bound library/object authority")
+        return 1
+    if windows:
+        match windows_install_memory_budget((a.lanes.len() + 1) * rss * 1024 + 268435456):
+            case Ok(_): ()
+            case Err(e):
+                eprint("FAIL: " + e)
+                return 1
+    var environ: [EnvPair] = []
+    for kv in env_vars() ?? []:
+        environ = env_put(environ, kv.0, kv.1)
+    val kept = match inherited_build_settings(environ, windows):
+        case Ok(k): k
+        case Err(e):
+            eprint("FAIL: " + e)
+            return 1
+    var base: [EnvPair] = []
+    for p in environ:
+        if not p.key.starts_with("SIMPLE_") and not p.key.starts_with("BOOTSTRAP_"): base = env_put(base, p.key, p.value)
+    for p in [EnvPair(key: "SIMPLE_BINARY", value: compiler), EnvPair(key: "SIMPLE_BIN", value: compiler), EnvPair(key: "SIMPLE_BOOTSTRAP_DRIVER", value: compiler), EnvPair(key: "SIMPLE_FRONTEND_DELEGATE", value: compiler), EnvPair(key: "SIMPLE_FRONTEND_DELEGATED", value: "1"), EnvPair(key: "SIMPLE_NO_STUB_FALLBACK", value: "1"), EnvPair(key: "SIMPLE_NATIVE_BUILD_FORCE_WORKER", value: "0"), EnvPair(key: "SIMPLE_BOOTSTRAP", value: "1"), EnvPair(key: "SIMPLE_LIB", value: join(root, "src")), EnvPair(key: "SIMPLE_RUNTIME_PATH", value: runtime), EnvPair(key: "SIMPLE_PACKAGE_INDEX_COLD_INIT", value: "1"), EnvPair(key: "SIMPLE_LINKER", value: if windows and abi == "msvc": "lld-link" else: "lld")]:
+        base = env_put(base, p.key, p.value)
+    for p in kept: base = env_put(base, p.key, p.value)
+    val linker_dir = linker.substring(0, (linker.last_index_of(if windows: "\\" else: "/") ?? 0))
+    base = env_put(base, "PATH", linker_dir + (if windows: ";" else: ":") + env_value(base, "PATH"))
+    val ctx = MatrixContext(root: root, out: out, script: "", stage_binary: stage_binary, compiler: compiler, sha: digest(compiler), runtime: runtime, runtime_hashes: hashes, linker: linker, linker_sha: digest(linker), windows: windows, darwin: false, driver: "", driver_sha: "", sdk: "", base: base, phase: phase, backend: backend, compile_route: route, timeout_seconds: timeout, max_rss_kib: rss, min_free_disk_bytes: disk, max_log_bytes: log_bytes, windows_abi: abi, trace_stages: a.trace, target: "", jobs: jobs)
+    val out_sep = if windows: "\\" else: "/"
+    val out_parent = out.substring(0, (out.last_index_of(out_sep) ?? 0))
+    if out_parent != "": dir_create_all(out_parent)
+    match mkdir_exclusive(out):
+        case Err(e):
+            eprint("FAIL: " + e)
+            return 1
+        case Ok(_): ()
+    val code = execute(ctx, a, br, pin)
+    match verified_stage_pin_recheck(pin, linux, windows):
+        case Ok(_): code
+        case Err(e):
+            write_sdn(ctx, join(out, "result.sdn"), [sdn_i("phase", phase), sdn_s("status", "FAIL"), sdn_s("reason", e), sdn_b("admitted", false)])
+            eprint("FAIL: " + e)
+            2
+
+fn _fail(ctx: MatrixContext, message: text) -> i64:
+    val status = if retained_children_count() > 0: "RUNNING_FINALIZATION" else: "FAIL"
+    write_sdn(ctx, join(ctx.out, "result.sdn"), [sdn_i("phase", ctx.phase), sdn_s("status", status), sdn_s("reason", message), sdn_b("admitted", false)])
+    eprint("FAIL: " + message)
+    1
+
+fn execute(ctx: MatrixContext, a: Args, br: [text], pin: VerifiedStagePin) -> i64:
+    var fixture_hashes: [EnvPair] = []
+    for name in ["single.spl", "main.spl", "provider.spl"]:
+        fixture_hashes = env_put(fixture_hashes, name, digest(join(join(ctx.root, FIXTURES), name)))
+    val (rev_out, _, rev_code) = process_run("git", ["-C", ctx.root, "rev-parse", "HEAD"])
+    if rev_code != 0: return _fail(ctx, "Command '['git', '-C', '" + ctx.root + "', 'rev-parse', 'HEAD']' returned non-zero exit status {rev_code}.")
+    var identity = [sdn_s("classification", "DIAGNOSTIC_NOT_ADMITTED"), sdn_i("phase", ctx.phase), sdn_s("compiler", ctx.compiler), sdn_s("compiler_sha256", ctx.sha), sdn_s("backend", ctx.backend), sdn_s("compile_route", ctx.compile_route), sdn_s("source_root", ctx.root), sdn_s("source_revision", rev_out.trim()), sdn_s("runtime", ctx.runtime), sdn_s("linker", ctx.linker), sdn_s("linker_sha256", ctx.linker_sha)]
+    for p in fixture_hashes: identity.push(sdn_s(p.key.replace(".", "_") + "_sha256", p.value))
+    identity.push(sdn_s("stage_binary_sha256", pin.sha256))
+    identity.push(sdn_s("stage_pin", pin.path))
+    write_sdn(ctx, join(ctx.out, "identity.sdn"), identity)
+    var runtime_fields: [SdnField] = []
+    for p in ctx.runtime_hashes: runtime_fields.push(sdn_s(p.key, p.value))
+    write_sdn(ctx, join(ctx.out, "runtime-inputs.sdn"), runtime_fields)
+    val setup = join(ctx.out, "setup")
+    mkdir_exclusive(setup)
+    val prior_version = arg_get(a, "--prior-version-evidence", "")
+    if prior_version != "":
+        return _fail(ctx, "prior compiler version evidence reuse is not supported by the phase-3 twin")
+    val version = run_command(ctx, setup, "compiler-version", [ctx.compiler, "--version"], [], "", 5)
+    if not version.ok: return _fail(ctx, version.error)
+    val inventory = join(ctx.root, "build/scv/source-inventory/CURRENT")
+    if not file_exists(inventory):
+        val e = compile(ctx, setup, "source-inventory-prime", join(FIXTURES, "single.spl"), join(setup, "prime.o"), ["--emit-object"], [EnvPair(key: "SIMPLE_SCV_INVENTORY_COLD_INIT", value: "1")])
+        if e != "" and not file_exists(inventory): return _fail(ctx, e)
+    val reuse = ReuseOptions(build: arg_get(a, "--reuse-build-evidence", ""), shared: arg_get(a, "--reuse-shared-evidence", ""), interpreter: arg_get(a, "--prior-interpreter-evidence", ""))
+    var statuses: [text] = []
+    for name in a.lanes: statuses.push(run_lane(ctx, reuse, name))
+    val interpreter_status = if a.skip_interpreter: "UNRUN" else: run_interpreter(ctx, reuse)
+    val memory_policy = _choice(a, "--memory-policy", "enforce", ["enforce", "monitor"])
+    val image = verified_stage_image_path(not ctx.windows and not ctx.darwin, ctx.windows)
+    var br_states: [text] = []
+    for name in LANES:
+        var record = [sdn_s("status", "UNRUN")]
+        if br[0] != "" and has_text(a.lanes, name):
+            record = match matrix_buildrunner_run_lane(ctx, if ctx.windows: "windows" else: "linux", memory_policy, image, pin.sha256, ctx.backend, name, br[0], br[1], br[2], br[3]):
+                case Ok(r): r
+                case Err(e): return _fail(ctx, e)
+        write_sdn(ctx, join(ctx.out, "buildrunner-" + name + ".sdn"), record)
+        for f in record:
+            if f.key == "status": br_states.push(f.value)
+    for p in fixture_hashes:
+        if digest(join(join(ctx.root, FIXTURES), p.key)) != p.value: return _fail(ctx, "fixture changed during matrix")
+    val now = runtime_identity(ctx.runtime)
+    var same = now.len() == ctx.runtime_hashes.len()
+    for p in ctx.runtime_hashes:
+        if env_value(now, p.key) != p.value: same = false
+    if not same: return _fail(ctx, "runtime authority bytes changed during matrix")
+    var passed = 0
+    for s in statuses:
+        if s == "PASS": passed = passed + 1
+    val complete = a.lanes.len() == LANES.len()
+    val native_status = if passed != statuses.len(): "FAIL" elif complete: "PASS" else: "PARTIAL"
+    var status = matrix_status(ctx.phase, native_status, interpreter_status)
+    val br_status = buildrunner_summary(br_states)
+    status = apply_buildrunner_status(status, br_status)
+    if retained_children_count() > 0: status = "RUNNING_FINALIZATION"
+    write_sdn(ctx, join(ctx.out, "result.sdn"), [sdn_i("phase", ctx.phase), sdn_s("compiler_sha256", ctx.sha), sdn_s("status", status), sdn_s("scope", "compiler-native-and-interpreter"), sdn_s("compile_route", ctx.compile_route), sdn_s("buildrunner_status", br_status), sdn_s("native_status", native_status), sdn_s("selected_native_status", if passed == statuses.len(): "PASS" else: "FAIL"), sdn_i("required_native_lanes", 4), sdn_i("selected_native_lanes", statuses.len()), sdn_s("interpreter_status", interpreter_status), sdn_i("executed_lanes", statuses.len()), sdn_i("passed_lanes", passed), sdn_i("failed_lanes", statuses.len() - passed), sdn_b("admitted", false)])
+    matrix_exit_code(status)
+
+fn main():
+    exit(main_matrix())

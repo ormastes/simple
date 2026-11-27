@@ -8,11 +8,21 @@
 
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend,
     vulkan_counted_submit_and_wait_fence,
-    vulkan_timing_enabled, vulkan_timing_now_us, vulkan_timing_add,
-    VK_T_ENQUEUE, VK_T_FLUSH, VK_T_SFFI_BEGIN, VK_T_SFFI_REAP, VK_T_SFFI_DESC,
-    VK_T_SFFI_BIND_PIPE, VK_T_SFFI_BIND_DESC, VK_T_SFFI_PUSH,
+    vulkan_timing_enabled, vulkan_timing_now_us, vulkan_timing_add}
+# Timing buckets moved to the import-free backend_vulkan_font_types.spl: this
+# module and backend_vulkan.spl import each other, and a val cannot be imported
+# from a module that is still loading.
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{
+    VK_T_ENQUEUE, VK_T_FLUSH, VK_T_SFFI_BEGIN, VK_T_SFFI_REAP,
+    VK_T_SFFI_DESC, VK_T_SFFI_BIND_PIPE, VK_T_SFFI_BIND_DESC, VK_T_SFFI_PUSH,
     VK_T_SFFI_DISPATCH, VK_T_SFFI_END, VK_T_SFFI_SUBMIT, VK_T_SFFI_WAIT_FENCE,
     VK_T_FONT_ATLAS_UPLOAD}
+# Values this module originally defined and still owes its consumers (the
+# gc_sync_mut facade and specs) after the move to backend_vulkan_font_types.spl.
+export use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{
+    VK_DISPATCH_COMPLETED_INELIGIBLE, RECT_BATCH_MIN_RECTS,
+    VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER,
+    VK_IMAGE_COMPOSITE_SRC_OVER_SOLID, VK_SPEC_MAX_WORKGROUP_COUNT}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
@@ -48,7 +58,6 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 # ============================================================================
 
 val VK_PUSH_CONSTANT_SIZE: i64 = 64
-val VK_DISPATCH_COMPLETED_INELIGIBLE: i64 = 2
 # Batched-rect lane. FROZEN, mirrors shaders/rect_batch.comp binding 1:
 # 5 u32 words per rect -- x, y, w, h, colour.
 val RECT_BATCH_WORDS_PER_RECT: i64 = 5
@@ -57,9 +66,6 @@ val RECT_BATCH_STORAGE_USAGE: i64 = 0x80
 # Smallest rect-list buffer, 256 rects. Sized so a typical UI frame never grows
 # the slot at all; growth doubles from here.
 val RECT_BATCH_MIN_BYTES: i64 = 5120
-# Below this the single-rect lane is cheaper: one dispatch costs a buffer
-# upload and a whole-bounding-box grid, which a lone rect does not amortise.
-val RECT_BATCH_MIN_RECTS: i64 = 2
 # Retained image-source staging buffers kept warm across frames. This is a
 # HOST-MEMORY bound, not a command-buffer bound: `rt_vulkan_create_descriptor_set`
 # (src/compiler_rust/runtime/src/vulkan_graphics_runtime_compute.rs:19-70) creates
@@ -240,11 +246,6 @@ fn vulkan_order_trace(message: text):
     """
     if vulkan_order_trace_enabled():
         print("[vk-order] " + message)
-val VK_IMAGE_COMPOSITE_COPY: i32 = 0
-val VK_IMAGE_COMPOSITE_SRC_OVER: i32 = 1
-# Solid colour fill: Chrome's SkPMSrcOver rule (color.blend_solid) rather
-# than the image rule mode 1 uses.
-val VK_IMAGE_COMPOSITE_SRC_OVER_SOLID: i32 = 2
 
 # ============================================================================
 # Compute Dispatch Methods
@@ -2428,7 +2429,6 @@ fn vulkan_font_atlas_slot_plan(slot_found: bool, slot_sequence: i64,
     VK_FONT_SLOT_FLUSH_THEN_WRITE
 
 val VK_CLEAR_WORKGROUP_SIZE: i64 = 256
-val VK_SPEC_MAX_WORKGROUP_COUNT: i64 = 65535
 val VK_CLEAR_MAX_GROUPS_X: i64 = 32768
 
 fn vulkan_clear_dispatch_groups_x(total_pixels: i64) -> i64:

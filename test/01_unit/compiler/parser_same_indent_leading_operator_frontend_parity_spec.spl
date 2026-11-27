@@ -1,0 +1,35 @@
+# Purpose and audience: executable parity evidence for
+# doc/08_tracking/bug/parser_same_indent_leading_operator_continuation_2026-08-17.md
+# Drives the pure-Simple frontend parser (compiler.core.parser) to pin the
+# self-hosted side of the same-indent leading-operator behaviour while the
+# row is BLOCKED on the language-owner disambiguation decision.
+#
+# Current design (both frontends agree, seed pins in
+# src/compiler_rust/parser/tests/leading_operator_indent_gate.rs):
+# a line starting with a binary operator continues the previous expression
+# ONLY when indented strictly deeper; a same-indent line is a new statement
+# (the cross_query.spl:137 implicit-return `-1` hazard).
+use std.spec.{describe, it, expect, step}
+use compiler.core.parser.{parse_module_silent_checked}
+
+describe "same-indent leading-operator continuation: pure-Simple frontend parity":
+    it "does not glue a same-indent + line (guard 2) but parses it as a unary-plus statement":
+        step("Parse fn body whose + continuation sits at the head-line indent")
+        step("Lexical glue is rejected; parser rescues it via parse_unary TOK_PLUS (tokens.spl:81, parser_expr.spl:471) as a separate discarded statement — the wm_optimization silent-miscompile shape")
+        val src = "fn probe(a: i64) -> i64:\n    1 + a\n    + 2\n"
+        expect(parse_module_silent_checked(src, "same_indent_plus_probe.spl")).to_equal(false)
+
+    it "rejects a same-indent == continuation line outright (no unary form, no glue)":
+        step("Operator with no unary production exposes guard 2 directly")
+        val src = "fn probe(a: i64) -> i64:\n    1 + a\n    == 2\n"
+        expect(parse_module_silent_checked(src, "same_indent_eq_probe.spl")).to_equal(true)
+
+    it "accepts the identical expression with a deeper-indented continuation line":
+        step("Same shape, continuation indented one level deeper")
+        val src = "fn probe(a: i64) -> i64:\n    1 + a\n        + 2\n"
+        expect(parse_module_silent_checked(src, "deep_indent_plus_probe.spl")).to_equal(false)
+
+    it "keeps a same-indent -1 after an inline if a separate implicit return":
+        step("The cross_query.spl:137 hazard shape must keep parsing as two statements")
+        val src = "fn digit(ch: i64) -> i64:\n    if ch == 1: return 1\n    -1\n"
+        expect(parse_module_silent_checked(src, "implicit_return_minus_probe.spl")).to_equal(false)

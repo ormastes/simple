@@ -282,9 +282,16 @@ pid). The pins were green when written; they guard the premises, they are not a 
 - *A unit setting.* None can help while the census matches on uid, and none is needed.
 - *Keeping the pause process alive on purpose.* It would then block the census by design.
 
-**Limit.** This rests on the helper group being killed. The same kill also removes `conmon`
-(`container_fresh_route_start_helper_kills_conmon_2026-11-27.md`); revisit this decision, as the pin
-spec says, if helper containment changes to fix that.
+**Limit.** This rests on the helper group being killed. The same kill also removed `conmon`
+(`container_fresh_route_start_helper_kills_conmon_2026-11-27.md`).
+
+**Changed 2026-11-27 (engine group, built).** The pause process no longer always dies with its helper: when
+a `start` helper made it, it is moved with `conmon` into `<delegatedCgroup>/simple-engine-<identity>` and
+outlives that one helper. The decision above still holds because the owner kills that group, observes it
+empty and removes it **before** the census (`machine_fresh_workload_engine_group_retire_v3`, first line
+after the absence check of the exited-start settle). So the census still has nothing to exclude and still
+excuses only the service's own pid. The pin gained link 2a (still four cases), and
+`machine_fresh_workload_engine_group_v3_spec.spl` pins the order at all three sites.
 `pause.pid` can name a dead pid between two helpers; podman replaces it, but a reused pid is a
 theoretical hazard that was not observed. The broker is itself a service-uid process; it exits after
 publishing its receipt. If the census samples before that, it refuses and the bounded repeat of Edge 1
@@ -346,10 +353,10 @@ The three stages need installed custody and were not executed.
    capture itself is refused (`containment-capture-refused:-95`), so it could not be observed. The
    classification does not depend on the answer unless it is `populated`.
 4. **Subject-closure settles are not attempted by cleanup.** Only the exited-start settle is.
-5. **The start helper's group kill also kills `conmon`.** A workload that is still running when the
-   start helper is reaped loses its monitor and the next engine command fails. Separate record:
+5. **The start helper's group kill also killed `conmon`.** Built in source 2026-11-27 (freeze and move
+   into an owner-held engine group); not run in the guest. Separate record:
    `container_fresh_route_start_helper_kills_conmon_2026-11-27.md`.
-6. **`HOME=/nonexistent`.** The route's broker environment allows only that value, and custody checks
-   the path does not exist. On this host `podman ... ps` with `HOME=/nonexistent` exits 1 with
-   `cannot resolve /nonexistent: lstat /nonexistent: no such file or directory`. Whether the helper
-   sees that value in the guest was not checked.
+6. **`HOME=/nonexistent`.** Checked 2026-11-27: that value is a rule for the broker's inherited
+   environment only. The helpers got an empty environment, so the engine fell back to the account home,
+   which custody requires to be the absent `/nonexistent`. Helpers now get `HOME=<run root>`. Record,
+   measurements and the open guest unit question: `container_fresh_route_helper_home_2026-11-27.md`.

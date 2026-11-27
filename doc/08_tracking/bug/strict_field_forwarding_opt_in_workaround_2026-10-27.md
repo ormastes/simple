@@ -33,7 +33,7 @@ Next step: rerun the census with the full module graph (imported type tables) on
 phase-3 full CLI exists; use that count to size step 1 of the removal plan.
 
 ## Full Module-Graph Census (2026-11-27)
-- Tooling update: extended `scripts/check/census-undefined-field-reads.spl` with `--lower-prefix`, `--shard`, Windows `/` path normalization, `/testdata/` exclusion, per-site deduplication, and `parse_module_source` error surfacing (`selftest` extended).
+- Tooling update: extended `scripts/check/census-undefined-field-reads.spl` with `--lower-prefix`, `--shard`, Windows `/` path normalization, `/testdata/` exclusion, module-name deduplication (`seen_names`), and `module_surfaces_from_modules` error surfacing (`selftest` extended).
 - Method: lowered all non-vendor/non-generated/non-testdata `.spl` modules across `src/{compiler,plugins,app,lib}` with `w2_census.exe` (strictly serial, 10 GB RSS / 120 s per-run caps) totaling **14,252 lowered files**:
   - `src/compiler` (**2,685 lowered** across `00..99`: `s1(00..30)=683`, `s2(35..60)=523`, `s3(70)=463`, `s4(80)=490`, `s5(90..99)=526`):
     - **3 findings already fixed upstream** on `release/1.0.0`: `src/compiler/20.hir/hir_lowering/_Items/module_tldr_registration.spl:111,119` (`admitted_function_abis`, fixed in `#12062` / `f7819267b6b`) and `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:3691` (`local_map`, fixed in `9a9800b74f0`).

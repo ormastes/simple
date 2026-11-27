@@ -1,6 +1,7 @@
 # JsInterpreter — native function dispatch (setTimeout, fetch, Promise, Response, Blob, Storage).
 
 use std.common.js.engine.js_error.{JsError, js_script_error, JsLogger, LogLevel, JsBrowserResult, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.common.js.engine.response_body.{JsResponseBodyFlag, js_response_consume_body_text, js_response_content_type_from_headers, js_response_blob_media_type}
 use std.common.js.types.js_types.JsValue
 use std.common.js.types.ast_types.JsExpression
 use std.common.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
@@ -1276,26 +1277,15 @@ impl JsInterpreter:
         JsValue.Object(id: self._create_settled_promise_object(value, true))
 
     me _consume_response_body(response_id: i64) -> Result<text, text>:
-        match self._get_internal_object_property(
-            response_id, "__simple_internal_response_body_consumed"
-        ):
-            JsValue.Boolean(true):
-                self.set_object_property(
-                    response_id, "bodyUsed", JsValue.Boolean(v: true)
-                )
-                return Err("TypeError: Body is unusable")
-            _:
-                pass_dn("unconsumed response body")
-        self._set_internal_object_property(
-            response_id, "__simple_internal_response_body_consumed",
-            JsValue.Boolean(v: true)
-        )
-        self.set_object_property(
-            response_id, "bodyUsed", JsValue.Boolean(v: true)
-        )
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v): Ok(v)
-            _: Ok("")
+        val flag = if self._is_response_body_consumed(response_id):
+            JsResponseBodyFlag.Consumed
+        else:
+            JsResponseBodyFlag.Unconsumed
+        self._write_response_body_flag(response_id, true)
+        val raw_body = match self.get_object_property(response_id, "body"):
+            JsValue.String(v): v
+            _: ""
+        js_response_consume_body_text(flag, raw_body)
 
     me _native_response_text(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
@@ -1337,9 +1327,10 @@ impl JsInterpreter:
                 return JsValue.Object(id: self._create_settled_promise_object(
                     JsValue.String(v: e), true
                 ))
-        var blob_type = self._response_content_type(response_id)
-        if blob_type == "":
-            blob_type = "application/octet-stream"
+        val headers_text = match self.get_object_property(response_id, "headersText"):
+            JsValue.String(h): h
+            _: ""
+        val blob_type = js_response_blob_media_type(headers_text)
         val blob_id = self.create_object()
         self.set_object_property(blob_id, "__simple_blob_host", JsValue.Boolean(v: true))
         self.set_object_property(blob_id, "size", JsValue.Number(v: body.len().to_f64()))
@@ -1409,13 +1400,8 @@ impl JsInterpreter:
 
     me _response_content_type(response_id: i64) -> text:
         match self.get_object_property(response_id, "headersText"):
-            JsValue.String(headers):
-                for line in headers.split("\n"):
-                    val trimmed = line.trim()
-                    if trimmed.lower().starts_with("content-type:"):
-                        return trimmed.slice(13, trimmed.byte_len()).trim()
-            _: pass_dn
-        ""
+            JsValue.String(headers): js_response_content_type_from_headers(headers)
+            _: ""
 
     me _json_parse_allocated(source: text, env: i64) -> JsBrowserResult<JsValue>:
         if not json_is_valid(source):

@@ -1,11 +1,21 @@
 # Source pins for one decision: the exited-start settle excludes nothing from the cohort census, because
-# the engine's rootless pause process cannot outlive the helper that created it.
+# the engine's rootless pause process cannot outlive the helper that created it, with one exception since
+# 2026-11-27: what a `start` helper whose leader exited 0 left behind is moved into an owner-held engine
+# group, which the owner kills before the census (link 2a).
 #
 # The chain, each link pinned below:
 #   1. every engine helper is cloned straight into its own group cgroup (CLONE_INTO_CGROUP);
 #   2. once the helper leader is reaped, a still-populated group is killed through cgroup.kill, and the
 #      group is collected only when the kernel reports it empty; the fresh route reaches that through
 #      its broker probe, and only the broker's post-collect receipt makes a helper terminal;
+#   2a. (changed on purpose, 2026-11-27) immediately before that kill, for a launch that asked through its
+#      thirteenth profile word and whose leader exited 0 without a timeout or a cancel, the group is frozen
+#      and its members moved into `<delegated root>/simple-engine-<identity>`. Only a Start projection
+#      asks: the plain one and, since the same day, the workspace one (a workspace start forks the same
+#      monitor). The kill below it is unchanged and still retires everything else. The owner retires the engine
+#      group before the exited-start census, so link 4 and link 5 hold as they were. Why: retiring the start
+#      helper killed the container's monitor and broke every later engine command
+#      (doc/08_tracking/bug/container_fresh_route_start_helper_kills_conmon_2026-11-27.md);
 #   3. the engine cannot move its pause process out of that group: custody refuses an epoch with a user
 #      bus, and every engine command line selects the cgroupfs manager;
 #   4. the settle refuses while a helper is not retired;
@@ -35,6 +45,13 @@ describe "Machine fresh engine residue containment V3":
         expect(poll.byte_len() > 0).to_equal(true)
         expect(poll.contains("if (owner->leader_reaped && populated) {\n        if (!rt_lg_kill(owner)) return errno ? errno : EIO;")).to_equal(true)
         expect(poll.contains("owner->tree_empty = owner->leader_reaped && !populated;")).to_equal(true)
+        step("2a: the one exception sits before that kill, runs once and only for a leader that exited 0 on its own")
+        val move_at = poll.index_of("if (owner->leader_reaped && populated && owner->residue_move && !owner->residue_done) {")
+        expect(move_at > 0).to_equal(true)
+        expect(poll.index_of("if (owner->leader_reaped && populated) {\n        if (!rt_lg_kill(owner)) return errno ? errno : EIO;") > move_at).to_equal(true)
+        expect(poll.contains("if (owner->exit_code == 0 && !owner->timed_out && !owner->cancelled && !owner->kill_pending)\n            (void)rt_lg_move_residue_v3(owner);")).to_equal(true)
+        expect(runtime.split("rt_lg_move_residue_v3(owner)").len()).to_equal(2)
+        expect(runtime.contains("rt_linux_group.residue_move=profile&&profile->v[12]==1;")).to_equal(true)
         step("Collection needs the reaped leader and the kernel-reported empty group")
         val collect = pin_body_v3(runtime, "SplArray *rt_linux_group_collect_v1(int64_t token) {", "\n}\n")
         expect(collect.contains("if (!rt_linux_group.leader_reaped || !rt_linux_group.tree_empty)\n        return rt_lg_observation(EBUSY);")).to_equal(true)
@@ -78,6 +95,19 @@ describe "Machine fresh engine residue containment V3":
     it "settles only after the helpers retired and excuses only the service from the census":
         val settlement = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_exited_settlement_v3.spl")
         expect(settlement.contains("if not progress.helper_retired: return Err(\"machine-fresh-workload-exited-settlement-helper-active\")")).to_equal(true)
+        step("2a: the moved residue is killed by the owner before the census, and only the two Start projections ask for the move")
+        val effects = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl")
+        val exited = pin_body_v3(effects, "pub(package) fn machine_fresh_workload_settle_exited_start_v3(", "\n\n")
+        val retire_at = exited.index_of("machine_fresh_workload_engine_group_retire_v3(custody, state)?")
+        expect(retire_at > 0).to_equal(true)
+        expect(exited.index_of("custody.observe_probe_absence_v3(") > retire_at).to_equal(true)
+        for path in ["src/lib/nogc_sync_mut/io/linux_fresh_workload_launch_v2.spl", "src/lib/nogc_sync_mut/io/linux_fresh_workspace_launch_v3.spl"]:
+            val asking = file_read_text(path)
+            expect(asking.split("leader_residue_mode = ").len()).to_equal(2)
+            expect(asking.contains("leader_residue_mode = if command.action == LinuxFreshWorkloadActionV2.Start: GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3 else: \"\"\n")).to_equal(true)
+        for path in ["src/lib/nogc_sync_mut/io/linux_fresh_epoch_launch_v1.spl", "src/lib/nogc_sync_mut/io/linux_fresh_workload_probe_launch_v3.spl",
+                "src/lib/nogc_sync_mut/io/linux_fresh_workspace_binding_v3.spl", "src/lib/common/contracts/container/linux_fresh_workload_probe_v3.spl"]:
+            expect(file_read_text(path).contains("leader_residue_mode")).to_equal(false)
         val native = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_epoch_native_v1.spl")
         val census = pin_body_v3(native, "fn epoch_native_uid_census_v1(", "\n\n")
         expect(census.byte_len() > 0).to_equal(true)

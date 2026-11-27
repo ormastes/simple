@@ -65,6 +65,20 @@ pub enum LowerError {
     )]
     OptionalCast { target: String },
 
+    /// An untyped value (unannotated parameter or return) reached a typed use
+    /// outside `unsafe` / script mode. A warning by default; an error under
+    /// `SIMPLE_STRICT_ANY=1`, where the strict marker keeps the JIT catch site
+    /// from demoting it to the interpreter.
+    #[error(
+        "SIMPLE_JIT_STRICT: {location}: in `{function}`: cannot infer a type for {origin} used in {usage}; add a type annotation. `any` is allowed only inside `unsafe` and in script mode"
+    )]
+    UninferredType {
+        origin: String,
+        usage: String,
+        function: String,
+        location: String,
+    },
+
     #[error("Cannot infer element type of empty array - use explicit annotation")]
     EmptyArrayNeedsType,
 

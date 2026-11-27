@@ -6,25 +6,21 @@ control="$workspace/control"
 data="$workspace/data"
 out="$workspace/build/verify/sdk-worker-observer-cycle1"
 compiler="$out/handoff/linux-x86_64-p1/simple"
-evidence="$control/scripts/check/sdk-observer-evidence-v1.py"
+evidence="$control/scripts/check/sdk-observer-evidence-v1.shs"
 mkdir -p "$out/control" "$out/sdk/src/app" "$out/sdk/cache"
 printf 'schema: sdk-observer-cycle1-outcome-v1\nsdk: NOT_RUN\nqualification: none\np3: skipped\n' > "$out/outcome.sdn"
-python3 - "$out/heartbeat.log" "$$" <<'PYHEART' &
-import datetime, os, pathlib, subprocess, sys, time
-path, owner = pathlib.Path(sys.argv[1]), int(sys.argv[2])
-end = time.monotonic() + 3600
-with path.open('w', buffering=1) as out:
-    out.write(f'heartbeat_pid={os.getpid()} heartbeat_pgid={os.getpgrp()} shell_pid={owner}\n')
-    while time.monotonic() < end and pathlib.Path(f'/proc/{owner}').is_dir():
-        out.write(datetime.datetime.now(datetime.timezone.utc).isoformat() + '\n')
-        for name in ('meminfo', 'swaps'):
-            out.write(pathlib.Path('/proc', name).read_text())
-        status = subprocess.run(['ps', '-eo', 'pid,ppid,pgid,rss,stat,comm', '--sort=-rss'],
-                                text=True, capture_output=True, timeout=5)
-        out.write('\n'.join(status.stdout.splitlines()[:16]) + '\n')
-        out.flush()
-        time.sleep(30)
-PYHEART
+(
+  # Resource heartbeat for the whole cycle: stops after an hour or when this shell exits.
+  me=$(exec sh -c 'echo $PPID')
+  end=$(( $(date +%s) + 3600 ))
+  printf 'heartbeat_pid=%s heartbeat_pgid=%s shell_pid=%s\n' "$me" "$(ps -o pgid= -p "$me" | tr -d ' ')" "$$"
+  while [ "$(date +%s)" -lt "$end" ] && [ -d "/proc/$$" ]; do
+    date -u +%Y-%m-%dT%H:%M:%S+00:00
+    cat /proc/meminfo /proc/swaps
+    ps -eo pid,ppid,pgid,rss,stat,comm --sort=-rss | head -n 16
+    sleep 30
+  done
+) > "$out/heartbeat.log" 2>&1 &
 heartbeat=$!
 trap 'kill "$heartbeat" 2>/dev/null || true' EXIT
 test "$GITHUB_RUN_ATTEMPT" = 1
@@ -70,18 +66,28 @@ set -e
 printf '%s\n' "$code" > "$control_lane/runtime.exit"
 test "$code" = 0
 test ! -s "$control_lane/runtime.stdout"
-python3 "$evidence" records --kind control --log "$control_lane/runtime.stderr" \
+sh "$evidence" records --kind control --log "$control_lane/runtime.stderr" \
   --output "$control_lane/capture.sdn"
 
 # Original SDK command/selected source bytes, with separate stdout/stderr capture.
 lane="$out/sdk"
-python3 - "$lane/environment.sdn" <<'PYENV'
-import json, os, pathlib, sys
-names = ('SIMPLE_NATIVE_BUILD_TARGET', 'SIMPLE_NATIVE_LIBRARY_MODE', 'SIMPLE_LIBRARY_MODE',
-         'SIMPLE_STAGE3_STREAMING_SURFACES', 'SIMPLE_BOOTSTRAP_STAGE4', 'SIMPLE_STAGE4_STREAMING_SURFACES')
-pathlib.Path(sys.argv[1]).write_text('schema: sdk-observer-ambient-context-v1\n' +
-    ''.join(f'{key}: {json.dumps(os.environ.get(key, ""))}\n' for key in names))
-PYENV
+# Ambient build-selector environment, JSON-quoted values (SDN string interop).
+json_quote() {
+  if printf '%s' "$1" | LC_ALL=C grep -q '[^ -~]'; then
+    echo "unsupported character in environment value" >&2
+    return 1
+  fi
+  printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+{
+  printf 'schema: sdk-observer-ambient-context-v1\n'
+  for name in SIMPLE_NATIVE_BUILD_TARGET SIMPLE_NATIVE_LIBRARY_MODE SIMPLE_LIBRARY_MODE \
+      SIMPLE_STAGE3_STREAMING_SURFACES SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_STAGE4_STREAMING_SURFACES; do
+    eval "value=\${$name-}"
+    quoted=$(json_quote "$value")
+    printf '%s: %s\n' "$name" "$quoted"
+  done
+} > "$lane/environment.sdn"
 cp "$data/test/fixtures/compiler/simpleos_sysroot_receipt_owner/main.spl" "$lane/src/app/simpleos_sdk_owner_probe.spl"
 printf '%s  %s\n' 98602bc41839ce44421338ff9dd4d7d7de329aa93df89d568f40a31bcb119808 \
   "$lane/src/app/simpleos_sdk_owner_probe.spl" | sha256sum --check --strict > "$lane/entry-binding.txt"
@@ -116,7 +122,7 @@ printf '%s  %s\n' a4a1904d68e355d6cc95ceff7867edd26454c66afdb0db812fe7dd0e36886d
   printf '%s\n' "$code" > "$lane/native-build.exit"
 )
 set +e
-python3 "$evidence" records --kind sdk --data-root "$data" --log "$lane/native-build.stderr" --output "$lane/capture.sdn" \
+sh "$evidence" records --kind sdk --data-root "$data" --log "$lane/native-build.stderr" --output "$lane/capture.sdn" \
   > "$lane/capture-check.stdout" 2> "$lane/capture-check.stderr"
 capture=$?
 set -e

@@ -1,11 +1,12 @@
 # JsInterpreter — native function dispatch (setTimeout, fetch, Promise, Response, Blob, Storage).
 
 use std.common.js.engine.js_error.{JsError, js_script_error, JsLogger, LogLevel, JsBrowserResult, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.common.js.engine.response_body.{JsResponseBodyFlag, js_response_consume_body_text, js_response_content_type_from_headers, js_response_blob_media_type}
 use std.common.js.types.js_types.JsValue
 use std.common.js.types.ast_types.JsExpression
 use std.common.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.common.js.engine.vm_object_store.{ObjectStore}
-use std.common.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
+use std.common.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
 use std.common.js.engine.parser.{JsParser}
 use std.common.js.builtins.json.{json_is_valid}
 use std.nogc_async_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask}
@@ -38,6 +39,8 @@ impl JsInterpreter:
             return self._native_response_json(this_val)
         if native_id == NATIVE_RESPONSE_BLOB:
             return self._native_response_blob(this_val)
+        if native_id == NATIVE_RESPONSE_ARRAY_BUFFER:
+            return self._native_response_array_buffer(this_val)
         if native_id == NATIVE_BLOB_TEXT:
             return self._native_blob_text(this_val)
         if native_id == NATIVE_STORAGE_GET_ITEM:
@@ -517,39 +520,51 @@ impl JsInterpreter:
         val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
         JsValue.Object(id: self._create_settled_promise_object(value, true))
 
+    me _consume_response_body(response_id: i64) -> Result<text, text>:
+        val flag = if self._is_response_body_consumed(response_id):
+            JsResponseBodyFlag.Consumed
+        else:
+            JsResponseBodyFlag.Unconsumed
+        self._write_response_body_flag(response_id, true)
+        val raw_body = match self.get_object_property(response_id, "body"):
+            JsValue.String(v): v
+            _: ""
+        js_response_consume_body_text(flag, raw_body)
+
     me _native_response_text(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
-            _: JsValue.Undefined
+        match self._consume_response_body(response_id):
+            Ok(body): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: body), false))
+            Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e), true))
 
     me _native_response_json(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v):
-                match self._json_parse_allocated(v, self.global_env):
+        match self._consume_response_body(response_id):
+            Ok(body):
+                match self._json_parse_allocated(body, self.global_env):
                     Ok(value): JsValue.Object(id: self._create_settled_promise_object(value, false))
                     Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e.message), true))
-            _: JsValue.Undefined
+            Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e), true))
 
     me _native_response_blob(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
         var body = ""
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v): body = v
-            _: pass_dn
-        var blob_type = self._response_content_type(response_id)
-        if blob_type == "":
-            blob_type = "application/octet-stream"
+        match self._consume_response_body(response_id):
+            Ok(v): body = v
+            Err(e):
+                return JsValue.Object(id: self._create_settled_promise_object(
+                    JsValue.String(v: e), true
+                ))
+        val headers_text = match self.get_object_property(response_id, "headersText"):
+            JsValue.String(h): h
+            _: ""
+        val blob_type = js_response_blob_media_type(headers_text)
         val blob_id = self.create_object()
         self.set_object_property(blob_id, "__simple_blob_host", JsValue.Boolean(v: true))
         self.set_object_property(blob_id, "size", JsValue.Number(v: body.len().to_f64()))
@@ -557,6 +572,36 @@ impl JsInterpreter:
         self.set_object_property(blob_id, "__body__", JsValue.String(v: body))
         self._define_method_on(blob_id, "text", NATIVE_BLOB_TEXT)
         JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: blob_id), false))
+
+    me _native_response_array_buffer(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        var body = ""
+        match self._consume_response_body(response_id):
+            Ok(v): body = v
+            Err(e):
+                return JsValue.Object(id: self._create_settled_promise_object(
+                    JsValue.String(v: e), true
+                ))
+        val body_hex = self._native_webassembly_normalize_hex(body)
+        val use_hex_body = self._native_webassembly_valid_header(body_hex)
+        val byte_len = if use_hex_body: body_hex.len() / 2 else: body.bytes().len()
+        val buffer_id = self.create_object()
+        self.set_object_property(buffer_id, "__simple_array_buffer", JsValue.Boolean(v: true))
+        self.set_object_property(buffer_id, "byteLength", JsValue.Number(v: byte_len.to_f64()))
+        var i = 0
+        if use_hex_body:
+            while i < byte_len:
+                val byte = self._native_webassembly_hex_byte_at(body_hex, i)
+                self.set_object_property(buffer_id, i.to_text(), JsValue.Number(v: byte.to_f64()))
+                i = i + 1
+        else:
+            val bytes = body.bytes()
+            while i < bytes.len():
+                self.set_object_property(buffer_id, i.to_text(), JsValue.Number(v: (bytes[i] as i64).to_f64()))
+                i = i + 1
+        JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: buffer_id), false))
 
     me _native_blob_text(this_val: JsValue) -> JsValue:
         val blob_id = _get_obj_id(this_val)
@@ -588,13 +633,8 @@ impl JsInterpreter:
 
     me _response_content_type(response_id: i64) -> text:
         match self.get_object_property(response_id, "headersText"):
-            JsValue.String(headers):
-                for line in headers.split("\n"):
-                    val trimmed = line.trim()
-                    if trimmed.lower().starts_with("content-type:"):
-                        return trimmed.slice(13, trimmed.byte_len()).trim()
-            _: pass_dn
-        ""
+            JsValue.String(headers): js_response_content_type_from_headers(headers)
+            _: ""
 
     me _json_parse_allocated(source: text, env: i64) -> JsBrowserResult<JsValue>:
         if not json_is_valid(source):

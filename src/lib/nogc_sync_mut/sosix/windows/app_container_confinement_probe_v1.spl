@@ -1,0 +1,82 @@
+# AppContainer read-confinement EVIDENCE probe (simple container plan item 4). Evidence only:
+# it sets no capability flag. The Windows engine launch path is job + restricted token
+# (containment_launch_v1.spl, read_confinement: no), so nothing here may be reported as
+# filesystem_confinement of that path. See doc/03_plan/platform/container/simple_container_remaining_work.md 4.
+#
+# The probe performs BOTH sandbox runs itself (sosix_app_sandbox_run_v1), from a view dir, an
+# inside path and an outside path, so a caller cannot hand in forged or mispaired results:
+#   host read of the outside file  (before)  -> must succeed, non-empty
+#   inside run : child opens inside_path      -> must exit 0
+#   outside run: child opens outside_path     -> must exit exactly WINDOWS_APPCONTAINER_NOT_READABLE_EXIT_V1
+#   host read of the outside file  (after)    -> must succeed again (file existed throughout)
+# Exit 5 from the probe child means "not readable" (missing, empty or any read error); it is
+# NOT proof of ERROR_ACCESS_DENIED. The host reads before and after rule out a missing file.
+# Paths must be disjoint: inside_path under view_dir, outside_path under neither view_dir nor
+# the staged (read-granted) dir. Both runs must be clean (empty reason, not timed out).
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_result}
+use std.common.contracts.sosix.containment_v1.{SosixContainMillisV1}
+use std.nogc_sync_mut.sosix.app_container_types_v1.{SosixAppSandboxRequestV1, SosixAppSandboxResultV1}
+use std.nogc_sync_mut.sosix.app_container_v1.{sosix_app_sandbox_run_v1}
+
+# Probe child exit code for "the open/read of the target did not yield content".
+pub const WINDOWS_APPCONTAINER_NOT_READABLE_EXIT_V1 = 5
+const _WALL_MS = 120000
+
+# program + program_args_prefix launch the staged probe child; the child is run with
+# program_args_prefix + ["open", <path>]. stage_dir is granted read, view_dir modify.
+pub struct WindowsAppContainerConfinementRequestV1:
+    scope: text
+    program: text
+    program_args_prefix: [text]
+    stage_dir: text
+    view_dir: text
+    out_dir: text
+    inside_path: text
+    outside_path: text
+
+pub enum WindowsAppContainerConfinementVerdictV1:
+    Confined
+    NotConfined(reason: text)
+
+fn _normal(path: text) -> text:
+    path.replace("\\", "/").to_lower()
+
+fn _under(path: text, dir: text) -> bool:
+    val base = _normal(dir)
+    val child = _normal(path)
+    child.starts_with(base + "/")
+
+fn _host_reads(path: text) -> bool:
+    if not file_exists(path): return false
+    match file_read_result(path):
+        Ok(content): content.byte_len() > 0
+        Err(_reason): false
+
+fn _clean(result: SosixAppSandboxResultV1) -> bool:
+    result.reason == "" and not result.timed_out.value
+
+fn _run(request: WindowsAppContainerConfinementRequestV1, tag: text, target: text) -> SosixAppSandboxResultV1:
+    sosix_app_sandbox_run_v1(SosixAppSandboxRequestV1(scope: request.scope + "-" + tag,
+        program: request.program, args: request.program_args_prefix + ["open", target],
+        directory: request.view_dir, readonly_dirs: [request.stage_dir], writable_dirs: [request.view_dir],
+        stdout_path: request.out_dir + "/" + request.scope + "-" + tag + ".out", stderr_path: request.out_dir + "/" + request.scope + "-" + tag + ".err",
+        wall: SosixContainMillisV1(_WALL_MS)))
+
+fn _not(reason: text) -> WindowsAppContainerConfinementVerdictV1:
+    WindowsAppContainerConfinementVerdictV1.NotConfined(reason)
+
+pub fn windows_appcontainer_confinement_probe_run_v1(request: WindowsAppContainerConfinementRequestV1) -> WindowsAppContainerConfinementVerdictV1:
+    if not _under(request.inside_path, request.view_dir): return _not("inside-path-not-in-view")
+    if _under(request.outside_path, request.view_dir) or _under(request.outside_path, request.stage_dir):
+        return _not("outside-path-is-granted")
+    if not _host_reads(request.inside_path): return _not("inside-control-unreadable")
+    if not _host_reads(request.outside_path): return _not("outside-control-unreadable")
+    val inside = _run(request, "inside", request.inside_path)
+    if not _clean(inside): return _not("inside-run-failed")
+    if inside.exit_code.value != 0: return _not("inside-read-failed")
+    val outside = _run(request, "outside", request.outside_path)
+    if not _clean(outside): return _not("outside-run-failed")
+    if not _host_reads(request.outside_path): return _not("outside-control-lost")
+    if outside.exit_code.value == 0: return _not("outside-read-succeeded")
+    if outside.exit_code.value != WINDOWS_APPCONTAINER_NOT_READABLE_EXIT_V1: return _not("outside-exit-not-unreadable")
+    WindowsAppContainerConfinementVerdictV1.Confined

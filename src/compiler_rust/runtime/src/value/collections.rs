@@ -34,6 +34,12 @@ thread_local! {
     static SESSION_HEAP: RefCell<Option<SessionHeap>> = const { RefCell::new(None) };
     /// Nodes the last `rt_transient_heap_adopt` visited (I2 pruning evidence).
     static SESSION_ADOPT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Output buffer for `rt_interp_cstr`'s NUL-terminated copy of a runtime
+    /// string. Reused per thread so the C-ABI return stays borrowed (no leak
+    /// per call); the pointer is invalidated by the next `rt_interp_cstr`
+    /// call on the same thread, which every current consumer already honors
+    /// by reading the pointer immediately.
+    static INTERP_CSTR_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 static SESSION_HEAP_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -4442,16 +4448,32 @@ pub extern "C" fn rt_string_data(string: RuntimeValue) -> *const u8 {
     unsafe { str_ptr.add(1) as *const u8 }
 }
 
-/// Return UTF-8 data for a tagged runtime string, or preserve an already-raw
-/// C string pointer used by bootstrap/interpreter call sites.
+/// Return a NUL-terminated view for a tagged runtime string, or preserve an
+/// already-raw C string pointer used by bootstrap/interpreter call sites.
+///
+/// RuntimeString storage is exactly `len` bytes with no trailing NUL (see
+/// `alloc_runtime_string`), so the string's own data pointer must never be
+/// handed to a C-string consumer: it would read heap slack past `len`
+/// whenever this Rust definition wins the link (the C runtime twin returns a
+/// terminated buffer instead). Copy the bytes into a per-thread buffer and
+/// terminate them. The returned pointer stays valid until the next
+/// `rt_interp_cstr` call on the same thread; every consumer (C supplement
+/// sites, GPU entry names, interpreter extern shims) reads it immediately.
+/// See doc/08_tracking/bug/rt_interp_cstr_built_name_unterminated_runtime_path_2026-11-26.md
 #[no_mangle]
 pub extern "C" fn rt_interp_cstr(value: RuntimeValue) -> *const u8 {
     let data = rt_string_data(value);
     if data.is_null() {
-        value.to_raw() as usize as *const u8
-    } else {
-        data
+        return value.to_raw() as usize as *const u8;
     }
+    let len = rt_string_len(value) as usize;
+    INTERP_CSTR_BUFFER.with(|buffer| {
+        let mut buffer = buffer.borrow_mut();
+        buffer.clear();
+        buffer.extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });
+        buffer.push(0);
+        buffer.as_ptr()
+    })
 }
 
 #[cfg(test)]
@@ -4460,10 +4482,19 @@ mod interp_cstr_tests {
     use crate::value::RuntimeValue;
 
     #[test]
-    fn accepts_runtime_string_and_raw_pointer() {
+    fn returns_nul_terminated_copy_for_runtime_string() {
+        // Regression for rt_interp_cstr_built_name_unterminated_runtime_path_2026-11-26:
+        // a runtime-built string must read back through C-string consumers by
+        // its byte length exactly, never into heap slack past `len`.
         let bytes = b"Hello";
         let string = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
-        assert_eq!(rt_interp_cstr(string), rt_string_data(string));
+        let ptr = rt_interp_cstr(string);
+        assert!(!ptr.is_null());
+        // The copy lives outside the string's exact-len storage, which carries
+        // no trailing NUL and must never be handed to a C-string consumer.
+        assert_ne!(ptr, rt_string_data(string));
+        let cstr = unsafe { std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char) };
+        assert_eq!(cstr.to_bytes(), bytes);
 
         let raw = RuntimeValue::from_raw(bytes.as_ptr() as usize as u64);
         assert_eq!(rt_interp_cstr(raw), bytes.as_ptr());

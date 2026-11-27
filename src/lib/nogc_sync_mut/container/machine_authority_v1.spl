@@ -1103,6 +1103,19 @@ pub class MachineFreshWorkloadTransferV2:
         machine_fresh_workload_settle_exited_start_bounded_v3(self.admission.authority.unwrap().storage,
             self.admission.custody.unwrap(), self.state)
 
+    # Retires this owner's engine groups (what its start helper's leader left behind, moved by the group
+    # runtime). The destroy action calls it after Absence and before either settle; settle_v2 and its pinned
+    # body are unchanged and refuse through the lifecycle gate while a group is still recorded.
+    pub fn retire_engine_groups_v3() -> Result<(), text>:
+        val current = self.current_v2()?
+        machine_fresh_workload_engine_group_retire_v3(self.admission.custody.unwrap(), self.state)
+
+    # Close-driven attempt of the same retirement. Additive like settle_exited_pending_v3: a refusal is not
+    # latched here; the lifecycle close refuses while a group is still recorded.
+    fn retire_engine_groups_pending_v3() -> Result<(), text>:
+        if self.current_v2().is_err(): return Ok(())
+        self.retire_engine_groups_v3()
+
     # Cleanup-driven attempt of the same settle, for an owner whose destroy already completed Stop, Remove and
     # Absence on a proven exited start and was refused only at the cohort census. Strictly additive: when the
     # owner is not current or nothing is pending it does nothing, and a refusal is returned to the caller,
@@ -1151,6 +1164,7 @@ pub class MachineFreshWorkloadTransferV2:
         if phase.is_err(): return MachineFreshWorkloadCloseTurnV2(Some(retained), false, phase.unwrap_err())
         if phase.unwrap() == "closed": return MachineFreshWorkloadCloseTurnV2(nil, true, retained.admission.lifecycle.diagnostic_v1().unwrap())
         val settle = retained.settle_exited_pending_v3()
+        val engine = retained.retire_engine_groups_pending_v3()
         val already = retained.state.closed_state_v3()
         val native = if already.is_ok() and already.unwrap(): Ok(()) else: retained.state.close_native_v2()
         val native_diagnostic = retained.state.diagnostic_v2()

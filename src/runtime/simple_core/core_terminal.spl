@@ -1,0 +1,368 @@
+# Pure-Simple `simple-core` terminal, stdin, and signal ABI wrappers.
+#
+# Provides POSIX terminal raw mode, window size, TTY probes, stdin byte/chunk
+# reads, and signal/atexit latches compatible with core_process.spl's
+# rt_signal_check/rt_atexit_check so native Caret builds link cleanly against
+# pure-Simple simple_core.
+
+@unsafe(reason: "raw libc heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn malloc(size: i64) -> i64
+@unsafe(reason: "raw libc zeroed heap allocation ABI; zero means failure", capabilities: [ffi, raw_ptr])
+extern fn calloc(count: i64, size: i64) -> i64
+@unsafe(reason: "raw libc owned heap-pointer release ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
+@unsafe(reason: "raw pointer/offset byte load ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer/offset byte store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw file-descriptor mutable pointer/count read ABI; negative return is failure", capabilities: [ffi, raw_ptr])
+extern fn read(fd: i64, ptr: i64, count: i64) -> i64
+@unsafe(reason: "raw libc TTY check ABI", capabilities: [ffi])
+extern fn isatty(fd: i64) -> i64
+@unsafe(reason: "raw libc termios fetch ABI; nonzero return means failure", capabilities: [ffi, raw_ptr])
+extern fn tcgetattr(fd: i64, termios_p: i64) -> i64
+@unsafe(reason: "raw libc termios raw-mode mutation ABI", capabilities: [ffi, raw_ptr])
+extern fn cfmakeraw(termios_p: i64)
+@unsafe(reason: "raw libc termios apply ABI; nonzero return means failure", capabilities: [ffi, raw_ptr])
+extern fn tcsetattr(fd: i64, optional_actions: i64, termios_p: i64) -> i64
+@unsafe(reason: "raw libc terminal ioctl ABI; negative return is failure", capabilities: [ffi, raw_ptr])
+extern fn ioctl(fd: i64, request: i64, argp: i64) -> i64
+@unsafe(reason: "raw libc signal set init ABI; nonzero return means failure", capabilities: [ffi, raw_ptr])
+extern fn sigemptyset(sigset: i64) -> i64
+@unsafe(reason: "raw libc signal set membership ABI; nonzero return means failure", capabilities: [ffi, raw_ptr])
+extern fn sigaddset(sigset: i64, signal_num: i64) -> i64
+@unsafe(reason: "raw libc process signal mask ABI; nonzero return means failure", capabilities: [ffi, raw_ptr])
+extern fn sigprocmask(how: i64, set_ptr: i64, oldset_ptr: i64) -> i64
+@unsafe(reason: "raw owned tuple-handle allocation ABI; nonpositive return is failure", capabilities: [ffi])
+extern fn rt_tuple_new(len: i64) -> i64
+@unsafe(reason: "raw tuple-handle/index value-transfer ABI", capabilities: [ffi])
+extern fn rt_tuple_set(tuple: i64, idx: i64, value: i64) -> i8
+@unsafe(reason: "raw owned tagged-integer value allocation ABI", capabilities: [ffi])
+extern fn rt_value_int(value: i64) -> i64
+@unsafe(reason: "raw borrowed byte pointer/length and owned tagged-string ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_string_new(bytes: i64, len: i64) -> i64
+
+@when(os="linux"):
+@unsafe(reason: "Linux libc thread-local errno address ABI", capabilities: [ffi, raw_ptr])
+extern fn __errno_location() -> i64
+fn _sffi_core_term_errno_ptr() -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        __errno_location()
+@else:
+@when(os="freebsd"):
+@unsafe(reason: "FreeBSD libc thread-local errno address ABI", capabilities: [ffi, raw_ptr])
+extern fn __error() -> i64
+fn _sffi_core_term_errno_ptr() -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        __error()
+@else:
+@when(os="macos"):
+@unsafe(reason: "Darwin libc thread-local errno address ABI", capabilities: [ffi, raw_ptr])
+extern fn __error() -> i64
+fn _sffi_core_term_errno_ptr() -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        __error()
+@else:
+fn _sffi_core_term_errno_ptr() -> i64:
+    0
+@end
+@end
+@end
+
+@always_inline
+fn _sffi_core_term_malloc(size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        malloc(size)
+
+@always_inline
+fn _sffi_core_term_calloc(count: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        calloc(count, size)
+
+@always_inline
+fn _sffi_core_term_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
+fn _sffi_core_term_load_u8(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_load_u8(ptr, offset)
+
+@always_inline
+fn _sffi_core_term_store_u8(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_store_u8(ptr, offset, value)
+
+@always_inline
+fn _sffi_core_term_read(fd: i64, ptr: i64, count: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        read(fd, ptr, count)
+
+@always_inline
+fn _sffi_core_term_isatty(fd: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        isatty(fd)
+
+@always_inline
+fn _sffi_core_term_tcgetattr(fd: i64, termios_p: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        tcgetattr(fd, termios_p)
+
+@always_inline
+fn _sffi_core_term_cfmakeraw(termios_p: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        cfmakeraw(termios_p)
+
+@always_inline
+fn _sffi_core_term_tcsetattr(fd: i64, optional_actions: i64, termios_p: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        tcsetattr(fd, optional_actions, termios_p)
+
+@always_inline
+fn _sffi_core_term_ioctl(fd: i64, request: i64, argp: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        ioctl(fd, request, argp)
+
+@always_inline
+fn _sffi_core_term_sigemptyset(sigset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        sigemptyset(sigset)
+
+@always_inline
+fn _sffi_core_term_sigaddset(sigset: i64, signal_num: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        sigaddset(sigset, signal_num)
+
+@always_inline
+fn _sffi_core_term_sigprocmask(how: i64, set_ptr: i64, oldset_ptr: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        sigprocmask(how, set_ptr, oldset_ptr)
+
+@always_inline
+fn _sffi_core_term_rt_tuple_new(len: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_tuple_new(len)
+
+@always_inline
+fn _sffi_core_term_rt_tuple_set(tuple: i64, idx: i64, value: i64) -> i8:
+    unsafe(capabilities: [ffi]):
+        rt_tuple_set(tuple, idx, value)
+
+@always_inline
+fn _sffi_core_term_rt_value_int(value: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_value_int(value)
+
+@always_inline
+fn _sffi_core_term_rt_string_new(bytes: i64, len: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_string_new(bytes, len)
+
+@when(os="linux"):
+fn _core_term_posix_supported() -> bool:
+    true
+@else:
+@when(os="macos"):
+fn _core_term_posix_supported() -> bool:
+    true
+@else:
+@when(os="freebsd"):
+fn _core_term_posix_supported() -> bool:
+    true
+@else:
+fn _core_term_posix_supported() -> bool:
+    false
+@end
+@end
+@end
+
+@when(os="linux"):
+fn _core_term_tiocgwinsz() -> i64:
+    21523
+@else:
+@when(os="macos"):
+fn _core_term_tiocgwinsz() -> i64:
+    1074295912
+@else:
+@when(os="freebsd"):
+fn _core_term_tiocgwinsz() -> i64:
+    1074295912
+@else:
+fn _core_term_tiocgwinsz() -> i64:
+    0
+@end
+@end
+@end
+
+@when(os="linux"):
+fn _core_term_sig_block() -> i64:
+    0
+@else:
+@when(os="macos"):
+fn _core_term_sig_block() -> i64:
+    1
+@else:
+@when(os="freebsd"):
+fn _core_term_sig_block() -> i64:
+    1
+@else:
+fn _core_term_sig_block() -> i64:
+    -1
+@end
+@end
+@end
+
+var _core_term_saved_ptr: i64 = 0
+var _core_term_raw_active: i64 = 0
+
+@allow(primitive_api)
+pub fn rt_terminal_is_tty() -> bool:
+    if not _core_term_posix_supported():
+        return false
+    _sffi_core_term_isatty(0) == 1
+
+@allow(primitive_api)
+pub fn rt_terminal_stdout_is_tty() -> bool:
+    if not _core_term_posix_supported():
+        return false
+    _sffi_core_term_isatty(1) == 1
+
+@allow(primitive_api)
+pub fn rt_terminal_enable_raw_mode() -> bool:
+    if not _core_term_posix_supported():
+        return false
+    if _sffi_core_term_isatty(0) != 1:
+        return false
+    if _core_term_raw_active == 1:
+        return true
+    val saved = _sffi_core_term_calloc(1, 128)
+    val raw = _sffi_core_term_calloc(1, 128)
+    if saved < 1 or raw < 1:
+        if saved > 0: _sffi_core_term_free(saved)
+        if raw > 0: _sffi_core_term_free(raw)
+        return false
+    if _sffi_core_term_tcgetattr(0, saved) != 0:
+        _sffi_core_term_free(saved)
+        _sffi_core_term_free(raw)
+        return false
+    var i = 0
+    while i < 128:
+        _sffi_core_term_store_u8(raw, i, _sffi_core_term_load_u8(saved, i))
+        i = i + 1
+    _sffi_core_term_cfmakeraw(raw)
+    # TCSAFLUSH == 2 across Linux, macOS, and FreeBSD termios headers.
+    val rc = _sffi_core_term_tcsetattr(0, 2, raw)
+    _sffi_core_term_free(raw)
+    if rc != 0:
+        _sffi_core_term_free(saved)
+        return false
+    _core_term_saved_ptr = saved
+    _core_term_raw_active = 1
+    true
+
+@allow(primitive_api)
+pub fn rt_terminal_disable_raw_mode() -> bool:
+    if _core_term_raw_active == 0 or _core_term_saved_ptr < 1:
+        _core_term_raw_active = 0
+        return true
+    val rc = _sffi_core_term_tcsetattr(0, 2, _core_term_saved_ptr)
+    _sffi_core_term_free(_core_term_saved_ptr)
+    _core_term_saved_ptr = 0
+    _core_term_raw_active = 0
+    rc == 0
+
+fn _core_term_u16_le(ptr: i64, offset: i64) -> i64:
+    val lo = _sffi_core_term_load_u8(ptr, offset)
+    val hi = _sffi_core_term_load_u8(ptr, offset + 1)
+    lo + (hi * 256)
+
+@allow(primitive_api)
+pub fn rt_terminal_get_size() -> i64:
+    var cols = 80
+    var rows = 24
+    val req = _core_term_tiocgwinsz()
+    if _core_term_posix_supported() and req != 0:
+        val ws = _sffi_core_term_calloc(1, 16)
+        if ws > 0:
+            if _sffi_core_term_ioctl(1, req, ws) == 0:
+                val r = _core_term_u16_le(ws, 0)
+                val c = _core_term_u16_le(ws, 2)
+                if r > 0 and c > 0:
+                    rows = r
+                    cols = c
+            _sffi_core_term_free(ws)
+    val pair = _sffi_core_term_rt_tuple_new(2)
+    if pair > 0:
+        _sffi_core_term_rt_tuple_set(pair, 0, _sffi_core_term_rt_value_int(cols))
+        _sffi_core_term_rt_tuple_set(pair, 1, _sffi_core_term_rt_value_int(rows))
+    pair
+
+fn _core_term_read_eintr_retry(fd: i64, ptr: i64, count: i64) -> i64:
+    var attempt = 0
+    while attempt < 64:
+        val n = _sffi_core_term_read(fd, ptr, count)
+        if n >= 0:
+            return n
+        val err_ptr = _sffi_core_term_errno_ptr()
+        if err_ptr < 1:
+            return n
+        val b0 = _sffi_core_term_load_u8(err_ptr, 0)
+        val b1 = _sffi_core_term_load_u8(err_ptr, 1)
+        val b2 = _sffi_core_term_load_u8(err_ptr, 2)
+        val b3 = _sffi_core_term_load_u8(err_ptr, 3)
+        val err_code = b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216)
+        if err_code != 4:
+            return n
+        attempt = attempt + 1
+    -1
+
+@allow(primitive_api)
+pub fn rt_stdin_read_byte() -> i64:
+    val buf = _sffi_core_term_malloc(1)
+    if buf < 1:
+        return -1
+    val n = _core_term_read_eintr_retry(0, buf, 1)
+    val result = if n == 1: _sffi_core_term_load_u8(buf, 0) else: -1
+    _sffi_core_term_free(buf)
+    result
+
+@allow(primitive_api)
+pub fn rt_stdin_read_chars_text(count: i64) -> i64:
+    if count <= 0:
+        return _sffi_core_term_rt_string_new(0, 0)
+    val buf = _sffi_core_term_malloc(count)
+    if buf < 1:
+        return _sffi_core_term_rt_string_new(0, 0)
+    var total = 0
+    while total < count:
+        val n = _core_term_read_eintr_retry(0, buf + total, count - total)
+        if n <= 0:
+            break
+        total = total + n
+    val text_val = _sffi_core_term_rt_string_new(buf, total)
+    _sffi_core_term_free(buf)
+    text_val
+
+@allow(primitive_api)
+pub fn rt_signal_install(signal_num: i64) -> i64:
+    val sig_block = _core_term_sig_block()
+    if sig_block < 0 or signal_num <= 0:
+        return 0
+    val mask = _sffi_core_term_calloc(1, 128)
+    if mask < 1:
+        return 0
+    var ok = 0
+    if _sffi_core_term_sigemptyset(mask) == 0 and _sffi_core_term_sigaddset(mask, signal_num) == 0:
+        if _sffi_core_term_sigprocmask(sig_block, mask, 0) == 0:
+            ok = 1
+    _sffi_core_term_free(mask)
+    ok
+
+@allow(primitive_api)
+pub fn rt_atexit_install() -> i64:
+    if _core_term_sig_block() < 0:
+        return 0
+    val int_ok = rt_signal_install(2)
+    val term_ok = rt_signal_install(15)
+    if int_ok > 0 or term_ok > 0: 1 else: 0

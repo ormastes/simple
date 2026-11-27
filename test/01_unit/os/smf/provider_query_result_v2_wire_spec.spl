@@ -1,0 +1,133 @@
+# Regression evidence for provider_query_result_v2_wire_codec_missing_2026-09-13.
+#
+# Pins the V2 result wire format: the complete V1 record verbatim (every V1
+# field at its V1 offset), followed by the 256-bit ABI digest as four
+# big-endian u64 words in abi_digest.spl's frozen w0..w3 order. A V1-only
+# provider writes only SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE bytes and leaves
+# the digest words undeclared (all zero), which must still decode.
+
+use std.spec
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_OK, SIMPLE_PROVIDER_MAJOR_UNSUPPORTED,
+    SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE,
+    SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE,
+    SimpleProviderQueryResultV1, SimpleProviderQueryResultV2, SimpleAbiDigest256V1,
+    simple_provider_digest_from_hex_v1, simple_provider_digest_to_hex_v1
+}
+use std.nogc_sync_mut.composition.abi_digest.{
+    simple_abi_digest_parse_hex_v1, simple_abi_digest_is_zero_v1
+}
+use os.smf.provider_query_wire.{
+    encode_provider_query_result_v1, decode_provider_query_result_v1,
+    encode_provider_query_result_v2, decode_provider_query_result_v2
+}
+
+val BASE_ABI_HEX = "112233445566778899aabbccddeeff00010203040506070890abcdefdeadbeef"
+
+fn _base() -> SimpleProviderQueryResultV1:
+    SimpleProviderQueryResultV1(
+        status: SIMPLE_PROVIDER_OK,
+        provided_major: 1,
+        provided_minor: 3,
+        descriptor_size: 32,
+        interface_handle: 0x0102030405060708,
+        provider_context: 9,
+        provider_identity_digest: 10,
+        implementation_digest: 11,
+        abi_digest: simple_provider_digest_from_hex_v1(BASE_ABI_HEX)
+    )
+
+fn _v2(digest: SimpleAbiDigest256V1) -> SimpleProviderQueryResultV2:
+    SimpleProviderQueryResultV2(base: _base(), abi_digest_256: digest)
+
+fn _ordered_digest() -> SimpleAbiDigest256V1:
+    # Distinct word values so a transposed, truncated, or byte-swapped word
+    # cannot pass the offset assertions below.
+    SimpleAbiDigest256V1(w0: 1, w1: 2, w2: 3, w3: 4)
+
+fn _base_digest_words() -> SimpleAbiDigest256V1:
+    # BASE_ABI_HEX parsed through the frozen abi_digest.spl word order.
+    simple_abi_digest_parse_hex_v1(BASE_ABI_HEX).value
+
+describe "provider query result V2 wire codec":
+    it "appends exactly 32 digest bytes to the verbatim V1 record":
+        val base = encode_provider_query_result_v1(_base())
+        expect(base.ok).to_equal(true)
+        val encoded = encode_provider_query_result_v2(_v2(_ordered_digest()))
+        expect(encoded.ok).to_equal(true)
+        expect(encoded.bytes.len()).to_equal(SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE as i64)
+        expect(encoded.bytes.len() - base.bytes.len()).to_equal(32)
+        expect(SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE as i64 - SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64).to_equal(32)
+        var index = 0
+        while index < base.bytes.len():
+            expect(encoded.bytes[index]).to_equal(base.bytes[index])
+            index = index + 1
+
+    it "writes the four digest words big-endian in w0..w3 order after the V1 bytes":
+        val encoded = encode_provider_query_result_v2(_v2(_ordered_digest()))
+        expect(encoded.bytes[84]).to_equal(0)
+        expect(encoded.bytes[91]).to_equal(1)
+        expect(encoded.bytes[99]).to_equal(2)
+        expect(encoded.bytes[107]).to_equal(3)
+        expect(encoded.bytes[115]).to_equal(4)
+
+    it "round trips every base field and the full 256-bit digest":
+        val digest = _base_digest_words()
+        val decoded = decode_provider_query_result_v2(encode_provider_query_result_v2(_v2(digest)).bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.base.status).to_equal(SIMPLE_PROVIDER_OK)
+        expect(decoded.value.base.provided_minor).to_equal(3)
+        expect(decoded.value.base.interface_handle).to_equal(0x0102030405060708)
+        expect(decoded.value.base.provider_context).to_equal(9)
+        expect(simple_provider_digest_to_hex_v1(decoded.value.base.abi_digest)).to_equal(BASE_ABI_HEX)
+        expect(decoded.value.abi_digest_256.w0).to_equal(digest.w0)
+        expect(decoded.value.abi_digest_256.w1).to_equal(digest.w1)
+        expect(decoded.value.abi_digest_256.w2).to_equal(digest.w2)
+        expect(decoded.value.abi_digest_256.w3).to_equal(digest.w3)
+
+    it "keeps the V1 view of a V2 record decodable for V1-only consumers":
+        val encoded = encode_provider_query_result_v2(_v2(_ordered_digest()))
+        val v1_view = decode_provider_query_result_v1(encoded.bytes[0..SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64])
+        expect(v1_view.ok).to_equal(true)
+        expect(v1_view.value.interface_handle).to_equal(0x0102030405060708)
+
+    it "decodes a V1-only provider's zeroed tail as an undeclared digest":
+        val encoded = encode_provider_query_result_v2(_v2(_ordered_digest()))
+        var v1_only: [u8] = []
+        var index = 0
+        while index < SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE as i64:
+            if index < SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64:
+                v1_only.push(encoded.bytes[index])
+            else:
+                v1_only.push(0 as u8)
+            index = index + 1
+        val decoded = decode_provider_query_result_v2(v1_only)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.base.provided_major).to_equal(1)
+        expect(simple_abi_digest_is_zero_v1(decoded.value.abi_digest_256)).to_equal(true)
+
+    it "rejects trailing and truncated V2 records":
+        val encoded = encode_provider_query_result_v2(_v2(_ordered_digest()))
+        expect(decode_provider_query_result_v2(encoded.bytes[0..115]).diagnostic).to_equal("result-wire-size-invalid")
+        var longer = encoded.bytes
+        longer.push(0 as u8)
+        expect(decode_provider_query_result_v2(longer).diagnostic).to_equal("result-wire-size-invalid")
+
+    it "inherits the V1 reserved-bytes and status validation":
+        val encoded = encode_provider_query_result_v2(_v2(_ordered_digest()))
+        var nonzero_reserved = encoded.bytes
+        nonzero_reserved[80] = 1
+        expect(decode_provider_query_result_v2(nonzero_reserved).diagnostic).to_equal("result-reserved-not-zero")
+        var bad_status = encoded.bytes
+        bad_status[0] = 99
+        expect(decode_provider_query_result_v2(bad_status).diagnostic).to_equal("result-status-invalid")
+        var error_with_handle = encoded.bytes
+        error_with_handle[0] = SIMPLE_PROVIDER_MAJOR_UNSUPPORTED as u8
+        expect(decode_provider_query_result_v2(error_with_handle).diagnostic).to_equal("result-error-handle-not-zero")
+
+    it "surfaces V1 encode validation on an invalid V2 base":
+        val invalid_base = _base()
+        invalid_base.abi_digest = simple_provider_digest_from_hex_v1("0000000000000000000000000000000000000000000000000000000000000000")
+        val encoded = encode_provider_query_result_v2(SimpleProviderQueryResultV2(base: invalid_base, abi_digest_256: _ordered_digest()))
+        expect(encoded.ok).to_equal(false)
+        expect(encoded.diagnostic).to_equal("result-abi-digest-missing")

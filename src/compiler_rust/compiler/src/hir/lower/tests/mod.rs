@@ -9,6 +9,17 @@ pub fn parse_and_lower(source: &str) -> LowerResult<HirModule> {
     lower(&module)
 }
 
+/// Same, in the lenient mode the run and native-build lanes use (untyped
+/// parameters, unresolved names admitted).
+pub fn parse_and_lower_lenient(source: &str) -> LowerResult<HirModule> {
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+    let mut lowerer = Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    lowerer.lower_module(&module)
+}
+
 // ---------------------------------------------------------------------------
 // Test-binary link infra (NOT a regression test itself)
 // ---------------------------------------------------------------------------
@@ -67,3 +78,4 @@ mod same_named_type_self_tests;
 mod callable_assert_tests;
 mod trait_field_receiver_tests;
 mod unit_value_field_tests;
+mod implicit_generic_tests;

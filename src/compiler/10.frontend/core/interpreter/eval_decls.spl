@@ -19,11 +19,11 @@ use compiler.core.interpreter.cli_eval.{cli_parse_argv}
 use compiler.core.interpreter.env.{env_define, env_define_global, env_init, env_pop_scope, env_push_scope}
 use compiler.core.interpreter.eval.{EVAL_DECL_LAZY_VAL, EVAL_STMT_BIND, eval_break_label, eval_breaking, eval_continue_label}
 use compiler.core.interpreter.eval.{eval_continuing, eval_expr, eval_had_error, eval_label_stack, eval_reset}
-use compiler.core.interpreter.eval.{eval_entry_file, eval_returning, eval_set_error, eval_yield_stack}
+use compiler.core.interpreter.eval.{eval_entry_file, eval_returning, eval_set_error, eval_toplevel_owner, eval_yield_stack}
 use compiler.core.interpreter.eval_calls.{eval_function_call, val_copy_if_value_struct}
 use compiler.core.interpreter.eval_stmts.{eval_stmt}
 use compiler.core.interpreter.eval_tables.{enum_table_register_in, func_register_return_type, func_table_lookup, func_table_register, func_table_register_owned}
-use compiler.core.interpreter.eval_tables.{func_table_reset, init_functions, match_fallthrough_set_abort, match_wildcard_catch_set_enabled, struct_table_register}
+use compiler.core.interpreter.eval_tables.{func_table_reset, init_functions, match_fallthrough_set_abort, match_wildcard_catch_set_enabled, struct_table_register, struct_table_register_owned}
 use compiler.core.interpreter.eval_tables.{struct_table_reset, teardown_functions, when_disabled_decls}
 use compiler.core.interpreter.module_loader_core.{import_admission_set_deny, load_module, load_module_selective, load_module_selective_with_unbraced_alias, module_bind_exports_for_caller}
 use compiler.core.interpreter.module_loader_core.{module_loader_init, register_deferred_module}
@@ -68,6 +68,8 @@ fn eval_decl(did: i64) -> i64:
     if tag == DECL_STRUCT:
         val name = d_node.name
         struct_table_register(name, did)
+        val struct_owner = decl_owner_file_get(did)
+        struct_table_register_owned(if struct_owner != "": struct_owner else: module_get_path(), name, did)
         return val_make_nil()
 
     if tag == DECL_IMPL:
@@ -287,6 +289,7 @@ fn eval_module() -> i64:
             func_register_return_type(d_node.name, d_node.ret_type)
         if tag == DECL_STRUCT:
             struct_table_register(d_node.name, did)
+            struct_table_register_owned(entry_path, d_node.name, did)
         if tag == DECL_IMPL:
             eval_decl(did)
 
@@ -302,6 +305,8 @@ fn eval_module() -> i64:
     # val bindings; the last one's value is the module's result when there
     # is no main() (the contract core_interpret documents in mod.spl).
     var last_val = val_make_nil()
+    val p2_saved_owner = eval_toplevel_owner
+    eval_toplevel_owner = entry_path
     for did in decls:
         if eval_had_error: break
         val p2_node = decl_get(did)
@@ -318,6 +323,7 @@ fn eval_module() -> i64:
             eval_decl(did)
         if tag == DECL_CLI:
             eval_decl(did)
+    eval_toplevel_owner = p2_saved_owner
 
     # Phase 3: Call @init functions in order (before main)
     for init_fn_name in init_functions:

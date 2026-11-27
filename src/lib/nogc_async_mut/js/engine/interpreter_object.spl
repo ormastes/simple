@@ -7,6 +7,7 @@ use std.common.js.types.js_types.JsObject
 use std.common.js.types.js_types.JsProperty
 use std.common.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.common.js.engine.vm_object_store.{ObjectStore}
+use std.common.js.engine.response_body.{JS_RESPONSE_HOST_KEY, JS_RESPONSE_CONSUMED_KEY, JS_RESPONSE_BODY_USED_KEY}
 use std.nogc_async_mut.js.engine.interpreter.{JsInterpreter}
 
 impl JsInterpreter:
@@ -62,12 +63,47 @@ impl JsInterpreter:
         # by the seed interpreter, so the proto table never grew.
         self.object_store.alloc_object()
 
+    me _is_response_body_consumed(response_id: i64) -> bool:
+        match self.get_object_property(response_id, JS_RESPONSE_CONSUMED_KEY):
+            JsValue.Boolean(true): true
+            _: false
+
+    me _write_response_body_flag(response_id: i64, consumed: bool):
+        val flag_value = JsValue.Boolean(v: consumed)
+        self.object_store.sync_prop_slots()
+        val existing_i = self.object_store.find_prop_slot(response_id, JS_RESPONSE_CONSUMED_KEY)
+        if existing_i >= 0:
+            self.object_store.update_slot(existing_i, flag_value)
+        else:
+            self.object_store.append_slot(response_id, JS_RESPONSE_CONSUMED_KEY, flag_value)
+            self.object_store.sync_prop_slots()
+        val used_i = self.object_store.find_prop_slot(response_id, JS_RESPONSE_BODY_USED_KEY)
+        if used_i >= 0:
+            self.object_store.update_slot(used_i, flag_value)
+        else:
+            self.object_store.append_slot(response_id, JS_RESPONSE_BODY_USED_KEY, flag_value)
+            self.object_store.sync_prop_slots()
+
     me set_object_property(obj_id: i64, key: text, value: JsValue):
         if key != "__simple_frozen" and self._is_object_frozen(obj_id):
             self.logger.debug("Ignoring write to frozen object {obj_id}.{key}")
             return
 
-        var stored_value = value
+        var write_value = value
+        if key == JS_RESPONSE_CONSUMED_KEY:
+            match self.get_object_property(obj_id, JS_RESPONSE_HOST_KEY):
+                JsValue.Boolean(true):
+                    return
+                _:
+                    pass_dn("not a Response host object")
+        if key == JS_RESPONSE_BODY_USED_KEY:
+            match self.get_object_property(obj_id, JS_RESPONSE_HOST_KEY):
+                JsValue.Boolean(true):
+                    write_value = JsValue.Boolean(v: self._is_response_body_consumed(obj_id))
+                _:
+                    pass_dn("not a Response host object")
+
+        var stored_value = write_value
         val indexed_key = key.parse_int() ?? -1
         if indexed_key >= 0:
             match self.get_object_property(obj_id, "__simple_typed_array_buffer"):

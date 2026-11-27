@@ -131,9 +131,19 @@ pub fn coverage_owner_file() -> text:
         return mp
     "<entry>"
 
+# Owner file of the top-level declaration being evaluated right now (a
+# module-level val/var initializer of the entry or of an imported module),
+# "" outside one. module_get_path() is not that owner at top level: it points
+# at the last module loaded, so top-level code would resolve classes and
+# functions as if written in its last import.
+pub var eval_toplevel_owner: text = ""
+
 # The same owner signal used for coverage is the authoritative caller identity
-# for resolving duplicate bare-name functions.
+# for resolving duplicate bare-name functions and same-named classes; at top
+# level it is the declaring file of the val/var being initialized.
 pub fn eval_caller_file() -> text:
+    if eval_current_decl_id < 0 and eval_toplevel_owner != "":
+        return eval_toplevel_owner
     coverage_owner_file()
 
 # Entry file of the current run (set by eval_module). module_get_path() is NOT
@@ -185,10 +195,36 @@ use compiler.core.interpreter.value.{val_get_bool, val_get_int, val_get_kind, va
 use compiler.core.interpreter.value.{val_is_int, val_is_nil, val_is_struct, val_is_thunk, val_is_truthy}
 use compiler.core.interpreter.value.{val_kind_name, val_make_array, val_make_bool, val_make_float, val_make_function}
 use compiler.core.interpreter.value.{val_make_int, val_make_nil, val_make_text, val_struct_find_field_idx, val_struct_get_field_idx}
+use compiler.core.interpreter.value.{val_get_struct_decl}
 use compiler.core.types.{span_col, span_is_valid, span_line, span_start}
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE, TYPE_STRUCT, named_type_name, type_tag_name}
+
+# Does struct value `vid` belong to the type the caller names `type_name`?
+# Owner decision 2026-11-27: an instance keeps matching its own bare name, an
+# import alias matches the owner's class, and when the bare name is shared by
+# several owner modules the caller's resolution must pick this instance's own
+# declaration.
+fn struct_value_matches_type_name(vid: i64, type_name: text) -> bool:
+    val actual = val_get_struct_name(vid)
+    if actual != type_name:
+        # A differently named type can only denote this instance's class
+        # through a class alias binding; without one the mismatch is final.
+        if not struct_class_alias_present():
+            return false
+        val named_decl = struct_resolve_for_caller(eval_caller_file(), type_name)
+        if named_decl < 0:
+            return false
+        val other_decl = val_get_struct_decl(vid)
+        if other_decl >= 0:
+            return other_decl == named_decl
+        return decl_get(named_decl).name == actual
+    val own_decl = val_get_struct_decl(vid)
+    if own_decl < 0 or not struct_decl_is_shared_name(own_decl):
+        return true
+    val named = struct_resolve_for_caller(eval_caller_file(), type_name)
+    named < 0 or named == own_decl
 
 # ===== Structural Subtyping =====
 # Check if a struct value has all the fields declared in a named struct type.
@@ -201,8 +237,9 @@ use compiler.core.types.{TYPE_NAMED_BASE, TYPE_STRUCT, named_type_name, type_tag
 #
 # Returns true if the value has all required fields, false otherwise.
 fn struct_satisfies(vid: i64, expected_name: text) -> bool:
-    # Look up the expected struct declaration by name
-    val decl_id = struct_table_lookup(expected_name)
+    # Look up the expected struct declaration as the caller names it (an
+    # import alias or a shared name resolves to its owner module's class).
+    val decl_id = struct_resolve_for_caller(eval_caller_file(), expected_name)
     if decl_id < 0:
         # Unknown expected type — allow (cannot validate)
         return true
@@ -464,6 +501,7 @@ fn eval_reset():
     eval_had_error = false
     eval_error_msg = ""
     eval_warnings = []
+    eval_toplevel_owner = ""
     match_expr_memo_eids = []
     match_expr_memo_types = []
     match_expr_memo_nexts = []
@@ -1253,7 +1291,7 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
             else:
                 # A NAMED type: the runtime value is a struct whose recorded
                 # type name is the discriminator.
-                tt_ok = tt_kind == VAL_STRUCT and val_get_struct_name(value_id) == tt_type_name
+                tt_ok = tt_kind == VAL_STRUCT and struct_value_matches_type_name(value_id, tt_type_name)
             if not tt_ok:
                 return false
             env_define(tt_binder_name, val_copy_if_value_struct(value_id))
