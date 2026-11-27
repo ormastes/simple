@@ -2678,16 +2678,23 @@ pub enum PipedReadV1:
 pub fn process_read_stdout_timeout_result(pid: i64, timeout_ms: i64) -> Result<PipedReadV1, text>:
     if pid <= 0: return Err("invalid_process_handle")
     if timeout_ms < 0: return Err("invalid_timeout")
-    val ready = unsafe(capabilities: [ffi]): rt_process_wait_readable_v1(pid, 1, timeout_ms)
-    if ready == 0: return Ok(PipedReadV1.Timeout)
-    if ready == -2: return Err("unknown_process_handle")
-    if ready != 1: return Err("process_wait_failed")
-    val chunk = _process_read_stdout_raw(pid)
-    if chunk != "": return Ok(PipedReadV1.Data(chunk))
-    val state = _process_stdout_state_raw(pid)
-    if state == 1: return Ok(PipedReadV1.Eof)
-    if state == -1: return Err("process_read_failed")
-    # Ready with no bytes and no EOF: a spurious wakeup; report as no data yet.
+    val deadline = time_now_unix_micros() + timeout_ms * 1000
+    var remaining = timeout_ms
+    while true:
+        val ready = unsafe(capabilities: [ffi]): rt_process_wait_readable_v1(pid, 1, remaining)
+        if ready == 0: return Ok(PipedReadV1.Timeout)
+        if ready == -2: return Err("unknown_process_handle")
+        if ready == -3: return Err("stdout_not_available")
+        if ready != 1: return Err("process_wait_failed")
+        val chunk = _process_read_stdout_raw(pid)
+        if chunk != "": return Ok(PipedReadV1.Data(chunk))
+        val state = _process_stdout_state_raw(pid)
+        if state == 1: return Ok(PipedReadV1.Eof)
+        if state == -1: return Err("process_read_failed")
+        # Ready with no decodable bytes (e.g. a held UTF-8 tail): wait out the
+        # rest of the budget instead of reporting an early timeout.
+        remaining = (deadline - time_now_unix_micros()) / 1000
+        if remaining <= 0: return Ok(PipedReadV1.Timeout)
     Ok(PipedReadV1.Timeout)
 
 # @allow(primitive_api): pid is the same raw handle as the sibling piped API; timeout_ms is a bounded millisecond count

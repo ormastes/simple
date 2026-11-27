@@ -1553,6 +1553,7 @@ static int64_t win_piped_wait_handle_v1(HANDLE pipe, int64_t timeout_ms) {
         if (available > 0) { result = PIPED_WAIT_READY_V1; break; }
         int64_t remaining = deadline - win_qpc_now_v1();
         if (remaining <= 0) { result = PIPED_WAIT_TIMEOUT_V1; break; }
+        if (remaining > frequency.QuadPart / 1000 + 1) remaining = frequency.QuadPart / 1000 + 1; /* clamp before scaling: no overflow */
         int64_t slice_100ns = remaining * 10000000 / frequency.QuadPart;
         if (slice_100ns > 10000) slice_100ns = 10000; /* 1 ms sampling */
         if (!timer) timer = CreateWaitableTimerExW(NULL, NULL,
@@ -2612,7 +2613,8 @@ int64_t simple_piped_owner_wait_readable_v1(int64_t pid, int64_t stream, int64_t
     struct RtProcSlot* slot = proc_find((pid_t)pid);
     int64_t early = 0;
     int fd = -1;
-    if (!slot || slot->closing || slot->stream_ticket) early = PIPED_WAIT_UNKNOWN_V1;
+    if (!slot || slot->closing) early = PIPED_WAIT_UNKNOWN_V1;
+    else if (slot->stream_ticket) early = PIPED_WAIT_NOT_PIPED_V1; /* stream owned by a ticket holder */
     else if (stream == PIPED_STREAM_STDERR_V1) early = PIPED_WAIT_NOT_PIPED_V1;
     else if (slot->stdout_state != 0) early = PIPED_WAIT_READY_V1; /* EOF/error is observable now */
     else if (slot->stdout_fd < 0) early = PIPED_WAIT_NOT_PIPED_V1;

@@ -1689,6 +1689,9 @@ fn child_environment_command(args: &[Value], who: &str) -> Result<Option<std::pr
     let mut arguments = Vec::with_capacity(argv.len());
     for item in argv.iter() {
         let Value::Str(text) = item else { return Ok(None) };
+        if text.contains('\0') {
+            return Ok(None);
+        }
         arguments.push(text.as_ref().clone());
     }
     let mut command = std::process::Command::new(resolve_command_path(cmd));
