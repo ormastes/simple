@@ -1,6 +1,6 @@
 # 63 August fix commits are absent from release/1.0.0: files sit at their pre-fix content (2026-11-15)
 
-Status: OPEN. One file restored (Ed25519, PR #9464); 152 files unreviewed.
+Status: FIXED (2026-11-27; Batch 1 + Batch 2 restored all remaining non-superseded August 2026 fixes across src/, with 51 intentional/superseded skips accounted and 0 unexpected REVERTED rows remaining; C runtime source restores runtime_native.c and test_cpu_common.h verified by inspection pending native C rebuild).
 
 ## Finding
 
@@ -289,3 +289,60 @@ against `HEAD` (`79445b063c4`) including `-M` rename detection:
 - **Already present (`3`):**
   - `7d7bb413700 src/os/crypto/aes_xts.spl`, `cf3144cc2e1 src/os/crypto/ocb3.spl`, `fe24dc9c76d src/os/tls13/hkdf.spl` had zero diff against `HEAD` (restored earlier in `2f5493a3ce1`). Spec verification: `ocb3_spec.spl` (`15/15`), `hkdf_rfc5869_spec.spl` (`14/14`), `psk_0rtt_spec.spl` (`12/13` — HKDF examples pass; 1 pre-existing `PskBinder` failure), `aes_xts_ieee1619_kat_spec.spl` (`13/17` — block-aligned vectors pass; 4 pre-existing non-16-byte CTS failures), `cert_verify_ecdsa_spec.spl` (`4/8` — pre-existing TLS `cert_verify.spl` DER/P-384/P-521 failures).
 - **Status kept `open`** until remaining non-Batch-1 August entries (`src/os/`, `src/lib/`, `src/app/`, `src/runtime/`) are processed in follow-up batches.
+
+## 2026-11-27 Batch 2 Restoration (P1-1: `src/os/`, `src/app/`, `src/lib/`, `src/runtime/`, `src/FILE.md`)
+
+Re-ran the August fix census (`git log --since=2026-08-01 --until=2026-08-27 --no-merges --grep='^fix' -- src`) against `origin/release/1.0.0` (`b6d78c690b2`) and working tree across all `8,536` `diff-tree` pairs (`369` commits), reconciling every remaining non-Batch-1 revert AND subsequent/sibling August commits so callers and newer APIs stay compatible:
+
+### Restored Fixes & Reconciled Sibling/Subsequent Commits (100 files under `src/`, plus `scripts/check/raw_sffi_unsafe_baseline.tsv`)
+
+1. **Crypto, TLS 1.3 & Package Security (Group A):**
+   - `src/os/crypto/ed25519.spl`: restored `@unsafe` FFI capability tags on `rt_bytes_u8_at`, `rt_ed25519_sc_muladd`, `rt_ed25519_sc_reduce_64`, `rt_tls13_sha512_full`, removed unused `serial_println`, preserved Batch 1 `4d6616c2426` RFC 8032 TEST 2 vector, and kept newer checked APIs compatible.
+   - `src/os/tls13/_CertVerify/der_parsing.spl`: reconciled `9ec9ebf4391` P-256 provider error propagation on top of `f6d3ecb6e9a` & `bc5e9f3feb9` via `ecdsa_p256_verify_fixed_checked`.
+   - `src/os/tls13/_CertVerify/signature_verify.spl`, `src/os/tls13/server_builders.spl`, `src/os/tls13/server_handshake.spl`, `src/os/tls13/transcript.spl`: restored checked scheme/signature/ECDSA-fail-closed checks and `28d89fb0a2c` `@unsafe` + `unsafe(capabilities: [ffi]):` scoping.
+   - `src/os/kernel/net/tcp_shim.spl`: restored `f6e65cd875b` (`ms <= 0` -> `-1` connect timeout) and `4efad3db3e7` (`ms <= 0` -> `-1` accept timeout + `net_tcp_accept_timeout` alignment).
+   - `src/os/apps/sshd/{ssh_channel,ssh_session_channel}.spl`: restored `31d21e30f82` strict 5-byte `SSH_MSG_CHANNEL_EOF` (`payload.len() != 5u64` / `data.len() != 5`).
+   - `src/app/package.registry/{signing,verify}.spl`: restored fail-closed signature/checksum audit checks (`package-signature-fail-closed.shs`: PASS).
+   - `src/app/ui.web/tls_client.spl`: restored nullable `rt_tls_client_read_checked` client read (`tls-client-sffi-fail-closed.shs` web-client check passes; 3 pre-existing failures remain in untouched `src/lib/nogc_sync_mut/io/tls_sffi.spl` & `src/app/io/tls_sffi.spl`).
+
+2. **Co-Compiled Symbol Collision Disambiguations (Group B, `dfb7879dad9` / `c31119412fb`):**
+   - Disambiguated private/helper collisions across `src/os/crypto/{aes128_tables,aes256_gcm,aes_gcm,aes_gcm_siv,aes_gcm_siv_aes_core,aes_gcm_siv_polyval,rsa_fallback,scrypt,serpent,sha256,sha384,sha512,zuc}.spl`, `src/os/proxy/{socks5,stun}.spl`, `src/os/tls13/{_Tls13/context_io,_Tls13/handshake,handshake13,key_schedule,record13,server}.spl`, and `src/os/apps/sshd/ssh_mac.spl` (preserving newer `gcm_gf128` delegation in `aes256_gcm.spl` and `68d56f11832` pure-Simple byte indexing / `@unsafe rt_bytes_to_text` in `socks5.spl`).
+
+3. **SFFI Authority & Checked/Unsafe Scopes (Group C) + Ratchet Baseline Hygiene:**
+   - Restored SFFI authority & `@unsafe(capabilities: [ffi])` boundaries across `src/app/interpreter/ffi/span_ffi.spl`, `src/os/kernel/arch/arm32/{context,timer}.spl`, `src/os/kernel/arch/arm64/{context,virtio_input}.spl`, `src/os/kernel/arch/riscv32/{context,sbi}.spl`, `src/os/kernel/arch/riscv64/{sbi,virtio_input}.spl`, `src/os/kernel/boot/x86_64_services.spl`, `src/os/kernel/log/klog_api.spl`, and `src/os/services/pkg/pkg_service.spl`.
+   - Pruned the `54` resolved/removed `extern fn` entries in `scripts/check/raw_sffi_unsafe_baseline.tsv` (51 across our Group A/C files + 3 in `src/os/proxy/socks5.spl`).
+
+4. **App, Compositor, OS Hygiene, Build & Runtime Source Restorations (Group D):**
+   - `src/FILE.md`, `src/app/build/targets/change_classifier.spl`, `src/app/check/render_adapter.spl`, `src/app/cli/baremetal_cmd.spl`, `src/app/compile/native_profile_counter_runtime.spl`, `src/app/debug/remote/feature/emulation.spl`, `src/app/desugar/rewriter.spl`, `src/app/ffi_gen.specs/{archive_mod,cli_mod,codegen_mod,concurrent_mod,cranelift_core,crypto_mod,data_mod,gc_full,io_full,net_mod,process_mod,runtime_value_full,serde_mod,system_mod,time_mod}.spl`, `src/app/mcp/{debug_eval,debug_log_tools,debug_session}.spl`, `src/app/office/slides/render.spl`, `src/app/qemu/{commands,main}.spl`, `src/app/replay/record_session.spl`, `src/app/sspec_maintain/{documentize,source_facts}.spl`, `src/app/ui.chromium/engine_merge.spl`, `src/app/ui.chromium.acid2/pixel_grid.spl`, `src/app/ui.ipc/async_handler.spl`.
+   - `src/os/apps/coreutils/{chmod,cp,kill,mem,mv,reboot,rm}.spl`, `src/os/apps/smux/mod.spl`, `src/os/compositor/vulkan_present_damage_gate.spl`, `src/os/crypto/{ecdsa_p521,random,scram_common}.spl`, `src/os/kernel/fs/win_vfs/win_vfs_driver.spl`, `src/os/machine_profile.spl` (`BareMetal`), `src/os/services/netstack/_TcpConnection/{connection_struct,data_and_segments,state_helpers,state_machine}.spl`, `src/os/tls13/mod.spl`, `src/os/userlib/_Window/{client,ipc_helpers}.spl`.
+   - `src/runtime/platform/test_cpu_common.h` and `src/runtime/runtime_native.c` (`fbcdc196dfb` negative `ms` timeout clamping on `rt_io_tcp_set_read_timeout`/`rt_io_tcp_set_write_timeout`; C source restored and verified by inspection; native C runtime rebuild deferred outside this Windows interpreter lane).
+
+### Final August Census & Accounted Skips (`51` REVERTED, `0` Unexpected)
+
+- **Census against working tree (`8,536` pairs):** `738 PRESENT`, `51 REVERTED`, `7,551 MODIFIED`, `196 MISSING` (`0` unreviewed/unexpected reverted rows).
+- **All `51` `REVERTED` entries intentionally skipped / superseded:**
+  - `7731b4c1394` (`33` files across `src/app/`, `src/compiler/`, `src/lib/`, `src/os/`): accidental dirty-index bulk edit immediately reverted by `ad2b5d5307f`.
+  - `96e7eaf10be` (2), `9e65c5356b6` (3), `a54492228c6` (3), `cb2d0f31577` (3) (`11` rows across `src/lib/nogc_sync_mut/enterprise_payment/payment.spl` & `enterprise_session/{session,throttle}.spl`): superseded/restored cleanly by `6b0b2175a06` (`restore(enterprise)`).
+  - `f9a7b5cb296` (`4` rows: `src/lib/common/{option,option_ce,result,result_ce}.spl`): superseded by `28df8ceac42` (`feat(types): written Any policy and Any-free compiled sources`).
+  - `bdba7b0a49d` (`1` row: `src/os/kernel/arch/riscv64/process_stdout_capture.spl`): superseded by `6bae19786a9` & `fa946add2ba`.
+  - `db237ffabde` (`1` row: `src/app/ui/main.spl`): raw-extern `rt_cli_get_args`/`sys_get_args` workaround intentionally reverted by `775ae478ca3` to `app.io.cli_ops.cli_get_args`.
+  - `31d01cd322d` (`1` row: `src/compiler/80.driver/driver_api_core.spl`): superseded by `c5588d34c6f` restored in Batch 1.
+
+### Batch 2 Verification Evidence (Host Interpreter `--mode=interpreter` & Audits)
+
+- `test/01_unit/compiler/held_verify/august_audit_batch2_restorations_spec.spl`: **13/13 passed** (`0 failed`)
+- `test/01_unit/compiler/held_verify/mir_optional_field_and_august_audit_spec.spl`: **4/4 passed** (`0 failed`)
+- `test/01_unit/os/crypto/ed25519_and_cose_checked_spec.spl`: **4/4 passed** (`0 failed`)
+- `test/01_unit/os/proxy/socks5_spec.spl`: **31/31 passed** (`0 failed`)
+- `test/01_unit/os/crypto/sha512_kat_spec.spl`: **3/3 passed** (`0 failed`)
+- `test/01_unit/os/crypto/zuc_kat_spec.spl`: **8/8 passed** (`0 failed`)
+- `test/01_unit/app/build/change_classifier_spec.spl`: **8/8 passed** (`0 failed`)
+- `test/01_unit/os/compositor/vulkan_present_damage_gate_spec.spl`: **2/2 passed** (`0 failed`)
+- `test/01_unit/app/package_cli_spec.spl`: **3/3 passed** (`0 failed`)
+- `test/01_unit/os/apps/coreutils/kill_spec.spl`: **14/14 passed** (`0 failed`)
+- `test/01_unit/app/mcp_unit/debug_eval_spec.spl`: **15/15 passed** (`0 failed`)
+- `test/01_unit/os/machine_profile_spec.spl`: **6/6 passed** (`0 failed`)
+- `test/01_unit/app/desugar/rewriter_static_calls_spec.spl`: **1/1 passed** (`0 failed`, skipped case inside spec)
+- `test/01_unit/app/desugar/rewriter_constants_spec.spl`: **1/1 passed** (`0 failed`, skipped case inside spec)
+- Pre-existing partial/unrelated host failures observed cleanly (0 regressions from Batch 2): `cert_verify_ecdsa_spec.spl` (`4/8`), `sha384_kat_spec.spl` (`4/7` — FIPS KATs pass, 3 high-bit hex diag checks fail in interpreter), `engine_merge_spec.spl` (`4/7` — `browser_engine` layout/spec-line-158 mismatch), `scoring_spec.spl` (`19/21` — `extract_sspec_manual_facts` passes, 2 AST tautology failures), `chmod_spec.spl` (`7/8` — arg parsing passes, OS `vfs_chmod` extern missing in host interpreter), `server_accept_spec.spl` (`0/1` — missing `std.nogc_sync_mut.io.signature_ffi` in test file).
+- Authority audits PASS: `package-signature-fail-closed.shs`, `check-riscv-sbi-sffi-authority.shs`, `user-entry-virtio-input-sffi-authority.shs`, `x86-64-boot-services-sffi-authority.shs`, `arch-context-timer-sffi-authority.shs`, `pkg-service-logging-sffi-authority.shs`, `interpreter-span-sffi-authority.shs` (`crypto-sffi-checked-callers.shs` & `tls-client-sffi-fail-closed.shs` report 0 errors in edited files and only pre-existing failures in untouched files).
