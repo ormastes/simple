@@ -308,7 +308,11 @@ and the push tier is bypassable, so a class with no automatic lane would be
 unenforced. It consults up to 40 first-parent ancestors as contributors, so that
 job fetches `PR_COMMITS + 41` rather than `PR_COMMITS + 1` — a shallower fetch
 would have left it exiting 0 over a near-empty window, which is a silent
-weakening rather than a FAIL. The extended job runs it too (`--range`, in the
+weakening rather than a FAIL. A PR that merges another line (main into a
+release line) made that depth-bounded clone list 5,094 commits for a 61-commit
+range (#12180); `scripts/check/pr-range-exact-fetch.shs` now fetches commit-only
+history when the local count differs from the PR's, and the rewind gate
+prefetches its blobs in one batch. The extended job runs it too (`--range`, in the
 "Push-tier core gates" step). The 47-step ratchet lane is the non-required
 "(extended)" job and runs on every main push and on PRs labelled `ci:full`
 (since 2026-09-27 every non-required PR workflow triggers only on the
