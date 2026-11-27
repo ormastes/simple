@@ -1372,6 +1372,10 @@ fn mir_visible_scalar_traits_v1(symbols: SymbolTable, module_name: text) -> Dict
             if symbols.lookup_or_invalid(local_name).id == raw:
                 if val symbol = symbols.get_symbol_raw(raw):
                     if symbol.kind == SymbolKind.Trait:
+                        val trait_owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
+                        val consumer_owner = _hir_symbol_owner_module(module_name)
+                        if symbol.visibility == Visibility.Package and trait_owner != "" and trait_owner != consumer_owner:
+                            continue
                         visible[mir_trait_dispatch_identity(symbol, module_name)] = SymbolId(id: raw)
         if val parent = scope.parent:
             scope_id = parent
@@ -1420,6 +1424,14 @@ impl MirLowering:
                     provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
                 self.register_trait_impls_of(provider_module.name, provider_module.symbols, provider_module.impls, provider_links, false, visible_scalar_traits)
 
+    me record_trait_impl_scalar_target_v1(key: text, candidate: SymbolId):
+        """Record a scalar trait or inherent method target idempotently;
+        distinct implementations or unsettled generic impls reject selection."""
+        if self.trait_impl_methods.has(key) and self.trait_impl_methods[key].id != candidate.id:
+            self.trait_impl_methods[key] = SymbolId(id: -1)
+        else:
+            self.trait_impl_methods[key] = candidate
+
     me register_trait_impls_of(module_name: text, symbols: SymbolTable, impls: [HirImpl], links: Dict<i64, text>, is_local: bool, visible_scalar_traits: Dict<text, SymbolId>):
         var ii = 0
         while ii < impls.len():
@@ -1434,6 +1446,7 @@ impl MirLowering:
             # wrap/unwrap transport is a proven ABI defect class. Test the
             # concrete slot and bind a concrete local (4710b22a991 pattern).
             var trait_key = ""
+            var impl_settled = false
             var scalar_trait_id: i64 = -1
             var scalar_impl_settled = false
             if impl_def.trait_ != None:
@@ -1448,12 +1461,13 @@ impl MirLowering:
                                 val trait_symbol: HirSymbol = present_trait_symbol
                                 if trait_symbol.kind == SymbolKind.Trait:
                                     trait_key = mir_trait_dispatch_identity(trait_symbol, module_name)
+                                    impl_settled = trait_args.len() == 0 and impl_def.type_params.len() == 0
                                     # Only a trait bound in this consumer's scope can
                                     # supply scalar extension methods. Same leaf names
                                     # from another provider do not establish identity.
                                     if visible_scalar_traits.has(trait_key):
                                         scalar_trait_id = visible_scalar_traits[trait_key].id
-                                        scalar_impl_settled = trait_args.len() == 0 and impl_def.type_params.len() == 0
+                                        scalar_impl_settled = impl_settled
                     case _: ()
             if trait_key != "":
                 # A generic or unnamed implementing type still counts as an
@@ -1496,16 +1510,28 @@ impl MirLowering:
                     var scalar_method_settled = false
                     if val method_symbol = symbols.get_symbol_raw(method_id.id):
                         scalar_method_settled = method_symbol.generic_param_count == 0
+                    if scalar_owner != "":
+                        val scoped_scalar_key = "{trait_key}::{scalar_owner}::{method_name}"
+                        val scoped_candidate = if impl_settled and scalar_method_settled and scalar_owner != "scalar:generic": target else: SymbolId(id: -1)
+                        self.record_trait_impl_scalar_target_v1(scoped_scalar_key, scoped_candidate)
                     if scalar_trait_id >= 0 and scalar_owner != "":
                         val scalar_key = "{scalar_owner}::{method_name}"
                         val candidate = if scalar_impl_settled and scalar_method_settled and scalar_owner != "scalar:generic": target else: SymbolId(id: -1)
-                        # Unsupported generic candidates and distinct visible
-                        # implementations reject selection. Exact repeats are
-                        # idempotent; a rejected key cannot become admissible.
-                        if self.trait_impl_methods.has(scalar_key) and self.trait_impl_methods[scalar_key].id != candidate.id:
-                            self.trait_impl_methods[scalar_key] = SymbolId(id: -1)
-                        else:
-                            self.trait_impl_methods[scalar_key] = candidate
+                        self.record_trait_impl_scalar_target_v1(scalar_key, candidate)
+            else:
+                val scalar_inherent_owner = mir_scalar_trait_owner_key_v1(impl_def.type_.kind)
+                if scalar_inherent_owner != "" and impl_def.type_params.len() == 0:
+                    for method_name in impl_def.methods.keys():
+                        val method_id: SymbolId = impl_def.methods[method_name]
+                        if not is_local:
+                            self.trait_impl_provider_relocations = self.trait_impl_provider_relocations + 1
+                        val target = if is_local: method_id else: self.relocate_provider_callable(method_id, symbols, links)
+                        var scalar_method_settled = false
+                        if val method_symbol = symbols.get_symbol_raw(method_id.id):
+                            scalar_method_settled = method_symbol.generic_param_count == 0
+                        val inherent_key = "scalar:inherent::{scalar_inherent_owner}::{method_name}"
+                        val candidate = if scalar_method_settled: target else: SymbolId(id: -1)
+                        self.record_trait_impl_scalar_target_v1(inherent_key, candidate)
 
     me build_provider_trait_impl_index_v1(providers: [HirModule]):
         """Session index of every provider `impl Trait for Type`, built ONCE
@@ -1556,6 +1582,22 @@ impl MirLowering:
                                         impl_settled = trait_args.len() == 0 and impl_def.type_params.len() == 0
                         case _: ()
                 if trait_key == "":
+                    val scalar_inherent_owner = mir_scalar_trait_owner_key_v1(impl_def.type_.kind)
+                    if scalar_inherent_owner != "" and impl_def.type_params.len() == 0:
+                        for method_name in impl_def.methods.keys():
+                            val method_id: SymbolId = impl_def.methods[method_name]
+                            var method_settled = false
+                            if val method_symbol = symbols.get_symbol_raw(method_id.id):
+                                method_settled = method_symbol.generic_param_count == 0
+                            val method_row = row_provider.len()
+                            row_provider.push(provider_index)
+                            row_symbol.push(method_id.id)
+                            row_name.push(method_name)
+                            row_scalar_owner.push(scalar_inherent_owner)
+                            row_scalar_settled.push(method_settled)
+                            var inherent_rows: [i64] = scalar_rows.get("__scalar_inherent__") ?? []
+                            inherent_rows = inherent_rows.push(method_row)
+                            scalar_rows["__scalar_inherent__"] = inherent_rows
                     continue
                 var owner_key = "generic:{module_name}#impl{impl_index}"
                 val type_kind: HirTypeKind = impl_def.type_.kind
@@ -1599,6 +1641,10 @@ impl MirLowering:
                     key_rows = key_rows.push(method_row)
                     method_rows[impl_key] = key_rows
                     if scalar_owner != "":
+                        val scoped_scalar_key = "{trait_key}::{scalar_owner}::{method_name}"
+                        var scoped_rows: [i64] = method_rows.get(scoped_scalar_key) ?? []
+                        scoped_rows = scoped_rows.push(method_row)
+                        method_rows[scoped_scalar_key] = scoped_rows
                         var trait_scalar_rows: [i64] = scalar_rows.get(trait_key) ?? []
                         trait_scalar_rows = trait_scalar_rows.push(method_row)
                         scalar_rows[trait_key] = trait_scalar_rows
@@ -1639,6 +1685,16 @@ impl MirLowering:
         val visible_scalar_traits = mir_visible_scalar_traits_v1(module.symbols, module.name)
         self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true, visible_scalar_traits)
         self.provider_trait_demand_active = true
+        val inherent_scalar_rows: [i64] = self.provider_trait_scalar_rows.get("__scalar_inherent__") ?? []
+        for raw_inherent_row in inherent_scalar_rows:
+            val inherent_row: i64 = raw_inherent_row
+            if self.provider_trait_row_is_consumer_v1(self.provider_trait_method_row_provider[inherent_row]):
+                continue
+            val inherent_target = self.relocate_provider_trait_method_row_v1(inherent_row)
+            val inherent_owner = self.provider_trait_method_row_scalar_owner[inherent_row]
+            val inherent_key = "scalar:inherent::{inherent_owner}::{self.provider_trait_method_row_name[inherent_row]}"
+            val inherent_candidate = if self.provider_trait_method_row_scalar_settled[inherent_row]: inherent_target else: SymbolId(id: -1)
+            self.record_trait_impl_scalar_target_v1(inherent_key, inherent_candidate)
         val visible_keys: [text] = visible_scalar_traits.keys()
         for raw_visible_key in visible_keys:
             val trait_key: text = raw_visible_key
@@ -1649,13 +1705,12 @@ impl MirLowering:
                     continue
                 val target = self.relocate_provider_trait_method_row_v1(row)
                 val scalar_owner = self.provider_trait_method_row_scalar_owner[row]
-                val scalar_key = "{scalar_owner}::{self.provider_trait_method_row_name[row]}"
+                val scalar_name = self.provider_trait_method_row_name[row]
+                val scalar_key = "{scalar_owner}::{scalar_name}"
+                val scoped_scalar_key = "{trait_key}::{scalar_owner}::{scalar_name}"
                 val candidate = if self.provider_trait_method_row_scalar_settled[row]: target else: SymbolId(id: -1)
-                # Same admission as register_trait_impls_of's scalar arm.
-                if self.trait_impl_methods.has(scalar_key) and self.trait_impl_methods[scalar_key].id != candidate.id:
-                    self.trait_impl_methods[scalar_key] = SymbolId(id: -1)
-                else:
-                    self.trait_impl_methods[scalar_key] = candidate
+                self.record_trait_impl_scalar_target_v1(scoped_scalar_key, candidate)
+                self.record_trait_impl_scalar_target_v1(scalar_key, candidate)
 
     me trait_impl_owners_materialize_v1(trait_key: text):
         """Merge the provider owners of `trait_key` into trait_impl_owners
@@ -1696,7 +1751,11 @@ impl MirLowering:
             if self.provider_trait_row_is_consumer_v1(self.provider_trait_method_row_provider[row]):
                 continue
             val target = self.relocate_provider_trait_method_row_v1(row)
-            if target.id >= 0:
+            val row_scalar_owner = self.provider_trait_method_row_scalar_owner[row]
+            if row_scalar_owner != "":
+                val candidate = if self.provider_trait_method_row_scalar_settled[row]: target else: SymbolId(id: -1)
+                self.record_trait_impl_scalar_target_v1(impl_key, candidate)
+            elif target.id >= 0:
                 self.trait_impl_methods[impl_key] = target
 
     me trait_receiver_identity(receiver: HirExpr, method: text = "") -> text:
@@ -2697,4 +2756,4 @@ impl MirLowering:
         if returns_optional:
             self.struct_method_return_is_optional[key] = true
 
-export hir_impl_trait_symbol_id_v1, MirImplMethodProvenanceV1, hir_impl_method_provenance_v1
+export hir_impl_trait_symbol_id_v1, MirImplMethodProvenanceV1, hir_impl_method_provenance_v1, mir_trait_dispatch_identity, mir_scalar_trait_owner_key_v1

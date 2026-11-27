@@ -55,6 +55,25 @@ fn _p256_fixed_spki_to_point(spki: [u8]) -> [u8]:
         return []
     spki.slice(26, 91)
 
+fn ecdsa_p256_sign_fixed_checked(pkcs8: [u8], message: [u8]) -> Result<[u8], text>:
+    """Sign `message` with ECDSA P-256 SHA-256; returns 64-byte r||s or typed error."""
+    match ecdsa_p256_sign_checked(pkcs8, message):
+        case Ok(signature):
+            if signature.len() != 64:
+                return Err("ecdsa_p256: expected 64-byte fixed signature, got {signature.len()}")
+            Ok(signature)
+        case Err(error):
+            Err(error)
+
+fn ecdsa_p256_verify_fixed_checked(
+    spki_der: [u8], message: [u8], signature_fixed64: [u8]
+) -> Result<bool, text>:
+    """Verify a 64-byte r||s ECDSA P-256 SHA-256 signature with SPKI->point conversion."""
+    val point = _p256_fixed_spki_to_point(spki_der)
+    if point.len() != 65:
+        return Err("ecdsa_p256: invalid P-256 SPKI DER public key")
+    ecdsa_p256_verify_checked(point, message, signature_fixed64)
+
 fn ecdsa_p256_sign_fixed(pkcs8: [u8], message: [u8]) -> [u8]:
     """Sign `message` with ECDSA P-256 SHA-256; returns 64-byte r||s.
 
@@ -70,10 +89,8 @@ fn ecdsa_p256_sign_fixed(pkcs8: [u8], message: [u8]) -> [u8]:
     For SSH wire format convert the result with fixed64_to_ssh_mpint_pair().
     Hosted-only.
     """
-    match ecdsa_p256_sign_checked(pkcs8, message):
+    match ecdsa_p256_sign_fixed_checked(pkcs8, message):
         case Ok(signature):
-            if signature.len() != 64:
-                return []
             signature
         case Err(_):
             []
@@ -89,10 +106,7 @@ fn ecdsa_p256_verify_fixed(spki_der: [u8], message: [u8], signature_fixed64: [u8
 
     Returns: true if the signature is valid, false otherwise.
     """
-    val point = _p256_fixed_spki_to_point(spki_der)
-    if point.len() != 65:
-        return false
-    match ecdsa_p256_verify_checked(point, message, signature_fixed64):
+    match ecdsa_p256_verify_fixed_checked(spki_der, message, signature_fixed64):
         case Ok(valid): valid
         case Err(_): false
 

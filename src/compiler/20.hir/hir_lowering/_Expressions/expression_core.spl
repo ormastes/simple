@@ -928,6 +928,26 @@ impl HirLowering:
                     if mc_instance_owner_raw >= 0:
                         val mc_instance_method_raw: i64 = self.symbols.record_instance_method_scalar_raw(mc_instance_owner_raw, method_name_t)
                         mc_resolution = MethodResolution.InstanceMethod(SymbolId(id: mc_instance_owner_raw), SymbolId(id: mc_instance_method_raw))
+                    elif val trait_self_type = self.current_method_self_type:
+                        # Inside a trait default method body, `self` has the
+                        # enclosing Trait type. Retain that trait identity on
+                        # `self.<method>()` for methods declared on that trait
+                        # so scalar/nominal defaults do not collide with
+                        # unrelated visible traits on the concrete Self type.
+                        match mc_static_resolution:
+                            case MethodResolution.Unresolved:
+                                match trait_self_type.kind:
+                                    case HirTypeKind.Named(trait_sym, _):
+                                        if val trait_sym_info = self.symbols.get_symbol_raw(trait_sym.id):
+                                            if trait_sym_info.kind == SymbolKind.Trait:
+                                                val recv_sym = _hir_expr_symbol_or_invalid(mc_lowered_receiver.kind)
+                                                if recv_sym.is_valid():
+                                                    if val recv_info = self.symbols.get_symbol_raw(recv_sym.id):
+                                                        if recv_info.name == "self" or recv_info.name == "me":
+                                                            if val trait_method = self.symbols.lookup_trait_method_raw(trait_sym.id, method_name_t):
+                                                                mc_resolution = MethodResolution.TraitMethod(trait_sym, trait_method)
+                                    case _: ()
+                            case _: ()
                     var hir_args: [HirCallArg] = []
                     val mc_lambda_hint: HirType = self.lambda_element_hint_for_method(mc_lowered_receiver.kind, method_name_t, e.span)
                     for arg in method_args_t:

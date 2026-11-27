@@ -1,0 +1,138 @@
+use std.spec.{describe, it, expect}
+use os.crypto.ed25519.{ed25519_self_test, ed25519_keypair_from_seed}
+use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed_checked, ecdsa_p256_verify_fixed_checked}
+use os.crypto.cose.{
+    CoseError, CoseVerifyResult,
+    cose_alg_eddsa, cose_alg_es256, cose_alg_hs256,
+    cose_sign1_create, cose_sign1_verify
+}
+use test.fixtures.system_support.os_crypto_ref_helpers.{hex_to_bytes}
+
+fn _p256_pkcs8() -> [u8]:
+    hex_to_bytes("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420578329bff057bf48c84b9fc462940c57bb509e77e443228dbd627054a1fce283a14403420004fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd")
+
+fn _p256_spki() -> [u8]:
+    hex_to_bytes("3059301306072a8648ce3d020106082a8648ce3d03010703420004fc116698a3e3236550c4c9efa9bd4d0619602a65d2930e9150ab33e84dbc83f8a6a6b9933f35ab59245e5b5a7af5dca76b33cbe7aeee5981b3ca350bebf52ecd")
+
+fn _test_seed32() -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push((i + 1).to_u8())
+        i = i + 1
+    out
+
+fn _test_sig64() -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 64:
+        out.push(((i % 32) + 1).to_u8())
+        i = i + 1
+    out
+
+fn _cose_err_kind(err: CoseError) -> text:
+    match err:
+        case CoseError.InvalidEncoding(_): "InvalidEncoding"
+        case CoseError.UnsupportedAlgorithm(_): "UnsupportedAlgorithm"
+        case CoseError.AlgorithmRejected(_): "AlgorithmRejected"
+        case CoseError.SignatureMismatch: "SignatureMismatch"
+        case CoseError.MacMismatch: "MacMismatch"
+        case CoseError.KeyTooShort: "KeyTooShort"
+
+describe "August audit Batch 1 crypto restorations (ed25519 TEST 2 + checked P-256/COSE)":
+    it "passes os.crypto.ed25519_self_test() including restored RFC 8032 TEST 2 vector":
+        val res = ed25519_self_test()
+        match res:
+            case Ok(passed):
+                expect(passed).to_equal(true)
+            case Err(msg):
+                expect(msg).to_equal("")
+
+    it "round-trips COSE_Sign1 EdDSA via Result and rejects invalid algorithm/key with typed CoseError":
+        val kp = ed25519_keypair_from_seed(_test_seed32())
+        val payload: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val signed_res = cose_sign1_create(payload, cose_alg_eddsa(), kp.0)
+        var ok_bytes: [u8] = []
+        var sign_err = ""
+        match signed_res:
+            case Ok(bytes): ok_bytes = bytes
+            case Err(e): sign_err = _cose_err_kind(e)
+        expect(sign_err).to_equal("")
+        expect(ok_bytes.len() > 64).to_equal(true)
+
+        val verified = cose_sign1_verify(ok_bytes, cose_alg_eddsa(), kp.1)
+        var verified_ok = false
+        match verified:
+            case CoseVerifyResult.Ok(got):
+                verified_ok = got.len() == payload.len()
+            case CoseVerifyResult.Err(_):
+                verified_ok = false
+        expect(verified_ok).to_equal(true)
+
+        val hs_res = cose_sign1_create(payload, cose_alg_hs256(), kp.0)
+        var hs_err = ""
+        match hs_res:
+            case Ok(_): hs_err = ""
+            case Err(e): hs_err = _cose_err_kind(e)
+        expect(hs_err).to_equal("AlgorithmRejected")
+
+        val bad_es256_res = cose_sign1_create(payload, cose_alg_es256(), [0x01u8, 0x02u8])
+        var bad_es256_err = ""
+        match bad_es256_res:
+            case Ok(_): bad_es256_err = ""
+            case Err(e): bad_es256_err = _cose_err_kind(e)
+        expect(bad_es256_err).to_equal("InvalidEncoding")
+
+    it "rejects malformed P-256 SPKI in ecdsa_p256_verify_fixed_checked and cose_sign1_verify":
+        val bad_spki: [u8] = [0x30u8, 0x00u8]
+        val sig64 = _test_sig64()
+        val msg: [u8] = [0x61u8, 0x62u8, 0x63u8]
+        var verify_err = ""
+        match ecdsa_p256_verify_fixed_checked(bad_spki, msg, sig64):
+            case Ok(_): verify_err = ""
+            case Err(e): verify_err = e
+        expect(verify_err).to_contain("invalid P-256 SPKI")
+
+        var sign_failed = false
+        match ecdsa_p256_sign_fixed_checked([0x01u8], msg):
+            case Ok(_): sign_failed = false
+            case Err(_): sign_failed = true
+        expect(sign_failed).to_equal(true)
+
+        val kp = ed25519_keypair_from_seed(_test_seed32())
+        var ed_msg: [u8] = []
+        match cose_sign1_create(msg, cose_alg_eddsa(), kp.0):
+            case Ok(bytes): ed_msg = bytes
+            case Err(_): ed_msg = []
+        expect(ed_msg.len() > 64).to_equal(true)
+        val wrong_alg = cose_sign1_verify(ed_msg, cose_alg_hs256(), bad_spki)
+        var wrong_alg_kind = ""
+        match wrong_alg:
+            case CoseVerifyResult.Ok(_): wrong_alg_kind = ""
+            case CoseVerifyResult.Err(e): wrong_alg_kind = _cose_err_kind(e)
+        expect(wrong_alg_kind).to_equal("AlgorithmRejected")
+
+    it "round-trips COSE_Sign1 ES256 with SPKI->point verify and propagates P-256 InvalidEncoding":
+        val payload: [u8] = [0x68u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val created = cose_sign1_create(payload, cose_alg_es256(), _p256_pkcs8())
+        var es_bytes: [u8] = []
+        var es_err = ""
+        match created:
+            case Ok(bytes): es_bytes = bytes
+            case Err(e): es_err = _cose_err_kind(e)
+        expect(es_err).to_equal("")
+        expect(es_bytes.len() > 64).to_equal(true)
+
+        val verified = cose_sign1_verify(es_bytes, cose_alg_es256(), _p256_spki())
+        var ok_len: i64 = -1
+        match verified:
+            case CoseVerifyResult.Ok(got): ok_len = got.len().to_i64()
+            case CoseVerifyResult.Err(_): ok_len = -1
+        expect(ok_len).to_equal(5)
+
+        val bad_key_verify = cose_sign1_verify(es_bytes, cose_alg_es256(), [0x30u8, 0x00u8])
+        var bad_key_kind = ""
+        match bad_key_verify:
+            case CoseVerifyResult.Ok(_): bad_key_kind = ""
+            case CoseVerifyResult.Err(e): bad_key_kind = _cose_err_kind(e)
+        expect(bad_key_kind).to_equal("InvalidEncoding")
