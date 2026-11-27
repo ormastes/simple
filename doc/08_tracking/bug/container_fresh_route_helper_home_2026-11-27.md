@@ -1,6 +1,7 @@
 # Container fresh route: engine helpers had no usable home
 
-- **Status:** helper environment FIXED in source 2026-11-27 (unit specs only). The guest unit's own
+- **Status:** helper environment FIXED in source 2026-11-27 (unit specs only), extended the same day with
+  `XDG_RUNTIME_DIR` and `PATH` (section "Runtime directory and PATH"). The guest unit's own
   environment is OPEN (section "Guest unit"). Nothing here was run in the guest.
 - **Component:** `src/lib/nogc_sync_mut/io/linux_fresh_epoch_launch_v1.spl`
   (`linux_fresh_epoch_project_launch_v1`), custody account check
@@ -51,9 +52,29 @@ passing spec executes `linux_fresh_epoch_project_launch_v1`: the three that reac
 (`linux_fresh_admitted_workload_v2_spec`, `linux_fresh_epoch_admission_v1_spec`,
 `machine_fresh_epoch_lifecycle_v1_spec`) fail on the base commit and fail the same cases after.
 
-Still open for the helper: it has no `XDG_RUNTIME_DIR`. Where the engine then keeps its runtime files
-(`pause.pid` among them) for an account without `/run/user/<uid>` was not measured; on this host it used
-`/run/user/1000/libpod`, outside the run root.
+## Runtime directory and PATH (decided and fixed in source 2026-11-27)
+
+`linux_fresh_epoch_helper_environment_v1(run_root)` now returns
+`["HOME=<run root>", "XDG_RUNTIME_DIR=<run root>", "PATH=/usr/bin:/bin"]`.
+
+Measured (podman 4.9.3 rootless, uid 1000, private store, user bus made unreachable, each helper in its own
+cgroup that is killed after it):
+
+| Helper environment | Result |
+|---|---|
+| `HOME` only, a pause process already running for the uid | exit 0; `pause.pid` is `/run/user/1000/libpod/tmp/pause.pid`. This is what the HOME-only row above measured without knowing it. |
+| `HOME` and `XDG_RUNTIME_DIR=<private dir>`, no `PATH` | every command exits 125: `command required for rootless mode with multiple IDs: exec: "newuidmap": executable file not found in $PATH`. |
+| `HOME`, `XDG_RUNTIME_DIR=<run root>`, no `PATH` | the same exit 125. |
+| `HOME`, `XDG_RUNTIME_DIR=<run root>`, `PATH=/usr/bin:/bin` | exit 0 for load, create, start, inspect, logs, stop, rm. `pause.pid` is `<run root>/libpod/tmp/pause.pid`. The run root gains `containers`, `libpod` and `runc` beside `networks`, `tmp` and the `vfs-*` entries it already gets. |
+
+- **`XDG_RUNTIME_DIR`: needed.** Without it the pause process file is outside custody and shared by every
+  store of the uid. The guest masks `user@<uid>.service`, so `/run/user/<uid>` is not expected to exist
+  there; where podman then falls back to was not measured, and with the variable set it does not matter.
+- **`PATH`: needed.** A helper that finds no pause process to join must make its user namespace, and looks
+  `newuidmap` up through `PATH`. The route kills every helper's group, so that is the normal case. The
+  value is the one the broker rule already requires of the broker.
+- The offline store inventory still requires an empty run root before first use; these entries appear
+  only once a helper ran, like the `vfs-*` ones.
 
 ## Guest unit (open, owner decision)
 
