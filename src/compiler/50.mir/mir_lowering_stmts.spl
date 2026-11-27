@@ -3985,7 +3985,9 @@ impl MirLowering:
                             var b_err = self.builder
                             val dummy = b_err.emit_const_int(0)
                             self.builder = b_err
-                            return MirMethodCallOperands(operands: [dummy], writebacks: [])
+                            for _a in args:
+                                operands = operands.push(mir_operand_copy(dummy))
+                            return MirMethodCallOperands(operands: operands, writebacks: [])
                 self.error_fatal("named call with omitted parameter default requires matching receiver operands", Some(args[0].span))
                 return MirMethodCallOperands(operands: operands, writebacks: [])
             if plan.source_kind != 2 and plan.source_kind != 4:
@@ -5914,6 +5916,30 @@ impl MirLowering:
         # General case: iterator protocol lowering
         self.lower_for_iterator(var_, iter, body, source_span)
 
+    fn range_bound_int_hir_type(expr: HirExpr) -> HirType?:
+        """Recover a concrete integer HirType from a for-range bound even before 30.types
+        populates HirExpr.type_ on Cast (`0u64`) or typed parameter/local references."""
+        if expr.has_type_:
+            val expr_ty: HirType = expr.type_
+            match expr_ty.kind:
+                case HirTypeKind.Int(_, _): return Some(expr_ty)
+                case _: ()
+        match expr.kind:
+            case HirExprKind.Cast(_, cast_target):
+                match cast_target.kind:
+                    case HirTypeKind.Int(_, _): return Some(cast_target)
+                    case _: ()
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                val bound = self.find_local(symbol.id)
+                if bound.id >= 0:
+                    if val bound_hir = self.find_local_hir_type(bound.id):
+                        val bound_hir_ty: HirType = bound_hir
+                        match bound_hir_ty.kind:
+                            case HirTypeKind.Int(_, _): return Some(bound_hir_ty)
+                            case _: ()
+            case _: ()
+        None
+
     me lower_for_range(
         var_: SymbolId,
         start: HirExpr?,
@@ -5938,19 +5964,17 @@ impl MirLowering:
         # Derive loop counter type from bound HirExpr types before emitting any code.
         # This preserves u64 (and other non-i64 integer) counter types end-to-end.
         var loop_ty = MirType.i64()
-        # NOT `case Some(...)`. HirExpr.type_ is declared `HirType` -- FLAT, not
-        # even nullable (hir_definitions.spl:529), with `has_type_` as "the
-        # authoritative presence bit" per its own docstring. An Option arm can
-        # therefore NEVER match here, which made the u64 preservation promised
-        # by the comment above dead code: loop_ty always kept its i64 default.
+        var loop_hir_ty = HirType(kind: HirTypeKind.Int(64, true), span: source_span)
+        var resolved_bound_hir: HirType? = None
         if val end_expr = end:
-            if end_expr.has_type_:
-                val end_ty: HirType = end_expr.type_
-                loop_ty = self.lower_type(end_ty)
-        elif val start_expr = start:
-            if start_expr.has_type_:
-                val start_ty: HirType = start_expr.type_
-                loop_ty = self.lower_type(start_ty)
+            resolved_bound_hir = self.range_bound_int_hir_type(end_expr)
+        if resolved_bound_hir == None:
+            if val start_expr = start:
+                resolved_bound_hir = self.range_bound_int_hir_type(start_expr)
+        if val int_hir = resolved_bound_hir:
+            val int_hir_ty: HirType = int_hir
+            loop_hir_ty = int_hir_ty
+            loop_ty = self.lower_type(int_hir_ty)
 
         # Lower start value (default to typed 0)
         var start_local: LocalId = 0
@@ -5998,6 +6022,7 @@ impl MirLowering:
             self.error_fatal("for range loop variable has no resolved symbol", Some(body.span))
         else:
             self.bind_local(range_var_id, counter)
+            self.remember_local_hir_type(counter.id, loop_hir_ty, 0, 0)
 
         # Create loop blocks
         var b_blocks = self.builder
