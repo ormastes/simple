@@ -789,3 +789,18 @@ Every unavailable host or capability row (spec execution NOT_RUN, container live
 remote enrollment, operator key-policy enrollment, agent workspace close) has an open BLOCKED Todo DB row (455-459 and
 193-195) and a resume plan with owner, prerequisite, resume command and retained artifacts in
 `doc/03_plan/agent_tasks/simple_orchestrator_remote_completion.md`. None is PASS.
+
+## Enrolled-host signed fixtures (2026-11-27, todos 481-493)
+- Producers: `test/fixtures/orchestrator/enrolled_host_signed_fixture_v1.spl` (lib) and
+  `enrolled_host_signed_fixture_gen.spl` (guest entry, env `SIMPLE_ORCH_FIXTURE_*`, prints
+  `FIXTURE OK|BLOCKED|ERROR <class>`). Spec: `test/03_system/app/orchestrator/feature/enrolled_host_signed_fixture_spec.spl`
+  (seed: executed=10 passed=7 blocked=3). The guest wrapper `--run-specs` runs the generator first (hook NOT_RUN;
+  requires the final `FIXTURE DONE` line; keys are created exclusively after the dispatch install).
+- Trap: `host-linux-enrollment-issue` reads **OpenSSH** Ed25519 private files (`host_identity_private_encode_v1`) at
+  `controller_authority_key_leaf_v1` names; openssl PKCS#8 PEM is refused.
+- Trap: `controller_dispatch_config_install_v1` creates files 0644 (`rt_file_create_excl`) then refuses them as
+  `dispatch-file-not-private` unless umask 077 (todo 483; `controller_dispatch_config_spec` fails 5/7 on the seed for this); the
+  generator pre-writes 0600.
+- Trap: the machine-policy decoder needs `version: 2` and canonical bytes; hand-written SDN never decodes.
+- The pure codecs (ed25519, entropy, gateway, binding, authority policy, enrollment issuer) all run on the seed; the
+  installed-profile/policy/native-identity openers fail on the seed with `unknown extern function: gettid`.

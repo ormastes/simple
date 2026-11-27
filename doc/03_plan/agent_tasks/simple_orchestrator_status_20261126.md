@@ -105,27 +105,39 @@ sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision && \
     It is not enabled. `ExecStart` runs `$SIMPLE_HOST_EXEC`.
   - `/etc/simple/podman-live-spec.env`, installed from the shipped fixture.
   - `/etc/simple/container`, `/var/lib/simple/container`, and the protected key
-    and credential stores under `/srv/simple-fixture`, with ed25519 keys
-    generated in the guest.
+    and credential stores under `/srv/simple-fixture`. The key store is left
+    empty; `--run-specs` fills it (below).
   - `/etc/simple/orchestrator-host.env` with all six
     `SIMPLE_LINUX_PROVISION_ACCEPTANCE_*`, the four `SIMPLE_LINUX_ATTACH_V6_*`,
     `SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT` and the five
     `SIMPLE_CARET_SSH_ACCEPTANCE_*` variables.
-- Still not provided, because each item needs the self-hosted binary and its
-  canonical encoders:
-  - Decoder-valid profiles. The three `/etc/simple/container/*.sdn` files use
-    the decoder key sets and the real machine-id, UIDs and podman sha256. The
-    digest fields are `AUTHOR_WITH_SIMPLE`, and the kind, mode, model and
-    cgroup values are unvalidated guesses.
-  - A validated key format: the ed25519 PEM keys were not checked against
-    what `host-linux-enrollment-issue` expects.
-  - `binding.sdn` and its five pinned inputs.
-  - `authority-policy.sdn` and the dispatch root.
-  - The signed V6 attach/invoke/detach requests.
-  - The signed installer fixture parent.
-  - The Caret SSH packets.
+- **Signed fixtures (2026-11-27).** Before the specs, `--run-specs` runs
+  `test/fixtures/orchestrator/enrolled_host_signed_fixture_gen.spl` with the
+  given binary. It prints `FIXTURE OK|BLOCKED|ERROR <class>` and ends with
+  `FIXTURE DONE`. An `ERROR` or a missing `DONE` counts as FAIL; a `BLOCKED`
+  line is reported on its own. **The hook is authored and NOT_RUN**: no guest
+  run has executed it yet. The generator itself ran on the seed in a temp tree.
+  It wrote the keys, dispatch root, authority policy and Caret request, and
+  reported the binding BLOCKED. A second run refused with
+  `dispatch-install-immutable-mismatch` and left the keys unchanged. The first
+  spec, `test/03_system/app/orchestrator/feature/enrolled_host_signed_fixture_spec.spl`,
+  checks the same producers: generate, decode, verify, and refuse a tampered or
+  wrong-key copy (`ISSUER_SIGNATURE_INVALID`). Seed result, 2026-11-27:
+  `outcome=BLOCKED executed=10 passed=7 failed=0 blocked=3`. **No consuming
+  spec is unblocked yet:** `$F/input` stays empty, so provision/startup is still
+  BLOCKED on todo 484.
+
+  | Class | Todo | State |
+  | --- | --- | --- |
+  | Key format | 482 | **Generated (seed).** The issuer reads OpenSSH Ed25519 private files at `controller_authority_key_leaf_v1` names (dir 0700, file 0600), created exclusively. The old openssl PKCS#8 `*.ed25519.pem` keys were the wrong format, and the spec proves the decoder refuses them. `--provision` no longer makes them, and `--run-specs` deletes them. |
+  | Authority | 483 | **Generated (seed).** This covers `authority-policy.sdn`, the dispatch root (`controller.sdn`, `dispatch-config.sdn`) installed by `controller_dispatch_config_install_v1`, and the machine-parent copy. On the seed the enrollment issuer signs and the snapshot verifies. Defect: the installer creates its files 0644 (`rt_file_create_excl`, on both the seed and the C runtime) and then refuses them as `dispatch-file-not-private` unless umask is 077. `controller_dispatch_config_spec` fails 5 of 7 on the seed for this reason (umask 0002). The generator works around it by pre-writing the same bytes 0600. Owner decision: create the files 0600, or require umask 077. |
+  | Binding | 484 | **Partly generated.** `binding.sdn` is written only when all five pinned inputs exist in `$F/input`. `engine-policy.sdn` has an encoder (`linux_oci_engine_policy_encode_v1`, runs on the seed). No generator is written yet for the host config, broker policy or the two helper templates, so in the guest this class prints `FIXTURE BLOCKED binding`. `providerIdentityDigest` is the podman sha256, which is unvalidated; the real value is `linux_oci_engine_identity_digest_v1` of a live observation. |
+  | Caret SSH | 487 | **Generated (seed):** the inspect request (`$F/caret-ssh/request.sdn`) through the gateway codec. The servers config, profile and peer still come from `run-orchestrator-native-qualification.shs --only ssh`. The round trip is still BLOCKED on a compiled peer. |
+  | Profiles | 481 | **BLOCKED: no generator yet.** On the seed, `machine_container_policy_bytes_v1`, `linux_oci_engine_policy_encode_v1` and `linux_fresh_epoch_profile_decode_v1` run, but `linux_machine_policy_open_v1` and `linux_installed_supervisor_profile_open_v1` fail with `unknown extern function: gettid`. The provisioned heredoc says `version: 1` and is non-canonical, so it can never decode: the decoder needs `version: 2`, canonical bytes and a non-empty `localPrincipals` in standalone mode. |
+  | V6 requests | 485 | **BLOCKED** on a live enrolled Host. The requests need its association digest, primary plan, signed helper request, pane binding and route READY file. |
+  | Installer parent | 486 | **BLOCKED: no generator yet.** The parent holds `fixture-enrollment.sdn` and `fixture-credential.sdn`, which are the binding and credential above, plus host-config, engine-policy, broker-policy and agent-helper-template, the inputs of todo 484. Its consumer also needs `linux_service_native_identity_borrow_v3`, which fails on the seed with `gettid`. |
 - `--run-specs` exports a path variable only when its fixture content exists,
-  so these specs report BLOCKED rather than FAIL.
+  so a spec whose fixture is still BLOCKED reports BLOCKED rather than FAIL.
 - The installed-Host MainPID case needs the supervised AOT route. Set
   `SIMPLE_HOST_EXEC` to the staged spec executable in a unit drop-in.
 
@@ -226,7 +238,7 @@ fixtures. The estimate above covers signed Linux provisioning.
 ## Update 2026-11-27 (native qualification prep)
 
 - **Runner:** `sh scripts/check/run-orchestrator-native-qualification.shs <self-hosted simple>`
-  runs the 134 `cited` and `inventory` specs of
+  runs the 136 `cited` and `inventory` specs (134 before 2026-11-27) of
   `scripts/check/orchestrator_native_qualification_specs.txt` one at a time, then the SSH
   round trip (builds or reuses the peer, generates keys and the `SIMPLE_CARET_SSH_ACCEPTANCE_*`
   fixture, submits one intent, starts and stops a user sshd on 127.0.0.1:2299), then
@@ -264,3 +276,18 @@ fixtures. The estimate above covers signed Linux provisioning.
     and `windows-case.sdn`, which nothing in the repo creates, and unwraps the error instead of
     reporting `pending("BLOCKED: ...")`. Until the fixture exists or the spec is changed, the
     runner exits 1 on this host.
+
+## Seed-only evidence awaiting native re-qualification (2026-11-27)
+
+The results below come only from the Rust seed interpreter. Each must be
+re-run with a self-hosted CLI deployed by `sh scripts/bootstrap/bootstrap-from-scratch.sh`.
+`<bin>` is that self-hosted `simple`.
+
+| Todo | Capability | Owner | Seed result being re-checked | Resume |
+| --- | --- | --- | --- | --- |
+| 488 | The orchestrator spec list (`scripts/check/orchestrator_native_qualification_specs.txt`) | Bootstrap owner, then orchestrator verification | `cited` group: 3 PASS (`oci_execution_options_effects` 11/11, `host_identity_v1` 27/27, `server_ssh_v1` 14/14), 2 BLOCKED, 2 FAIL (`gettid`; missing `simple-container-api` case files) | `sh scripts/check/run-orchestrator-native-qualification.shs <bin>` |
+| 489 | SSH loopback round trip | Orchestrator verification | Key auth and host-key pinning hold. The round trip gives `outcome=ERROR executed=1 failed=1` because the seed lacks `rt_stdin_read`/`rt_stdout_write` | `sh scripts/check/run-orchestrator-native-qualification.shs --only ssh --no-guest <bin>` |
+| 490 | Podman session smoke | Container owner | 5/5 with the entrypoint fixture image | `SIMPLE_PODMAN_SMOKE=1 SIMPLE_PODMAN_ENTRYPOINT_IMAGE=<image> <bin> test test/03_system/app/container/feature/podman_session_live_spec.spl` (per its smoke manual; neither runner calls it) |
+| 491 | Podman shared-API live spec | Container owner (root) | rc=6, `outcome=BLOCKED executed=6 blocked=6` (`/etc/simple/container` missing) | `sh scripts/check/check-linux-orchestrator-host-qemu.shs --run-specs <bin>` |
+| 492 | V6 pane-target release fix (#12055) | Orchestrator verification | `runtime_host_pane_target_release_v6_spec` `outcome=OK executed=2 passed=2` | `sh scripts/check/run-orchestrator-native-qualification.shs --only cited --no-guest <bin>` (the spec is now listed) |
+| 493 | Enrolled-host system specs | Linux host operator (root) and bootstrap owner | `pending("BLOCKED: ...")` exit 6 for provision/startup, V6 attach and installer; `enrolled_host_signed_fixture_spec` `outcome=BLOCKED executed=10 passed=7 blocked=3` | `sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision && sh scripts/check/check-linux-orchestrator-host-qemu.shs --run-specs <bin>` |
