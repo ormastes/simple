@@ -205,14 +205,49 @@ fn engine2d_host_gpu_lane_schedule(source_lane: text, target_lane: text, operati
 fn engine2d_host_gpu_lane_summary(result: Engine2dHostGpuLaneResult) -> text:
     "ok={result.ok};source={result.source_lane};target={result.target_lane};exec={result.execution_kind};host_commit={result.committed_on_host};gpu_batched={result.gpu_batched};fallback={result.fallback_explicit};packet={result.estimated_packet_bytes}/{result.max_packet_bytes};baseline_ms={result.baseline_ms};estimated_ms={result.estimated_ms};diagnostic={result.diagnostic}"
 
+@allow(primitive_api)
+struct FontRuntimeProvenance:
+    runtime_status: text
+    selected_backend: text
+    font_backend: text
+    driver: text
+    device_handle: i64
+    module_or_queue_handle: i64
+    kernel_or_pipeline_handle: i64
+    fence_handle: i64
+    readback_checksum: i64
+    parity_status: text
+
+fn _is_gpu_font_runtime_backend(name: text) -> bool:
+    val canonical = backend_canonical_name(name)
+    canonical != "" and canonical != "cpu" and canonical != "software" and canonical != "cpu_simd" and canonical != "unknown"
+
+@allow(primitive_api)
+fn engine2d_font_runtime_provenance_valid(provenance: FontRuntimeProvenance) -> bool:
+    """Return true only when non-CPU runtime handles, fence, and readback parity are all present."""
+    if provenance.runtime_status != "pass":
+        return false
+    if not _is_gpu_font_runtime_backend(provenance.selected_backend) or not _is_gpu_font_runtime_backend(provenance.font_backend):
+        return false
+    if backend_canonical_name(provenance.font_backend) != backend_canonical_name(provenance.selected_backend):
+        return false
+    if provenance.driver == "":
+        return false
+    if provenance.device_handle <= 0 or provenance.module_or_queue_handle <= 0 or provenance.kernel_or_pipeline_handle <= 0 or provenance.fence_handle <= 0:
+        return false
+    if provenance.readback_checksum <= 0 or provenance.parity_status != "pass":
+        return false
+    true
+
 export ENGINE2D_BACKEND_LANE_DRAWING, ENGINE2D_BACKEND_LANE_PROCESSING, ENGINE2D_BACKEND_LANE_COMBINED
 export ENGINE2D_HOST_GPU_LANE_HOST, ENGINE2D_HOST_GPU_LANE_GPU
 export ENGINE2D_HOST_GPU_EXEC_DIRECT, ENGINE2D_HOST_GPU_EXEC_PACKET
 export Engine2dBackendLane, Engine2dBackendLanePlan
-export Engine2dHostGpuLaneResult
+export Engine2dHostGpuLaneResult, FontRuntimeProvenance
 export engine2d_drawing_backend_lane, engine2d_processing_backend_lane, engine2d_combined_backend_lane
 export engine2d_backend_lane_summary, engine2d_backend_lane_plan, engine2d_operation_lane
 export engine2d_backend_lane_drawing_preference_order, engine2d_backend_lane_full_preference_order
 export engine2d_backend_lane_preference_summary, engine2d_backend_lane_preferred_candidate
 export engine2d_font_offload_backend_order, engine2d_backend_lane_preferred_font_offload_candidate
 export engine2d_host_gpu_lane_schedule, engine2d_host_gpu_lane_summary
+export engine2d_font_runtime_provenance_valid

@@ -1,0 +1,89 @@
+use std.spec
+use std.io_runtime.{file_read, file_exists}
+
+describe "LLM Caret pure-Simple native closure ABI providers":
+    it "implements OS-aware rt_file_stat and rt_dir_list d_name offsets in core_fs":
+        val fs_src = file_read("src/runtime/simple_core/core_fs.spl")
+        expect(fs_src.contains("extern fn stat(path: i64, stat_buf: i64) -> i64")).to_equal(true)
+        expect(fs_src.contains("fn _core_fs_stat_mtime_offset() -> i64:")).to_equal(true)
+        expect(fs_src.contains("fn _core_fs_dirent_name_offset() -> i64:")).to_equal(true)
+        # Verify verified ABI offsets per OS family rather than hardcoded entry + 9.
+        expect(fs_src.contains("    88\n")).to_equal(true)
+        expect(fs_src.contains("    48\n")).to_equal(true)
+        expect(fs_src.contains("    64\n")).to_equal(true)
+        expect(fs_src.contains("    19\n")).to_equal(true)
+        expect(fs_src.contains("    21\n")).to_equal(true)
+        expect(fs_src.contains("    24\n")).to_equal(true)
+        expect(fs_src.contains("val name = entry + d_name_offset")).to_equal(true)
+        expect(fs_src.contains("val name = entry + 9")).to_equal(false)
+        # Ensure rt_file_stat no longer returns constant 0 stub.
+        expect(fs_src.contains("guest stat lacks mtime")).to_equal(false)
+
+    it "provides pure-Simple terminal, stdin, and signal providers in core_terminal":
+        expect(file_exists("src/runtime/simple_core/core_terminal.spl")).to_equal(true)
+        val term_src = file_read("src/runtime/simple_core/core_terminal.spl")
+        val proc_src = file_read("src/runtime/simple_core/core_process.spl")
+        val str_src = file_read("src/runtime/simple_core/core_string.spl")
+        val required = [
+            "pub fn rt_terminal_is_tty() -> bool:",
+            "pub fn rt_terminal_stdout_is_tty() -> bool:",
+            "pub fn rt_terminal_enable_raw_mode() -> bool:",
+            "pub fn rt_terminal_disable_raw_mode() -> bool:",
+            "pub fn rt_terminal_get_size() -> i64:",
+            "pub fn rt_stdin_read_byte() -> i64:",
+            "pub fn rt_stdin_read_chars_text(count: i64) -> i64:",
+            "pub fn rt_signal_install(signal_num: i64) -> i64:",
+            "pub fn rt_atexit_install() -> i64:"
+        ]
+        for sig in required:
+            expect(term_src.contains(sig)).to_equal(true)
+        # Do not duplicate leaf symbols already exported by core_process or core_string.
+        expect(term_src.contains("pub fn rt_signal_check(")).to_equal(false)
+        expect(term_src.contains("pub fn rt_atexit_check(")).to_equal(false)
+        expect(term_src.contains("pub fn rt_term_enable_ansi(")).to_equal(false)
+        expect(term_src.contains("pub fn stdin_read_char(")).to_equal(false)
+        expect(proc_src.contains("pub fn rt_signal_check(")).to_equal(true)
+        expect(str_src.contains("pub fn stdin_read_char(")).to_equal(true)
+        expect(term_src.contains("_core_term_read_eintr_retry")).to_equal(true)
+        expect(term_src.contains("err_code != 4")).to_equal(true)
+
+    it "provides fail-closed thread and TLS ABI providers in core_thread without colliding on sleep":
+        expect(file_exists("src/runtime/simple_core/core_thread.spl")).to_equal(true)
+        val thread_src = file_read("src/runtime/simple_core/core_thread.spl")
+        val proc_src = file_read("src/runtime/simple_core/core_process.spl")
+        val required = [
+            "pub fn rt_thread_spawn_isolated(closure: i64, data: i64) -> i64:",
+            "pub fn rt_thread_spawn_isolated_with_args(fn_ptr: i64, data1: i64, data2: i64) -> i64:",
+            "pub fn rt_thread_spawn_isolated_kind(kind: i64, closure: i64, data: i64) -> i64:",
+            "pub fn rt_thread_spawn_isolated_with_args_kind(kind: i64, fn_ptr: i64, data1: i64, data2: i64) -> i64:",
+            "pub fn rt_thread_spawn_isolated2(closure: i64, data1: i64, data2: i64) -> i64:",
+            "pub fn rt_thread_join(handle: i64) -> i64:",
+            "pub fn rt_thread_is_done(handle: i64) -> i64:",
+            "pub fn rt_thread_id(handle: i64) -> i64:",
+            "pub fn rt_thread_free(handle: i64):",
+            "pub fn rt_thread_available_parallelism() -> i64:",
+            "pub fn rt_thread_yield():",
+            "pub fn rt_thread_sleep_ms(ms: i64):",
+            "pub fn rt_thread_local_new() -> i64:",
+            "pub fn rt_thread_local_get_i64(tls: i64) -> i64:",
+            "pub fn rt_thread_local_set_i64(tls: i64, value: i64):",
+            "pub fn rt_thread_local_get(tls: i64) -> i64:",
+            "pub fn rt_thread_local_set(tls: i64, value: i64):",
+            "pub fn rt_thread_local_free(tls: i64):"
+        ]
+        for sig in required:
+            expect(thread_src.contains(sig)).to_equal(true)
+        expect(thread_src.contains("pub fn rt_thread_sleep(")).to_equal(false)
+        expect(thread_src.contains("pub fn spl_thread_cpu_count(")).to_equal(false)
+        expect(proc_src.contains("pub fn rt_thread_sleep(")).to_equal(true)
+
+    it "routes gui_metal sleep through std.io_runtime and guards closure symbols":
+        val gui_metal_src = file_read("src/app/llm_caret/gui_metal.spl")
+        expect(gui_metal_src.contains("std.io_runtime")).to_equal(true)
+        expect(gui_metal_src.contains("thread_sleep")).to_equal(true)
+        expect(gui_metal_src.contains("use std.nogc_sync_mut.concurrent.thread.")).to_equal(false)
+
+        val closure_gate = file_read("scripts/check/check-llm-caret-native-closure.shs")
+        expect(closure_gate.contains("signal_install|atexit_install")).to_equal(true)
+        expect(closure_gate.contains("stdin_read_(byte|chars_text)")).to_equal(true)
+        expect(closure_gate.contains("available_parallelism")).to_equal(true)
