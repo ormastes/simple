@@ -1,22 +1,18 @@
-# Windows AppContainer filesystem-confinement verdict over the SOSIX app sandbox
+# Windows AppContainer read-confinement evidence probe over the SOSIX app sandbox
 # (sosix_app_sandbox_run_v1). Windows only: off Windows each example prints SKIP and
 # returns (visible, and never evidence). On Windows a missing seed FAILS.
 # Children are copies of the running seed executing test/fixtures/container/app_sandbox_probe.spl
-# `open <path>` (exit 0 readable, 5 access denied). The seed copy + probe sit in a staging dir
+# `open <path>` (exit 0 readable, 5 not readable). The seed copy + probe sit in a staging dir
 # granted READ; the child cwd is a second dir granted MODIFY; the outside dir is granted to
 # nobody but is readable by Everyone and by the host, so a denial is the AppContainer's.
 use std.spec.{describe, it, expect}
 use std.platform.{is_windows, get_current_dir, get_temp_dir}
 use std.nogc_sync_mut.io_runtime.{env_get, file_exists, file_copy, file_write, getpid, time_now_monotonic_ms}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, dir_list}
-use std.common.contracts.sosix.containment_v1.{SosixContainMillisV1, SosixContainExitCodeV1, SosixContainFlagV1}
-use std.common.contracts.container.capability_report_v1.{container_capability_report_v1_empty}
-use std.nogc_sync_mut.sosix.app_container_types_v1.{SosixAppSandboxRequestV1, SosixAppSandboxResultV1}
-use std.nogc_sync_mut.sosix.app_container_v1.{sosix_app_sandbox_run_v1}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_get_module_file_name_w}
 use std.common.char_from_code_pure.{char_from_code}
 use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_read_ptr_v1, sec_u16_v1, sec_get_dacl_v1, sec_set_entries_v1, sec_set_dacl_v1, sec_access_entry_v1, sec_sid_from_text_v1}
-use std.nogc_sync_mut.io.windows_appcontainer_v1.{WindowsAppContainerVerdictV1, WINDOWS_APPCONTAINER_DENIED_EXIT_V1, windows_appcontainer_verdict_v1, windows_appcontainer_apply_runs_v1}
+use std.nogc_sync_mut.sosix.windows.app_container_confinement_probe_v1.{WindowsAppContainerConfinementRequestV1, WindowsAppContainerConfinementVerdictV1, windows_appcontainer_confinement_probe_run_v1}
 
 val RUN_TAG = getpid().to_string() + "_" + time_now_monotonic_ms().to_string()
 
@@ -108,77 +104,49 @@ val WORK_ACES_BEFORE = if SETUP_OK: ace_count(WORK) else: -1
 val STAGE_ACES_BEFORE = if SETUP_OK: ace_count(STAGE) else: -1
 val PROFILES_BEFORE = if SETUP_OK: profile_count() else: -1
 
-fn open_request(tag: text, target: text) -> SosixAppSandboxRequestV1:
-    SosixAppSandboxRequestV1(scope: "ac-" + tag, program: STAGE + "/seed.exe",
-        args: ["run", STAGE + "/probe.spl", "args:", "open", target], directory: WORK,
-        readonly_dirs: [STAGE], writable_dirs: [WORK],
-        stdout_path: BASE + "/" + tag + ".out", stderr_path: BASE + "/" + tag + ".err",
-        wall: SosixContainMillisV1(120000))
+fn request_for(tag: text, inside: text, outside: text) -> WindowsAppContainerConfinementRequestV1:
+    WindowsAppContainerConfinementRequestV1(scope: "ac-" + tag, program: STAGE + "/seed.exe",
+        program_args_prefix: ["run", STAGE + "/probe.spl", "args:"], stage_dir: STAGE, view_dir: WORK,
+        out_dir: BASE, inside_path: inside, outside_path: outside)
 
-fn open_run(tag: text, target: text) -> SosixAppSandboxResultV1:
-    sosix_app_sandbox_run_v1(open_request(tag, target))
-
-fn idle() -> SosixAppSandboxResultV1:
-    SosixAppSandboxResultV1(reason: "not-run", exit_code: SosixContainExitCodeV1(-1), timed_out: SosixContainFlagV1(false))
-
-fn fake(code: i64) -> SosixAppSandboxResultV1:
-    SosixAppSandboxResultV1(reason: "", exit_code: SosixContainExitCodeV1(code), timed_out: SosixContainFlagV1(false))
-
-val inside_run = if SETUP_OK: open_run("inside", WORK + "/inside.txt") else: idle()
-val outside_run = if SETUP_OK: open_run("outside", OUTSIDE + "/user.txt") else: idle()
-val missing_run = if SETUP_OK: open_run("missing", OUTSIDE + "/absent.txt") else: idle()
-val leaky_run = if SETUP_OK: open_run("leaky", WORK + "/inside.txt") else: idle()
+val real_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("real", WORK + "/inside.txt", OUTSIDE + "/user.txt")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
+val missing_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("missing", WORK + "/inside.txt", OUTSIDE + "/absent.txt")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
+val granted_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("granted", WORK + "/inside.txt", WORK + "/inside.txt")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
+val inside_out_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("inout", OUTSIDE + "/user.txt", OUTSIDE + "/user.txt")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
+# AAP-readable system file: granted to no container SID, yet an AppContainer can read it.
+val leaky_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("leaky", WORK + "/inside.txt", "C:/Windows/win.ini")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
 val WORK_ACES_AFTER = if SETUP_OK: ace_count(WORK) else: -1
 val STAGE_ACES_AFTER = if SETUP_OK: ace_count(STAGE) else: -1
 val PROFILES_AFTER = if SETUP_OK: profile_count() else: -1
 
-fn not_confined(verdict: WindowsAppContainerVerdictV1, why: text) -> bool:
+fn not_confined(verdict: WindowsAppContainerConfinementVerdictV1, why: text) -> bool:
     match verdict:
-        WindowsAppContainerVerdictV1.NotConfined(reason): reason == why
+        WindowsAppContainerConfinementVerdictV1.NotConfined(reason): reason == why
         _: false
 
-fn is_confined(verdict: WindowsAppContainerVerdictV1) -> bool:
+fn is_confined(verdict: WindowsAppContainerConfinementVerdictV1) -> bool:
     match verdict:
-        WindowsAppContainerVerdictV1.Confined: true
+        WindowsAppContainerConfinementVerdictV1.Confined: true
         _: false
 
-describe "windows appcontainer filesystem confinement":
-    it "reads inside the granted dir and is denied outside it":
+describe "windows appcontainer read-confinement evidence probe":
+    it "is Confined: reads inside the view, cannot read the host-readable outside file":
         if skipped(): return
         expect(SETUP_OK).to_equal(true)
-        expect(inside_run.reason).to_equal("")
-        expect(inside_run.exit_code.value).to_equal(0)
-        expect(outside_run.reason).to_equal("")
-        expect(outside_run.exit_code.value).to_equal(WINDOWS_APPCONTAINER_DENIED_EXIT_V1)
+        expect(is_confined(real_verdict)).to_equal(true)
 
-    it "is Confined and flips filesystem_confinement only from the measured runs":
+    it "is not Confined when the outside file is missing for the host":
         if skipped(): return
-        val verdict = windows_appcontainer_verdict_v1(inside_run, outside_run, OUTSIDE + "/user.txt")
-        expect(is_confined(verdict)).to_equal(true)
-        val report = windows_appcontainer_apply_runs_v1(container_capability_report_v1_empty(), inside_run, outside_run, OUTSIDE + "/user.txt")
-        expect(report.filesystem_confinement.value).to_equal(true)
-        expect(container_capability_report_v1_empty().filesystem_confinement.value).to_equal(false)
+        expect(not_confined(missing_verdict, "outside-control-unreadable")).to_equal(true)
 
-    it "is not Confined when the outside child crashed or exited negative":
+    it "refuses mispaired paths before any run":
         if skipped(): return
-        val path = OUTSIDE + "/user.txt"
-        expect(not_confined(windows_appcontainer_verdict_v1(inside_run, fake(3221225477), path), "outside-exit-not-access-denied")).to_equal(true)
-        expect(not_confined(windows_appcontainer_verdict_v1(inside_run, fake(1), path), "outside-exit-not-access-denied")).to_equal(true)
-        expect(not_confined(windows_appcontainer_verdict_v1(inside_run, fake(-1), path), "outside-exit-not-access-denied")).to_equal(true)
-        val report = windows_appcontainer_apply_runs_v1(container_capability_report_v1_empty(), inside_run, fake(3221225477), path)
-        expect(report.filesystem_confinement.value).to_equal(false)
+        expect(not_confined(granted_verdict, "outside-path-is-granted")).to_equal(true)
+        expect(not_confined(inside_out_verdict, "inside-path-not-in-view")).to_equal(true)
 
-    it "is not Confined when the outside file does not exist for the host":
+    it "is not Confined when the child can read the outside file":
         if skipped(): return
-        expect(missing_run.exit_code.value).to_equal(WINDOWS_APPCONTAINER_DENIED_EXIT_V1)
-        expect(not_confined(windows_appcontainer_verdict_v1(inside_run, missing_run, OUTSIDE + "/absent.txt"), "outside-control-unreadable")).to_equal(true)
-
-    it "is not Confined when the outside read succeeds or the inside read fails":
-        if skipped(): return
-        expect(leaky_run.exit_code.value).to_equal(0)
-        expect(not_confined(windows_appcontainer_verdict_v1(inside_run, leaky_run, WORK + "/inside.txt"), "outside-read-succeeded")).to_equal(true)
-        expect(not_confined(windows_appcontainer_verdict_v1(outside_run, outside_run, OUTSIDE + "/user.txt"), "inside-read-failed")).to_equal(true)
-        expect(not_confined(windows_appcontainer_verdict_v1(idle(), outside_run, OUTSIDE + "/user.txt"), "inside-run-failed")).to_equal(true)
+        expect(not_confined(leaky_verdict, "outside-read-succeeded")).to_equal(true)
 
     it "leaves no grant and no profile behind after the runs":
         if skipped(): return
