@@ -18,6 +18,8 @@ use std.nogc_sync_mut.container.machine_fresh_workload_dispatch_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workload_native_dispatch_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workload_inspect_v2.*
 use std.nogc_sync_mut.container.machine_fresh_workload_exited_settlement_v3.machine_fresh_workload_exited_cohort_command_v3
+use std.nogc_sync_mut.container.machine_fresh_workload_exit_edges_v3.{MachineFreshWorkloadCohortRetryV3,
+    machine_fresh_workload_exited_cohort_retry_v3, machine_fresh_workload_association_exit_v3}
 use std.common.contracts.container.linux_fresh_workload_v2.*
 use std.common.contracts.container.effect_deadline_v1.*
 use std.common.contracts.container.workspace_preparation_window_v3.container_workspace_launch_expiry_v3
@@ -25,7 +27,7 @@ use std.common.contracts.distributed_operation_state_v2.*
 use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_encode_v3
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure, sleep_ms}
 use std.nogc_sync_mut.io.process_ops.{process_spawn_piped_owned_v2, PipedProcessOwnedSpawnV2}
 use std.nogc_sync_mut.io.group_process_owner.{group_process_stream_poll_v2, group_process_stream_terminal_v2}
 use std.nogc_sync_mut.database.wal.WalEntry
@@ -198,6 +200,23 @@ pub(package) fn machine_fresh_workload_progress_v3(storage: MachineStorageOwnerV
     val completed = state.after_action_v2(machine_fresh_workload_complete_v3(storage, custody, state, observed))?
     Ok(Some(completed))
 
+# The workload exited during association (CPU V2 records only; a workspace sample is never `Exited`).
+# `capture_error` is "" when the subject was captured and the confirmation is already retained; otherwise
+# the pid was gone before capture and the once-only confirmation is run here. The reducer decides from the
+# owner's own two retained samples and its own retained descriptor. On its Ok every descriptor is released
+# and the start is an exited start (exited_start_v3); it is never associated. Every Err, including a
+# descriptor that does not close, returns through after_association_v2 and latches as before.
+fn workload_association_exit_v3(storage: MachineStorageOwnerV1, custody: LinuxFreshEpochSuccessorCustodyV1,
+        state: MachineFreshWorkloadLifecycleV2, custody_generation: i64, capture_error: text) -> Result<(), text>:
+    val record = state.record_v3()?
+    val id = state.native_id_v2()?
+    if capture_error != "":
+        if machine_fresh_record_cpu_v3(record).is_err(): return Err(capture_error)
+        val again = machine_fresh_workload_run_v3(storage, custody, state, custody_generation, LinuxFreshWorkloadActionV2.Inspect, "inspect-confirm", None)?
+    val first = machine_fresh_record_start_evidence_v3(record, id, state.output_v2("inspect")?)?
+    val confirmed = machine_fresh_record_start_evidence_v3(record, id, state.output_v2("inspect-confirm")?)?
+    val proven = machine_fresh_workload_association_exit_v3(first, confirmed, capture_error, state.held_subject_v3()?)?
+    state.release_exited_containment_v3()
 
 pub(package) fn machine_fresh_workload_associate_v3(storage: MachineStorageOwnerV1,
         custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
@@ -217,8 +236,12 @@ pub(package) fn machine_fresh_workload_associate_v3(storage: MachineStorageOwner
         return Ok(())
     val before = machine_fresh_record_inspect_v3(record, id, state.output_v2("inspect")?)?
     val binding = sha256_text(machine_fresh_record_id_v3(record)? + "\n" + id + "\n" + state.output_v2("inspect")?)
-    val captured = state.capture_subject_v2(before, binding)?
+    val captured = state.capture_subject_v2(before, binding)
+    if captured.is_err(): return workload_association_exit_v3(storage, custody, state, custody_generation, captured.unwrap_err())
     val confirmed = machine_fresh_workload_run_v3(storage, custody, state, custody_generation, LinuxFreshWorkloadActionV2.Inspect, "inspect-confirm", nil)?
+    val exit_evidence = machine_fresh_record_start_evidence_v3(record, id, confirmed.output)
+    if exit_evidence.is_ok() and exit_evidence.unwrap() == MachineFreshWorkloadStartEvidenceV3.Exited:
+        return workload_association_exit_v3(storage, custody, state, custody_generation, "")
     val after = machine_fresh_record_inspect_v3(record, id, confirmed.output)?
     val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, id)?
     val evidence = state.validate_subject_v2(custody, command, before, after)?
@@ -256,6 +279,23 @@ pub(package) fn machine_fresh_workload_settle_exited_start_v3(storage: MachineSt
     val rows = state.prepare_exited_settlement_v3(absence, closure, time_sample_unix_micros_or_failure() / 1000)?
     val committed = workload_publish_v3(storage, state, rows)?
     state.mark_settled_v2()
+
+# Bounded sibling of machine_fresh_workload_settle_exited_start_v3 (which stays unchanged). The engine's own
+# helpers for a container that just exited are still leaving the cohort for a moment after Remove, and the
+# census refuses while they do. Each attempt is the whole settle above with a new full census; only the
+# census refusals the reducer names are repeated, and only inside its attempt and time bound. Nothing is
+# latched: at the bound the caller gets the named retryable refusal and may call destroy or cleanup again.
+pub(package) fn machine_fresh_workload_settle_exited_start_bounded_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    val started = time_sample_monotonic_nanos_or_failure()
+    for attempt in 1..9:
+        val settled = machine_fresh_workload_settle_exited_start_v3(storage, custody, state)
+        if settled.is_ok(): return settled
+        match machine_fresh_workload_exited_cohort_retry_v3(settled.unwrap_err(), attempt, started, time_sample_monotonic_nanos_or_failure()):
+            case MachineFreshWorkloadCohortRetryV3.Resample(delay_ms): sleep_ms(delay_ms)
+            case MachineFreshWorkloadCohortRetryV3.Exhausted(reason): return Err(reason)
+            case MachineFreshWorkloadCohortRetryV3.Refuse(reason): return Err(reason)
+    Err("machine-fresh-workload-exited-settlement-cohort-retry-bound")
 
 
 # T-01 sibling of machine_fresh_workload_settle_cpu_v3 (which stays byte-unchanged): the same body with the CpuV2

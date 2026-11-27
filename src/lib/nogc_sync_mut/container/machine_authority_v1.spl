@@ -1100,8 +1100,18 @@ pub class MachineFreshWorkloadTransferV2:
     # Exited-start sibling of settle_v2 (which stays byte-unchanged): same current-epoch gate, same storage and custody.
     pub fn settle_exited_start_v3() -> Result<(), text>:
         val current = self.current_v2()?
-        machine_fresh_workload_settle_exited_start_v3(self.admission.authority.unwrap().storage,
+        machine_fresh_workload_settle_exited_start_bounded_v3(self.admission.authority.unwrap().storage,
             self.admission.custody.unwrap(), self.state)
+
+    # Cleanup-driven attempt of the same settle, for an owner whose destroy already completed Stop, Remove and
+    # Absence on a proven exited start and was refused only at the cohort census. Strictly additive: when the
+    # owner is not current or nothing is pending it does nothing, and a refusal is returned to the caller,
+    # never latched and never retained as a diagnostic.
+    fn settle_exited_pending_v3() -> Result<(), text>:
+        if self.current_v2().is_err(): return Ok(())
+        val pending = self.state.exited_settlement_pending_v3()
+        if pending.is_err() or not pending.unwrap(): return Ok(())
+        self.settle_exited_start_v3()
 
     pub fn native_id_v2() -> Result<text, text>:
         val current = self.current_v2()?
@@ -1140,12 +1150,13 @@ pub class MachineFreshWorkloadTransferV2:
         val phase = retained.admission.lifecycle.phase_v1()
         if phase.is_err(): return MachineFreshWorkloadCloseTurnV2(Some(retained), false, phase.unwrap_err())
         if phase.unwrap() == "closed": return MachineFreshWorkloadCloseTurnV2(nil, true, retained.admission.lifecycle.diagnostic_v1().unwrap())
+        val settle = retained.settle_exited_pending_v3()
         val already = retained.state.closed_state_v3()
         val native = if already.is_ok() and already.unwrap(): Ok(()) else: retained.state.close_native_v2()
         val native_diagnostic = retained.state.diagnostic_v2()
         if native_diagnostic.is_ok():
             val first = retained.admission.lifecycle.retain_diagnostic_v1(native_diagnostic.unwrap())
-        if native.is_err(): return MachineFreshWorkloadCloseTurnV2(Some(retained), false, if retained.admission.lifecycle.diagnostic_v1().unwrap() != "": retained.admission.lifecycle.diagnostic_v1().unwrap() else: native.unwrap_err())
+        if native.is_err(): return MachineFreshWorkloadCloseTurnV2(Some(retained), false, if retained.admission.lifecycle.diagnostic_v1().unwrap() != "": retained.admission.lifecycle.diagnostic_v1().unwrap() else: (if settle.is_err(): settle.unwrap_err() else: native.unwrap_err()))
         if val authority = retained.admission.authority:
             val closed = authority.close_v1()
             var diagnostic = authority.close_diagnostic_v1()

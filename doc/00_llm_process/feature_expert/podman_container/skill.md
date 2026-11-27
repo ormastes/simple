@@ -248,5 +248,20 @@ Traps hit while doing it:
   `doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md`.
 - `machine_fresh_workload_settle_cpu_v3` and `settle_v2` are body-pinned by
   `host_linux_service_agent_v4_structure_spec.spl`. Add a sibling; do not edit them.
-- Any association failure other than "gone at both samples" still latches
-  `outcome_unknown`, which refuses `wait`/`logs` and both settles (open, same record).
+- A first sample `running` followed by a confirmation `exited` (or a pid gone
+  before capture, then `exited`) is also a proven exited start, decided by the
+  pure reducer `machine_fresh_workload_association_exit_v3`
+  (`machine_fresh_workload_exit_edges_v3.spl`); the owner closes every
+  descriptor it took and is never associated. Every other association failure
+  still latches `outcome_unknown`.
+- The exited-start settle is repeated whole, at most 8 times in 2 seconds, only
+  on the three census refusals named in
+  `machine_fresh_workload_exited_cohort_retry_v3`, then refuses with
+  `machine-fresh-workload-exited-settlement-cohort-retryable:<reason>` (not
+  latched). The transfer `close_v2` attempts the same settle, so cleanup can
+  settle after a refused `destroy`. Measured on this host (own uid): conmon,
+  `podman container cleanup` and runc last seen 143 to 169 ms after `start`
+  returned for `/bin/true`; the rootless pause process (`catatonit`) never
+  leaves, and such a process keeps the census refusing by design.
+- `host_agent_workspace_extraction_v2_spec.spl` pins two lines of the transfer
+  `close_v2` and exactly one `close_native_v2()` in it; add lines around them.
