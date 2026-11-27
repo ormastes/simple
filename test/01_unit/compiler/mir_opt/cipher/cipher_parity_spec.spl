@@ -16,7 +16,7 @@
 
 use compiler.mir_opt.pattern_dispatch.{
     PatternIdiomStats, pattern_idiom_stats_zero,
-    run_pattern_idiom_pass_x86, idiom_for_intrinsic
+    run_pattern_idiom_pass_x86, run_pattern_idiom_candidate_pass_x86, idiom_for_intrinsic
 }
 use compiler.mir_opt.pattern.rules_crypto.{
     lookup_rule_for_callee,
@@ -173,7 +173,7 @@ describe "Cipher parity — multi-call blocks":
         val callees = [SYM_AES_ROUND, SYM_AES_ROUND_LAST, SYM_AES_INV_ROUND, SYM_AES_INV_ROUND_LAST]
         val m    = make_multi_call_module(callees)
         val caps = make_x86_caps_full()
-        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         val block = func.blocks[0]
@@ -223,14 +223,13 @@ describe "Cipher parity — all cipher symbols":
             SYM_AES_ROUND, SYM_AES_ROUND_LAST,
             SYM_AES_INV_ROUND, SYM_AES_INV_ROUND_LAST,
             SYM_SHA256_COMPRESS,
-            SYM_CRC32_UPDATE_BYTE, SYM_CRC32_UPDATE_U32, SYM_CRC32_UPDATE_U64,
             SYM_CLMUL_LO, SYM_CLMUL_HI
         ]
         val caps = make_x86_caps_full()
         var all_intrinsic = true
         for sym in all_syms:
             val m   = make_call_module(sym)
-            val out = run_pattern_idiom_pass_x86(m, caps, false)
+            val out = run_pattern_idiom_candidate_pass_x86(m, caps, false)
             val fsym = out.functions.keys()[0]
             val func = out.functions[fsym]
             val inst = func.blocks[0].instructions[0]
@@ -263,3 +262,29 @@ describe "Cipher parity — all cipher symbols":
             if !is_call:
                 all_call = false
         expect(all_call).to_equal(true)
+
+# ============================================================================
+# Cipher parity — production pass is quarantined (identity)
+# ============================================================================
+
+describe "Cipher parity — production quarantine and x86 CRC32 policy":
+    it "run_pattern_idiom_pass_x86 stays identity with full caps (un-quarantine is a deliberate spec change)":
+        val m    = make_call_module(SYM_AES_ROUND)
+        val caps = make_x86_caps_full()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val fsym = out.functions.keys()[0]
+        val inst = out.functions[fsym].blocks[0].instructions[0]
+        val is_call = match inst.kind:
+            case Call(dest, func_op, args): true
+            case _: false
+        expect(is_call).to_equal(true)
+
+    it "CRC32 symbols stay Call on x86 even with full caps (SSE4.2 crc32 is CRC-32C, not IEEE)":
+        val caps = make_x86_caps_full()
+        for sym in [SYM_CRC32_UPDATE_BYTE, SYM_CRC32_UPDATE_U32, SYM_CRC32_UPDATE_U64]:
+            val out = run_pattern_idiom_candidate_pass_x86(make_call_module(sym), caps, false)
+            val inst = out.functions[out.functions.keys()[0]].blocks[0].instructions[0]
+            val is_call = match inst.kind:
+                case Call(dest, func_op, args): true
+                case _: false
+            expect(is_call).to_equal(true)

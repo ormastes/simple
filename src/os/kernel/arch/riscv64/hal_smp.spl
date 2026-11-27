@@ -171,14 +171,9 @@ fn hal_smp_ipi_send_with_mock(mock: SbiMockSmp, target: u32, vector: u32):
     mock.ipi_calls.push((target as u64, hart_mask))
 
 fn hal_smp_ipi_broadcast_with_mock(mock: SbiMockSmp, vector: u32):
-    """Simulate hal_smp_ipi_broadcast: send IPI to all harts except self (hart 0)."""
-    val self_id = 0u32
-    var i: u32 = 0u32
-    val count = HAL_SMP_CPU_COUNT_STATE
-    while i < count:
-        if i != self_id:
-            hal_smp_ipi_send_with_mock(mock, i, vector)
-        i = i + 1u32
+    """Simulate hal_smp_ipi_broadcast: record one (hart_mask, hart_mask_base) per SBI window."""
+    for w in hal_smp_ipi_broadcast_plan(vector):
+        mock.ipi_calls.push(w)
 
 # ============================================================================
 # Canonical trait methods — production-callable (AC-1)
@@ -202,42 +197,56 @@ fn hal_smp_ipi_send(target: u32, vector: u32):
     val window = hal_smp_ipi_window(hart)
     sbi_probe_then_send_ipi(window.0, window.1)
 
-fn hal_smp_ipi_window_mask(harts: [u64; 8], count: u32, base: u64) -> u64:
-    """SBI hart_mask for the 64-hart window starting at base, over harts[0..count)."""
-    var mask: u64 = 0u64
-    var i: u32 = 0u32
-    while i < count:
-        val window = hal_smp_ipi_window(harts[i])
-        if window.1 == base: mask = mask | window.0
-        i = i + 1u32
-    mask
+fn hal_smp_ipi_windows(harts: [u64; 8], count: u32, self_phys: u64) -> [(u64, u64)]:
+    """Distinct (hart_mask, hart_mask_base) SBI windows covering harts[0..count) minus self_phys."""
+    var out: [(u64, u64)] = []
+    var k: u32 = 0u32
+    while k < count:
+        if harts[k] != self_phys:
+            val base = hal_smp_ipi_window(harts[k]).1
+            var seen = false
+            var j: u32 = 0u32
+            while j < k:
+                if harts[j] != self_phys and hal_smp_ipi_window(harts[j]).1 == base: seen = true
+                j = j + 1u32
+            if not seen:
+                var mask: u64 = 0u64
+                var m: u32 = 0u32
+                while m < count:
+                    if harts[m] != self_phys:
+                        val w = hal_smp_ipi_window(harts[m])
+                        if w.1 == base: mask = mask | w.0
+                    m = m + 1u32
+                out.push((mask, base))
+        k = k + 1u32
+    out
 
-fn hal_smp_ipi_broadcast(vector: u32):
-    """Broadcast IPI to all non-self harts (self = logical 0), one SBI call per 64-hart window.
+fn hal_smp_ipi_broadcast_plan(vector: u32) -> [(u64, u64)]:
+    """Write PENDING_IPI for every non-self hart and return the SBI windows to signal.
 
-    Uses the same physical-hart window addressing as hal_smp_ipi_send, so sparse
-    DTB hart IDs (including IDs above 63) are targeted correctly.
+    Self is the boot hart's PHYSICAL id (logical 0 in the DTB capability, which
+    also holds in the fallback), so a sparse or non-zero boot hart is never
+    targeted even when the capability fell back to one hart.
     """
-    val self_id = 0u32
+    val self_phys = riscv_noalloc_dtb_hart_id(0u32)
     val count = HAL_SMP_CPU_COUNT_STATE
     var phys: [u64; 8] = [0u64; 8]
     var n: u32 = 0u32
     var i: u32 = 0u32
     while i < count and i < MAX_HARTS:
-        if i != self_id:
-            HAL_SMP_PENDING_IPI[i] = vector
-            val target = hal_smp_hsm_target(i)
-            phys[n] = if target.0: target.1 else: i as u64
-            n = n + 1u32
+        val target = hal_smp_hsm_target(i)
+        val hart = if target.0: target.1 else: i as u64
+        phys[i] = hart
+        if hart != self_phys: HAL_SMP_PENDING_IPI[i] = vector
+        n = n + 1u32
         i = i + 1u32
-    var k: u32 = 0u32
-    while k < n:
-        val base = hal_smp_ipi_window(phys[k]).1
-        var seen = false
-        var j: u32 = 0u32
-        while j < k:
-            if hal_smp_ipi_window(phys[j]).1 == base: seen = true
-            j = j + 1u32
-        if not seen:
-            sbi_probe_then_send_ipi(hal_smp_ipi_window_mask(phys, n, base), base)
-        k = k + 1u32
+    hal_smp_ipi_windows(phys, n, self_phys)
+
+fn hal_smp_ipi_broadcast(vector: u32):
+    """Broadcast IPI to all non-self harts, one SBI call per 64-hart window.
+
+    Uses the same physical-hart window addressing as hal_smp_ipi_send, so sparse
+    DTB hart IDs (including IDs above 63) are targeted correctly.
+    """
+    for w in hal_smp_ipi_broadcast_plan(vector):
+        sbi_probe_then_send_ipi(w.0, w.1)
