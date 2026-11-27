@@ -271,6 +271,16 @@ impl Lowerer {
         }
     }
 
+    /// Both types are arrays, or both are dicts: only then may a weak empty
+    /// literal defer to its sibling (an unrelated aggregate keeps the default).
+    fn same_collection_kind(&self, a: TypeId, b: TypeId) -> bool {
+        matches!(
+            (self.module.types.get(a), self.module.types.get(b)),
+            (Some(HirType::Array { .. } | HirType::Any), Some(HirType::Array { .. }))
+                | (Some(HirType::Dict { .. } | HirType::Any), Some(HirType::Dict { .. }))
+        )
+    }
+
     /// Lower an if expression to HIR
     ///
     /// Result type follows the then branch, except an empty array literal
@@ -316,6 +326,16 @@ impl Lowerer {
         // no extra handling: `ty` already defaults to `then_hir.ty` above.
         if let Some(other) = else_hir.as_ref() {
             if hir_arm_is_bottom(&then_hir) && !hir_arm_is_bottom(other) {
+                ty = other.ty;
+            }
+            // A then-arm that is only an empty `[]`/`{}` (directly or through a
+            // nested match/if chain, see `hir_value_is_weak_empty`) is not
+            // evidence about the join type: a concrete else-arm wins.
+            if hir_value_is_weak_empty(&then_hir)
+                && hir_value_is_concrete(other)
+                && self.same_collection_kind(then_hir.ty, other.ty)
+                && !matches!(then_branch, Expr::ArrayRepeat { .. })
+            {
                 ty = other.ty;
             }
         }

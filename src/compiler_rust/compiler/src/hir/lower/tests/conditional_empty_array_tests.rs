@@ -234,3 +234,34 @@ fn match_empty_array_arm_does_not_beat_concrete_sibling_array() {
         assert_eq!(element, TypeId::F64, "{body}");
     }
 }
+
+#[test]
+fn if_join_weak_empty_match_arm_does_not_beat_concrete_sibling() {
+    // The IF join must apply the same weak-empty rule as the match join when a
+    // branch is a (now typed) tail match whose value arms are only `[]`/`{}`.
+    let k = "enum K:\n    A\n    B\n    C\n";
+    for (body, want_array) in [
+        ("    val r = if c:\n        match k:\n            case K.A: []\n            case K.B: return -7.0\n            case K.C: []\n    else:\n        xs\n", true),
+        ("    val r = if n == 0:\n        match k:\n            case K.A: []\n            case K.B: return -7.0\n            case K.C: []\n    elif n == 1:\n        []\n    else:\n        xs\n", true),
+        ("    val r = if c:\n        []\n    else:\n        xs\n", true),
+    ] {
+        let source = format!("{k}fn h(xs: [f64], c: bool, n: i64, k: K) -> f64:\n{body}    if r.len() > 0: r[0] + 0.25 else: -2.0\n");
+        let module = parse_and_lower(&source).unwrap();
+        let Some(HirType::Array { element, .. }) = local_ty(&module, "h", "r") else { panic!("r must be an array for {body}") };
+        assert_eq!(element, TypeId::F64, "{body}");
+        assert!(want_array);
+    }
+}
+
+#[test]
+fn if_join_weak_empty_dict_match_arm_does_not_beat_concrete_sibling_dict() {
+    let source = format!(
+        "{TAG_CLASSES}enum K:\n    A\n    B\n    C\nfn pick(d: Dict<text, Tag>, c: bool, k: K) -> text:\n    val files = if c:\n        match k:\n            case K.A: {{}}\n            case K.B: return \"r\"\n            case K.C: {{}}\n    else:\n        d\n    files[\"k\"].label() ?? \"\"\n"
+    );
+    let module = parse_and_lower(&source).unwrap();
+    let Some(HirType::Dict { key, value }) = local_ty(&module, "pick", "files") else {
+        panic!("files must be the sibling Dict, got {:?}", local_ty(&module, "pick", "files"));
+    };
+    assert_eq!(key, TypeId::STRING);
+    assert!(matches!(module.types.get(value), Some(HirType::Struct { name, .. }) if name == "Tag"));
+}
