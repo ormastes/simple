@@ -152,6 +152,18 @@ fn hir_hollow_literal_depth(expr: &HirExpr) -> Option<usize> {
             Some(HirStmt::Expr(tail)) => hir_hollow_literal_depth(tail),
             _ => None,
         },
+        HirExprKind::LetIn { body, .. } => hir_hollow_literal_depth(body),
+        // A match arm chain: every value arm must be hollow; bottom arms are ignored.
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => match (hir_arm_is_bottom(then_branch), hir_arm_is_bottom(else_branch)) {
+            (true, true) => None,
+            (true, false) => hir_hollow_literal_depth(else_branch),
+            (false, true) => hir_hollow_literal_depth(then_branch),
+            (false, false) => Some(hir_hollow_literal_depth(then_branch)?.min(hir_hollow_literal_depth(else_branch)?)),
+        },
         _ => None,
     }
 }
@@ -554,8 +566,14 @@ impl Lowerer {
             return Ok(());
         }
         let both_concrete = hir_value_is_concrete(then_arm) && hir_value_is_concrete(else_arm);
-        let hollow = [hir_hollow_literal_depth(then_arm), hir_hollow_literal_depth(else_arm)].into_iter().flatten().min();
+        let (then_hollow, else_hollow) = (hir_hollow_literal_depth(then_arm), hir_hollow_literal_depth(else_arm));
+        let hollow = [then_hollow, else_hollow].into_iter().flatten().min();
         let disagree = a != b || (both_concrete && self.join_types_disagree(then_arm.ty, else_arm.ty, hollow));
+        // A nested hollow then-arm (`[[]]`) defers to its concrete sibling, as a
+        // plain `[]` already does in the callers.
+        if !disagree && a == b && then_hollow.is_some_and(|d| d > 1) && else_hollow.is_none() {
+            *ty = else_arm.ty;
+        }
         let script_fn = crate::hir::lower::lowerer::entry_script_mode() && self.current_function_owner.is_none();
         if !disagree || ctx.unsafe_depth > 0 || script_fn {
             return Ok(());
