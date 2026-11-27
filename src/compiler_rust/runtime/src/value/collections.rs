@@ -1979,6 +1979,31 @@ pub extern "C" fn rt_typed_words_u32_data_at(data_ptr: i64, index: i64) -> i64 {
     }
 }
 
+/// Decode an unpacked `[u64]` RuntimeValue slot without losing bits 60..63 on boxed wide integers.
+#[inline]
+fn decode_typed_u64_slot(raw: RuntimeValue) -> i64 {
+    if let Some(value) = raw.as_heap_u64() {
+        return value as i64;
+    }
+    if let Some(value) = raw.as_heap_i64() {
+        return value;
+    }
+    if raw.is_int() {
+        return raw.as_int();
+    }
+    raw.to_raw() as i64
+}
+
+/// Encode a `u64` word for an unpacked `[u64]` RuntimeValue slot, preserving bits 60..63 via `HeapUInt`.
+#[inline]
+fn encode_unpacked_u64_slot(value: i64) -> RuntimeValue {
+    if RuntimeValue::fits_inline_int(value) {
+        RuntimeValue::from_int(value)
+    } else {
+        RuntimeValue::from_u64(value as u64)
+    }
+}
+
 /// Read a u64 element from a `[u64]`-style runtime array without generic index dispatch.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 {
@@ -1998,16 +2023,7 @@ pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 
             return *((*arr).data as *const u64).add(idx as usize) as i64;
         }
         let raw = (*arr).as_slice()[idx as usize];
-        if let Some(value) = raw.as_heap_u64() {
-            return value as i64;
-        }
-        if let Some(value) = raw.as_heap_i64() {
-            return value;
-        }
-        if raw.is_int() {
-            return raw.as_int();
-        }
-        raw.to_raw() as i64
+        decode_typed_u64_slot(raw)
     }
 }
 
@@ -2023,10 +2039,7 @@ pub extern "C" fn rt_typed_words_u64_unchecked(array: RuntimeValue, index: i64) 
             return *((*arr).data as *const u64).add(index as usize) as i64;
         }
         let raw = (*arr).as_slice()[index as usize];
-        if raw.is_int() {
-            return raw.as_int();
-        }
-        raw.to_raw() as i64
+        decode_typed_u64_slot(raw)
     }
 }
 
@@ -2039,10 +2052,7 @@ pub extern "C" fn rt_typed_words_u64_data_at(data_ptr: i64, index: i64) -> i64 {
     }
     unsafe {
         let raw = *((data_ptr as *const RuntimeValue).add(index as usize));
-        if raw.is_int() {
-            return raw.as_int();
-        }
-        raw.to_raw() as i64
+        decode_typed_u64_slot(raw)
     }
 }
 
@@ -2212,7 +2222,7 @@ pub extern "C" fn rt_typed_words_u64_set(array: RuntimeValue, index: i64, value:
         if (*arr).is_u64_packed() {
             *((*arr).data as *mut u64).add(idx as usize) = value as u64;
         } else {
-            (*arr).as_mut_slice()[idx as usize] = RuntimeValue::from_int(value);
+            (*arr).as_mut_slice()[idx as usize] = encode_unpacked_u64_slot(value);
         }
         true
     }
@@ -2277,7 +2287,7 @@ pub extern "C" fn rt_typed_words_i64_set(array: RuntimeValue, index: i64, value:
 
 /// Append a signed word to a `[i64]`-style runtime array (grows as needed).
 /// Packs the array in place on the first value outside the inline range, like
-/// `rt_typed_words_i64_set`.
+/// `rt_typed_words_i64_set`. When packing is unavailable, stores signed `HeapInt`.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_i64_push(array: RuntimeValue, value: i64) -> bool {
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
@@ -2289,7 +2299,7 @@ pub extern "C" fn rt_typed_words_i64_push(array: RuntimeValue, value: i64) -> bo
             pack_tagged_words_in_place(arr);
         }
     }
-    rt_typed_words_u64_push(array, value)
+    typed_words_push_word(array, value, RuntimeValue::from_int)
 }
 
 /// Push an element to an array (no grow, returns false if full)
@@ -2389,9 +2399,7 @@ pub extern "C" fn rt_typed_words_u32_push(array: RuntimeValue, value: i64) -> bo
     }
 }
 
-/// Push a raw u64 into a `[u64]`-style runtime array without RuntimeValue boxing.
-#[no_mangle]
-pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bool {
+fn typed_words_push_word(array: RuntimeValue, value: i64, encode_unpacked: fn(i64) -> RuntimeValue) -> bool {
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
@@ -2422,11 +2430,17 @@ pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bo
         if (*arr).is_u64_packed() {
             *((*arr).data as *mut u64).add((*arr).len as usize) = value as u64;
         } else {
-            *(*arr).data.add((*arr).len as usize) = RuntimeValue::from_int(value);
+            *(*arr).data.add((*arr).len as usize) = encode_unpacked(value);
         }
         (*arr).len += 1;
         true
     }
+}
+
+/// Push a raw u64 into a `[u64]`-style runtime array without signed RuntimeValue boxing.
+#[no_mangle]
+pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bool {
+    typed_words_push_word(array, value, encode_unpacked_u64_slot)
 }
 
 /// Store a typed u32 at a caller-proven append slot and update length.
@@ -2460,7 +2474,7 @@ pub extern "C" fn rt_typed_words_u64_push_known_at(array: RuntimeValue, index: i
         if (*arr).is_u64_packed() {
             *((*arr).data as *mut u64).add(index as usize) = value as u64;
         } else {
-            *(*arr).data.add(index as usize) = RuntimeValue::from_int(value);
+            *(*arr).data.add(index as usize) = encode_unpacked_u64_slot(value);
         }
         (*arr).len = (index as u64 + 1).max((*arr).len);
         true
@@ -2514,7 +2528,7 @@ pub extern "C" fn rt_typed_words_u64_push_known_data_at(
         if (*arr).is_u64_packed() {
             *((data_ptr as *mut u64).add(index as usize)) = value as u64;
         } else {
-            *((data_ptr as *mut RuntimeValue).add(index as usize)) = RuntimeValue::from_int(value);
+            *((data_ptr as *mut RuntimeValue).add(index as usize)) = encode_unpacked_u64_slot(value);
         }
         (*arr).len = (index as u64 + 1).max((*arr).len);
         true
@@ -2554,7 +2568,7 @@ pub extern "C" fn rt_typed_words_u64_store_known_data_at(
         if _header_ptr != 0 && (*arr).is_u64_packed() {
             *((data_ptr as *mut u64).add(index as usize)) = value as u64;
         } else {
-            *((data_ptr as *mut RuntimeValue).add(index as usize)) = RuntimeValue::from_int(value);
+            *((data_ptr as *mut RuntimeValue).add(index as usize)) = encode_unpacked_u64_slot(value);
         }
         true
     }

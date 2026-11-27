@@ -261,15 +261,24 @@ impl<'a> MirLowerer<'a> {
                     return Ok(());
                 }
                 if let Some(val) = value {
-                    let is_u8_array_declared = self
+                    let declared_elem_ty = self
                         .type_registry
                         .and_then(|tr| tr.get(effective_declared_ty))
-                        .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8));
+                        .and_then(|ty| match ty {
+                            HirType::Array { element, .. } => Some(*element),
+                            _ => None,
+                        });
+                    let is_u8_array_declared = declared_elem_ty == Some(TypeId::U8);
+                    let declared_packed_array = match declared_elem_ty {
+                        Some(TypeId::U8) => Some(("rt_byte_array_new", "rt_typed_bytes_u8_push", 1024i64)),
+                        Some(TypeId::U64) => Some(("rt_array_new_with_cap_u64", "rt_typed_words_u64_push", 16i64)),
+                        _ => None,
+                    };
 
-                    if is_u8_array_declared {
+                    if let Some((alloc_fn, push_fn, default_cap)) = declared_packed_array {
                         if let HirExprKind::Array(elements) = &val.kind {
                             if elements.is_empty() {
-                                // Empty [u8] literal: allocate a byte-packed buffer with default capacity.
+                                // Empty [u8]/[u64] literal: allocate a packed buffer with default capacity.
                                 let local_idx = *local_index;
                                 self.with_func(|func, current_block| {
                                     let capacity = func.new_vreg();
@@ -278,11 +287,11 @@ impl<'a> MirLowerer<'a> {
                                     let block = func.block_mut(current_block).unwrap();
                                     block.instructions.push(MirInst::ConstInt {
                                         dest: capacity,
-                                        value: 1024,
+                                        value: default_cap,
                                     });
                                     block.instructions.push(MirInst::Call {
                                         dest: Some(array),
-                                        target: CallTarget::from_name("rt_byte_array_new"),
+                                        target: CallTarget::from_name(alloc_fn),
                                         args: vec![capacity],
                                     });
                                     block.instructions.push(MirInst::LocalAddr {
@@ -303,14 +312,15 @@ impl<'a> MirLowerer<'a> {
                                 self.record_len_local_source(*local_index, Some(val));
                                 self.record_array_capacity_local_source(*local_index, Some(val));
                                 return Ok(());
-                            } else if self.array_push_returns_header
+                            } else if !is_u8_array_declared
+                                || self.array_push_returns_header
                                 || elements.len() <= super::lowering_expr_collection::ARRAY_LITERAL_REPEAT_MIN
                                 || !Self::repeat_scalar_element(&elements[0])
                                 || !elements.iter().all(|elem| elem == &elements[0])
                             {
-                                // Non-empty [u8] literal: bare integer literals default to I64 in HIR,
+                                // Non-empty [u8]/[u64] literal: bare integer literals default to I64 in HIR,
                                 // so the element type check in lower_array_expr misses this case.
-                                // Use declared_ty here to emit packed byte storage.
+                                // Use declared_ty here to emit packed storage.
                                 let capacity = elements.len() as i64;
                                 // Clone elements to avoid borrowing `self` while calling methods.
                                 let elements: Vec<_> = elements.to_vec();
@@ -324,28 +334,31 @@ impl<'a> MirLowerer<'a> {
                                     });
                                     reg
                                 })?;
-                                let array_reg = self.with_func(|func, current_block| {
+                                let mut array_reg = self.with_func(|func, current_block| {
                                     let dest = func.new_vreg();
                                     let block = func.block_mut(current_block).unwrap();
                                     block.instructions.push(MirInst::Call {
                                         dest: Some(dest),
-                                        target: CallTarget::from_name("rt_byte_array_new"),
+                                        target: CallTarget::from_name(alloc_fn),
                                         args: vec![capacity_reg],
                                     });
                                     dest
                                 })?;
                                 for elem in &elements {
                                     let value_reg = self.lower_expr(elem)?;
-                                    self.with_func(|func, current_block| {
+                                    let pushed = self.with_func(|func, current_block| {
                                         let dest = func.new_vreg();
                                         let block = func.block_mut(current_block).unwrap();
                                         block.instructions.push(MirInst::Call {
                                             dest: Some(dest),
-                                            target: CallTarget::from_name("rt_typed_bytes_u8_push"),
+                                            target: CallTarget::from_name(push_fn),
                                             args: vec![array_reg, value_reg],
                                         });
                                         dest
                                     })?;
+                                    if self.array_push_returns_header {
+                                        array_reg = pushed;
+                                    }
                                 }
                                 self.with_func(|func, current_block| {
                                     let addr = func.new_vreg();

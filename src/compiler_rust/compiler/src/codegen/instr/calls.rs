@@ -2199,7 +2199,7 @@ fn compile_inline_typed_words_at<M: Module>(
     // in that lane are stored by the typed push/set paths as tagged integers, so
     // the generated hot path can untag directly instead of rediscovering the slot
     // representation on every read. Generic/mixed arrays still use `rt_index_get`.
-    let word = maybe_packed_u64_load_word(builder, ptr_bits, raw, width);
+    let word = maybe_packed_u64_load_word(ctx, builder, ptr_bits, raw, width);
     builder.ins().jump(done_block, &[word]);
     builder.seal_block(load_block);
 
@@ -2438,29 +2438,88 @@ fn u64_packed_condition(builder: &mut FunctionBuilder, header_ptr: Value) -> Val
     builder.ins().icmp_imm(IntCC::NotEqual, packed, 0)
 }
 
-fn maybe_packed_u64_load_word(builder: &mut FunctionBuilder, header_ptr: Value, raw: Value, width: i64) -> Value {
-    let int_payload = builder.ins().sshr_imm(raw, 3);
-    if width == 4 {
-        builder.ins().band_imm(int_payload, 0xFFFF_FFFF)
-    } else {
-        let is_packed = u64_packed_condition(builder, header_ptr);
-        builder.ins().select(is_packed, raw, int_payload)
+/// Emit a branch selecting `fast_val` when `fast_ok` holds, or calling the cold
+/// single-argument runtime helper `fallback_fn(arg)` otherwise.
+fn fast_value_or_runtime_1<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    fast_ok: Value,
+    fast_val: Value,
+    fallback_fn: &str,
+    arg: Value,
+) -> Value {
+    let has_fallback = ctx.func_ids.contains_key(fallback_fn) || ctx.runtime_funcs.contains_key(fallback_fn);
+    if !has_fallback {
+        return fast_val;
     }
+    let fallback_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I64);
+    builder
+        .ins()
+        .brif(fast_ok, merge_block, &[fast_val], fallback_block, &[]);
+
+    builder.switch_to_block(fallback_block);
+    let fallback_val = call_runtime_1(ctx, builder, fallback_fn, arg);
+    builder.ins().jump(merge_block, &[fallback_val]);
+    builder.seal_block(fallback_block);
+
+    builder.switch_to_block(merge_block);
+    builder.seal_block(merge_block);
+    builder.block_params(merge_block)[0]
 }
 
-fn maybe_packed_u64_store_word(builder: &mut FunctionBuilder, header_ptr: Value, value: Value, width: i64) -> Value {
+fn maybe_packed_u64_load_word<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    header_ptr: Value,
+    raw: Value,
+    width: i64,
+) -> Value {
+    let int_payload = builder.ins().sshr_imm(raw, 3);
+    if width == 4 {
+        return builder.ins().band_imm(int_payload, 0xFFFF_FFFF);
+    }
+    let is_packed = u64_packed_condition(builder, header_ptr);
+    let fast_val = builder.ins().select(is_packed, raw, int_payload);
+    if ctx.fam_arrays {
+        return fast_val;
+    }
+    // Packed `[u64]` arrays hold raw 64-bit words regardless of low tag bits, while
+    // unpacked arrays store RuntimeValues (`TAG_INT == 0` inline, `HeapUInt`/`HeapInt` boxed).
+    let tag = builder.ins().band_imm(raw, 7);
+    let is_inline_int = builder.ins().icmp_imm(IntCC::Equal, tag, 0);
+    let fast_ok = builder.ins().bor(is_packed, is_inline_int);
+    fast_value_or_runtime_1(ctx, builder, fast_ok, fast_val, "rt_value_as_u64", raw)
+}
+
+fn maybe_packed_u64_store_word<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    header_ptr: Value,
+    value: Value,
+    width: i64,
+) -> Value {
     let word = if width == 4 {
         builder.ins().band_imm(value, 0xFFFF_FFFF)
     } else {
         value
     };
     let tagged = builder.ins().ishl_imm(word, 3);
-    if width == 8 {
-        let is_packed = u64_packed_condition(builder, header_ptr);
-        builder.ins().select(is_packed, word, tagged)
-    } else {
-        tagged
+    if width != 8 {
+        return tagged;
     }
+    let is_packed = u64_packed_condition(builder, header_ptr);
+    let fast_val = builder.ins().select(is_packed, word, tagged);
+    if ctx.fam_arrays {
+        return fast_val;
+    }
+    // Unpacked arrays store RuntimeValues: inline 61-bit signed ints when round-trip exact,
+    // or a boxed `HeapUInt` via `rt_value_u64` so bits 60..63 are never dropped or sign-flipped.
+    let roundtrip = builder.ins().sshr_imm(tagged, 3);
+    let fits_inline = builder.ins().icmp(IntCC::Equal, roundtrip, word);
+    let fast_ok = builder.ins().bor(is_packed, fits_inline);
+    fast_value_or_runtime_1(ctx, builder, fast_ok, fast_val, "rt_value_u64", word)
 }
 
 fn compile_inline_typed_words_unchecked<M: Module>(
@@ -2489,7 +2548,7 @@ fn compile_inline_typed_words_unchecked<M: Module>(
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
-    let word = maybe_packed_u64_load_word(builder, ptr_bits, raw, width);
+    let word = maybe_packed_u64_load_word(ctx, builder, ptr_bits, raw, width);
     let word = finish_guarded_read(builder, done_block, word);
     ctx.vreg_values.insert(*dest, word);
     Ok(true)
@@ -2520,8 +2579,12 @@ fn compile_inline_typed_words_data_at<M: Module>(
     let int_payload = builder.ins().sshr_imm(raw, 3);
     let word = if width == 4 {
         builder.ins().band_imm(int_payload, 0xFFFF_FFFF)
-    } else {
+    } else if ctx.fam_arrays {
         int_payload
+    } else {
+        let tag = builder.ins().band_imm(raw, 7);
+        let is_inline_int = builder.ins().icmp_imm(IntCC::Equal, tag, 0);
+        fast_value_or_runtime_1(ctx, builder, is_inline_int, int_payload, "rt_value_as_u64", raw)
     };
     let word = finish_guarded_read(builder, done_block, word);
     ctx.vreg_values.insert(*dest, word);
@@ -2552,7 +2615,7 @@ fn compile_inline_typed_words_data_at_checked<M: Module>(
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
-    let word = maybe_packed_u64_load_word(builder, header_ptr, raw, 8);
+    let word = maybe_packed_u64_load_word(ctx, builder, header_ptr, raw, 8);
     let word = finish_guarded_read(builder, done_block, word);
     ctx.vreg_values.insert(*dest, word);
     Ok(true)
@@ -2732,7 +2795,7 @@ fn compile_inline_typed_words_push<M: Module>(
     // maybe_packed_u64_store_word's gc_flags probe reads offset 1, which is 0
     // for every FAM heap object (the u32 type tag's high bytes), so it emits
     // the tagged-int store the FAM C runtime uses.
-    let stored = maybe_packed_u64_store_word(builder, ptr_bits, value, width);
+    let stored = maybe_packed_u64_store_word(ctx, builder, ptr_bits, value, width);
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(len, 1);
     store_array_len(builder, ptr_bits, next_len, ctx.fam_arrays);
@@ -2787,7 +2850,7 @@ fn compile_inline_typed_words_push_known_at<M: Module>(
     let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-    let stored = maybe_packed_u64_store_word(builder, ptr_bits, value, width);
+    let stored = maybe_packed_u64_store_word(ctx, builder, ptr_bits, value, width);
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(index, 1);
     store_array_len(builder, ptr_bits, next_len, ctx.fam_arrays);
@@ -2815,7 +2878,7 @@ fn compile_inline_typed_words_push_known_data_at<M: Module>(
     let value = coerce_vreg_to_i64(ctx, builder, args[3]);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
-    let stored = maybe_packed_u64_store_word(builder, header_ptr, value, width);
+    let stored = maybe_packed_u64_store_word(ctx, builder, header_ptr, value, width);
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(index, 1);
     store_array_len(builder, header_ptr, next_len, ctx.fam_arrays);
@@ -2843,7 +2906,7 @@ fn compile_inline_typed_words_store_known_data_at<M: Module>(
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let header_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
-    let stored = maybe_packed_u64_store_word(builder, header_ptr, value, width);
+    let stored = maybe_packed_u64_store_word(ctx, builder, header_ptr, value, width);
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     if let Some(dest) = dest {
         let true_value = builder.ins().iconst(types::I8, 1);
