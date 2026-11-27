@@ -177,3 +177,12 @@ HEAD:
   change, forbidden in this lane.
 
 Record stays OPEN for #1 and #3; no code or assertion was changed.
+
+## 2026-11-27 W5-3 Host Verification (`fix-implemented-verification-pending`)
+
+- **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter` on Windows)**:
+  - **#1**: `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_processing_spec.spl` (22/22 PASS — ARGB literal `0xFF111111u32` / `0xFFAABBCCu32` fix verified) and `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_demotion_recovery_spec.spl` (7/7 PASS — exact ARGB interior pixel `0xFFAABBCCu32` on host fallback verified).
+  - **#2**: `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl` (13/13 PASS).
+  - **#3**: `test/01_unit/check/vulkan_engine2d_frame_batch_contract_spec.spl` failed 0/3 in slim sparse checkout because `src/compiler_rust/**` is sparse-excluded here (`file_read` returns empty).
+  - **#4**: `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` ran 50/51 PASS (1 failure in `uses the cross-mode return-array span bridge for backend fills`, reading `backend_software.spl` / sparse-excluded `src/compiler_rust`).
+- Transitioned `.sdn` shard to `fix-implemented-verification-pending` (`waiting-for: Linux Vulkan / lavapipe verification`).

@@ -1,0 +1,93 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl 30%
+# @req REQ-ENGINE2D-METAL-PROVENANCE
+"""
+# MetalBackend GPU-only readback provenance & device glass fail-closed checks
+
+Verifies on any host without macOS Metal hardware:
+1. CPU-mirror composited `gpu_only` frames resolve to `cpu_mirror` readback
+   provenance (never mislabelled as `device_readback`).
+2. `clear()`, `init()`, and `shutdown()` reset `cpu_composite_reason`.
+3. `draw_ir_apply_glass_material_device` rejects non-`gpu_only` and unavailable
+   device states fail-closed.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{
+    MetalBackend, metal_resolve_gpu_only_readback_source
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{Engine2dGlassMaterialConfig}
+
+fn _sample_glass_cfg(w: i32, h: i32) -> Engine2dGlassMaterialConfig:
+    Engine2dGlassMaterialConfig(
+        framebuffer_width: w,
+        framebuffer_height: h,
+        x: 0,
+        y: 0,
+        width: w,
+        height: h,
+        radius: 4,
+        blur_radius: 2,
+        saturation_milli: 1200,
+        surface_alpha_milli: 500,
+        surface_color: 0xFFFFFFFFu32,
+        gradient_from: 0x00000000u32,
+        gradient_to: 0x00000000u32,
+        gradient_enabled: false,
+        gradient_layered_over_surface: false
+    )
+
+describe "MetalBackend readback provenance and gpu_only glass guard":
+
+    it "maps pure-GPU vs CPU-composited gpu_only frames to honest readback source labels":
+        step("Verify pure-GPU resolves device_readback and any CPU composite resolves cpu_mirror")
+        expect(metal_resolve_gpu_only_readback_source("")).to_equal("device_readback")
+        expect(metal_resolve_gpu_only_readback_source("gpu-only-cpu-composite")).to_equal("cpu_mirror")
+        expect(metal_resolve_gpu_only_readback_source("gpu-only-mask-emulation")).to_equal("cpu_mirror")
+
+    it "fails closed without claiming device_readback when gpu_only CPU composite lacks device buffer":
+        step("Call gpu_only CPU-composited draws on uninitialized and initialized no-device MetalBackend")
+        var b = MetalBackend.create()
+        expect(b.cpu_composite_reason_in_frame()).to_equal("")
+        b.use_gpu_only()
+        b.draw_rect_blend(0, 0, 4, 4, 0x80FF0000u32)
+        expect(b.gpu_frame_complete).to_equal(false)
+        val uninit_rb = b.read_pixels_with_source()
+        expect(uninit_rb.source).to_equal("completion_unknown")
+        expect(uninit_rb.source == "device_readback").to_equal(false)
+
+        b.initialized = true
+        b.w = 4
+        b.h = 4
+        b.d_framebuffer = 0
+        b.draw_gradient_rect_h(0, 0, 4, 4, 0xFFFF0000u32, 0xFF0000FFu32)
+        expect(b.gpu_frame_complete).to_equal(false)
+        val no_dev_rb = b.read_pixels_with_source()
+        expect(no_dev_rb.source).to_equal("readback_failed")
+        expect(no_dev_rb.source == "device_readback").to_equal(false)
+        b.shutdown()
+
+    it "resets cpu_composite_reason on clear, init, and shutdown boundaries":
+        step("Seed cpu_composite_reason and verify lifecycle resets clear it")
+        var b = MetalBackend.create()
+        b.cpu_composite_reason = "gpu-only-cpu-composite"
+        expect(b.cpu_composite_reason_in_frame()).to_equal("gpu-only-cpu-composite")
+
+        b.clear(0xFF000000u32)
+        expect(b.cpu_composite_reason_in_frame()).to_equal("")
+
+        b.cpu_composite_reason = "gpu-only-mask-emulation"
+        b.shutdown()
+        expect(b.cpu_composite_reason_in_frame()).to_equal("")
+        expect(b.gpu_only).to_equal(false)
+
+    it "rejects non-gpu_only targets and unavailable gpu_only devices in device glass dispatch":
+        step("Verify gpu_only=false returns exact source-of-truth error and gpu_only=true fails unavailable cleanly")
+        var b = MetalBackend.create()
+        val cfg = _sample_glass_cfg(8, 8)
+        expect(b.draw_ir_apply_glass_material_device(cfg)).to_equal(false)
+        expect(b.last_error).to_equal("Metal device glass requires GPU-only source of truth")
+
+        b.use_gpu_only()
+        expect(b.draw_ir_apply_glass_material_device(cfg)).to_equal(false)
+        expect(b.last_error).to_equal("Metal device glass unavailable")
+        b.shutdown()
