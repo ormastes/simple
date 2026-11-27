@@ -2157,22 +2157,7 @@ impl MirLowering:
                                     # Error) or an erased i64/any handle under a
                                     # container annotation
                                     # (mir_unresolved_method_inferred_receiver_2026-10-24).
-                                    val declared_override = if let_type_present: self.let_declared_type_override_v1(init_local.id, let_type_value) else: 0
-                                    if declared_override == 4:
-                                        self.copy_local_hir_type_metadata(init_local.id, local.id)
-                                        self.remember_local_hir_type(local.id, let_type_value,
-                                            self.local_hir_type_isolation_state(init_local.id),
-                                            self.local_hir_type_resource_state(init_local.id))
-                                    elif declared_override > 0:
-                                        self.remember_local_hir_type(local.id, let_type_value, 0, 0)
-                                        if declared_override == 2:
-                                            self.runtime_array_locals[local.id] = true
-                                            self.mark_runtime_value_local(local.id)
-                                        elif declared_override == 3:
-                                            self.runtime_dict_locals[local.id] = true
-                                            self.mark_runtime_value_local(local.id)
-                                    else:
-                                        self.copy_local_hir_type_metadata(init_local.id, local.id)
+                                    self.remember_let_init_hir_metadata_v1(init_local.id, local.id, let_type_present, let_type_value)
                                 else:
                                     # Same defect as the two sites above, and
                                     # latent rather than dormant: this is the
@@ -2531,7 +2516,11 @@ impl MirLowering:
                                         # same three things this call moved. The aggregate is
                                         # still RECEIVED above to test presence, which is not the
                                         # hazard -- passing it onward was.
-                                        self.copy_local_hir_type_metadata(init_local.id, local.id)
+                                        if type_ != None:
+                                            val declared_override_type: HirType = type_
+                                            self.remember_let_init_hir_metadata_v1(init_local.id, local.id, true, declared_override_type)
+                                        else:
+                                            self.copy_local_hir_type_metadata(init_local.id, local.id)
                                     else:
                                         # Nullable, not an Option box -- same migration as
                                         # the `mir_type` read above in this arm.
@@ -4884,6 +4873,25 @@ impl MirLowering:
                             self.builder.set_local_type(dest, lowered_shared)
         elif self.find_local_hir_type(dest.id) == None:
             self.remember_merged_result_ctor_arm_type(dest, arm_locals, allow_untyped_ctor_join)
+
+    me remember_let_init_hir_metadata_v1(init_local_id: i64, local_id: i64, has_declared: bool, declared: HirType):
+        """Record the declared override or copy the initializer's HIR metadata."""
+        val declared_override = if has_declared: self.let_declared_type_override_v1(init_local_id, declared) else: 0
+        if declared_override == 4:
+            self.copy_local_hir_type_metadata(init_local_id, local_id)
+            self.remember_local_hir_type(local_id, declared,
+                self.local_hir_type_isolation_state(init_local_id),
+                self.local_hir_type_resource_state(init_local_id))
+        elif declared_override > 0:
+            self.remember_local_hir_type(local_id, declared, 0, 0)
+            if declared_override == 2:
+                self.runtime_array_locals[local_id] = true
+                self.mark_runtime_value_local(local_id)
+            elif declared_override == 3:
+                self.runtime_dict_locals[local_id] = true
+                self.mark_runtime_value_local(local_id)
+        else:
+            self.copy_local_hir_type_metadata(init_local_id, local_id)
 
     me let_declared_type_override_v1(init_local_id: i64, declared: HirType) -> i64:
         """Whether an annotated `val x: T = init` must record T instead of

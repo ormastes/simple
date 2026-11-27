@@ -19,10 +19,14 @@
 
 use std.spec.step
 
+use std.string_core.{char_from_code}
 use compiler.frontend.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text}
 use compiler.frontend.core.string_interpolation_expand.{parse_string_interpolation_regions, decode_interpolation_brace_escapes}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_text}
 
 val Q = "\""
+val SQ = char_from_code(39)
 val LB = "{{"
 val RB = "}}"
 
@@ -94,3 +98,45 @@ describe "self-hosted literal value of a brace followed by an escape":
         val bs = "\\"
         val body = LB + bs + Q + "a" + bs + Q + ": " + LB + bs + Q + "b" + bs + Q + ": 1" + RB + RB + RB + RB
         expect(native_value(body)).to_equal("{\"a\": {\"b\": 1}}}}")
+
+    it "treats a brace followed by a quote as a literal brace (seed parity)":
+        # @req REQ-SSPEC-UNIT
+        step("double-quoted brace-then-single-quote emits doubled brace and keeps following escapes decoded")
+        var lx_q: CoreLexer = make_core_lexer(Q + r"{'a'} {42}" + Q)
+        val rq = core_lexer_next_token(lx_q)
+        lx_q = rq.0
+        expect(core_lexer_token_text(lx_q)).to_equal(LB + LB + SQ + "a" + SQ + RB + " " + LB + "42" + RB)
+        expect(native_value(r"{'a'} {42}")).to_equal("<parts:1>")
+        expect(native_value(r"{'a'}\n")).to_equal(LB + SQ + "a" + SQ + RB + "\n")
+        expect(native_value(r"expected '{' after 'loss'\n")).to_equal("expected " + SQ + LB + SQ + " after " + SQ + "loss" + SQ + "\n")
+        expect(native_value(LB)).to_equal(LB)
+        step("single-quoted non-interpolating literal keeps its single brace")
+        var lx_sq: CoreLexer = make_core_lexer(SQ + LB + "\"a\"" + RB + SQ)
+        val rsq = core_lexer_next_token(lx_sq)
+        lx_sq = rsq.0
+        expect(core_lexer_token_text(lx_sq)).to_equal(LB + "\"a\"" + RB)
+
+    it "decodes tab, hex, unicode, and quote escapes immediately after an open brace":
+        # @req REQ-SSPEC-UNIT
+        step("every escape sequence immediately after an unescaped open brace decodes normally")
+        val body = "a" + LB + "\\t\\x41\\u0042\\" + Q + "b" + RB
+        expect(native_value(body)).to_equal("a" + LB + "\tAB" + Q + "b" + RB)
+
+    it "evaluates brace-escape and brace-quote literals end-to-end in core_interpret":
+        # @req REQ-SSPEC-UNIT
+        step("run the pure-Simple CoreLexer -> parser -> interpreter pipeline")
+        val ptx_vid = core_interpret("fn main() -> text:\n    " + Q + r"a) {\n    b;\n}\nc" + Q + "\n", "brace_esc_e2e_ptx.spl")
+        expect(ptx_vid >= 0).to_equal(true)
+        expect(val_get_text(ptx_vid)).to_equal("a) {{\n    b;\n}}\nc")
+
+        val bs_vid = core_interpret("fn main() -> text:\n    " + Q + r"SELECT \{name\} FROM users" + Q + "\n", "brace_esc_e2e_bs.spl")
+        expect(bs_vid >= 0).to_equal(true)
+        expect(val_get_text(bs_vid)).to_equal("SELECT \{name\} FROM users")
+
+        val sq_vid = core_interpret("fn main() -> text:\n    " + Q + r"{'a'} {42}" + Q + "\n", "brace_esc_e2e_sq.spl")
+        expect(sq_vid >= 0).to_equal(true)
+        expect(val_get_text(sq_vid)).to_equal(LB + SQ + "a" + SQ + RB + " 42")
+
+        val sq_nl_vid = core_interpret("fn main() -> text:\n    " + Q + r"{'a'}\n" + Q + "\n", "brace_esc_e2e_sq_nl.spl")
+        expect(sq_nl_vid >= 0).to_equal(true)
+        expect(val_get_text(sq_nl_vid)).to_equal(LB + SQ + "a" + SQ + RB + "\n")

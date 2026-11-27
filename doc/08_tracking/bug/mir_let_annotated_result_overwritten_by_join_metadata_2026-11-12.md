@@ -1,6 +1,6 @@
 # MIR: let-annotated Result type overwritten by untyped join metadata (2026-11-12)
 
-Status: fix-implemented-verification-pending (MIR-lowering spec green 2026-11-13; runtime value and self-host unverified). Severity P3.
+Status: fix-implemented-verification-pending (MIR-lowering, ordinary-Let sync, MIR consumer JSON, HM mismatch, and interpreter execution green 2026-11-27; waiting-for: Stage-2/LLVM compiled execution of Result<i64, text> unwrap repro and self-host bootstrap). Severity P3.
 
 ## Symptom
 `val r: Result<i64, text> = if/match ... Ok(x_u8) ...`. The MIR local's HIR type metadata becomes
@@ -66,12 +66,20 @@ temporaries. It was run with the Rust seed (`simple-seed-v4`, sha256 prefix `af7
   in 9 files. That run predates the `any`-payload guard, which only narrows the fix back to the old
   behaviour.
 
-## Unverified
-- No runtime value was checked. A `Result<u8, text>` payload from `mk` is now unwrapped as I64; the spec
-  checks only MIR types.
-- The harness does not run the type checker. Whether the real driver accepts a `Result<u8, text>`
-  initializer for a `Result<i64, text>` let is unchecked.
-- Self-host and bootstrap behaviour is unchecked. Every annotated Result let in the compiler whose
-  initializer is a Result now takes this path, and no bootstrap was run.
-- The ordinary Let arm (`copy_local_hir_type_metadata` at ~:2144) has no override. Every shape tried,
-  including `var` and a let in a `for` body, went through the early-Let path.
+## W4-1 Follow-up & Verification (2026-11-27, work/w4-1-compiler-lexer-mir-20261127)
+- **Ordinary-Let arm synced:** Extracted `remember_let_init_hir_metadata_v1(init_local_id, local_id, has_declared, declared)` in `src/compiler/50.mir/mir_lowering_stmts.spl:4875` (above `let_declared_type_override_v1` at `:4894`) so both the early-Let arm (`:2160`) and the ordinary `case Let` arm (`:2521`, guarded with `if type_ != None`) share the exact declared-`Result` override and `any`-payload guard logic without passing `find_local_hir_type` back across the staged ABI.
+- **Expanded unit spec (`test/01_unit/compiler/mir/let_annotated_result_join_type_spec.spl`, 13/13 PASS):**
+  - Verifies via `serialize_mir_function` + JSON that `r.unwrap() + 300` stored into `arr[0]` (`[i64]`) and passed to `take_i64(v: i64)` lowers entirely with `I64` and zero `"target":"U8"` casts.
+  - Verifies mixed `mk(x)` / `Ok(1000)` arms, `if val` joins (only `u8` temp is the pattern binder), and `any`-payload guards (`unsafe(capabilities: [type_erasure]):`).
+  - Verifies HM type inference (`HmInferContext`) rejects assigning `Result<u8, text>` to `val r: Result<i64, text>` with `"type mismatch: expected HirTypeKind::Int((64, true)), found HirTypeKind::Int((8, false))"`, while seed interpreter (`200u8 + 300 == 500`) and `core_interpret` (`200 as u8` + `300 == 500`) execute without 8-bit truncation. Note: `MirInterpreter` cannot lower `MirCallOrigin.Runtime` `rt_enum_new` (`E-INTERP-RUNTIME-Unknown`), so direct `MirInterpreter` execution of `Result` constructors is skipped at runtime.
+- **Neighbor MIR specs (run sequentially via `simple.exe --mode=interpreter`):**
+  - `test/01_unit/compiler/mir/early_let_receiver_metadata_spec.spl`: `5/5` (`outcome=OK`)
+  - `test/01_unit/compiler/mir/annotated_let_from_optional_arm_spec.spl`: `2/2` (`outcome=OK`)
+  - `test/01_unit/compiler/50.mir/untyped_if_result_ctor_join_spec.spl`: `11/11` (`outcome=OK`)
+  - `test/01_unit/compiler/50.mir/array_slice_min_max_lowering_spec.spl`: `14/14` (`outcome=OK`)
+  - `test/01_unit/compiler/50.mir/if_val_match_diverging_value_type_spec.spl`: `9/9` (`outcome=OK`)
+  - `test/01_unit/compiler/mir/result_unwrap_struct_provenance_spec.spl`: `5/6` (`clears a stale payload owner after reassignment` failed identically `5/6` on unmodified `origin/release/1.0.0` `HEAD`; pre-existing).
+
+## Unverified (`waiting-for:`)
+- **Stage-2/LLVM compiled runtime execution:** Native compiled execution of `val r: Result<i64, text> = if c: mk(x) else: Err("e")` + `r.unwrap() + 300` (with `200u8`) printing `500` rather than truncating at U8 remains unverified on this Windows host (no native rebuild allowed in W4-1 and `MirInterpreter` lacks `rt_enum_new`).
+- **Self-host & bootstrap verification:** Full Stage-2/Stage-3 self-host bootstrap rebuild and verification with both Let arms taking `remember_let_init_hir_metadata_v1` remain pending (`waiting-for:` Linux bootstrap verification).
