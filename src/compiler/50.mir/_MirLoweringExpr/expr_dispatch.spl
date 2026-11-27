@@ -9070,6 +9070,9 @@ impl MirLowering:
                         case HirTypeKind.Bool:
                             if nc_result_is_erased_i64:
                                 result_type = MirType.bool()
+                        case HirTypeKind.Int(64, false):
+                            if nc_result_is_erased_i64:
+                                result_type = MirType(kind: MirTypeKind.U64)
                         case HirTypeKind.Float(_):
                             if nc_result_is_erased_i64:
                                 result_type = self.lower_type(nc_inner_type)
@@ -9406,7 +9409,6 @@ impl MirLowering:
                 elif self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
                     some_value = self.runtime_option_scalar_payload(base, base_local, result_type)
                 else:
-                    some_value = self.enum_payload_value(some_value, result_type)
                     # `if val x = first([7])`: the binder keeps the declared
                     # erased `T` and is decoded on use, and a raw i64 word
                     # cannot be told from the nil sentinel 3. Re-tag the
@@ -9447,11 +9449,20 @@ impl MirLowering:
                                                                     case _: exists_expr_inner_is_concrete = true
                                                 case _: ()
                             case _: ()
+                    val erased_inner_opt = self.option_inner_hir_type_for_local(base, base_local)
+                    var exists_decode_type = result_type
+                    if val opt_u64_inner = erased_inner_opt:
+                        match opt_u64_inner.kind:
+                            case HirTypeKind.Int(64, false):
+                                if exists_expr_inner_is_concrete or not self.static_optional_payload_is_type_param(base) or not self.native_trait_concrete_option_locals.contains(base_local.id):
+                                    exists_decode_type = MirType(kind: MirTypeKind.U64)
+                            case _: ()
+                    some_value = self.enum_payload_value(some_value, exists_decode_type)
                     if not exists_expr_inner_is_concrete and self.static_optional_payload_is_type_param(base) and not self.native_trait_concrete_option_locals.contains(base_local.id):
-                        if val erased_inner = self.option_inner_hir_type_for_local(base, base_local):
+                        if val erased_inner = erased_inner_opt:
                             match erased_inner.kind:
                                 case HirTypeKind.Int(64, false): some_value = self.box_u64_runtime_value(some_value)
-                                case HirTypeKind.Int(_, _): some_value = self.box_runtime_value(some_value)
+                                case HirTypeKind.Int(_, _) | HirTypeKind.Char: some_value = self.box_runtime_value(some_value)
                                 case _: ()
                 b_then = self.builder
                 b_then.emit_copy(result_local, some_value)
