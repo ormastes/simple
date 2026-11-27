@@ -1,0 +1,113 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+# `minmax(<length>, Nfr)` floors and grid `justify-content` (Chrome 159)
+
+Follow-up to web_grid_auto_track_takes_full_width_with_flex_item_2026-11-27.
+`grid_expand_track_functions` reduced `minmax(<length>, Nfr)` to a bare `Nfr`,
+so the length floor was lost when the fr share is smaller than it (CSS Grid
+12.7.1: such a track is inflexible at its base size). The grid column layout
+also never applied `justify-content` (CSS Box Alignment 5.1 / CSS Grid 11.1):
+tracks that leave free space were always packed at the start.
+
+Page: each case is a `.w` grid (margin-left 40px, 200px wide, display:grid);
+the blue `.b` item's run is read on the device row through CSS row
+`case * 30 + 10`. Chrome values were measured with getBoundingClientRect in
+Chrome for Testing 159.0.8154.6 (headless, 400x300); every edge is a whole
+CSS px, so the k=4 run is 4x.
+
+| case | template / justify-content | Chrome k=1 | base k=1 |
+|------|----------------------------|------------|----------|
+| 0 | `minmax(120px,1fr) 1fr` | 160..239 | 140..239 |
+| 1 | `minmax(150px,1fr) minmax(150px,1fr)` (overflows) | 190..339 | 140..239 |
+| 2 | `1fr minmax(80px,1fr) 1fr` | 100..179 | 106..171 |
+| 3 | `minmax(180px,1fr) auto` (40px auto item) | 220..259 | 200..239 |
+| 4 | `50px 50px`, center | 140..189 | 90..139 |
+| 5 | `50px 50px`, end | 190..239 | 90..139 |
+| 6 | `40px 40px 40px`, space-between | 120..159 | 80..119 |
+| 7 | `40px 40px`, space-around | 170..209 | 80..119 |
+| 8 | `40px 40px`, space-evenly | 160..199 | 80..119 |
+| 9 | `auto auto` (30px, 40px items), center | 135..174 | 70..109 |
+"""
+
+"""
+Traceability: web_grid_minmax_floor_and_justify_content_2026-11-27 — a `minmax(<length>, Nfr)` column keeps its length floor, and grid columns honour `justify-content`.
+"""
+# @tag: unit, browser_engine, layout, grid, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}.w{{margin-left:40px;width:200px;height:30px;display:grid}}.b{{height:20px;background:#00f}}.e{{height:20px}}</style></head><body><div class=\"w\" style=\"grid-template-columns:minmax(120px,1fr) 1fr\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:minmax(150px,1fr) minmax(150px,1fr)\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:1fr minmax(80px,1fr) 1fr\"><div class=\"e\"></div><div class=\"b\"></div><div class=\"e\"></div></div><div class=\"w\" style=\"grid-template-columns:minmax(180px,1fr) auto\"><div class=\"e\"></div><div class=\"b\" style=\"width:40px\"></div></div><div class=\"w\" style=\"grid-template-columns:50px 50px;justify-content:center\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:50px 50px;justify-content:end\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:40px 40px 40px;justify-content:space-between\"><div class=\"e\"></div><div class=\"b\"></div><div class=\"e\"></div></div><div class=\"w\" style=\"grid-template-columns:40px 40px;justify-content:space-around\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:40px 40px;justify-content:space-evenly\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:auto auto;justify-content:center\"><div class=\"e\" style=\"width:30px\"></div><div class=\"b\" style=\"width:40px\"></div></div></body></html>"
+var g_px1: [u32] = []
+var g_px4: [u32] = []
+
+fn _px(k: i32) -> [u32]:
+    if k == 1:
+        if g_px1.len() == 0:
+            g_px1 = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, CSS_W, CSS_H, "cpu_simd")
+        return g_px1
+    if g_px4.len() == 0:
+        g_px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, k, "cpu_simd")
+    g_px4
+
+# Blue runs " a..b" on the device row through CSS row `row * 30 + 10`.
+fn _runs(k: i32, row: i32) -> text:
+    val px = _px(k)
+    val w = CSS_W * k
+    val y = (row * 30 + 10) * k
+    var out = ""
+    var x = 0
+    var inr = false
+    var start = 0
+    while x <= w:
+        var blue = false
+        if x < w:
+            val v = px[y * w + x]
+            val r = ((v >> 16u32) & 0xFFu32).to_i32()
+            val b = (v & 0xFFu32).to_i32()
+            blue = b > 128 and r < 128
+        if blue and not inr:
+            inr = true
+            start = x
+        if not blue and inr:
+            inr = false
+            out = out + " {start}..{x - 1}"
+        x = x + 1
+    out
+
+fn _both(row: i32, r1: text, r4: text):
+    expect(_runs(1, row)).to_equal(r1)
+    expect(_runs(4, row)).to_equal(r4)
+
+describe "minmax length floors and justify-content on grid columns (Chrome 159)":
+    it "AC-1: a minmax(<length>, Nfr) column keeps its floor when the fr share is smaller":
+        _both(0, " 160..239", " 640..959")
+        _both(2, " 100..179", " 400..719")
+
+    it "AC-2: floors wider than the container overflow it":
+        _both(1, " 190..339", " 760..1359")
+
+    it "AC-3: a minmax(<length>, Nfr) floor beside an auto track":
+        _both(3, " 220..259", " 880..1039")
+
+    it "AC-4: justify-content center and end offset the columns":
+        _both(4, " 140..189", " 560..759")
+        _both(5, " 190..239", " 760..959")
+
+    it "AC-5: justify-content space-between, space-around and space-evenly spread the columns":
+        _both(6, " 120..159", " 480..639")
+        _both(7, " 170..209", " 680..839")
+        _both(8, " 160..199", " 640..799")
+
+    it "AC-6: justify-content center does not stretch auto tracks and centres them":
+        _both(9, " 135..174", " 540..699")

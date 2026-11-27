@@ -1071,8 +1071,9 @@ fn grid_top_level_comma(raw: text, start: i32, endv: i32, last_wins: bool) -> i3
 # rows totalling 168 px, and the +120 px shifted every element below it.
 #
 # `minmax(min, max)` reduces to its MAX — the growth limit, which is what an
-# unconstrained track resolves to once free space is distributed; the `min`
-# side would need min-content sizing, which this track sizer does not model.
+# unconstrained track resolves to once free space is distributed — except that
+# an `fr` max keeps a `0` or whole-px min as a `0+` / `L+` floor mark (below);
+# other `min` values would need min-content sizing, which is not modelled.
 # `repeat(n, X)` expands to n space-separated copies of X. Nothing else is
 # rewritten: `auto-fill`/`auto-fit` counts, `fit-content()` and named lines
 # still fall through to the existing reject-and-block-layout path.
@@ -1125,9 +1126,13 @@ fn grid_expand_track_functions(raw: text) -> text:
         # `minmax(0, Nfr)` keeps its 0 floor as `0+Nfr` (a bare `Nfr` is
         # floored at its items' min-content); `normalized_grid_track_list`
         # keeps the mark only beside `auto`, the one sizing that reads it.
+        # `minmax(<L>px, Nfr)` keeps its whole-px floor as `L+Nfr` (CSS Grid
+        # 12.7.1: the track is inflexible at L when its fr share is smaller).
         val min_size = out.substring(mm_open + 1, mm_comma).trim().lower()
-        val zero_floor = (min_size == "0" or min_size == "0px") and growth_limit.lower().ends_with("fr")
-        val reduced = if zero_floor: "0+" + growth_limit else: growth_limit
+        val fr_limit = growth_limit.lower().ends_with("fr")
+        val zero_floor = (min_size == "0" or min_size == "0px") and fr_limit
+        val px_floor = if fr_limit and min_size.ends_with("px") and min_size.byte_len() > 2: normalized_grid_positive_int(min_size.substring(0, min_size.byte_len() - 2)) else: 0
+        val reduced = if zero_floor: "0+" + growth_limit elif px_floor > 0: px_floor.to_string() + "+" + growth_limit else: growth_limit
         out = out.substring(0, mm) + reduced + out.substring(mm_close + 1, out.byte_len() as i32)
         guard = guard + 1
     out
@@ -1147,15 +1152,20 @@ fn normalized_grid_track_list(raw_declaration: text) -> text:
         # time in grid_track_sizes (simple_web_html_layout_renderer_layout.spl),
         # once the container's available width is known.
         if token.ends_with("fr") and token.byte_len() > 2:
+            val plus = find_from(token, "+", 0)
             val zero_floor = token.starts_with("0+")
+            val px_floor = if plus > 0 and not zero_floor: normalized_grid_positive_int(token.substring(0, plus)) else: 0
+            if plus > 0 and not zero_floor and px_floor <= 0:
+                return ""
             val fr_size = normalized_grid_positive_int(
-                token.substring(if zero_floor: 2 else: 0, token.byte_len() - 2)
+                token.substring(plus + 1, token.byte_len() - 2)
             )
             if fr_size <= 0:
                 return ""
             if normalized != "":
                 normalized = normalized + " "
-            normalized = normalized + (if zero_floor: "0+" else: "") + fr_size.to_string() + "fr"
+            val floor_mark = if zero_floor: "0+" elif px_floor > 0: px_floor.to_string() + "+" else: ""
+            normalized = normalized + floor_mark + fr_size.to_string() + "fr"
             continue
         # `auto` is kept for the column layout to size from its items
         # (`grid_explicit_auto_column_sizes`); `grid_track_sizes` still reads a
@@ -1176,7 +1186,23 @@ fn normalized_grid_track_list(raw_declaration: text) -> text:
         if normalized != "":
             normalized = normalized + " "
         normalized = normalized + size.to_string() + "px"
-    if has_auto: normalized else: normalized.replace("0+", "")
+    # A `0+` mark is dropped from a token start (never from inside `10+1fr`).
+    if has_auto: normalized else: (" " + normalized).replace(" 0+", " ").trim()
+
+# A track list with every `<L>+` floor mark dropped (`120+1fr` -> `1fr`).
+# Rows are sized with no available height, so a floored `fr` row keeps the
+# 0 px it had. ponytail: a `minmax(<L>px, Nfr)` row floor is not measured
+# against Chrome; read it in row sizing once it is.
+fn grid_track_list_without_floors(list: text) -> text:
+    var out = ""
+    for part in list.split(" "):
+        if part == "":
+            continue
+        val plus = find_from(part, "+", 0)
+        if out != "":
+            out = out + " "
+        out = out + (if plus >= 0: part.substring(plus + 1, part.byte_len()) else: part)
+    out
 
 # One `grid-auto-rows` / `grid-auto-columns` track -> `<N>px` (fixed), `auto`
 # (content sized),
@@ -1361,9 +1387,9 @@ fn apply_grid_decls(mut st: Style, table: [text]):
     )
     if columns != "":
         st.grid_template_columns = columns
-    val rows = normalized_grid_track_list(
+    val rows = grid_track_list_without_floors(normalized_grid_track_list(
         decl_tbl_get(table, "grid-template-rows")
-    )
+    ))
     # Rows have no `auto` sizing: a row list holding it stays unset, as before
     # `auto` was kept for columns (the GPU adapter reads `auto` as unsupported).
     if rows != "" and not (" " + rows + " ").contains(" auto "):
