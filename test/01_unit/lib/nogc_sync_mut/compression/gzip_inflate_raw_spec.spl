@@ -1,0 +1,118 @@
+"""
+# Raw DEFLATE inflate public API (inflate_raw)
+
+`inflate_raw` is the typed public entry point of the pure-Simple RFC 1951
+inflater in `std.nogc_sync_mut.compression.gzip.inflate`. These fixtures were
+produced by zlib (`compressobj(level, DEFLATED, -15)`) and each asserts its own
+BTYPE so a "dynamic" fixture cannot silently be fixed-Huffman.
+See doc/08_tracking/bug/inflate_module_private_import_2026-11-27.md.
+"""
+# @cover src/lib/nogc_sync_mut/compression/gzip/inflate.spl
+# @tag: compression, deflate, inflate
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate_raw, inflate, inflate_bounded}
+use std.common.archive.zip.{zip_write, zip_entries, zip_extract, zip_text_file, ZipFile}
+
+fn ascii(s: text) -> [u8]:
+    var out: [u8] = []
+    for ch in s.chars():
+        out.push(ch.ord().to_u8())
+    out
+
+fn btype(stream: [u8]) -> i64:
+    (stream[0].to_i64() >> 1) & 3
+
+fn unwrap_or_empty(r: Result<[u8], text>) -> [u8]:
+    match r:
+        Ok(bytes): bytes
+        Err(_): []
+
+fn is_err(r: Result<[u8], text>) -> bool:
+    match r:
+        Ok(_): false
+        Err(_): true
+
+# zlib level 0: one stored block.
+fn stored_stream() -> [u8]:
+    val b: [u8] = [
+        1, 14, 0, 241, 255, 72, 101, 108, 108, 111, 44, 32, 115, 116, 111, 114,
+        101, 100, 33
+    ]
+    b
+
+# zlib level 9 on a short input: one fixed-Huffman block.
+fn fixed_stream() -> [u8]:
+    val b: [u8] = [
+        75, 76, 74, 78, 68, 66, 10, 25, 169, 57, 57, 249, 16, 18, 0
+    ]
+    b
+
+# zlib level 9 on 12 lines of text: one dynamic-Huffman block.
+fn dynamic_stream() -> [u8]:
+    val b: [u8] = [
+        149, 210, 217, 17, 130, 64, 16, 4, 208, 127, 162, 232, 16, 216, 131, 5,
+        204, 70, 101, 17, 116, 101, 21, 69, 148, 232, 45, 157, 73, 160, 191, 167,
+        94, 205, 213, 105, 156, 34, 202, 29, 158, 67, 196, 125, 25, 143, 23, 28,
+        230, 188, 78, 232, 243, 27, 231, 229, 122, 123, 32, 191, 226, 252, 47, 167,
+        253, 246, 65, 151, 79, 40, 139, 244, 83, 134, 83, 70, 148, 229, 148, 23,
+        229, 56, 213, 138, 242, 228, 132, 65, 88, 197, 49, 91, 9, 11, 28, 115,
+        218, 173, 38, 15, 162, 187, 53, 28, 11, 122, 200, 150, 99, 141, 126, 205,
+        144, 17, 113, 202, 200, 140, 88, 95, 124, 1
+    ]
+    b
+
+fn dynamic_plain() -> text:
+    var s = ""
+    var i = 0
+    while i < 12:
+        val sq = (i * i) % 97
+        s = s + "line {i}: the quick brown fox jumps over the lazy dog {sq}\n"
+        i = i + 1
+    s
+
+describe "inflate_raw":
+    it "decodes a stored block byte-exact":
+        val st = stored_stream()
+        expect(btype(st)).to_equal(0)
+        expect(unwrap_or_empty(inflate_raw(st))).to_equal(ascii("Hello, stored!"))
+
+    it "decodes a fixed-Huffman block byte-exact":
+        val fx = fixed_stream()
+        expect(btype(fx)).to_equal(1)
+        expect(unwrap_or_empty(inflate_raw(fx))).to_equal(ascii("abcabcabcabcabc hello hello"))
+
+    it "decodes a dynamic-Huffman block byte-exact":
+        val dy = dynamic_stream()
+        expect(btype(dy)).to_equal(2)
+        val expected = ascii(dynamic_plain())
+        expect(expected.len()).to_equal(657)
+        expect(unwrap_or_empty(inflate_raw(dy))).to_equal(expected)
+
+    it "agrees with the legacy optional entry points":
+        val dy = dynamic_stream()
+        expect(inflate(dy) ?? []).to_equal(unwrap_or_empty(inflate_raw(dy)))
+        expect(inflate_bounded(dy, 657) ?? []).to_equal(ascii(dynamic_plain()))
+
+    it "returns Err for a truncated stream":
+        val dy = dynamic_stream()
+        var cut: [u8] = []
+        var i = 0
+        while i < 20:
+            cut.push(dy[i])
+            i = i + 1
+        expect(is_err(inflate_raw(cut))).to_equal(true)
+
+    it "returns Err for a reserved block type":
+        val bad: [u8] = [7, 0, 0]
+        expect(is_err(inflate_raw(bad))).to_equal(true)
+
+describe "zip member inflate through inflate_raw":
+    it "round-trips a deflated zip member":
+        val body = dynamic_plain()
+        var files: [ZipFile] = []
+        files.push(zip_text_file("a.txt", body))
+        val archive = zip_write(files)
+        expect(zip_entries(archive)[0].method).to_equal(8)
+        val got = zip_extract(archive, "a.txt") ?? []
+        expect(got).to_equal(ascii(body))

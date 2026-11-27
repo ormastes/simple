@@ -13,19 +13,21 @@
 # ponytail: no zip64, no encryption, no data-descriptor streaming entries;
 # these formats don't need them for office documents.
 
-use std.common.image.deflate_inflate.{deflate_inflate}
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate_raw}
 use std.common.compress.deflate.{deflate_compress}
 use std.common.string_core.{char_from_code}
 use std.common.crypto.crc32.{crc32}
 
-struct ZipEntry:
+@allow(primitive_api)  # reason: PKZIP container: header field widths, offsets and member names are the on-disk format
+pub struct ZipEntry:
     name: text
     method: i32
     comp_size: i32
     uncomp_size: i32
     local_offset: i32
 
-struct ZipFile:
+@allow(primitive_api)  # reason: PKZIP container: header field widths, offsets and member names are the on-disk format
+pub struct ZipFile:
     name: text
     data: [u8]
 
@@ -69,7 +71,8 @@ fn _find_eocd(b: [u8]) -> i32:
         i = i - 1
     -1
 
-fn zip_entries(b: [u8]) -> [ZipEntry]:
+@allow(primitive_api)  # reason: PKZIP container: header field widths, offsets and member names are the on-disk format
+pub fn zip_entries(b: [u8]) -> [ZipEntry]:
     """Parse the central directory into entries. Empty on malformed input."""
     var entries: [ZipEntry] = []
     val eocd = _find_eocd(b)
@@ -94,7 +97,8 @@ fn zip_entries(b: [u8]) -> [ZipEntry]:
         n = n + 1
     entries
 
-fn zip_extract(b: [u8], name: text) -> [u8]?:
+@allow(primitive_api)  # reason: PKZIP container: header field widths, offsets and member names are the on-disk format
+pub fn zip_extract(b: [u8], name: text) -> [u8]?:
     """Extract one entry's bytes by name (stored or deflate), or nil."""
     for entry in zip_entries(b):
         if entry.name == name:
@@ -114,11 +118,14 @@ fn zip_extract(b: [u8], name: text) -> [u8]?:
             if entry.method == 0:
                 return Some(comp)
             if entry.method == 8:
-                return Some(deflate_inflate(comp, 0))
+                match inflate_raw(comp):
+                    Ok(bytes): return Some(bytes)
+                    Err(_): return None
             return None
     nil
 
-fn zip_extract_text(b: [u8], name: text) -> text:
+@allow(primitive_api)  # reason: PKZIP container: header field widths, offsets and member names are the on-disk format
+pub fn zip_extract_text(b: [u8], name: text) -> text:
     """Extract an entry as text (ASCII/UTF-8 bytes passed through). "" if absent."""
     val data = zip_extract(b, name)
     if data == nil:
@@ -149,7 +156,8 @@ fn _push_all(out: [u8], data: [u8]) -> [u8]:
         b.push(byte)
     b
 
-fn zip_write_stored(files: [ZipFile]) -> [u8]:
+@allow(primitive_api)  # reason: PKZIP container: header field widths, offsets and member names are the on-disk format
+pub fn zip_write_stored(files: [ZipFile]) -> [u8]:
     """Build a zip archive with all entries stored (method 0)."""
     var out: [u8] = []
     var offsets: [i32] = []
@@ -206,7 +214,8 @@ fn zip_write_stored(files: [ZipFile]) -> [u8]:
     out = _push_u16(out, 0)               # comment len
     out
 
-fn zip_write(files: [ZipFile]) -> [u8]:
+@allow(primitive_api)  # reason: PKZIP container: header field widths, offsets and member names are the on-disk format
+pub fn zip_write(files: [ZipFile]) -> [u8]:
     """Build a zip archive, compressing each entry with DEFLATE (method 8)
     when that shrinks the payload, otherwise storing it (method 0).
 
@@ -279,6 +288,7 @@ fn zip_write(files: [ZipFile]) -> [u8]:
     out = _push_u16(out, 0)               # comment len
     out
 
-fn zip_text_file(name: text, content: text) -> ZipFile:
+@allow(primitive_api)  # reason: PKZIP container: header field widths, offsets and member names are the on-disk format
+pub fn zip_text_file(name: text, content: text) -> ZipFile:
     """Convenience: a ZipFile from a text payload."""
     ZipFile(name: name, data: _ascii_to_bytes(content))
