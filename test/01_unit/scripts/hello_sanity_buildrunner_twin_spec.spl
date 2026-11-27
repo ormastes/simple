@@ -1,0 +1,410 @@
+# @cover scripts/bootstrap/lib/hello_sanity_buildrunner.spl 80%
+# @cover scripts/bootstrap/lib/hello_sanity_buildrunner_lane.spl 60%
+"""
+## Purpose and audience
+Purpose: pin the pure-Simple twin of `scripts/bootstrap/hello-sanity-buildrunner.py`
+(phase 3+; phase 2 keeps the Python adapter) to the cases of
+`test/01_unit/scripts/hello_sanity_buildrunner_test.py`, which stays in place
+for the Python copy. Audience: maintainers of
+`scripts/bootstrap/lib/hello_sanity_buildrunner{,_lane}.spl` and the
+hello-sanity-matrix twin that calls `hello_buildrunner_run_lane`.
+
+Parity: every verdict and reason text asserted here equals the Python
+adapter's on the same fixture (checked by running both over identical
+fixtures). Known, intended divergences: the trust anchor is the running stage
+binary pin (record key `python_sha256` kept; value = stage-binary digest); SDN evidence accepts
+only the literal forms the matrix writer emits; zip CRCs are not re-checked
+(the executable digest bound by the worker result is).
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_write, file_write_bytes, file_hash_sha256_or_empty, mkdir_p, is_dir, getpid, dir_remove_all, remove_file_if_exists}
+use scripts.bootstrap.lib.hello_sanity_buildrunner.{SdnField, sdn_str, sdn_int, sdn_bool, task_budget_seconds, lane_status, target_matches_host, verify_memory_receipt, expected_lane_identity, sdn_record_text, parse_sdn_record, hello_forms, ZipInput, zip_stored}
+use scripts.bootstrap.lib.hello_sanity_buildrunner_lane.{HelloMatrixPort, HelloLaneContext, HelloProvider, RuntimeHash, hello_buildrunner_run_lane, pass_fields, verified_memory_receipt, unpack_verified_lane, verify_stage_binary_pin, prepare_private_roots}
+
+val HEX_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val HEX_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+var scratch_counter = 0
+
+fn scratch() -> text:
+    scratch_counter = scratch_counter + 1
+    val dir = "build/tmp/hsbr-twin-{getpid()}-{scratch_counter}"
+    dir_remove_all(dir)
+    mkdir_p(dir)
+    dir
+
+fn bytes_of(s: text) -> [u8]:
+    var out: [u8] = []
+    for i in 0..s.len():
+        out.push(s.char_at(i).char_code_at(0).to_u8())
+    out
+
+fn sha_text(dir: text, content: text) -> text:
+    val p = dir + "/.sha-probe"
+    file_write(p, content)
+    file_hash_sha256_or_empty(p)
+
+# ---------------------------------------------------------------- zip fixtures
+fn identity_text(lane: text, backend: text) -> text:
+    "format: \"hello-buildrunner-lane-v1\"\nlane: \"" + lane + "\"\nbackend: \"" + backend + "\"\nphase: 2\ncompile_route: \"positional\"\ncompiler_sha256: \"" + HEX_A + "\"\nstatus: \"PASS\"\nadmitted: false\n"
+
+fn result_text(dir: text) -> text:
+    "phase: 2\ncompiler_sha256: \"" + HEX_A + "\"\ncompile_route: \"positional\"\nstatus: \"PASS\"\nexecutable_sha256: \"" + sha_text(dir, "artifact") + "\"\n"
+
+fn bundle_members_for(dir: text, lane: text, backend: text) -> [ZipInput]:
+    [ZipInput(name: "managed-lane.sdn", data: bytes_of(identity_text(lane, backend)), mode: 0o100644),
+     ZipInput(name: "result.sdn", data: bytes_of(result_text(dir)), mode: 0o100644),
+     ZipInput(name: "hello", data: bytes_of("artifact"), mode: 0o100644)]
+
+fn write_bundle(dir: text, members: [ZipInput]) -> text:
+    val path = dir + "/bundle.zip"
+    file_write_bytes(path, zip_stored(members))
+    path
+
+fn expected(lane: text, backend: text) -> [SdnField]:
+    expected_lane_identity(lane, backend, 2, "positional", HEX_A)
+
+fn with_field(fields: [SdnField], f: SdnField) -> [SdnField]:
+    var out: [SdnField] = []
+    for x in fields:
+        out.push(if x.key == f.key: f else: x)
+    out
+
+fn unpack_err(bundle: text, dest: text, exp: [SdnField]) -> text:
+    match unpack_verified_lane(bundle, dest, exp, "linux"):
+        case Ok(_): "ok"
+        case Err(e): e
+
+# ------------------------------------------------------- memory receipt fixture
+fn receipt_lines(output: text, artifact_sha: text) -> [text]:
+    ["SIMPLE-BUILD-RESULT-1", "hello", "2", HEX_A, "worker1", "OK", "0", "0", "0", "0", "1", output, artifact_sha]
+
+fn join_lines(lines: [text]) -> text:
+    var out = ""
+    for l in lines:
+        out = out + l + "\n"
+    out
+
+struct LineCase:
+    index: i64
+    value: text
+
+struct Kv:
+    key: text
+    value: text
+
+fn memory_fields() -> [Kv]:
+    [Kv(key: "format", value: "simple-build-memory-v1"), Kv(key: "task_identity", value: HEX_A),
+     Kv(key: "requested_policy", value: "enforce"), Kv(key: "reserved_bytes", value: "1024"),
+     Kv(key: "enforcement", value: "job-memory"), Kv(key: "enforced_bytes", value: "1024"),
+     Kv(key: "observed_peak_bytes", value: "500"), Kv(key: "peak_metric", value: "job-commit-peak")]
+
+fn set_kv(fields: [Kv], key: text, value: text) -> [Kv]:
+    var out: [Kv] = []
+    for f in fields:
+        out.push(if f.key == key: Kv(key: key, value: value) else: f)
+    out
+
+fn without_kv(fields: [Kv], key: text) -> [Kv]:
+    var out: [Kv] = []
+    for f in fields:
+        if f.key != key: out.push(f)
+    out
+
+fn kv_text(fields: [Kv]) -> text:
+    var out = ""
+    for f in fields:
+        out = out + f.key + "=" + f.value + "\n"
+    out
+
+struct MemoryFixture:
+    root: text
+    artifact: text
+    receipt: text
+    memory: text
+
+fn memory_fixture() -> MemoryFixture:
+    val root = scratch()
+    val artifact = root + "/bundle"
+    file_write(artifact, "manager-verified bundle fixture")
+    val receipt = root + "/receipt"
+    file_write(receipt, join_lines(receipt_lines("bundle", file_hash_sha256_or_empty(artifact))))
+    mkdir_p(root + "/attempts/hello/2/worker1")
+    MemoryFixture(root: root, artifact: artifact, receipt: receipt, memory: root + "/attempts/hello/2/worker1/compiler.memory")
+
+fn verify_with(fx: MemoryFixture, fields: [Kv]) -> text:
+    file_write(fx.memory, kv_text(fields))
+    match verified_memory_receipt(fx.root, fx.receipt, "bundle", fx.artifact, 1024, "enforce"):
+        case Ok(path): "ok:" + path
+        case Err(e): e
+
+# --------------------------------------------------------------- fake matrix
+var manifest_commands: [[text]] = []
+var manager_commands: [[text]] = []
+
+fn fake_run(lane: text, name: text, argv: [text], seconds: i64) -> Result<text, text>:
+    if name == "manifest": manifest_commands.push(argv)
+    if name == "manager-run": manager_commands.push(argv)
+    Ok("builder: verified tasks=1\n")
+
+fn fake_check(lane: text, artifact: text) -> Result<bool, text>:
+    Ok(true)
+
+fn fake_port() -> HelloMatrixPort:
+    HelloMatrixPort(run: fake_run, check_executable: fake_check)
+
+fn arg_after(argv: [text], flag: text) -> text:
+    for i in 0..(argv.len() - 1):
+        if argv[i] == flag: return argv[i + 1]
+    ""
+
+fn lane_ctx(root: text, compiler: text, sha: text, runtime: text, hashes: [RuntimeHash], pin: text) -> HelloLaneContext:
+    HelloLaneContext(out: root, root: ".", runtime: runtime, compiler: compiler, sha: sha,
+        linker: "/usr/bin/ld", runtime_hashes: hashes, phase: 2, max_rss_kib: 1024,
+        timeout_seconds: 10, compile_route: "positional", min_free_disk_bytes: 0,
+        max_log_bytes: 1024, windows_abi: "msvc", trace_stages: true, memory_policy: "enforce",
+        host_machine: "x86_64", host_os: "linux", producer_path: compiler, producer_sha256: pin)
+
+fn field_value(record: [SdnField], key: text) -> text:
+    for f in record:
+        if f.key == key: return f.value
+    ""
+
+describe "hello BuildRunner twin: pure decisions":
+    it "caps the whole-task budget at the V4 ceiling":
+        expect(task_budget_seconds(10)).to_equal(110)
+        expect(task_budget_seconds(900)).to_equal(3600)
+        expect(task_budget_seconds(446)).to_equal(3598)
+
+    it "reserves PASS for enforce evidence":
+        expect(lane_status("enforce").unwrap()).to_equal("PASS")
+        expect(lane_status("monitor").unwrap()).to_equal("FUNCTIONAL")
+        expect(lane_status("none").is_err()).to_equal(true)
+
+    it "admits only native-host targets":
+        expect(target_matches_host("x86_64-linux", "x86_64", "linux", "msvc")).to_equal(true)
+        expect(target_matches_host("x86_64-unknown-linux-gnu", "amd64", "linux", "msvc")).to_equal(true)
+        expect(target_matches_host("x86_64-unknown-notlinux", "x86_64", "linux", "msvc")).to_equal(false)
+        expect(target_matches_host("x86_64-linux-musl", "x86_64", "linux", "msvc")).to_equal(false)
+        expect(target_matches_host("aarch64-apple-darwin", "arm64", "macos", "msvc")).to_equal(true)
+        expect(target_matches_host("x86_64-pc-windows-gnu", "AMD64", "windows", "gnu")).to_equal(true)
+        expect(target_matches_host("x86_64-pc-windows-gnu", "AMD64", "windows", "msvc")).to_equal(false)
+
+    it "renders records byte-identically to the matrix sdn() writer":
+        val text = sdn_record_text([sdn_int("phase", 2), sdn_str("backend", "llvm"), sdn_bool("admitted", false), sdn_str("reason", "a \"q\" \\ b\nc")])
+        expect(text).to_equal("phase: 2\nbackend: \"llvm\"\nadmitted: false\nreason: \"a \\\"q\\\" \\\\ b\\nc\"\n")
+        val back = parse_sdn_record(text).unwrap()
+        expect(field_value(back, "reason")).to_equal("a \"q\" \\ b\nc")
+
+describe "hello BuildRunner twin: trust anchor":
+    it "fails closed on a missing, malformed or mismatched stage pin":
+        val dir = scratch()
+        file_write(dir + "/stage", "stage binary")
+        val pin = file_hash_sha256_or_empty(dir + "/stage")
+        expect(verify_stage_binary_pin(dir + "/stage", pin).unwrap()).to_equal(pin)
+        expect(verify_stage_binary_pin(dir + "/stage", "").is_err()).to_equal(true)
+        expect(verify_stage_binary_pin(dir + "/stage", HEX_B).is_err()).to_equal(true)
+        expect(verify_stage_binary_pin(dir + "/missing", pin).is_err()).to_equal(true)
+
+    it "never reuses a private root":
+        val dir = scratch()
+        expect(prepare_private_roots([dir + "/state", dir + "/published"]).is_ok()).to_equal(true)
+        expect(prepare_private_roots([dir + "/state"]).is_err()).to_equal(true)
+
+describe "hello BuildRunner twin: missing receipt":
+    it "never passes on manager exit alone, for every form and backend":
+        val root = scratch()
+        mkdir_p(root + "/runtime")
+        file_write(root + "/runtime/lib.a", "runtime")
+        for n in ["manager", "writer", "template"]:
+            file_write(root + "/" + n, "fixture")
+        file_write(root + "/simple", "compiler")
+        val sha = file_hash_sha256_or_empty(root + "/simple")
+        val ctx = lane_ctx(root, root + "/simple", sha, root + "/runtime",
+            [RuntimeHash(relative: "lib.a", sha256: file_hash_sha256_or_empty(root + "/runtime/lib.a"))], sha)
+        val provider = HelloProvider(manager: root + "/manager", manifest_writer: root + "/writer", template: root + "/template")
+        manifest_commands = []
+        manager_commands = []
+        for backend in ["llvm", "cranelift"]:
+            for lane in hello_forms():
+                val record = hello_buildrunner_run_lane(fake_port(), ctx, backend, lane, provider, "x86_64-linux").unwrap()
+                expect(field_value(record, "status")).to_equal("FAIL")
+                expect(field_value(record, "reason")).to_contain("receipt")
+                val command = manifest_commands[manifest_commands.len() - 1]
+                expect(command[command.len() - 1]).to_equal("--trace-stages")
+                val run = manager_commands[manager_commands.len() - 1]
+                expect(run[run.len() - 1]).to_equal("--trace-stages")
+                expect(arg_after(command, "--lane")).to_equal(lane)
+                expect(arg_after(command, "--backend")).to_equal(backend)
+                expect(arg_after(command, "--target")).to_equal("x86_64-linux")
+        expect(manifest_commands.len()).to_equal(8)
+
+    it "rejects a cross-ABI target before staging":
+        for target in ["x86_64-unknown-notlinux", "x86_64-linux-musl"]:
+            val root = scratch()
+            val ctx = lane_ctx(root, "missing", HEX_A, root, [], HEX_A)
+            val provider = HelloProvider(manager: "missing", manifest_writer: "missing", template: "missing")
+            val record = hello_buildrunner_run_lane(fake_port(), ctx, "llvm", "one-source", provider, target).unwrap()
+            expect(field_value(record, "status")).to_equal("FAIL")
+            expect(field_value(record, "reason")).to_contain("target differs")
+            expect(file_exists(root + "/buildrunner-llvm-one-source/source")).to_equal(false)
+
+    it "keeps the Python record key order on failure":
+        val root = scratch()
+        val ctx = lane_ctx(root, "missing", HEX_A, root, [], HEX_A)
+        val provider = HelloProvider(manager: "missing", manifest_writer: "missing", template: "missing")
+        val record = hello_buildrunner_run_lane(fake_port(), ctx, "llvm", "nine-source", provider, "x86_64-linux").unwrap()
+        expect(sdn_record_text(record)).to_equal("phase: 2\nbackend: \"llvm\"\nlane: \"nine-source\"\ncompile_route: \"positional\"\ncompiler_sha256: \"" + HEX_A + "\"\nstatus: \"FAIL\"\nadmitted: false\nreason: \"unsupported Hello form\"\n")
+
+describe "hello BuildRunner twin: result bundle":
+    it "requires exact identity for all four forms and both backends":
+        for lane in hello_forms():
+            for backend in ["llvm", "cranelift"]:
+                val root = scratch()
+                val bundle = write_bundle(root, bundle_members_for(root, lane, backend))
+                val artifact = unpack_verified_lane(bundle, root + "/verified", expected(lane, backend), "linux").unwrap()
+                expect(file_read(artifact)).to_equal("artifact")
+                val other = if backend == "llvm": "cranelift" else: "llvm"
+                expect(unpack_err(bundle, root + "/invalid", expected(lane, other))).to_contain("identity mismatch")
+
+    it "rejects path traversal before extracting":
+        val root = scratch()
+        val bundle = write_bundle(root, bundle_members_for(root, "one-source", "llvm") + [ZipInput(name: "../escaped", data: bytes_of("bad"), mode: 0o100644)])
+        expect(unpack_err(bundle, root + "/verified", expected("one-source", "llvm"))).to_contain("unsafe")
+        expect(file_exists(root + "/escaped")).to_equal(false)
+
+    it "rejects duplicate members":
+        val root = scratch()
+        val bundle = write_bundle(root, bundle_members_for(root, "one-source", "llvm") + [ZipInput(name: "result.sdn", data: bytes_of("status: \"PASS\"\n"), mode: 0o100644)])
+        expect(unpack_err(bundle, root + "/verified", expected("one-source", "llvm"))).to_contain("ambiguous")
+
+    it "rejects an artifact changed after the worker result":
+        val root = scratch()
+        var members = bundle_members_for(root, "one-source", "llvm")
+        members[2] = ZipInput(name: "hello", data: bytes_of("modified"), mode: 0o100644)
+        val bundle = write_bundle(root, members)
+        expect(unpack_err(bundle, root + "/verified", expected("one-source", "llvm"))).to_contain("executable identity")
+
+    it "rejects every unbound lane identity before extracting":
+        val changes = [sdn_str("format", "hello-buildrunner-lane-v0"), sdn_str("lane", "two-objects"),
+            sdn_str("backend", "cranelift"), sdn_int("phase", 3), sdn_str("compile_route", "coordinator"),
+            sdn_str("compiler_sha256", HEX_B), sdn_str("status", "FAIL"), sdn_str("admitted", "true")]
+        for change in changes:
+            val root = scratch()
+            val bundle = write_bundle(root, bundle_members_for(root, "one-source", "llvm"))
+            expect(unpack_err(bundle, root + "/verified", with_field(expected("one-source", "llvm"), change))).to_contain("identity mismatch")
+            expect(file_exists(root + "/verified")).to_equal(false)
+
+    it "rejects unsafe member kinds and names before extracting":
+        val cases = [ZipInput(name: "escape", data: [], mode: 0o120777), ZipInput(name: "device", data: [], mode: 0o020600),
+            ZipInput(name: "dir", data: [], mode: 0o040700), ZipInput(name: "dir/file", data: [], mode: 0),
+            ZipInput(name: "C:escape", data: [], mode: 0), ZipInput(name: "..", data: [], mode: 0),
+            ZipInput(name: "/absolute", data: [], mode: 0), ZipInput(name: "a\\b", data: [], mode: 0)]
+        for bad in cases:
+            val root = scratch()
+            val bundle = write_bundle(root, bundle_members_for(root, "one-source", "llvm") + [ZipInput(name: bad.name, data: bytes_of("target"), mode: bad.mode)])
+            expect(unpack_err(bundle, root + "/verified", expected("one-source", "llvm"))).to_contain("unsafe")
+            expect(file_exists(root + "/verified")).to_equal(false)
+
+    it "rejects excess member count and duplicate identity fields":
+        val root = scratch()
+        var many = bundle_members_for(root, "one-source", "llvm")
+        for i in 0..126:
+            many.push(ZipInput(name: "extra-{i}", data: [], mode: 0o100644))
+        val bundle = write_bundle(root, many)
+        expect(unpack_err(bundle, root + "/verified", expected("one-source", "llvm"))).to_contain("oversized")
+        expect(file_exists(root + "/verified")).to_equal(false)
+        val root2 = scratch()
+        var dup = bundle_members_for(root2, "one-source", "llvm")
+        dup[0] = ZipInput(name: "managed-lane.sdn", data: bytes_of(identity_text("one-source", "llvm") + "status: \"PASS\"\n"), mode: 0o100644)
+        val bundle2 = write_bundle(root2, dup)
+        expect(unpack_err(bundle2, root2 + "/verified", expected("one-source", "llvm"))).to_contain("duplicate")
+        expect(file_exists(root2 + "/verified")).to_equal(false)
+
+    it "reports a non-zip bundle with the zipfile reason":
+        val root = scratch()
+        file_write(root + "/bundle.zip", "not a zip")
+        expect(unpack_err(root + "/bundle.zip", root + "/verified", expected("one-source", "llvm"))).to_equal("File is not a zip file")
+
+describe "hello BuildRunner twin: memory admission":
+    it "binds the result and rejects duplicates":
+        val fx = memory_fixture()
+        expect(verify_with(fx, memory_fields())).to_equal("ok:" + fx.memory)
+        expect(verify_with(fx, set_kv(memory_fields(), "enforcement", "rss-watchdog"))).to_contain("memory enforcement")
+        file_write(fx.memory, kv_text(memory_fields()) + "enforcement=job-memory\n")
+        match verified_memory_receipt(fx.root, fx.receipt, "bundle", fx.artifact, 1024, "enforce"):
+            case Ok(_): expect("ok").to_equal("duplicate")
+            case Err(e): expect(e).to_contain("duplicate")
+
+    it "accepts only bound kernel enforcement metrics":
+        val fx = memory_fixture()
+        expect(verify_with(fx, memory_fields())).to_equal("ok:" + fx.memory)
+        expect(verify_with(fx, set_kv(set_kv(memory_fields(), "enforcement", "cgroup-memory-max"), "peak_metric", "cgroup-memory-peak"))).to_equal("ok:" + fx.memory)
+
+    it "fails closed on mismatched memory fields":
+        val cases = [["format", "unknown"], ["task_identity", HEX_B], ["requested_policy", "monitor"],
+            ["reserved_bytes", "1023"], ["reserved_bytes", "01024"], ["enforced_bytes", "0"],
+            ["enforcement", "rss-watchdog"], ["enforcement", "none"], ["peak_metric", "rss"],
+            ["peak_metric", "cgroup-memory-peak"], ["observed_peak_bytes", "-1"],
+            ["observed_peak_bytes", "+1"], ["observed_peak_bytes", "01"], ["observed_peak_bytes", "1.0"],
+            ["observed_peak_bytes", ""], ["observed_peak_bytes", "1junk"]]
+        val fx = memory_fixture()
+        for c in cases:
+            expect(verify_with(fx, set_kv(memory_fields(), c[0], c[1])).starts_with("ok:")).to_equal(false)
+
+    it "fails closed on missing, extra and malformed fields":
+        val fx = memory_fixture()
+        for f in memory_fields():
+            expect(verify_with(fx, without_kv(memory_fields(), f.key))).to_equal("memory receipt identity or format mismatch")
+        expect(verify_with(fx, memory_fields() + [Kv(key: "unexpected", value: "1")])).to_equal("memory receipt identity or format mismatch")
+        file_write(fx.memory, "broken-line\n")
+        expect(verified_memory_receipt(fx.root, fx.receipt, "bundle", fx.artifact, 1024, "enforce").is_err()).to_equal(true)
+        expect(verify_memory_receipt("broken-line\n", HEX_A, 1024, "enforce").unwrap_err()).to_equal("malformed worker memory receipt")
+        # An empty value is a present key (parity case: observed_peak_bytes= is a bad peak, not a missing field).
+        expect(verify_memory_receipt(kv_text(set_kv(memory_fields(), "observed_peak_bytes", "")), HEX_A, 1024, "enforce").unwrap_err()).to_equal("invalid worker memory peak")
+        expect(verified_memory_receipt(fx.root, fx.receipt, "bundle", fx.artifact, 1024, "enforce").unwrap_err()).to_equal("malformed worker memory receipt")
+        remove_file_if_exists(fx.memory)
+        expect(verified_memory_receipt(fx.root, fx.receipt, "bundle", fx.artifact, 1024, "enforce").unwrap_err()).to_equal("worker memory receipt missing")
+
+    it "requires the result identity, status and artifact to match":
+        val cases = [LineCase(index: 0, value: "SIMPLE-BUILD-RESULT-0"), LineCase(index: 1, value: "other-task"),
+            LineCase(index: 2, value: "0"), LineCase(index: 2, value: "../2"), LineCase(index: 3, value: "not-a-hash"),
+            LineCase(index: 4, value: "../../worker"), LineCase(index: 5, value: "FAIL"), LineCase(index: 6, value: "1"),
+            LineCase(index: 10, value: "0"), LineCase(index: 10, value: "2"), LineCase(index: 11, value: "other-output"),
+            LineCase(index: 12, value: HEX_B)]
+        for c in cases:
+            val fx = memory_fixture()
+            var lines = receipt_lines("bundle", file_hash_sha256_or_empty(fx.artifact))
+            lines[c.index] = c.value
+            file_write(fx.receipt, join_lines(lines))
+            expect(verify_with(fx, memory_fields()).starts_with("ok:")).to_equal(false)
+
+    it "admits monitor receipts only without claimed enforcement":
+        val monitor = set_kv(set_kv(set_kv(set_kv(memory_fields(), "requested_policy", "monitor"), "enforcement", "none"), "enforced_bytes", "0"), "peak_metric", "process-tree-peak")
+        expect(verify_memory_receipt(kv_text(monitor), HEX_A, 1024, "monitor").is_ok()).to_equal(true)
+        expect(verify_memory_receipt(kv_text(set_kv(monitor, "enforcement", "job-memory")), HEX_A, 1024, "monitor").unwrap_err()).to_equal("monitor receipt claims enforcement it did not request")
+        expect(verify_memory_receipt(kv_text(set_kv(monitor, "peak_metric", "job-commit-peak")), HEX_A, 1024, "monitor").unwrap_err()).to_equal("monitor receipt peak metric is not monitor-only")
+        expect(verify_memory_receipt(kv_text(monitor), HEX_A, 1024, "enforce").unwrap_err()).to_equal("worker did not prove the requested memory enforcement")
+
+fn python_pass_keys() -> [text]:
+    """PASS-record keys in order, read from the Python adapter (the oracle)."""
+    val src = file_read("scripts/bootstrap/hello-sanity-buildrunner.py")
+    val start = src.index_of("values.update(status=lane_status(policy)") ?? -1
+    val stop = src.index_of("if policy == \"monitor\":", start) ?? -1
+    var keys: [text] = []
+    for part in src.substring(start + 14, stop).split(","):
+        val p = part.trim()
+        val eq = p.index_of("=") ?? -1
+        if eq > 0 and p.substring(0, eq) != "status": keys.push(p.substring(0, eq))
+    for k in ["memory_policy", "evidence_scope", "verdict"]:
+        keys.push(k)
+    keys
+
+describe "hello BuildRunner twin: record keys":
+    it "keeps the Python PASS record key set and order, python_sha256 included":
+        var keys: [text] = []
+        for f in pass_fields("e", "r", "m", "b", "p", "g", "w", "t", "monitor"):
+            keys.push(f.key)
+        expect(python_pass_keys().len()).to_equal(11)
+        expect(keys).to_equal(python_pass_keys())
+        expect(pass_fields("e", "r", "m", "b", "p", "g", "w", "t", "enforce").len()).to_equal(8)

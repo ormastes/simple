@@ -1,0 +1,63 @@
+# Run a real linkage lane inside a BuildRunner-owned process tree.
+#
+# Pure-Simple twin of hello-sanity-buildrunner-worker.py, launched by the
+# BuildRunner manager from the staged attempt root (cwd) as
+#   <verified stage binary> run scripts/bootstrap/hello-sanity-buildrunner-worker.spl ARGS
+# Logic: scripts/bootstrap/lib/hello_sanity_buildrunner_worker.spl.
+
+use std.nogc_sync_mut.io_runtime.{get_args, exit, cwd, host_os}
+use std.nogc_sync_mut.io.sffi_common.{is_absolute_path}
+use std.nogc_sync_mut.spec.engine_probe.{self_exe_path}
+use scripts.bootstrap.lib.hello_sanity_buildrunner_worker.{WorkerOptions, ManagedLaneRunner, parse_worker_args, prepare_worker, finish_worker}
+
+# TODO(hello-sanity-matrix twin): replace with the matrix twin's
+# hello_matrix_managed_lane_runner(options) once it lands; until then every
+# managed lane fails closed instead of reporting a pass it never ran.
+fn unavailable_lane() -> Result<text, text>:
+    Err("hello-sanity-matrix twin lane runner unavailable")
+
+fn unavailable_identity() -> Result<bool, text>:
+    Err("hello-sanity-matrix twin lane runner unavailable")
+
+fn unavailable_runtime() -> bool:
+    false
+
+fn unavailable_sha() -> text:
+    ""
+
+fn lane_runner(options: WorkerOptions) -> ManagedLaneRunner:
+    ManagedLaneRunner(lane: unavailable_lane, validate_identity: unavailable_identity,
+        runtime_unchanged: unavailable_runtime, sha: unavailable_sha)
+
+fn script_args() -> [text]:
+    """Arguments after the script path (get_args() keeps the binary, `run` and the script)."""
+    val all = get_args()
+    var out: [text] = []
+    var seen_script = false
+    for a in all:
+        if seen_script:
+            out.push(a)
+        elif a.ends_with("hello-sanity-buildrunner-worker.spl"):
+            # Multi-line on purpose: the seed parser rejects `elif c: x = v` (inline assignment).
+            seen_script = true
+    out
+
+fn main():
+    val parsed = parse_worker_args(script_args())
+    if not parsed.options.?:
+        print("error: {parsed.error}")
+        exit(2)
+    val root = cwd()
+    match prepare_worker(parsed.options.unwrap(), root, host_os(), self_exe_path() ?? ""):
+        case Err(reason):
+            print("error: {reason}")
+            exit(1)
+        case Ok(options):
+            val output = if is_absolute_path(options.output): options.output else: root + "/" + options.output
+            match finish_worker(options, lane_runner(options), output):
+                case Ok(code): exit(code)
+                case Err(reason):
+                    print("error: {reason}")
+                    exit(1)
+
+main()
