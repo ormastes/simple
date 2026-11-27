@@ -69,10 +69,45 @@ val count = 42
 var total = 0
 var items = []
 
-# Type annotations (optional in interpreter, required in compiler mode)
+# Type annotations (optional on locals; see "Type Annotations, Inference and `any`" below)
 val name: text = "Alice"
 var count: i64 = 0
 ```
+
+### Type Annotations, Inference and `any`
+
+Owner decision 2026-11-27, **staged: warning first, then error**. Design:
+`doc/05_design/language/type_system/no_any_inference_generics.md`.
+
+```simple
+val name: text = "Alice"            # locals: annotation optional, type inferred
+var count = 0                        # i64
+
+pub fn area(w: f64, h: f64) -> f64:  # pub / cross-module: annotate params + return
+    w * h
+
+fn half(x):                          # private: inferred from body + same-module calls
+    x / 2.0                          # -> one copy, f64 -> f64
+
+fn first(xs):                        # private, called with [i64] and [text]:
+    xs[0]                            # implicit generic (capped number of instances)
+```
+
+| Where | Rule |
+|-------|------|
+| Body locals | inferred |
+| `pub` / exported / cross-module functions, fields, `extern fn` | must be annotated |
+| Private function, call sites agree | inferred, one monomorphic copy |
+| Private function, call sites disagree | implicit generic, instances capped and deduplicated |
+| Over the cap, polymorphic recursion, higher-rank | compile error: annotate |
+| `if`/`match` arms of different types | compile error naming both arms (int/float arms widen to float) |
+| Type cannot be determined | compile error, never a fallback to `any` |
+| `any`, `[any]` | only inside `unsafe` and in script mode |
+
+An unannotated parameter is a type variable, **not** `any`. For mixed data use
+an `enum` (closed set of cases) or a trait object (`dyn Trait` / `interface`,
+open set). Script mode is a script entry file run by the interpreter; a module
+it imports is still checked as safe code.
 
 ---
 
@@ -482,7 +517,8 @@ s.char_at(99)                       # "" (char_at keeps its over-run policy)
   (`177e47d13d9`). Spec: `test/01_unit/lib/text/text_len_units_spec.spl`.
 - A `char` is not a condition: `if c:` / `while c:` is a type error. Write
   `c != '\0'`.
-- Staged warnings (non-exhaustive match, `Any` outside `unsafe:`, char used as
+- Staged warnings (non-exhaustive match, `any` outside `unsafe:` or script mode,
+  unannotated `pub` functions, char used as
   `i64`, char-vs-text compare, new `'...'` raw strings) become errors once
   Windows, macOS and Linux all have a working self-hosted Simple binary.
 - **Lexer switch is staged:** until it lands (after the stage3 self-build

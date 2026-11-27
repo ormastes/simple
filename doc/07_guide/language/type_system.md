@@ -47,12 +47,23 @@ val add: fn(i64, i64) -> i64 = \x, y: x + y   # Parameters inferred from type
 
 | Context | Annotations |
 |---------|-------------|
-| Public function signatures | Required |
-| Struct/class fields | Required |
+| Public / exported / cross-module function signatures | Required |
+| Struct/class fields, `extern fn` | Required |
 | Generic constraints | Required |
+| Private function, same-module call sites agree | Optional: inferred, one monomorphic copy |
+| Private function, call sites disagree | Optional: implicit generic, instances capped and deduplicated |
+| Private function over the instance cap, polymorphic recursion, higher-rank | Required (compile error says "annotate") |
 | Local variables (library code) | Recommended |
 | Local variables (application code) | Optional |
 | Lambda parameters | Contextual |
+
+The private-function rows and the "required" row for public functions are the
+owner decision of 2026-11-27 and are **staged: warning first, then error**.
+An unannotated parameter is a type variable, not `any`; a type the compiler
+cannot determine is a compile error. Inference never crosses a module
+boundary, which is why public signatures are annotated. Full rules, error
+messages and what is implemented so far:
+[no_any_inference_generics.md](../../05_design/language/type_system/no_any_inference_generics.md).
 
 ```simple
 # Explicit when needed for a specific type
@@ -75,7 +86,7 @@ simple check --show-types src/lib.spl # Show inferred types
 simple check --verbose src/*.spl      # Verbose with suggestions
 ```
 
-Type checking is optional -- it only runs when you use `simple check` or `--type-check` flags.
+The standalone type checker is optional -- it only runs when you use `simple check` or `--type-check` flags. The rules under "Current Type Rules" below are separate: they are enforced during compilation.
 
 ### Forward References
 
@@ -126,8 +137,17 @@ and an ERROR after phase 3 (staged). See
 ## Current Type Rules
 
 - `nil` only inside `unsafe:`; use `Option<T>` / `None` (match arm `None:`).
-- `Any` / erased access outside `unsafe:` is a compile error.
-- Generics are erased; there is no monomorphization pass.
+- `any` / `Any` (including `[any]`) and erased access are allowed only inside
+  `unsafe:` and in script mode (a script entry file run by the interpreter).
+  Safe compiled code never uses or produces `any`: where a type cannot be
+  determined the result is a compile error, not a fallback. Staged: WARNING
+  now for existing sites, ERROR after migration (owner decision 2026-11-27).
+- `if`/`match` arms used as a value must have one type; different types are a
+  compile error naming both arms. Int and float arms widen to float.
+- For mixed data use an `enum` (closed set) or a trait object (`dyn Trait` /
+  `interface`, open set) instead of `any`.
+- Generics are erased; there is no monomorphization pass. How implicit-generic
+  instances relate to this is an open owner question (design doc §6).
 - Non-exhaustive value match: WARNING now, ERROR after phase 3 (staged).
 
 ## Union Types
