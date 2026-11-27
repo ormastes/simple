@@ -1340,12 +1340,24 @@ impl ExecCore {
             std::collections::HashMap::new()
         };
         let _ = hir::take_dropped_unsupported_exprs();
+        // A script entry (top-level statements or examples, or no `main`) is
+        // handed to the interpreter below, never run as a compiled safe module:
+        // its own functions keep dynamically typed value joins.
+        let entry_is_script = !spec_entry
+            && (!ast
+                .items
+                .iter()
+                .any(|i| matches!(i, simple_parser::ast::Node::Function(f) if f.name == "main"))
+                || Self::jit_entry_skipped_statements(path, &ast.items, false) > 0
+                || simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests > 0);
+        hir::set_entry_script_mode(entry_is_script);
         let lowered = hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,
             path,
             project_hint.as_deref(),
             duplicate_structs,
         );
+        hir::set_entry_script_mode(false);
         // References to a private fn of another directory found in the
         // lowered unit; judged below, once it is known the JIT will run it.
         let private_refs = hir::take_private_ref_violations();

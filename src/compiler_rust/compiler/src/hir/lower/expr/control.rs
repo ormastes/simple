@@ -7,9 +7,13 @@ use simple_parser::{self as ast, ast::Mutability, ast::Pattern, Expr, MatchArm};
 use std::collections::HashSet;
 
 use crate::hir::lower::context::FunctionContext;
-use crate::hir::lower::error::LowerResult;
+use crate::hir::lower::error::{LowerError, LowerResult, LOWERING_TYPE_ERROR_TAG};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
+
+// `Lowerer::join_class` codes of the two classes numeric promotion joins.
+const JOIN_INT: u8 = 1;
+const JOIN_FLOAT: u8 = 2;
 
 fn hir_expr_definitely_returns(expr: &HirExpr) -> bool {
     match &expr.kind {
@@ -110,6 +114,25 @@ fn weak_literal_is_dict(expr: &HirExpr) -> Option<bool> {
             weak_literal_is_dict(then_branch).or_else(|| weak_literal_is_dict(else_branch))
         }
         _ => None,
+    }
+}
+
+/// An arm with no value for `Lowerer::join_value_arms` to judge: bottom, or a
+/// block that ends in a statement (`continue`, `break`, an assignment, a
+/// statement `if`) instead of an expression.
+fn hir_arm_yields_no_value(expr: &HirExpr) -> bool {
+    if hir_arm_is_bottom(expr) {
+        return true;
+    }
+    match &expr.kind {
+        HirExprKind::Block(stmts) => !matches!(stmts.last(), Some(HirStmt::Expr(tail)) if !hir_arm_yields_no_value(tail)),
+        HirExprKind::LetIn { body, .. } => hir_arm_yields_no_value(body),
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => hir_arm_yields_no_value(then_branch) && hir_arm_yields_no_value(else_branch),
+        _ => false,
     }
 }
 
@@ -378,6 +401,138 @@ impl Lowerer {
         self.same_collection_kind(a, b)
     }
 
+    /// Representation class of an arm type the value join can judge, or
+    /// `None` for one it leaves alone (ANY, struct, enum, Option, tuple, a
+    /// suffix-guessed method result): there the seed's typing is not
+    /// authoritative, see `validate_declared_return_type`.
+    fn join_class(&self, ty: TypeId) -> Option<u8> {
+        if self.suffix_guessed_return_types.contains(&ty) {
+            return None;
+        }
+        match self.module.types.get(ty)? {
+            HirType::Bool => Some(0),
+            HirType::Int { .. } => Some(JOIN_INT),
+            HirType::Float { .. } => Some(JOIN_FLOAT),
+            HirType::String => Some(3),
+            HirType::Array { .. } => Some(4),
+            HirType::Dict { .. } => Some(5),
+            _ => None,
+        }
+    }
+
+    /// Two judged types that cannot share one slot: different classes, or
+    /// arrays whose element types disagree (`[f64]` vs `[i64]`).
+    fn join_types_disagree(&self, a: TypeId, b: TypeId) -> bool {
+        let (Some(ca), Some(cb)) = (self.join_class(a), self.join_class(b)) else {
+            return false;
+        };
+        match (self.module.types.get(a), self.module.types.get(b)) {
+            (Some(HirType::Array { element: ea, .. }), Some(HirType::Array { element: eb, .. })) => {
+                self.join_types_disagree(*ea, *eb)
+            }
+            _ => ca != cb,
+        }
+    }
+
+    fn join_type_name(&self, ty: TypeId) -> String {
+        match self.module.types.get(ty) {
+            Some(HirType::Bool) => "bool".to_string(),
+            Some(HirType::String) => "text".to_string(),
+            Some(HirType::Float { bits }) => format!("f{bits}"),
+            Some(HirType::Int { bits, signedness }) => {
+                format!("{}{bits}", if matches!(signedness, Signedness::Unsigned) { "u" } else { "i" })
+            }
+            Some(HirType::Array { element, .. }) => format!("[{}]", self.join_type_name(*element)),
+            Some(HirType::Dict { key, value }) => {
+                format!("Dict<{}, {}>", self.join_type_name(*key), self.join_type_name(*value))
+            }
+            _ => "_".to_string(),
+        }
+    }
+
+    /// Typed join of two value-position `if`/`match` arms. The first concrete
+    /// arm's type used to win and the sibling was read through it as garbage
+    /// (`1` vs `"a"`, `{}` vs `5`, `[f64]` vs `[i64]`).
+    ///
+    /// - int vs float: the language's implicit int -> float widening (same
+    ///   rule as mixed arithmetic); the int arm is converted and the join is
+    ///   the float type.
+    /// - any other disagreement is a compile-time type error in safe code.
+    ///   Only `unsafe` code and functions of a script entry file (run by the
+    ///   interpreter, see `set_entry_script_mode`) keep the untyped join.
+    ///
+    /// Bottom arms, weak empty literals against the same collection kind and
+    /// types `join_class` does not judge are left to the existing rules.
+    /// `labels` name the two arms in the message.
+    fn join_value_arms(
+        &self,
+        then_arm: &mut HirExpr,
+        else_arm: &mut HirExpr,
+        ty: &mut TypeId,
+        labels: (&str, &str),
+        ctx: &FunctionContext,
+    ) -> LowerResult<()> {
+        if hir_arm_yields_no_value(then_arm) || hir_arm_yields_no_value(else_arm) {
+            return Ok(());
+        }
+        // A dict literal is a dict whatever (dynamic) type the seed gave it.
+        let class = |arm: &HirExpr| match arm.kind {
+            HirExprKind::Dict(_) => Some(5),
+            _ => self.join_class(arm.ty),
+        };
+        let (Some(a), Some(b)) = (class(then_arm), class(else_arm)) else {
+            return Ok(());
+        };
+        if (a == JOIN_INT && b == JOIN_FLOAT) || (a == JOIN_FLOAT && b == JOIN_INT) {
+            let (int_arm, target) = if a == JOIN_INT { (then_arm, else_arm.ty) } else { (else_arm, then_arm.ty) };
+            let value = std::mem::replace(
+                int_arm,
+                HirExpr {
+                    kind: HirExprKind::Nil,
+                    ty: TypeId::NIL,
+                },
+            );
+            *int_arm = HirExpr {
+                kind: HirExprKind::Cast {
+                    expr: Box::new(value),
+                    target,
+                },
+                ty: target,
+            };
+            *ty = target;
+            return Ok(());
+        }
+        let both_concrete = hir_value_is_concrete(then_arm) && hir_value_is_concrete(else_arm);
+        let disagree = a != b || (both_concrete && self.join_types_disagree(then_arm.ty, else_arm.ty));
+        let script_fn = crate::hir::lower::lowerer::entry_script_mode() && self.current_function_owner.is_none();
+        if !disagree || ctx.unsafe_depth > 0 || script_fn {
+            return Ok(());
+        }
+        let mut site = format!("`{}`", self.current_function_name.as_deref().unwrap_or("<module>"));
+        if let Some(line) = self.current_function_line {
+            site.push_str(&format!(" (fn at line {line}"));
+            if let Some(owner) = self.current_function_owner.as_deref() {
+                site.push_str(&format!(" of {}", owner.trim_start_matches(r"\\?\")));
+            }
+            site.push(')');
+        }
+        let name = |arm: &HirExpr| match arm.kind {
+            HirExprKind::Array(ref items) if items.is_empty() => "[]".to_string(),
+            HirExprKind::Dict(_) if self.join_class(arm.ty).is_none() => "Dict".to_string(),
+            _ => self.join_type_name(arm.ty),
+        };
+        let msg = format!(
+            "{LOWERING_TYPE_ERROR_TAG} type mismatch: value arms disagree in {site}: {} is `{}` but {} is `{}`; \
+             give every arm one type (convert explicitly, or wrap the alternatives in an enum) -- \
+             only `unsafe` code or a script may mix arm types",
+            labels.0,
+            name(then_arm),
+            labels.1,
+            name(else_arm)
+        );
+        Err(LowerError::Unsupported(msg))
+    }
+
     /// Lower an if expression to HIR
     ///
     /// Result type follows the then branch, except an empty array literal
@@ -468,6 +623,9 @@ impl Lowerer {
             }
         }
         self.reject_uninferred_join(&then_hir, else_hir.as_deref(), ctx)?;
+        if let Some(other) = else_hir.as_mut() {
+            self.join_value_arms(&mut then_hir, other, &mut ty, ("the then-arm", "the else-arm"), ctx)?;
+        }
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -531,8 +689,8 @@ impl Lowerer {
         let binding_stmts = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
 
         let then_hir = self.lower_expr(then_branch, ctx)?;
-        let ty = then_hir.ty;
-        let then_hir = if binding_stmts.is_empty() {
+        let mut ty = then_hir.ty;
+        let mut then_hir = if binding_stmts.is_empty() {
             then_hir
         } else {
             let mut stmts = binding_stmts;
@@ -547,11 +705,14 @@ impl Lowerer {
         // indices already baked into the HIR remain valid.
         self.restore_match_bindings(previous_bindings, ctx);
 
-        let else_hir = if let Some(eb) = else_branch {
+        let mut else_hir = if let Some(eb) = else_branch {
             Some(Box::new(self.lower_expr(eb, ctx)?))
         } else {
             None
         };
+        if let Some(other) = else_hir.as_mut() {
+            self.join_value_arms(&mut then_hir, other, &mut ty, ("the then-arm", "the else-arm"), ctx)?;
+        }
 
         let if_expr = HirExpr {
             kind: HirExprKind::If {
@@ -824,7 +985,7 @@ impl Lowerer {
 
         // Build the chain of If-Else expressions from the arms
         let exhaust_msg = match_exhausted_message(form, arms.first().map(|a| ("first arm", a.span.line)));
-        let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, &exhaust_msg, ctx)?;
+        let if_chain = self.lower_match_arms(subject_idx, subject_ty, arms, &exhaust_msg, form == "expression", ctx)?;
         let result_ty = if_chain.ty;
 
         // Wrap in LetIn to store the subject before evaluating the if-else chain
@@ -845,6 +1006,7 @@ impl Lowerer {
         subject_ty: TypeId,
         arms: &[MatchArm],
         exhaust_msg: &str,
+        value_position: bool,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         if arms.is_empty() {
@@ -885,7 +1047,7 @@ impl Lowerer {
         // Lower the arm body with bindings in scope
         let then_branch = self.lower_match_arm_body(&arm.body, ctx)?;
         let then_ty = then_branch.ty;
-        let then_branch = if binding_stmts.is_empty() {
+        let mut then_branch = if binding_stmts.is_empty() {
             then_branch
         } else {
             // Prepend the binding initializations, preserving the arm value as
@@ -904,7 +1066,8 @@ impl Lowerer {
         self.restore_match_bindings(previous_bindings, ctx);
 
         // Recursively build the else branch from remaining arms
-        let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, exhaust_msg, ctx)?;
+        let mut else_branch =
+            self.lower_match_arms(subject_idx, subject_ty, remaining_arms, exhaust_msg, value_position, ctx)?;
         // Class 5: a BOTTOM arm — a return-only arm, a bare `nil`, or
         // `panic(...)` (which lowers to `rt_panic` typed `TypeId::NIL`) —
         // does not contribute a value to the match join. Using its type as
@@ -922,8 +1085,17 @@ impl Lowerer {
             && else_branch.ty != TypeId::ANY
             && self.weak_arm_matches_sibling(&then_branch, then_ty, else_branch.ty)
             && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
-        let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
         self.reject_uninferred_join(&then_branch, Some(&else_branch), ctx)?;
+        let mut result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
+        // A statement-form match discards its value: its arms are not joined.
+        if value_position {
+            let then_label = format!("the arm at line {}", arm.span.line);
+            let rest_label = match remaining_arms.first() {
+                Some(next) => format!("the arm(s) from line {}", next.span.line),
+                None => "the fall-through".to_string(),
+            };
+            self.join_value_arms(&mut then_branch, &mut else_branch, &mut result_ty, (&then_label, &rest_label), ctx)?;
+        }
 
         Ok(HirExpr {
             kind: HirExprKind::If {

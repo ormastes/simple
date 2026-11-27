@@ -417,3 +417,112 @@ fn option_wrapped_empty_literal_never_adopts_sibling_of_other_collection_kind() 
         }
     }
 }
+
+// (C) disagreeing siblings: the first concrete arm's type used to win and the
+// sibling arm was read through it as garbage. Safe code now gets a type error
+// naming both arm types; int vs float is the one typed join (int -> float).
+fn join_error(source: &str) -> String {
+    match parse_and_lower(source) {
+        Ok(_) => panic!("must not lower:\n{source}"),
+        Err(e) => e.to_string(),
+    }
+}
+
+#[test]
+fn disagreeing_value_arms_are_a_type_error_in_safe_code() {
+    for (expression, then_ty, else_ty) in [
+        ("if c: 1 else: \"a\"", "`i64`", "`text`"),
+        ("if c: {} else: 5", "`Dict`", "`i64`"),
+        ("if c: [] else: \"txt\"", "`[", "`text`"),
+        ("if c: [] else: d", "`[", "`Dict<text, i64>`"),
+        ("if c: true else: 0", "`bool`", "`i64`"),
+        ("if c: xs else: ys", "`[f64]`", "`[i64]`"),
+        ("if c: [1] else: names", "`[i64]`", "`[text]`"),
+    ] {
+        let source = format!(
+            "fn probe(c: bool, xs: [f64], ys: [i64], names: [text], d: Dict<text, i64>) -> i64:\n    val r = {expression}\n    0\n"
+        );
+        let msg = join_error(&source);
+        assert!(msg.contains(crate::hir::LOWERING_TYPE_ERROR_TAG), "{expression}: {msg}");
+        assert!(msg.contains("value arms disagree in `probe` (fn at line 1)"), "{expression}: {msg}");
+        assert!(msg.contains(&format!("the then-arm is {then_ty}")), "{expression}: {msg}");
+        assert!(msg.contains(&format!("the else-arm is {else_ty}")), "{expression}: {msg}");
+    }
+}
+
+#[test]
+fn disagreeing_match_arms_name_both_types_and_arm_lines() {
+    let k = "enum K:\n    A\n    B\n    C\n";
+    // probe n1 d1 / d2: `[]`, `[f64]`, `[i64]` in both orders.
+    for (b, c, first, second) in [("xs", "ys", "`[f64]`", "`[i64]`"), ("ys", "xs", "`[i64]`", "`[f64]`")] {
+        let source = format!(
+            "{k}fn d(xs: [f64], ys: [i64], kk: K) -> i64:\n    val r = match kk:\n        case K.A: []\n        case K.B: {b}\n        case K.C: {c}\n    r.len()\n"
+        );
+        let msg = join_error(&source);
+        assert!(msg.contains(&format!("the arm at line 8 is {first} but the arm(s) from line 9 is {second}")), "{msg}");
+    }
+    // probe p_kind k6: `{}` vs `5`.
+    let msg = join_error(&format!("{k}fn k6(kk: K) -> i64:\n    val r = match kk:\n        case K.A: {{}}\n        case _: 5\n    0\n"));
+    assert!(msg.contains("value arms disagree in `k6`") && msg.contains("`i64`"), "{msg}");
+    // `if val` expression form.
+    let msg = join_error("fn o(x: i64?) -> i64:\n    val r = if val Some(v) = x: v else: \"none\"\n    0\n");
+    assert!(msg.contains("the then-arm is `i64` but the else-arm is `text`"), "{msg}");
+}
+
+#[test]
+fn int_and_float_arms_join_to_float_by_converting_the_int_arm() {
+    for (expression, int_is_then) in [("if c: 1.5 else: 2", false), ("if c: n else: x", true)] {
+        let source = format!("fn probe(c: bool, n: i64, x: f64) -> f64:\n    val r = {expression}\n    r\n");
+        let module = parse_and_lower(&source).unwrap();
+        assert_eq!(local_ty(&module, "probe", "r"), Some(HirType::Float { bits: 64 }), "{expression}");
+        let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+        let HirStmt::Let { value: Some(value), .. } = &function.body[0] else { panic!("expected initializer") };
+        let HirExprKind::If { then_branch, else_branch: Some(other), .. } = &value.kind else { panic!("expected conditional") };
+        let (int_arm, float_arm) = if int_is_then { (then_branch, other) } else { (other, then_branch) };
+        assert!(matches!(&int_arm.kind, HirExprKind::Cast { target, .. } if *target == TypeId::F64), "{expression}");
+        assert!(!matches!(&float_arm.kind, HirExprKind::Cast { .. }), "{expression}");
+    }
+    let source = "fn probe(k: i64) -> f64:\n    val r = match k:\n        case 0: 1\n        case 1: 2.5\n        case _: 3\n    r\n";
+    let module = parse_and_lower(source).unwrap();
+    assert_eq!(local_ty(&module, "probe", "r"), Some(HirType::Float { bits: 64 }));
+}
+
+#[test]
+fn value_join_rule_leaves_agreeing_bottom_weak_unsafe_and_statement_forms_alone() {
+    let k = "enum K:\n    A\n    B\nfn p(x: i64) -> i64:\n    x\nfn q(x: i64) -> text:\n    \"q\"\n";
+    for body in [
+        // agreeing / width-only / weak-empty / bottom arms
+        "    val r = if c: xs else: xs\n",
+        "    val r = if c: 1 else: 2\n",
+        "    val r = if c: [] else: xs\n",
+        "    val r = match kk:\n        case K.A: []\n        case _: xs\n",
+        "    val r = if c: 1 else: nil\n",
+        "    val r = match kk:\n        case K.A: return 7\n        case _: \"t\"\n",
+        // an arm that leaves through `continue` yields no value
+        "    for i in [1, 2]:
+        val t = match kk:
+            case K.A: \"t\"
+            case _:
+                xs.len()
+                continue
+",
+        // a statement-form match discards its value: nothing is joined
+        "    match kk:\n        case K.A: p(1)\n        case K.B: q(2)\n",
+        // `unsafe` keeps the untyped join
+        "    unsafe:\n        val r = if c: 1 else: \"a\"\n",
+        "    unsafe:\n        val r = match kk:\n            case K.A: xs\n            case _: [1]\n",
+    ] {
+        let source = format!("{k}fn probe(c: bool, kk: K, xs: [f64]) -> i64:\n{body}    0\n");
+        parse_and_lower(&source).unwrap_or_else(|e| panic!("must lower:\n{body}{e}"));
+    }
+}
+
+#[test]
+fn script_entry_functions_keep_the_untyped_join_and_compiled_entries_do_not() {
+    let source = "fn probe(c: bool) -> i64:\n    val r = if c: 1 else: \"a\"\n    0\n";
+    crate::hir::set_entry_script_mode(true);
+    let script = parse_and_lower(source);
+    crate::hir::set_entry_script_mode(false);
+    script.expect("a script entry function runs on the interpreter and is not checked");
+    assert!(join_error(source).contains("value arms disagree"));
+}

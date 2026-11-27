@@ -305,3 +305,140 @@ type becomes `Option<T>`.
   `if c: Some([7.5]) else: Some(xs)` = 0.0 on r and y); d07/d14/d08/d10 k5 (ill-typed literal
   reassign/push is silent garbage, should be errors); d13 (`-> [i64]?` returning `Some([f64])`
   should be a hard error).
+
+## (C) disagreeing siblings
+
+### Symptom (seed `r` and older)
+
+```simple
+val r = if c: 1 else: "a"          # "{r}" for the else arm: 6225353883777
+val r = if c: 1.5 else: 2          # the int arm read as f64 bits: 0.000...277
+val r = match k:                   # probe p_kind k6
+    case K.A: {}
+    case _: 5                      # "{r}": <value:0x5>
+val r = match k:                   # probe n1 d1 / d2
+    case K.A: []
+    case K.B: xs                   # [f64]
+    case K.C: ys                   # [i64]: r[0] printed 0.000...277 or 6090532272433
+```
+
+No diagnostic, exit 0. The seed type checker does not catch it either:
+`type/src/checker_infer.rs` (`Expr::If`) discards the `unify` result of the two
+branch types, and `Expr::Match` answers a fresh type variable.
+
+### Semantics (owner rule: no ANY in safe code)
+
+The join of two value arms is typed. `ANY` / `[ANY]` is never produced.
+
+1. **int vs float joins to the float type.** This is the one implicit
+   conversion the language already has (mixed arithmetic promotes to float;
+   int -> float widening at declared slots stays implicit, float -> int is
+   error E1003). The int arm is wrapped in a real `Cast` to the float arm's
+   type, so the value is converted, not reinterpreted.
+2. **Any other disagreement is a compile-time type error in safe code**,
+   reported with the existing lowering type-error tag `error[E1003]`, which the
+   run lane never demotes to the interpreter (`jit_failure_must_propagate`).
+   Judged classes: `bool`, int, float, `text`, array, dict. Two arms disagree
+   when their classes differ (`1` vs `"a"`, `{}` vs `5`, `[]` vs `"txt"`,
+   `[]` vs a dict) or when both are concrete arrays whose element types
+   disagree, recursively (`[f64]` vs `[i64]`, `[i64]` vs `[text]`). There is no
+   array promotion: `[i64]` does not become `[f64]`.
+3. **Declared expected types do not relax the rule.** A union annotation
+   (`val r: i64 | text = if c: 1 else: "a"`) printed `<enum@0x...>` on seed `r`:
+   the seed has no typed union join, so the same error is reported. The fix for
+   the user is one arm type (explicit conversion) or an enum wrapping the
+   alternatives. A union-typed join is a named gap, not implemented here.
+4. **Permissive contexts**, both detected at HIR lowering:
+   - `unsafe:` blocks (`ctx.unsafe_depth > 0`) keep the untyped first-arm join.
+   - Script mode. A script is an entry file the run lane hands to the
+     interpreter instead of running as a compiled module: it has top-level
+     statements or examples, or no `main` (`run_file_jit_outcome` in
+     `driver/src/exec_core.rs`; spec-entry synthesis excluded). The driver sets
+     `hir::set_entry_script_mode` for that lowering, and only functions OWNED
+     BY THE ENTRY FILE (`current_function_owner == None`) are exempt. Modules a
+     script imports are safe modules and are still checked. The interpreter
+     evaluates the arms dynamically, so a script prints the right values.
+   The native-build lane never sets script mode: it has no interpreter to give
+   a mixed join dynamic semantics, so the rule is unconditional there.
+
+Left to the existing rules (not judged): bottom arms (`nil`, `panic`, `return`),
+arms whose block ends in a statement (`continue`, `break`, an assignment, a
+statement-form `if`), a weak empty `[]` / `{}` against the same collection
+kind, statement-form `match` (value discarded), and every type whose seed
+typing is not authoritative: ANY, struct, enum, Option, tuple, char, and return
+types borrowed by the untyped-receiver method search
+(`suffix_guessed_return_types`).
+
+### Message
+
+```
+error[E1003] type mismatch: value arms disagree in `d1` (fn at line 65): the arm at
+line 68 is `[f64]` but the arm(s) from line 69 is `[i64]`; give every arm one type
+(convert explicitly, or wrap the alternatives in an enum) -- only `unsafe` code or a
+script may mix arm types
+```
+
+`Expr::If` carries no span, so an `if` is located by its function and that
+function's declaration line plus `the then-arm` / `the else-arm`; a `match`
+also names the arm lines. A function of an imported module is named with its
+module path.
+
+### Known limits
+
+- A block-form `if` whose arm is a statement block ending in a statement
+  `if` / `match` (e.g. `val r = if c:` + indented `match` + `else: "txt"`) is not
+  judged: that arm's value comes from the tail-statement join
+  (`hir_tail_if_value_type`), a separate path.
+- A function's implicit tail (`fn t(c: bool) -> text: if c: 1 else: "a"`, or a
+  tail `match`) is not a join error. It was and still is the untagged
+  `declared return type mismatch`, which drops the module to the interpreter
+  with a `[jit-fallback]` line and prints the right values (same on `r`, `w`).
+- Where the int -> float conversion now lands in existing `src` code was not
+  counted; the sweep only looked for the error.
+- An explicit empty repeat `[0; 0]` lowers to an empty array literal and is
+  treated as weak; `[0; 0]` vs `[f64]` keeps the pre-existing behaviour.
+- Dict key/value disagreement between two concrete dicts is not judged.
+- Sources routed straight to the interpreter (`SIMPLE_EXECUTION_MODE=interpreter`,
+  the forced-interpreter allowlist) are never lowered, so nothing is reported
+  there; this is the pre-existing limit of every lowering type error.
+- `type/src/checker_infer.rs` is unchanged. Its `if` unification result is still
+  discarded; the lowering is the enforcing site because it owns the join type
+  and the unsafe / script context.
+
+### Behaviour change to expect
+
+Programs that printed the right text by accident on seed `r` are now rejected,
+because they are the same ill-typed join as the garbage cases: `[]` vs a dict or
+text (`r.len()`, `"{r}"` happened to work), `[1]` vs `[1.5]` and `[1]` vs `["a"]`
+printed whole (element reads were wrong).
+
+### Sweep of existing code (2026-11-27)
+
+Run with an audit build of the same rule that printed every site instead of
+stopping at the first. Newly rejected sites in `src/`: **none**.
+
+| lane | input | lowered to completion | not verified | value-join sites |
+|---|---|---|---|---|
+| run/JIT, flattened import closure | 1,351 unit specs (first 2 per directory of `test/01_unit/lib` and `test/01_unit/compiler`, plus the 4 named specs) | 1,229 | 122 (99 stopped on an unrelated HIR error, 2 MIR, 3 module load, 18 no verdict) | 0 |
+| `compile`, per file | 7,453 files: all of `src/compiler`, every 3rd `src/lib`, about every 4th `src/app`, every 6th `src/os` | 5,958 | 1,495 hit the 15 s cap on a loaded host (1,169 of them in `src/compiler`) | 0 |
+| `compile` on the final seed, 400 s cap | 22 of those capped `src/compiler` files, one per layer directory | 16 | 6 failed on unrelated semantic errors | 0 |
+
+The audit found one false positive, fixed in the rule before the final build:
+`src/compiler/00.common/data/data_schema_resolver.spl:294,299`, a `match` arm
+that ends in `continue` and so yields no value. Not run: the full bootstrap and
+the rest of `test/01_unit` (9,985 specs; a spec takes 30-200 s through
+`simple test` here). `storage_view_v1_spec`, `parsers_json_core_spec`,
+`if_val_match_diverging_value_type_spec` and `match_empty_array_bug_spec` pass
+through `simple test` on the final seed. Spec files are scripts, so only the
+modules they import are checked.
+
+### Tests
+
+`src/compiler_rust/compiler/src/hir/lower/tests/conditional_empty_array_tests.rs`:
+`disagreeing_value_arms_are_a_type_error_in_safe_code`,
+`disagreeing_match_arms_name_both_types_and_arm_lines`,
+`int_and_float_arms_join_to_float_by_converting_the_int_arm`,
+`value_join_rule_leaves_agreeing_bottom_weak_unsafe_and_statement_forms_alone`,
+`script_entry_functions_keep_the_untyped_join_and_compiled_entries_do_not`.
+Two older pins of an ill-typed join (`[1]` vs `[text]`, `["typed"; 0]` vs `[1]`)
+were removed and the `[]` vs dict pin moved inside `unsafe:`.
