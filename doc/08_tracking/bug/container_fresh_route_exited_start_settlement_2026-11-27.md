@@ -349,7 +349,7 @@ The three stages need installed custody and were not executed.
 5. **The start helper's group kill also kills `conmon`.** A workload that is still running when the
    start helper is reaped loses its monitor and the next engine command fails. Separate record:
    `container_fresh_route_start_helper_kills_conmon_2026-11-27.md`.
-6. **`HOME=/nonexistent`.** The route's broker environment allows only that value, and custody checks
-   the path does not exist. On this host `podman ... ps` with `HOME=/nonexistent` exits 1 with
-   `cannot resolve /nonexistent: lstat /nonexistent: no such file or directory`. Whether the helper
-   sees that value in the guest was not checked.
+6. **`HOME=/nonexistent`.** Checked 2026-11-27: that value is a rule for the broker's inherited
+   environment only. The helpers got an empty environment, so the engine fell back to the account home,
+   which custody requires to be the absent `/nonexistent`. Helpers now get `HOME=<run root>`. Record,
+   measurements and the open guest unit question: `container_fresh_route_helper_home_2026-11-27.md`.
