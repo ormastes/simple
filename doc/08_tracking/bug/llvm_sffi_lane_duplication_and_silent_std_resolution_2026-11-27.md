@@ -16,3 +16,6 @@ Found while fixing the native-build worker JIT demotion
 3. Resolver: bare `std.X` picks the first lane silently (interpreter_module/path_resolution.rs:948-955,
    lane order nogc_async_mut, nogc_sync_mut, ...). It should warn or error when more than one lane
    provides the module, which would have flagged the llvm collision at its source.
+
+4. `scripts/audit/llvm-target-sffi-authority.shs` is unwired and already red at base; it now also drifts on
+   the `pub` qualifiers and the `#![allow(primitive_api)]` header added to the llvm sffi files here.
