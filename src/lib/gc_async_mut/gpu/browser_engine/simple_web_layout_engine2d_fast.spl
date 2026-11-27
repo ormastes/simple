@@ -70,6 +70,7 @@ class SimpleWebLayoutEngine2DExecutionResult:
     # (sans-serif/16px), so the reported identity and pixel size describe the
     # default face rather than the document's. Consumers gate on this FIRST.
     render_degraded: bool
+    resolved_backend: text
     vector_font_identity: text
     vector_font_pixel_size: i32
     vector_font_execution_target: text
@@ -495,7 +496,7 @@ fn _simple_web_layout_execute_draw_ir_composition(
     width: i32, height: i32, backend_name: text,
     image_resources: [SimpleOsHostGpuImageResource]
 ) -> SimpleWebLayoutEngine2DExecutionResult:
-    val render = _simple_web_layout_render_draw_ir_composition(
+    val (render, engine_backend) = _simple_web_layout_render_draw_ir_composition_with_backend(
         composition, width, height, backend_name, image_resources)
     # A caller that asked for an accelerated backend and got its pixels back
     # from a CPU fallback surface received a DEMOTED frame. Before 2026-08-02
@@ -517,12 +518,21 @@ fn _simple_web_layout_execute_draw_ir_composition(
         render.glass_backend_handle,
         render.glass_device_identity
     )
+    val actual_backend = if lane_demoted:
+        "software"
+    elif render.fallback_required and render.selected_backend != "":
+        render.selected_backend
+    elif engine_backend != "":
+        engine_backend
+    else:
+        backend_name
     SimpleWebLayoutEngine2DExecutionResult(
         render: render, material_fallback: material_fallback,
         # Captured AFTER the layout/style pass has run, so it reflects any
         # budget break in that pass; the vector_font_* fields below are only
         # trustworthy when this is false.
         render_degraded: simple_web_layout_last_render_degraded() or lane_demoted,
+        resolved_backend: actual_backend,
         vector_font_identity: render.font_identity,
         vector_font_pixel_size:
             _simple_web_draw_ir_last_text_font_pixel_size(
@@ -537,11 +547,12 @@ fn _simple_web_layout_execute_draw_ir_composition(
         vector_font_device_executed: render.font_device_executed,
         vector_font_promotion_ready: render.font_promotion_ready)
 
-fn _simple_web_layout_render_draw_ir_composition(
+fn _simple_web_layout_render_draw_ir_composition_with_backend(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text, image_resources: [SimpleOsHostGpuImageResource]
-) -> Engine2dDrawIrAdvResult:
+) -> (Engine2dDrawIrAdvResult, text):
     var slot = _web_fast_engine_acquire(width, height, backend_name)
+    val engine_backend = slot.engine.backend_name()
     slot.engine.clear(0u32)
     var images: [Engine2dResolvedDrawIrImage] = []
     for image in image_resources:
@@ -552,6 +563,15 @@ fn _simple_web_layout_render_draw_ir_composition(
         slot.engine, composition, true, images
     )
     _web_fast_engine_release(slot, width, height, backend_name)
+    (render, engine_backend)
+
+fn _simple_web_layout_render_draw_ir_composition(
+    composition: DrawIrComposition, width: i32, height: i32,
+    backend_name: text, image_resources: [SimpleOsHostGpuImageResource]
+) -> Engine2dDrawIrAdvResult:
+    val (render, _engine_backend) = _simple_web_layout_render_draw_ir_composition_with_backend(
+        composition, width, height, backend_name, image_resources
+    )
     render
 
 fn _simple_web_layout_draw_ir_once(
@@ -1527,7 +1547,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             readback: engine2d_readback([], "unavailable"),
             material_fallback: WebRenderMaterialFallbackProvenance.none(),
             render_degraded: false,
-            resolved_backend: backend_name,
+            resolved_backend: "",
             vector_font_identity: "", vector_font_pixel_size: 0,
             vector_font_execution_target: "", vector_font_batch_identity: "",
             vector_font_readback_source: "", vector_font_device_checksum: 0,
@@ -1544,7 +1564,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             readback: engine2d_readback([], "unavailable"),
             material_fallback: execution.material_fallback,
             render_degraded: execution.render_degraded,
-            resolved_backend: backend_name,
+            resolved_backend: execution.resolved_backend,
             vector_font_identity: execution.vector_font_identity,
             vector_font_pixel_size: execution.vector_font_pixel_size,
             vector_font_execution_target: execution.vector_font_execution_target,
@@ -1564,7 +1584,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
     SimpleWebLayoutEngine2DReadbackResult(
         readback: readback, material_fallback: execution.material_fallback,
         render_degraded: execution.render_degraded,
-        resolved_backend: backend_name,
+        resolved_backend: execution.resolved_backend,
         vector_font_identity: execution.vector_font_identity,
         vector_font_pixel_size: execution.vector_font_pixel_size,
         vector_font_execution_target: execution.vector_font_execution_target,

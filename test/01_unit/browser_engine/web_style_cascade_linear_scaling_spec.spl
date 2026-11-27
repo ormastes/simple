@@ -1,0 +1,187 @@
+# Purpose and audience: executable regression and linear-scaling unit spec for
+# doc/08_tracking/bug/web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md.
+# Verifies exact style semantics across #text fast-path, leaf-bypassed inherit/
+# ancestor tracking, single/multi-rule batch caching, flag-gated cascade checks,
+# and O(N) whitespace-sibling pruning without quadratic per-node regressions.
+# @req REQ-SSPEC-LIB
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 80%
+# @tag: unit, browser_engine, style, perf
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    parse_html, extract_css_vw, build_child_index, compute_styles
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    web_style_cascade_memo_hits
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    web_argb,
+    simple_web_layout_last_render_degraded,
+    simple_web_layout_clear_render_degraded
+}
+
+fn _find_node_by_id(nodes, id: text) -> i32:
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].id_attr == id:
+            return i as i32
+        i = i + 1
+    -1
+
+fn _synthetic_cards_html(card_count: i32) -> text:
+    val css = (
+        "body {{ margin: 0; font-size: 16px; }} " +
+        ".grid {{ display: flex; }} " +
+        ".card {{ display: block; width: 120px; padding: 4px; margin: 2px; background-color: #ddeeff; overflow: hidden; }} " +
+        ".card .badge {{ display: inline-flex; color: #112233; font-size: 12px; }} " +
+        ".card .desc {{ margin-top: 2px; color: #334455; }} " +
+        ".unused1 {{ color: #111111; }} .unused2 {{ color: #222222; }} .unused3 {{ color: #333333; }} " +
+        ".unused4 {{ color: #444444; }} .unused5 {{ color: #555555; }} .unused6 {{ color: #666666; }} " +
+        ".unused7 {{ writing-mode: vertical-rl; }} .unused8 {{ empty-cells: hide; }}"
+    )
+    var parts: [text] = []
+    var i = 0
+    while i < card_count:
+        parts.push("<div class=\"card\"><span class=\"badge\">tag</span><p class=\"desc\">item</p></div>")
+        i = i + 1
+    "<!doctype html><html><head><style>" + css + "</style></head><body><div class=\"grid\">" + parts.join("") + "</div></body></html>"
+
+describe "Web style producer linear cascade and semantic preservation":
+    it "AC-1: preserves exact cascade semantics across text, nested lists, overflow, display, empty-cells, and disclosure":
+        step("Build HTML exercising #text inheritance, nested lists, closed <details>, overflow, empty-cells, links, and inline-flex")
+        val html = (
+            "<!doctype html><html><head><style>" +
+            "body {{ font-size: 20px; color: #102030; }} " +
+            ".box {{ display: inline-flex; overflow: hidden; writing-mode: horizontal-tb; background: #aabbcc; }} " +
+            "table {{ border-collapse: separate; }} " +
+            "td.ec {{ empty-cells: hide; background: #ff0000; }} " +
+            "input.ap {{ -webkit-appearance: none; appearance: none; }} " +
+            "</style></head><body>" +
+            "<div id=\"box\" class=\"box\"><span id=\"txt_wrap\">hello</span></div>" +
+            "<a id=\"plain_a\">nohref</a><a id=\"href_a\" href=\"#x\">withhref</a>" +
+            "<ul id=\"u1\"><li><ul><li id=\"nested_li\"><ul id=\"u2\"><li>x</li></ul></li></ul></li></ul>" +
+            "<details id=\"det\"><summary id=\"sum\">s</summary><div id=\"hid\">hidden</div></details>" +
+            "<table><tr><td id=\"empty_td\" class=\"ec\"></td><td id=\"full_td\" class=\"ec\">hi</td></tr></table>" +
+            "<input id=\"inp\" class=\"ap\" type=\"text\">" +
+            "</body></html>"
+        )
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 800, false)
+        val cidx = build_child_index(nodes)
+        val styles = compute_styles(nodes, rules, cidx, false, false, 800, 600)
+
+        val box_i = _find_node_by_id(nodes, "box")
+        val txt_wrap_i = _find_node_by_id(nodes, "txt_wrap")
+        val txt_i = cidx.first_child[txt_wrap_i]
+        val plain_a_i = _find_node_by_id(nodes, "plain_a")
+        val href_a_i = _find_node_by_id(nodes, "href_a")
+        val u1_i = _find_node_by_id(nodes, "u1")
+        val u2_i = _find_node_by_id(nodes, "u2")
+        val hid_i = _find_node_by_id(nodes, "hid")
+        val empty_td_i = _find_node_by_id(nodes, "empty_td")
+        val full_td_i = _find_node_by_id(nodes, "full_td")
+        val inp_i = _find_node_by_id(nodes, "inp")
+
+        expect(styles[box_i].overflow_hidden).to_equal(true)
+        expect(styles[box_i].display_inline_flex_authored).to_equal(true)
+        expect(styles[txt_i].font_size).to_equal(20)
+        expect(styles[txt_i].fg).to_equal(web_argb(16, 32, 48))
+        expect(styles[plain_a_i].text_decoration_underline).to_equal(false)
+        expect(styles[href_a_i].text_decoration_underline).to_equal(true)
+        expect(styles[u1_i].margin_t).to_equal(20)
+        expect(styles[u2_i].margin_t).to_equal(0)
+        expect(styles[hid_i].display).to_equal("none")
+        expect(styles[empty_td_i].bg).to_equal(0u32)
+        expect(styles[full_td_i].bg).to_equal(web_argb(255, 0, 0))
+        expect(styles[inp_i].appearance_none).to_equal(true)
+
+    it "AC-2: hides whitespace-only #text siblings across long hidden-element runs in linear time":
+        var parts: [text] = []
+        var hidden_divs: [text] = []
+        var i = 0
+        while i < 120:
+            parts.push("   <div style=\"display:none\"></div>")
+            hidden_divs.push("<div style=\"display:none\"></div>")
+            i = i + 1
+        val html = (
+            "<!doctype html><html><body>" +
+            "<div id=\"p\"><p>start</p>" + parts.join("") + "<p>end</p></div>" +
+            "<div id=\"q\"><span>a</span> " + hidden_divs.join("") + "<p>end</p></div>" +
+            "</body></html>"
+        )
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 800, false)
+        val cidx = build_child_index(nodes)
+        val styles = compute_styles(nodes, rules, cidx, false, false, 800, 600)
+        val p_i = _find_node_by_id(nodes, "p")
+        var ws_count = 0
+        var hidden_ws_count = 0
+        var c = cidx.first_child[p_i]
+        while c >= 0:
+            if nodes[c].tag == "#text" and nodes[c].text_trimmed == "":
+                ws_count = ws_count + 1
+                if styles[c].display == "none":
+                    hidden_ws_count = hidden_ws_count + 1
+            c = cidx.next_sibling[c]
+        expect(ws_count).to_equal(120)
+        expect(hidden_ws_count).to_equal(120)
+        val q_i = _find_node_by_id(nodes, "q")
+        var q_ws = 0
+        var q_hidden_ws = 0
+        var qc = cidx.first_child[q_i]
+        while qc >= 0:
+            if nodes[qc].tag == "#text" and nodes[qc].text_trimmed == "":
+                q_ws = q_ws + 1
+                if styles[qc].display == "none":
+                    q_hidden_ws = q_hidden_ws + 1
+            qc = cidx.next_sibling[qc]
+        expect(q_ws).to_equal(1)
+        expect(q_hidden_ws).to_equal(1)
+
+    it "AC-3: scales sub-quadratically from 80 to 320 multi-rule DOM cards with cascade memo hits":
+        val html_small = _synthetic_cards_html(80)
+        val nodes_s = parse_html(html_small)
+        val rules_s = extract_css_vw(html_small, 800, false)
+        val cidx_s = build_child_index(nodes_s)
+
+        val html_large = _synthetic_cards_html(320)
+        val nodes_l = parse_html(html_large)
+        val rules_l = extract_css_vw(html_large, 800, false)
+        val cidx_l = build_child_index(nodes_l)
+
+        val clock = default_frame_clock()
+        simple_web_layout_clear_render_degraded()
+        val t0 = clock.now_micros()
+        val styles_s = compute_styles(nodes_s, rules_s, cidx_s, false, false, 800, 600)
+        val dt_small = clock.now_micros() - t0
+        expect(simple_web_layout_last_render_degraded()).to_equal(false)
+
+        simple_web_layout_clear_render_degraded()
+        val t1 = clock.now_micros()
+        val styles_l = compute_styles(nodes_l, rules_l, cidx_l, false, false, 800, 600)
+        val dt_large = clock.now_micros() - t1
+        val hits_large = web_style_cascade_memo_hits()
+
+        expect(simple_web_layout_last_render_degraded()).to_equal(false)
+        expect(hits_large).to_be_greater_than(100)
+        expect(styles_s.len()).to_equal(nodes_s.len())
+        expect(styles_l.len()).to_equal(nodes_l.len())
+        # Verify first and last .card receive identical styles
+        var first_card = -1
+        var last_card = -1
+        var k = 0
+        while k < nodes_l.len():
+            if nodes_l[k].class_attr == "card":
+                if first_card < 0:
+                    first_card = k as i32
+                last_card = k as i32
+            k = k + 1
+        expect(first_card >= 0 and last_card > first_card).to_equal(true)
+        expect(styles_l[first_card].bg).to_equal(web_argb(221, 238, 255))
+        expect(styles_l[last_card].bg).to_equal(styles_l[first_card].bg)
+        expect(styles_l[last_card].overflow_hidden).to_equal(true)
+        # 4x more cards (320 vs 80) must scale well below quadratic (16x)
+        val linear_ceiling = dt_small * 10 + 250000
+        print "[style-scale] nodes_s={nodes_s.len()} dt_small_us={dt_small} nodes_l={nodes_l.len()} dt_large_us={dt_large} memo_hits={hits_large}"
+        expect(dt_large <= linear_ceiling).to_equal(true)
