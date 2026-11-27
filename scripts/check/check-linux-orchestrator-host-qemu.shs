@@ -1,0 +1,483 @@
+#!/bin/sh
+set -eu
+
+# Enrolled-Linux-Host guest for the Simple orchestrator system specs.
+#
+# Usage:
+#   sh scripts/check/check-linux-orchestrator-host-qemu.shs --smoke            # boot + SSH + arch/firmware proof
+#   sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision        # podman, systemd unit, fixture state (idempotent)
+#   sh scripts/check/check-linux-orchestrator-host-qemu.shs --prove            # print the fixture proof as root
+#   sh scripts/check/check-linux-orchestrator-host-qemu.shs --run-specs BIN    # copy BIN + source, run the 4 specs as root
+#   sh scripts/check/check-linux-orchestrator-host-qemu.shs --ssh CMD...
+#   sh scripts/check/check-linux-orchestrator-host-qemu.shs --stop
+#
+# Guest: Ubuntu 24.04 arm64 cloud image under KVM, booted through real
+# EDK2/AAVMF pflash firmware (never `-kernel`). Same shape as
+# check-linux-riscv64-bootstrap-qemu.shs: a cloud-init NoCloud seed ISO built
+# from the host SSH public key, a pristine sha256-verified base image and
+# qcow2 overlays, SSH forwarded on 127.0.0.1 only. The guest user has
+# passwordless sudo INSIDE the guest; nothing on the host needs sudo.
+#
+# Overlay chain (all under build/linux-orch-guest/, gitignored):
+#   base/ubuntu-24.04-server-cloudimg-arm64.img   pristine, sha256-verified
+#   provisioned.qcow2  -> base   --smoke/--provision; kept as reusable base
+#   run.qcow2          -> provisioned   recreated by every --run-specs, because the
+#                     enrollment credential is one-use and stores must be fresh.
+#
+# Env knobs (defaults):
+#   QEMU_CPUS=8  QEMU_MEM=8G (hard cap 8 / 8G)  QEMU_DISK=40G  QEMU_PORT=2225
+#   QEMU_USER=simple  QEMU_SSH_TIMEOUT=600
+#   QEMU_SSH_PRIVATE_KEY=~/.ssh/id_ed25519_fbsd_qemu (falls back to ~/.ssh/id_ed25519)
+#   QEMU_EFI_CODE / QEMU_EFI_VARS  (default ~/.local/share/qemu/edk2-aarch64-code.fd + edk2-arm-vars.fd)
+#   ORCH_GUEST_DIR=$ROOT/build/linux-orch-guest
+#   ORCH_UBUNTU_RELEASE=24.04  ORCH_IMAGE_URL / ORCH_SHA256SUMS_URL override
+#   ORCH_HOST_EXEC   ExecStart target written into the Host unit drop-in (see below)
+#
+# Known limit, stated rather than hidden: the provision-startup preflight
+# requires the installed Host unit's MainPID to be the spec process itself.
+# --run-specs runs `simple test` over SSH as root, so that case needs the
+# supervised AOT route (doc/07_guide/infra/testing/native_test_binary_workflow.md):
+# set ORCH_HOST_EXEC to the staged spec executable and start the unit.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+QEMU_CPUS="${QEMU_CPUS:-8}"
+QEMU_MEM="${QEMU_MEM:-8G}"
+QEMU_DISK="${QEMU_DISK:-40G}"
+QEMU_PORT="${QEMU_PORT:-2225}"
+QEMU_USER="${QEMU_USER:-simple}"
+QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-600}"
+QEMU_BIN="${QEMU_SYSTEM_AARCH64:-$(command -v qemu-system-aarch64 || printf '%s' "${HOME}/.local/bin/qemu-system-aarch64")}"
+QEMU_EFI_CODE="${QEMU_EFI_CODE:-${HOME}/.local/share/qemu/edk2-aarch64-code.fd}"
+QEMU_EFI_VARS="${QEMU_EFI_VARS:-${HOME}/.local/share/qemu/edk2-arm-vars.fd}"
+VM_DIR="${ORCH_GUEST_DIR:-${ROOT_DIR}/build/linux-orch-guest}"
+REL="${ORCH_UBUNTU_RELEASE:-24.04}"
+IMG_NAME="ubuntu-${REL}-server-cloudimg-arm64.img"
+IMG_URL="${ORCH_IMAGE_URL:-https://cloud-images.ubuntu.com/releases/${REL}/release/${IMG_NAME}}"
+SUMS_URL="${ORCH_SHA256SUMS_URL:-https://cloud-images.ubuntu.com/releases/${REL}/release/SHA256SUMS}"
+if [ -n "${QEMU_SSH_PRIVATE_KEY:-}" ]; then KEY="$QEMU_SSH_PRIVATE_KEY"
+elif [ -f "${HOME}/.ssh/id_ed25519_fbsd_qemu" ]; then KEY="${HOME}/.ssh/id_ed25519_fbsd_qemu"
+else KEY="${HOME}/.ssh/id_ed25519"; fi
+BASE="${VM_DIR}/base/${IMG_NAME}"
+PROVISIONED="${VM_DIR}/provisioned.qcow2"
+RUN_OVERLAY="${VM_DIR}/run.qcow2"
+SEED_ISO="${VM_DIR}/cloudinit-seed.iso"
+VARS="${VM_DIR}/efi-vars.fd"
+PIDFILE="${VM_DIR}/qemu.pid"
+SERIAL="${VM_DIR}/serial.log"
+MARKER=/var/lib/simple-orch-guest/provisioned.v1
+GUEST_ENV=/etc/simple/orchestrator-host.env
+
+say() { printf 'linux-orch-guest: %s\n' "$*"; }
+die() { printf 'linux-orch-guest: FAIL — %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing host tool: $1"; }
+
+ssh_vm() {
+    ssh -i "$KEY" -p "$QEMU_PORT" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+        "${QEMU_USER}@127.0.0.1" "$@"
+}
+
+vm_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+
+check_limits() {
+    case "$QEMU_CPUS" in ''|*[!0-9]*) die "QEMU_CPUS must be an integer";; esac
+    [ "$QEMU_CPUS" -le 8 ] || die "QEMU_CPUS=$QEMU_CPUS exceeds the 8 vCPU cap"
+    case "$QEMU_MEM" in [1-8]G) ;; *) die "QEMU_MEM=$QEMU_MEM must be 1G..8G";; esac
+    avail=$(free -g | awk '/^Mem:/ { print $7 }')
+    [ "${avail:-0}" -ge 12 ] || die "only ${avail}G host memory available; refusing to start an ${QEMU_MEM} guest"
+}
+
+do_image() {
+    need qemu-img; need xorriso; need sha256sum
+    mkdir -p "${VM_DIR}/base"
+    if [ ! -f "$BASE" ]; then
+        need curl
+        say "downloading $IMG_URL"
+        curl -fL --retry 3 -o "${BASE}.part" "$IMG_URL" || die "download failed: $IMG_URL"
+        mv -f "${BASE}.part" "$BASE"
+    fi
+    if [ ! -s "${BASE}.sha256" ]; then
+        need curl
+        curl -fsSL "$SUMS_URL" | awk -v n="*${IMG_NAME}" '$2 == n || $2 == substr(n,2) { print $1 }' > "${BASE}.sha256"
+    fi
+    want=$(cat "${BASE}.sha256")
+    [ -n "$want" ] || die "no SHA256 for ${IMG_NAME} in ${SUMS_URL}"
+    got=$(sha256sum "$BASE" | awk '{print $1}')
+    [ "$got" = "$want" ] || die "base image sha256 mismatch: got=$got want=$want"
+    say "base verified sha256=$got"
+    [ -f "${KEY}.pub" ] || die "missing SSH public key ${KEY}.pub"
+    ci="${VM_DIR}/cidata"; mkdir -p "$ci"
+    printf 'instance-id: simple-orch-host\nlocal-hostname: simple-orch-host\n' > "${ci}/meta-data"
+    cat > "${ci}/user-data" <<EOF
+#cloud-config
+hostname: simple-orch-host
+users:
+  - name: ${QEMU_USER}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - $(cat "${KEY}.pub")
+ssh_pwauth: false
+EOF
+    # Same NoCloud seed recipe as check-freebsd-bootstrap-qemu.shs (xorriso branch).
+    xorriso -as mkisofs -o "$SEED_ISO" -volid cidata -joliet -rock \
+        "${ci}/user-data" "${ci}/meta-data" >/dev/null 2>&1 || die "seed ISO build failed"
+    if [ ! -f "$PROVISIONED" ]; then
+        qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$PROVISIONED" "$QEMU_DISK"
+        say "overlay $PROVISIONED ($QEMU_DISK) over pristine base"
+    fi
+}
+
+# $1 = disk image to boot
+do_start() {
+    disk="${1:-$PROVISIONED}"
+    [ -x "$QEMU_BIN" ] || die "missing $QEMU_BIN"
+    [ -r "$QEMU_EFI_CODE" ] || die "missing EFI code $QEMU_EFI_CODE"
+    [ -r "$QEMU_EFI_VARS" ] || die "missing EFI vars template $QEMU_EFI_VARS"
+    [ -c /dev/kvm ] || die "no /dev/kvm"
+    [ -f "$disk" ] || do_image
+    if vm_running; then say "already running pid=$(cat "$PIDFILE")"; return 0; fi
+    check_limits
+    if ss -ltnH "sport = :${QEMU_PORT}" | grep -q .; then die "port ${QEMU_PORT} already in use"; fi
+    free_gb=$(df -Pk "$VM_DIR" | awk 'NR==2 { print int($4 / 1048576) }')
+    [ "$free_gb" -ge "${QEMU_MIN_FREE_GB:-20}" ] || die "only ${free_gb}G free under $VM_DIR"
+    [ -f "$VARS" ] || cp "$QEMU_EFI_VARS" "$VARS"
+    "$QEMU_BIN" -machine virt,gic-version=host -accel kvm -cpu host \
+        -smp "$QEMU_CPUS" -m "$QEMU_MEM" \
+        -drive if=pflash,format=raw,unit=0,readonly=on,file="$QEMU_EFI_CODE" \
+        -drive if=pflash,format=raw,unit=1,file="$VARS" \
+        -drive if=none,id=hd0,file="$disk",format=qcow2,cache=writeback,discard=unmap,werror=report,rerror=report \
+        -device virtio-blk-pci,drive=hd0 \
+        -drive if=none,id=ci,file="$SEED_ISO",format=raw,readonly=on \
+        -device virtio-blk-pci,drive=ci \
+        -netdev user,id=n0,hostfwd=tcp:127.0.0.1:"$QEMU_PORT"-:22 \
+        -device virtio-net-pci,netdev=n0 -device virtio-rng-pci \
+        -display none -serial file:"$SERIAL" -daemonize -pidfile "$PIDFILE"
+    say "started pid=$(cat "$PIDFILE") disk=$disk cpus=$QEMU_CPUS mem=$QEMU_MEM ssh=127.0.0.1:$QEMU_PORT"
+    t=0
+    until ssh_vm true 2>/dev/null; do
+        vm_running || die "qemu exited during boot; see $SERIAL"
+        [ "$t" -ge "$QEMU_SSH_TIMEOUT" ] && die "no SSH after ${QEMU_SSH_TIMEOUT}s; see $SERIAL"
+        sleep 5; t=$((t + 5))
+    done
+    ssh_vm 'cloud-init status --wait >/dev/null 2>&1 || true'
+    say "ssh up after ~${t}s"
+}
+
+do_stop() {
+    vm_running || { say "not running"; rm -f "$PIDFILE"; return 0; }
+    pid=$(cat "$PIDFILE")
+    ssh_vm 'sudo systemctl poweroff' 2>/dev/null || true
+    t=0; while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 120 ]; do sleep 2; t=$((t + 2)); done
+    kill -0 "$pid" 2>/dev/null && kill "$pid"
+    rm -f "$PIDFILE"; say "stopped pid=$pid"
+}
+
+do_smoke() {
+    do_image; do_start "$PROVISIONED"
+    arch=$(ssh_vm uname -m); cpus=$(ssh_vm nproc)
+    [ "$arch" = aarch64 ] || die "guest arch=$arch"
+    [ "$cpus" = "$QEMU_CPUS" ] || die "guest nproc=$cpus want=$QEMU_CPUS"
+    ssh_vm 'test -d /sys/firmware/efi' || die "guest did not boot through UEFI firmware"
+    ssh_vm 'sudo -n true' || die "passwordless sudo missing in guest"
+    printf 'PASS — linux-orch-guest up: arch=%s nproc=%s kernel=%s efi=yes sudo=nopasswd\n' \
+        "$arch" "$cpus" "$(ssh_vm uname -r)"
+}
+
+# Guest-side provisioning, run as root. Idempotent through $MARKER.
+guest_provision_script() {
+    cat <<'GUEST'
+set -eu
+MARKER=/var/lib/simple-orch-guest/provisioned.v1
+if [ -f "$MARKER" ]; then echo "already provisioned: $(cat "$MARKER")"; exit 0; fi
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q
+apt-get install -y -q podman uidmap slirp4netns fuse-overlayfs dbus-user-session openssl acl rsync >/dev/null
+
+# Static rootless Podman service account with subordinate ID ranges.
+SVC=simple-host; SVC_UID=950; SVC_GID=950
+getent group "$SVC" >/dev/null || groupadd --system --gid "$SVC_GID" "$SVC"
+getent passwd "$SVC" >/dev/null || useradd --system --uid "$SVC_UID" --gid "$SVC_GID" \
+    --home-dir /var/lib/simple-host --create-home --shell /usr/sbin/nologin "$SVC"
+grep -q "^${SVC}:" /etc/subuid || echo "${SVC}:200000:65536" >> /etc/subuid
+grep -q "^${SVC}:" /etc/subgid || echo "${SVC}:200000:65536" >> /etc/subgid
+
+# cgroup v2 is required.
+[ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ] || { echo "cgroup v2 missing"; exit 1; }
+
+# Podman services the profile names stay masked and never started; the
+# service account's user manager is masked so nothing activates Podman.
+systemctl mask podman.service podman.socket simple-podman.service simple-podman.socket "user@${SVC_UID}.service" >/dev/null 2>&1
+
+# Canonical directories (root-owned, not group/world writable).
+install -d -o root -g root -m 0755 /etc/simple /etc/simple/container
+install -d -o root -g root -m 0755 /var/lib/simple
+install -d -o root -g root -m 0711 /var/lib/simple/container
+install -d -o "$SVC" -g "$SVC" -m 0700 /var/lib/simple-host/podman /var/lib/simple-host/podman/graph
+install -d -o root -g root -m 0755 /opt/simple /opt/simple/host
+F=/srv/simple-fixture
+install -d -o root -g root -m 0711 "$F"
+install -d -o root -g "$SVC" -m 0750 "$F/input" "$F/machine-parent" "$F/machine-parent/dispatch" "$F/installer-parent"
+install -d -o root -g "$SVC" -m 0750 "$F/attach-v6" "$F/caret-ssh"
+install -d -o root -g "$SVC" -m 0750 "$F/key-store"
+install -d -o "$SVC" -g "$SVC" -m 0700 "$F/output-store" "$F/output-store/journal"
+
+# Protected signing keys, generated in the guest; private halves 0600.
+for role in issuer approver; do
+    if [ ! -f "$F/key-store/${role}.ed25519.pem" ]; then
+        openssl genpkey -algorithm ed25519 -out "$F/key-store/${role}.ed25519.pem"
+        openssl pkey -in "$F/key-store/${role}.ed25519.pem" -pubout -out "$F/key-store/${role}.ed25519.pub.pem"
+    fi
+done
+chown root:"$SVC" "$F"/key-store/*; chmod 0640 "$F"/key-store/*.pem; chmod 0600 "$F"/key-store/*.ed25519.pem
+chmod 0644 "$F"/key-store/*.pub.pem
+
+MID=$(cat /etc/machine-id)
+PODMAN=$(command -v podman); PODMAN_SHA=$(sha256sum "$PODMAN" | awk '{print $1}')
+UNIT=simple-orchestrator-host.service
+
+# Profile skeletons: field names are exactly the decoder key sets in
+# machine_policy_v1.spl, linux_fresh_epoch_v1.spl and
+# linux_installed_supervisor_profile_v1.spl. Digest fields that require the
+# canonical Simple encoder are AUTHOR_WITH_SIMPLE until a self-hosted binary
+# rewrites them; these files are NOT decoder-validated.
+cat > /etc/simple/container/machine-policy.sdn <<EOF
+version: 1
+kind: "machine-container-policy"
+authorityId: "fixture-authority"
+physicalHostId: "simple-orch-host"
+nativeMachineId: "${MID}"
+mode: "standalone"
+managedAuthorityId: ""
+managedAuthorityPolicyDigest: ""
+cpuMillis: 8000
+memoryBytes: 8589934592
+providers: [{backend: "linux-podman", identityDigest: "${PODMAN_SHA}", policyBytes: ""}]
+localPrincipals: ["${SVC}"]
+EOF
+cat > /etc/simple/container/fresh-epoch-profile.sdn <<EOF
+kind: "linux-fresh-epoch-profile"
+version: 1
+epochId: "fixture-epoch-1"
+machinePolicyDigest: "AUTHOR_WITH_SIMPLE"
+serviceName: "${SVC}"
+serviceUid: ${SVC_UID}
+serviceGid: ${SVC_GID}
+subuidStart: 200000
+subuidCount: 65536
+subgidStart: 200000
+subgidCount: 65536
+hostUnit: "${UNIT}"
+providerUnit: "simple-podman.service"
+providerSocketUnit: "simple-podman.socket"
+partitionCgroup: "/sys/fs/cgroup/simple.slice"
+delegatedCgroup: "/sys/fs/cgroup/system.slice/${UNIT}"
+supervisorCgroup: "/sys/fs/cgroup/system.slice/${UNIT}/supervisor"
+partitionCpuMillis: 6000
+partitionMemoryBytes: 6442450944
+reservedCpuMillis: 1000
+reservedMemoryBytes: 1073741824
+outsideCpuMillis: 1000
+outsideMemoryBytes: 1073741824
+providerExecutable: "${PODMAN}"
+providerExecutableSha256: "${PODMAN_SHA}"
+providerPolicyDigest: "AUTHOR_WITH_SIMPLE"
+graphRoot: "/var/lib/simple-host/podman/graph"
+runRoot: "/run/simple-host/podman"
+staticRoot: "/var/lib/simple-host/podman/libpod"
+endpointPath: "/run/simple-host/podman/podman.sock"
+storageDriver: "overlay"
+cgroupManager: "systemd"
+brokerExecutable: "/opt/simple/bin/simple"
+brokerExecutableSha256: "AUTHOR_WITH_SIMPLE"
+EOF
+cat > /etc/simple/container/supervisor-profile.sdn <<EOF
+kind: "linux-installed-supervisor"
+version: 1
+machinePolicyDigest: "AUTHOR_WITH_SIMPLE"
+serviceUid: ${SVC_UID}
+supervisorUnit: "${UNIT}"
+providerUnit: "simple-podman.service"
+activationUnits: ["simple-podman.socket"]
+providerPolicy: "AUTHOR_WITH_SIMPLE"
+closedActivationModel: "masked"
+closedProviderModel: "masked"
+EOF
+chown root:root /etc/simple/container/*.sdn; chmod 0644 /etc/simple/container/*.sdn
+
+# Protected acceptance environment (root:svc 0640, resolvable by the service UID).
+cat > /etc/simple/orchestrator-host.env <<EOF
+SIMPLE_LINUX_PROVISION_ACCEPTANCE_INPUT_DIR=${F}/input
+SIMPLE_LINUX_PROVISION_ACCEPTANCE_DISPATCH_ROOT=${F}/machine-parent/dispatch
+SIMPLE_LINUX_PROVISION_ACCEPTANCE_CONTROLLER=fixture-controller
+SIMPLE_LINUX_PROVISION_ACCEPTANCE_KEY_STORE=${F}/key-store
+SIMPLE_LINUX_PROVISION_ACCEPTANCE_OUTPUT_STORE=${F}/output-store
+SIMPLE_LINUX_PROVISION_ACCEPTANCE_APPROVER=fixture-approver
+SIMPLE_LINUX_ATTACH_V6_READY=${F}/attach-v6/ready.sdn
+SIMPLE_LINUX_ATTACH_V6_ATTACH=${F}/attach-v6/attach.sdn
+SIMPLE_LINUX_ATTACH_V6_INVOKE=${F}/attach-v6/invoke.sdn
+SIMPLE_LINUX_ATTACH_V6_DETACH=${F}/attach-v6/detach.sdn
+SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT=${F}/installer-parent
+SIMPLE_CARET_SSH_ACCEPTANCE_CONFIG=${F}/caret-ssh/config.sdn
+SIMPLE_CARET_SSH_ACCEPTANCE_CONTEXT=${F}/caret-ssh/context.sdn
+SIMPLE_CARET_SSH_ACCEPTANCE_SERVER=${F}/caret-ssh/server.sdn
+SIMPLE_CARET_SSH_ACCEPTANCE_PROFILE=${F}/caret-ssh/profile.sdn
+SIMPLE_CARET_SSH_ACCEPTANCE_REQUEST=${F}/caret-ssh/request.sdn
+EOF
+chown root:"$SVC" /etc/simple/orchestrator-host.env; chmod 0640 /etc/simple/orchestrator-host.env
+
+# Host unit: static account, numeric group, delegated cgroup. Installed but
+# not enabled or started; ExecStart is a drop-in so a staged spec executable
+# can become MainPID.
+cat > /opt/simple/host/host-entry <<'EOF'
+#!/bin/sh
+[ -n "${SIMPLE_HOST_EXEC:-}" ] || { echo "SIMPLE_HOST_EXEC unset" >&2; exit 64; }
+exec $SIMPLE_HOST_EXEC
+EOF
+chmod 0755 /opt/simple/host/host-entry
+cat > /etc/systemd/system/${UNIT} <<EOF
+[Unit]
+Description=Simple orchestrator enrolled Linux Host (acceptance fixture)
+After=network-online.target
+
+[Service]
+Type=exec
+User=${SVC}
+Group=${SVC_GID}
+Delegate=yes
+EnvironmentFile=/etc/simple/orchestrator-host.env
+Environment=SIMPLE_HOST_EXEC=
+ExecStart=/opt/simple/host/host-entry
+NoNewPrivileges=yes
+EOF
+systemctl daemon-reload
+
+# Pre-pull the proof image for root so the spec run needs no network.
+podman pull -q docker.io/library/busybox:1.36 >/dev/null
+
+install -d -m 0700 /var/lib/simple-orch-guest
+printf '%s machine-id=%s podman=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$MID" "$(podman --version)" > "$MARKER"
+echo "provisioned: $(cat "$MARKER")"
+GUEST
+}
+
+guest_prove_script() {
+    cat <<'GUEST'
+set -eu
+echo "== id: $(id -un) uid=$(id -u)"
+echo "== marker: $(cat /var/lib/simple-orch-guest/provisioned.v1)"
+echo "== /etc/simple/container"; ls -l /etc/simple/container
+stat -c '%n %U:%G %a' /etc/simple/container /var/lib/simple/container
+head -5 /etc/simple/container/machine-policy.sdn
+echo "== unit"; systemctl cat simple-orchestrator-host.service | grep -E '^(User|Group|Delegate|EnvironmentFile)='
+echo "unit Delegate property: $(systemctl show -p Delegate simple-orchestrator-host.service)"
+echo "masked: podman.socket=$(systemctl is-enabled podman.socket 2>&1) user@950=$(systemctl is-enabled user@950.service 2>&1)"
+echo "== stores"; stat -c '%n %U:%G %a' /srv/simple-fixture/key-store /srv/simple-fixture/key-store/issuer.ed25519.pem /srv/simple-fixture/output-store/journal
+echo "== podman"; podman --version; podman run --rm docker.io/library/busybox:1.36 true && echo "podman run --rm busybox:1.36 true: rc=0"
+echo "== env file $(stat -c '%U:%G %a' /etc/simple/orchestrator-host.env)"; cat /etc/simple/orchestrator-host.env
+GUEST
+}
+
+do_provision() {
+    vm_running || { do_image; do_start "$PROVISIONED"; }
+    guest_provision_script | ssh_vm 'sudo sh -s' || die "guest provisioning failed"
+    date -u +%Y-%m-%dT%H:%M:%SZ > "${VM_DIR}/provisioned.ok"
+    printf 'PASS — linux-orch-guest provisioned (%s)\n' "$PROVISIONED"
+}
+
+do_prove() {
+    vm_running || do_start "$PROVISIONED"
+    guest_prove_script | ssh_vm 'sudo sh -s'
+}
+
+SPECS="test/03_system/app/orchestrator/feature/host_linux_provision_startup_v3_spec.spl
+test/03_system/app/orchestrator/feature/linux_agent_attachment_v6_spec.spl
+test/03_system/app/orchestrator/feature/caret_configured_ssh_gateway_spec.spl
+test/03_system/tools/linux_service_native_identity_v3_spec.spl"
+
+# Classify one spec log: PASS | FAIL | BLOCKED | ERROR (no verdict line, dropped, inconclusive).
+classify_spec_log() {
+    awk '
+        /SPEC FILE VERDICT:/ { seen = 1; line = $0
+            for (i = 1; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] } }
+        /BLOCKED:/ { blocked = 1 }
+        END {
+            if (!seen) { print "ERROR"; exit }
+            if (v["failed"] + 0 > 0) print "FAIL"
+            else if (blocked) print "BLOCKED"
+            else if (v["dropped"] + 0 > 0 || v["inconclusive"] + 0 > 0 || v["passed"] + 0 == 0) print "ERROR"
+            else print "PASS"
+        }'
+}
+
+do_run_specs() {
+    bin="${1:-}"
+    [ -n "$bin" ] && [ -x "$bin" ] || die "--run-specs needs an executable self-hosted simple binary"
+    vm_running && die "a guest is already running (pid $(cat "$PIDFILE")); --stop it first"
+    # Unattended: provision first if no saved provisioned overlay exists.
+    if [ ! -f "$PROVISIONED" ] || [ ! -f "${VM_DIR}/provisioned.ok" ]; then
+        do_image; do_start "$PROVISIONED"
+        guest_provision_script | ssh_vm 'sudo sh -s' || { do_stop; die "guest provisioning failed"; }
+        do_stop
+        date -u +%Y-%m-%dT%H:%M:%SZ > "${VM_DIR}/provisioned.ok"
+    fi
+    # Fresh throwaway overlay over the provisioned one: the one-use credential
+    # and fresh stores never touch the reusable base.
+    rm -f "$RUN_OVERLAY"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$PROVISIONED" "$RUN_OVERLAY"
+    trap 'do_stop >/dev/null 2>&1 || true' EXIT
+    do_start "$RUN_OVERLAY"
+    ssh_vm "sudo test -f $MARKER" || die "run overlay is not provisioned"
+    ssh_vm 'sudo install -d -m 0755 /opt/simple/bin /opt/simple/src && sudo chown -R "$(id -un)" /opt/simple/src'
+    ssh_vm 'cat > /tmp/simple.bin' < "$bin" || die "binary transfer failed"
+    ssh_vm 'sudo install -o root -g root -m 0755 /tmp/simple.bin /opt/simple/bin/simple && rm -f /tmp/simple.bin'
+    git -C "$ROOT_DIR" archive --format=tar HEAD -- src/lib src/app src/compiler src/compositions test/fixtures \
+        test/03_system/app/orchestrator test/03_system/tools config VERSION \
+        | ssh_vm 'tar -xf - -C /opt/simple/src' || die "source subset transfer failed"
+    ssh_vm 'sudo chown -R root:root /opt/simple/src'
+    out="${VM_DIR}/last-run.txt"; logs="${VM_DIR}/last-run-logs"; rm -rf "$logs"; mkdir -p "$logs"
+    {
+        printf '# linux-orch-guest --run-specs %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '# bin=%s sha256=%s src=%s\n' "$bin" "$(sha256sum "$bin" | awk '{print $1}')" "$(git -C "$ROOT_DIR" rev-parse HEAD)"
+    } > "$out"
+    # Export a path variable only when its fixture content exists (file present
+    # or directory non-empty), so a spec whose signed fixture is not yet
+    # authored reports BLOCKED (pending) instead of a misleading FAIL.
+    ssh_vm "sudo sh -c 'while IFS== read -r k v; do case \"\$v\" in /*) \
+        [ -f \"\$v\" ] || { [ -d \"\$v\" ] && [ -n \"\$(ls -A \"\$v\")\" ]; } || { echo \"# unset \$k (no fixture content)\"; continue; };; esac; \
+        echo \"\$k=\$v\"; done < $GUEST_ENV > $GUEST_ENV.run'"
+    ssh_vm "sudo cat $GUEST_ENV.run" | sed 's/^/# env: /' >> "$out"
+    nfail=0; nerr=0; nblock=0; npass=0
+    for spec in $SPECS; do
+        name=$(basename "$spec" .spl); glog="/var/log/simple-spec-${name}.log"
+        ssh_vm "sudo sh -c 'set -a; . $GUEST_ENV.run; set +a; cd /opt/simple/src && \
+            /opt/simple/bin/simple test $spec --verbose > $glog 2>&1; echo rc=\$? >> $glog'" || true
+        ssh_vm "sudo cat $glog" > "${logs}/${name}.log" 2>/dev/null || true
+        status=$(classify_spec_log < "${logs}/${name}.log")
+        verdict=$(grep -h 'SPEC FILE VERDICT' "${logs}/${name}.log" | tail -1 || true)
+        case "$status" in PASS) npass=$((npass+1));; FAIL) nfail=$((nfail+1));; BLOCKED) nblock=$((nblock+1));; *) nerr=$((nerr+1));; esac
+        printf '%s %s %s\n' "$status" "$spec" "${verdict:-NO SPEC FILE VERDICT LINE ($(tail -1 "${logs}/${name}.log"))}" | tee -a "$out"
+    done
+    summary="pass=$npass fail=$nfail blocked=$nblock error=$nerr"
+    printf 'SUMMARY %s\n' "$summary" | tee -a "$out"
+    do_stop; trap - EXIT
+    say "verdicts in $out; full logs in $logs"
+    [ "$nfail" -eq 0 ] || { printf 'FAIL — %s\n' "$summary"; exit 1; }
+    [ "$nerr" -eq 0 ] || { printf 'ERROR — %s\n' "$summary"; exit 2; }
+    printf 'PASS — %s (BLOCKED specs are not failures)\n' "$summary"
+}
+
+case "${1:-}" in
+    --image) do_image ;;
+    --start) do_start "$PROVISIONED" ;;
+    --smoke) do_smoke ;;
+    --provision) do_provision ;;
+    --prove) do_prove ;;
+    --run-specs) shift; do_run_specs "${1:-}" ;;
+    --ssh) shift; ssh_vm "$@" ;;
+    --stop) do_stop ;;
+    *) sed -n '4,12p' "$0"; exit 2 ;;
+esac

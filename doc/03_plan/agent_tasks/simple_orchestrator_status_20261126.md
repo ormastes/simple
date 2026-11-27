@@ -66,6 +66,52 @@ All evidence below comes from the Rust seed interpreter. It is diagnostic only a
 | Caret SSH gateway / real remote host | Orchestrator verification | A compiled `simple-orchestrator` peer and the `SIMPLE_CARET_SSH_ACCEPTANCE_*` fixture | `bin/simple test test/03_system/app/orchestrator/feature/caret_configured_ssh_gateway_spec.spl` |
 | Shared-API Linux Podman route (workspace, limits, exec/TTY, cleanup) | Container owner (root) | Installed machine policy under `/etc/simple/container` and `/var/lib/simple/container`; no live spec exists yet (`simple_container_api_v2_spec` and `oci_execution_options_effects_spec` cover only argv and refusals) | Author a live spec through `SimpleContainerApiV2` once the policy is installed |
 
+### Enrolled Linux Host guest VM (how-to, 2026-11-27)
+
+A dedicated Ubuntu 24.04 arm64 KVM guest (EDK2 pflash firmware, 8 vCPU / 8G,
+SSH `127.0.0.1:2225`, passwordless sudo inside the guest only) carries the
+OS-level fixture for the Enrolled Linux Host and Caret SSH rows. The wrapper is
+`scripts/check/check-linux-orchestrator-host-qemu.shs`. Resume, unattended,
+once a self-hosted compiler exists:
+
+```sh
+sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision && \
+  sh scripts/check/check-linux-orchestrator-host-qemu.shs --run-specs <self-hosted simple>
+```
+
+- `--run-specs` provisions first when there is no saved overlay. It boots a
+  throwaway `run.qcow2` over `build/linux-orch-guest/provisioned.qcow2`, runs the
+  four specs as root and writes `build/linux-orch-guest/last-run.txt`. Then it
+  shuts the VM down. It exits 1 on a spec FAIL and 2 on a missing or
+  inconclusive verdict. BLOCKED is reported as its own status and exits 0.
+- `--provision` provides the following:
+  - podman 4.9.3 with `busybox:1.36` pre-pulled.
+  - cgroup v2, and the static account `simple-host` (950:950) with subuid and
+    subgid `200000:65536`.
+  - podman, `simple-podman`, the socket units and `user@950.service`, all masked.
+  - `/etc/systemd/system/simple-orchestrator-host.service` with `Delegate=yes`.
+    It is not enabled. `ExecStart` runs `$SIMPLE_HOST_EXEC`.
+  - `/etc/simple/container`, `/var/lib/simple/container`, and the protected key
+    and credential stores under `/srv/simple-fixture`, with ed25519 keys
+    generated in the guest.
+  - `/etc/simple/orchestrator-host.env` with all six
+    `SIMPLE_LINUX_PROVISION_ACCEPTANCE_*`, the four `SIMPLE_LINUX_ATTACH_V6_*`,
+    `SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT` and the five
+    `SIMPLE_CARET_SSH_ACCEPTANCE_*` variables.
+- Still not provided, because each item needs the self-hosted binary and its
+  canonical encoders:
+  - Decoder-valid profiles: the three `/etc/simple/container/*.sdn` files are
+    key-correct skeletons, with digest fields `AUTHOR_WITH_SIMPLE`.
+  - `binding.sdn` and its five pinned inputs.
+  - `authority-policy.sdn` and the dispatch root.
+  - The signed V6 attach/invoke/detach requests.
+  - The signed installer fixture parent.
+  - The Caret SSH packets.
+- `--run-specs` exports a path variable only when its fixture content exists,
+  so these specs report BLOCKED rather than FAIL.
+- The installed-Host MainPID case needs the supervised AOT route. Set
+  `SIMPLE_HOST_EXEC` to the staged spec executable in a unit drop-in.
+
 ## On the release branch
 
 - Linux has an OCI lifecycle provider wired into CI. The Linux Host V4 service
