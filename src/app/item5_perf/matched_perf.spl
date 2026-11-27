@@ -1,0 +1,541 @@
+# Pure-Simple twin of scripts/check/run-item5-matched-app-performance.py.
+# The matched-app benchmark runs after the bootstrap, so it is p3+ and
+# therefore pure Simple (doc/08_tracking/todo/hello_sanity_phase_table_2026-11-27.md).
+# The Python copy is kept unchanged. This module holds the pure parts: parsers,
+# statistics, Python-compatible JSON layout, the functional gate, provider
+# staging and the trust anchor. main.spl drives processes.
+# Finite native matched-app measurements; never bootstrap or ISA qualification.
+
+# Parity port: counts, sizes and nanoseconds are the Python wire format's plain ints.
+#![allow(primitive_api)]
+
+use std.nogc_sync_mut.io_runtime.{file_read, file_exists, file_copy, file_size, dir_create_all, is_file, file_hash_sha256_or_empty}
+use std.common.json.value.{JsonValue, json_parse_value, json_value_get, json_value_as_text}
+
+pub struct MpManifestBindings:
+    compiler_sha256: text
+    runtime_sha256: text
+    producer_source_commit: text
+    functional_app_source_commit: text
+    provider_id: text
+    implementation_id: text
+
+pub struct MpSampleRecord:
+    keys: [text]
+    kind: text
+    size: i64
+    operations: i64
+    ns: i64
+    checksum: i64
+    results: i64
+    provider_calls: i64
+    warmups: i64
+    wire_hex: text
+    has_wire: bool
+
+# ---------------------------------------------------------------- statistics
+
+pub fn mp_sorted_i64(values: [i64]) -> [i64]:
+    var out: [i64] = []
+    for v in values: out.push(v)
+    out.sort()
+    out
+
+pub fn mp_percentile(values: [i64], percent: i64) -> i64:
+    """Nearest rank: sorted(values)[ceil(len * percent / 100) - 1]."""
+    val sorted = mp_sorted_i64(values)
+    val rank = (sorted.len() * percent + 99) / 100
+    sorted[rank - 1]
+
+pub fn mp_percentile_f64(values: [f64], percent: i64) -> f64:
+    var sorted: [f64] = []
+    for v in values: sorted.push(v)
+    sorted.sort()
+    val rank = (sorted.len() * percent + 99) / 100
+    sorted[rank - 1]
+
+# ---------------------------------------------------------------- text helpers
+
+fn mp_is_py_line_break(b: i64) -> bool:
+    b == 10 or b == 13 or b == 11 or b == 12 or b == 28 or b == 29 or b == 30
+
+pub fn mp_splitlines(content: text) -> [text]:
+    """str.splitlines() for the ASCII line boundaries Python recognises."""
+    var out: [text] = []
+    var start = 0
+    var i = 0
+    val n = content.byte_len()
+    while i < n:
+        val b = content.byte_at(i)
+        if mp_is_py_line_break(b):
+            out.push(content.substring(start, i))
+            if b == 13 and i + 1 < n and content.byte_at(i + 1) == 10:
+                i = i + 1
+            start = i + 1
+        i = i + 1
+    if start < n:
+        out.push(content.substring(start, n))
+    out
+
+fn mp_is_py_space(b: i64) -> bool:
+    b == 32 or (b >= 9 and b <= 13) or (b >= 28 and b <= 31)
+
+pub fn mp_split_whitespace(line: text) -> [text]:
+    """str.split() with no separator, for ASCII whitespace."""
+    var out: [text] = []
+    var i = 0
+    val n = line.byte_len()
+    while i < n:
+        while i < n and mp_is_py_space(line.byte_at(i)): i = i + 1
+        val start = i
+        while i < n and not mp_is_py_space(line.byte_at(i)): i = i + 1
+        if i > start: out.push(line.substring(start, i))
+    out
+
+pub fn mp_py_int(raw: text) -> i64?:
+    """int(raw) for ASCII input: surrounding whitespace, sign, and single underscores between digits."""
+    var s = raw.trim()
+    if s == "": return None
+    var negative = false
+    if s.starts_with("+") or s.starts_with("-"):
+        negative = s.starts_with("-")
+        s = s.substring(1, s.byte_len())
+    if s == "": return None
+    var value = 0
+    var previous_digit = false
+    var i = 0
+    while i < s.byte_len():
+        val b = s.byte_at(i)
+        if b == 95:
+            if not previous_digit or i + 1 >= s.byte_len(): return None
+            previous_digit = false
+        elif b >= 48 and b <= 57:
+            value = value * 10 + (b - 48)
+            previous_digit = true
+        else:
+            return None
+        i = i + 1
+    if not previous_digit: return None
+    Some(if negative: 0 - value else: value)
+
+pub fn mp_fields(path: text) -> {text: text}:
+    """dict(line.split("=", 1) for line in splitlines() if "=" in line); last key wins."""
+    var out: {text: text} = {}
+    if not file_exists(path): return out
+    for line in mp_splitlines(file_read(path)):
+        val at = line.index_of("=")
+        if at >= 0:
+            out[line.substring(0, at)] = line.substring(at + 1, line.byte_len())
+    out
+
+pub fn mp_field(fields: {text: text}, key: text) -> text?:
+    if fields.contains_key(key): return Some(fields[key])
+    None
+
+fn mp_field_is(fields: {text: text}, key: text, expected: text) -> bool:
+    match mp_field(fields, key):
+        case Some(v): v == expected
+        case None: false
+
+fn mp_hex_nibble(b: i64) -> i64:
+    if b >= 48 and b <= 57: return b - 48
+    if b >= 97 and b <= 102: return b - 87
+    if b >= 65 and b <= 70: return b - 55
+    -1
+
+pub fn mp_hex_decode(hex: text) -> [u8]?:
+    """bytes.fromhex: hex digit pairs; ASCII spaces allowed between pairs."""
+    var out: [u8] = []
+    var i = 0
+    val n = hex.byte_len()
+    while i < n:
+        if hex.byte_at(i) == 32:
+            i = i + 1
+        else:
+            if i + 1 >= n: return None
+            val hi = mp_hex_nibble(hex.byte_at(i))
+            val lo = mp_hex_nibble(hex.byte_at(i + 1))
+            if hi < 0 or lo < 0: return None
+            out.push((hi * 16 + lo) as u8)
+            i = i + 2
+    Some(out)
+
+fn mp_bytes_starts_with(data: [u8], prefix: text) -> bool:
+    if data.len() < prefix.byte_len(): return false
+    var i = 0
+    while i < prefix.byte_len():
+        if (data[i] as i64) != prefix.byte_at(i): return false
+        i = i + 1
+    true
+
+fn mp_bytes_ends_with(data: [u8], suffix: text) -> bool:
+    val n = suffix.byte_len()
+    if data.len() < n: return false
+    val base = data.len() - n
+    var i = 0
+    while i < n:
+        if (data[base + i] as i64) != suffix.byte_at(i): return false
+        i = i + 1
+    true
+
+# ---------------------------------------------------------------- sample record
+
+val MP_REQUIRED_FIELDS: [text] = ["kind", "size", "operations", "ns", "checksum", "results", "provider_calls", "warmups"]
+
+fn mp_list_has(items: [text], key: text) -> bool:
+    for item in items:
+        if item == key: return true
+    false
+
+pub fn mp_sample_record(path: text, kind: text, size: i64, vector: bool) -> Result<MpSampleRecord, text>:
+    if file_size(path) > 1024 * 1024: return Err("app stdout exceeded 1 MiB")
+    val lines = mp_splitlines(file_read(path))
+    var records: [text] = []
+    for line in lines:
+        if line.starts_with("ITEM5_PERF_V1 "): records.push(line)
+    if records.len() != 1: return Err("expected exactly one measured record after three warmups")
+    val words = mp_split_whitespace(records[0])
+    var keys: [text] = []
+    var values: {text: text} = {}
+    var pair_count = 0
+    var w = 1
+    while w < words.len():
+        val at = words[w].index_of("=")
+        if at < 0: return Err("dictionary update sequence element has length 1; 2 is required")
+        val key = words[w].substring(0, at)
+        if not mp_list_has(keys, key): keys.push(key)
+        values[key] = words[w].substring(at + 1, words[w].byte_len())
+        pair_count = pair_count + 1
+        w = w + 1
+    var all_known = keys.len() == MP_REQUIRED_FIELDS.len()
+    for key in MP_REQUIRED_FIELDS:
+        if not mp_list_has(keys, key): all_known = false
+    if not all_known or pair_count != MP_REQUIRED_FIELDS.len():
+        return Err("missing, duplicate or unknown sample fields")
+    if values["kind"] != kind: return Err("wrong workload")
+    var numbers: {text: i64} = {}
+    for key in MP_REQUIRED_FIELDS:
+        if key != "kind":
+            match mp_py_int(values[key]):
+                case Some(v):
+                    if v < 0: return Err("negative sample field")
+                    numbers[key] = v
+                case None: return Err("invalid literal for int() with base 10: " + values[key])
+    val expected_ops = if kind == "db": 32 else: 128
+    if numbers["size"] != size or numbers["operations"] != expected_ops:
+        return Err("wrong workload size or operation count")
+    if numbers["warmups"] != 3 or numbers["ns"] <= 0: return Err("invalid timing/warmup count")
+    val calls = numbers["provider_calls"]
+    if (not vector and calls != 0) or (vector and calls <= 0):
+        return Err("missing vector calls or unexpected scalar provider use")
+    if kind == "db" and vector and calls != 32:
+        return Err("DB query cache/fallback bypassed measured provider work")
+    var wires: [text] = []
+    for line in lines:
+        if line.starts_with("ITEM5_PERF_WIRE_V1 hex="):
+            wires.push(line.substring(23, line.byte_len()))
+    var wire_hex = ""
+    var has_wire = false
+    if kind == "http":
+        if wires.len() != 1: return Err("missing complete HTTP wire result")
+        match mp_hex_decode(wires[0]):
+            case Some(wire):
+                if not mp_bytes_starts_with(wire, "HTTP/1.1 200") or not mp_bytes_ends_with(wire, "ITEM5_MATCHED_HTTP_BODY"):
+                    return Err("invalid HTTP response")
+            case None: return Err("non-hexadecimal number found in fromhex() arg")
+        wire_hex = wires[0]
+        has_wire = true
+        keys.push("wire_hex")
+    elif wires.len() > 0:
+        return Err("unexpected HTTP record in DB workload")
+    Ok(MpSampleRecord(keys: keys, kind: values["kind"], size: numbers["size"], operations: numbers["operations"],
+        ns: numbers["ns"], checksum: numbers["checksum"], results: numbers["results"],
+        provider_calls: numbers["provider_calls"], warmups: numbers["warmups"], wire_hex: wire_hex, has_wire: has_wire))
+
+pub fn mp_record_json(record: MpSampleRecord, lane: text, pair: i64, order: [text], rss_kib: i64) -> JsonValue:
+    """The record dict in Python insertion order after record.update(lane=, pair=, order=, max_process_rss_kib=)."""
+    var keys: [text] = []
+    var values: [JsonValue] = []
+    for key in record.keys:
+        keys.push(key)
+        if key == "kind": values.push(JsonValue.Str(record.kind))
+        elif key == "wire_hex": values.push(JsonValue.Str(record.wire_hex))
+        elif key == "size": values.push(JsonValue.Int(record.size))
+        elif key == "operations": values.push(JsonValue.Int(record.operations))
+        elif key == "ns": values.push(JsonValue.Int(record.ns))
+        elif key == "checksum": values.push(JsonValue.Int(record.checksum))
+        elif key == "results": values.push(JsonValue.Int(record.results))
+        elif key == "provider_calls": values.push(JsonValue.Int(record.provider_calls))
+        else: values.push(JsonValue.Int(record.warmups))
+    var order_values: [JsonValue] = []
+    for o in order: order_values.push(JsonValue.Str(o))
+    keys.push("lane")
+    values.push(JsonValue.Str(lane))
+    keys.push("pair")
+    values.push(JsonValue.Int(pair))
+    keys.push("order")
+    values.push(JsonValue.Array(order_values))
+    keys.push("max_process_rss_kib")
+    values.push(JsonValue.Int(rss_kib))
+    JsonValue.Object(keys: keys, values: values)
+
+# ---------------------------------------------------------------- provider staging
+
+pub fn mp_path_suffix(path: text) -> text:
+    """PurePath.suffix: the final component's last '.' part, not counting a leading dot."""
+    var name = path
+    val slash = path.last_index_of("/")
+    if slash >= 0: name = path.substring(slash + 1, path.byte_len())
+    val dot = name.last_index_of(".")
+    if dot <= 0 or dot == name.byte_len() - 1: return ""
+    name.substring(dot, name.byte_len())
+
+pub fn mp_stage_provider(source: text, output: text, expected_digest: text) -> Result<(text, text), text>:
+    """Keep the loader's existing relative build/providers/ admission policy."""
+    val relative = "build/providers/matched-provider" + mp_path_suffix(source)
+    val destination = output + "/" + relative
+    if file_exists(output + "/build/providers"): return Err("FileExistsError: " + output + "/build/providers")
+    if not file_exists(output): return Err("FileNotFoundError: " + output)
+    dir_create_all(output + "/build/providers")
+    if not file_copy(source, destination): return Err("provider copy failed")
+    if file_hash_sha256_or_empty(destination) != expected_digest:
+        return Err("staged production provider hash mismatch")
+    Ok((relative, destination))
+
+# ---------------------------------------------------------------- functional gate
+
+pub fn mp_parent(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash < 0: return "."
+    if slash == 0: return "/"
+    path.substring(0, slash)
+
+pub fn mp_functional_gate(evidence_path: text, m: MpManifestBindings) -> Result<[(text, text)], text>:
+    """Require completed canonical actual-app evidence; not hash-only admission.
+    Returns (path, sha256) pairs in Python dict order."""
+    val e = mp_fields(evidence_path)
+    if not mp_field_is(e, "schema", "item5-app-vector-runner-v1") or not mp_field_is(e, "qualification", "execution-evidence-only"):
+        return Err("canonical completed actual-app execution evidence required")
+    if not mp_field_is(e, "producer_compiler_sha256", m.compiler_sha256) or
+            not mp_field_is(e, "producer_source_commit", m.producer_source_commit) or
+            not mp_field_is(e, "app_source_commit", m.functional_app_source_commit) or
+            not mp_field_is(e, "provider_identity", m.provider_id) or
+            not mp_field_is(e, "implementation_identity", m.implementation_id):
+        return Err("functional source/producer/provider binding mismatch")
+    val directory = mp_parent(evidence_path)
+    val hello = directory + "/staged/producer-hello.json"
+    if not is_file(hello): return Err("FileNotFoundError: " + hello)
+    val hello_digest = file_hash_sha256_or_empty(hello)
+    if not mp_field_is(e, "producer_hello_receipt_sha256", hello_digest):
+        return Err("functional producer receipt hash mismatch")
+    match json_parse_value(file_read(hello)):
+        case Ok(h):
+            var runtime = ""
+            var has_runtime = false
+            match json_value_get(h, "runtime_archive_sha256"):
+                case Some(v):
+                    match json_value_as_text(v):
+                        case Some(t):
+                            runtime = t
+                            has_runtime = true
+                        case None: has_runtime = false
+                case None: has_runtime = false
+            if not has_runtime or runtime != m.runtime_sha256:
+                return Err("functional runtime differs from measurement runtime")
+        case Err(err): return Err("producer hello receipt is not JSON: " + err)
+    var evidence: [(text, text)] = [(evidence_path, file_hash_sha256_or_empty(evidence_path)), (hello, hello_digest)]
+    for role in ["db-scalar", "db-vector", "http-scalar", "http-vector"]:
+        val receipt = directory + "/receipts/" + role + ".rss.env"
+        val r = mp_fields(receipt)
+        if not mp_field_is(r, "status", "complete") or not mp_field_is(r, "exit_status", "0") or not mp_field_is(r, "quiescent", "1"):
+            return Err("functional application was not successfully quiescent: " + role)
+        evidence.push((receipt, file_hash_sha256_or_empty(receipt)))
+    Ok(evidence)
+
+# ---------------------------------------------------------------- trust anchor
+
+pub fn mp_runner_pin_check(runner_path: text, pinned_sha256: text) -> Result<text, text>:
+    """The twin's replacement for the Python interpreter pin: the running,
+    already verified p2/stage binary must hash to the pinned value. Fails
+    closed when no pin is given, the pin is malformed, or it does not match."""
+    if pinned_sha256.byte_len() != 64: return Err("runner pin missing or malformed; refusing unpinned stage binary")
+    var i = 0
+    while i < 64:
+        val b = pinned_sha256.byte_at(i)
+        if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102)): return Err("runner pin is not lowercase sha256 hex")
+        i = i + 1
+    val actual = file_hash_sha256_or_empty(runner_path)
+    if actual == "": return Err("running stage binary is unreadable: " + runner_path)
+    if actual != pinned_sha256: return Err("running stage binary " + actual + " does not match pin " + pinned_sha256)
+    Ok(actual)
+
+# ---------------------------------------------------------------- Python-compatible JSON
+
+fn mp_digit_string(n: f64) -> (text, i64):
+    """Shortest round-trip digits D and decimal point position P, value = 0.D * 10^P."""
+    var s = "{n}"
+    if s.starts_with("-"): s = s.substring(1, s.byte_len())
+    var int_part = s
+    var frac_part = ""
+    val dot = s.index_of(".")
+    if dot >= 0:
+        int_part = s.substring(0, dot)
+        frac_part = s.substring(dot + 1, s.byte_len())
+    var digits = int_part + frac_part
+    var point = int_part.byte_len()
+    var lead = 0
+    while lead < digits.byte_len() and digits.byte_at(lead) == 48: lead = lead + 1
+    digits = digits.substring(lead, digits.byte_len())
+    point = point - lead
+    var end = digits.byte_len()
+    while end > 0 and digits.byte_at(end - 1) == 48: end = end - 1
+    digits = digits.substring(0, end)
+    (digits, point)
+
+fn mp_zeros(count: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < count:
+        out = out + "0"
+        i = i + 1
+    out
+
+pub fn mp_py_float_repr(n: f64) -> text:
+    """float.__repr__: shortest round-trip digits; scientific when the exponent is < -4 or >= 16."""
+    val sign = if n < 0.0 or "{n}".starts_with("-"): "-" else: ""
+    val (digits, point) = mp_digit_string(n)
+    if digits == "": return sign + "0.0"
+    val exponent = point - 1
+    if exponent < -4 or exponent >= 16:
+        var mantissa = digits.substring(0, 1)
+        if digits.byte_len() > 1: mantissa = mantissa + "." + digits.substring(1, digits.byte_len())
+        val exp_sign = if exponent < 0: "-" else: "+"
+        val magnitude = if exponent < 0: 0 - exponent else: exponent
+        val exp_text = if magnitude < 10: "0{magnitude}" else: "{magnitude}"
+        return sign + mantissa + "e" + exp_sign + exp_text
+    if point <= 0: return sign + "0." + mp_zeros(0 - point) + digits
+    if point >= digits.byte_len(): return sign + digits + mp_zeros(point - digits.byte_len()) + ".0"
+    sign + digits.substring(0, point) + "." + digits.substring(point, digits.byte_len())
+
+val MP_HEX: text = "0123456789abcdef"
+
+fn mp_u4(code: i64) -> text:
+    "\\u" + MP_HEX.substring((code / 4096) % 16, (code / 4096) % 16 + 1) + MP_HEX.substring((code / 256) % 16, (code / 256) % 16 + 1) +
+        MP_HEX.substring((code / 16) % 16, (code / 16) % 16 + 1) + MP_HEX.substring(code % 16, code % 16 + 1)
+
+pub fn mp_py_json_string(s: text) -> text:
+    """json.dumps(str) with ensure_ascii=True."""
+    var out = "\""
+    var i = 0
+    val n = s.byte_len()
+    while i < n:
+        val b = s.byte_at(i)
+        if b == 34: out = out + "\\\""
+        elif b == 92: out = out + "\\\\"
+        elif b == 10: out = out + "\\n"
+        elif b == 13: out = out + "\\r"
+        elif b == 9: out = out + "\\t"
+        elif b == 8: out = out + "\\b"
+        elif b == 12: out = out + "\\f"
+        elif b < 32: out = out + mp_u4(b)
+        elif b < 128: out = out + s.substring(i, i + 1)
+        else:
+            var code = 0
+            var extra = 0
+            if b >= 240:
+                code = b % 8
+                extra = 3
+            elif b >= 224:
+                code = b % 16
+                extra = 2
+            else:
+                code = b % 32
+                extra = 1
+            var k = 0
+            while k < extra and i + 1 < n:
+                i = i + 1
+                code = code * 64 + (s.byte_at(i) % 64)
+                k = k + 1
+            if code >= 65536:
+                val v = code - 65536
+                out = out + mp_u4(55296 + v / 1024) + mp_u4(56320 + v % 1024)
+            else:
+                out = out + mp_u4(code)
+        i = i + 1
+    out + "\""
+
+pub fn mp_py_json_compact(value: JsonValue) -> text:
+    """json.dumps(value) with the default ', ' and ': ' separators."""
+    match value:
+        case Null: "null"
+        case Bool(b): if b: "true" else: "false"
+        case Int(i): "{i}"
+        case Float(f): mp_py_float_repr(f)
+        case Str(s): mp_py_json_string(s)
+        case Array(items):
+            var out = "["
+            var i = 0
+            while i < items.len():
+                if i > 0: out = out + ", "
+                out = out + mp_py_json_compact(items[i])
+                i = i + 1
+            out + "]"
+        case Object(keys, values):
+            var out = "{{"
+            var i = 0
+            while i < keys.len():
+                if i > 0: out = out + ", "
+                out = out + mp_py_json_string(keys[i]) + ": " + mp_py_json_compact(values[i])
+                i = i + 1
+            out + "}"
+
+fn mp_indent(level: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < level * 2:
+        out = out + " "
+        i = i + 1
+    out
+
+fn mp_py_json_indent_at(value: JsonValue, level: i64) -> text:
+    match value:
+        case Array(items):
+            if items.len() == 0: return "[]"
+            var out = "[\n"
+            var i = 0
+            while i < items.len():
+                if i > 0: out = out + ",\n"
+                out = out + mp_indent(level + 1) + mp_py_json_indent_at(items[i], level + 1)
+                i = i + 1
+            out + "\n" + mp_indent(level) + "]"
+        case Object(keys, values):
+            if keys.len() == 0: return "{{}}"
+            var out = "{{\n"
+            var i = 0
+            while i < keys.len():
+                if i > 0: out = out + ",\n"
+                out = out + mp_indent(level + 1) + mp_py_json_string(keys[i]) + ": " + mp_py_json_indent_at(values[i], level + 1)
+                i = i + 1
+            out + "\n" + mp_indent(level) + "}"
+        case _: mp_py_json_compact(value)
+
+pub fn mp_py_json_indent2(value: JsonValue) -> text:
+    """json.dumps(value, indent=2)."""
+    mp_py_json_indent_at(value, 0)
+
+pub fn mp_json_text_map(pairs: [(text, text)]) -> JsonValue:
+    """{path: digest} dict; a repeated key keeps its first position and last value."""
+    var keys: [text] = []
+    var values: [JsonValue] = []
+    for pair in pairs:
+        var found = -1
+        var i = 0
+        while i < keys.len():
+            if keys[i] == pair.0: found = i
+            i = i + 1
+        if found >= 0:
+            values[found] = JsonValue.Str(pair.1)
+        else:
+            keys.push(pair.0)
+            values.push(JsonValue.Str(pair.1))
+    JsonValue.Object(keys: keys, values: values)

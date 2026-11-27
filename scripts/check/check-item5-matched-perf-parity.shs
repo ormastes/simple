@@ -1,0 +1,227 @@
+#!/bin/sh
+# Cross-language parity check for the matched-app benchmark runner.
+# Runs scripts/check/run-item5-matched-app-performance.py and its pure-Simple
+# twin src/app/item5_perf/main.spl on identical synthetic fixtures. It then
+# compares exit codes and receipt bytes, and reports the wall time of each.
+#
+# The fixture apps, watchdog and provider are synthetic stand-ins. They are
+# not application evidence. They exercise the runner contract only.
+#
+# Usage (Linux; cwd = repo root):
+#   sh scripts/check/check-item5-matched-perf-parity.shs --simple /path/to/simple [--python /usr/bin/python3] [--samples 30]
+# The last stdout line is the verdict: PASS (exit 0), FAIL (exit 1), or
+# ERROR — nothing was checked (exit 2).
+# Byte-compared: manifest.json, scope.txt, functional-evidence.json,
+# samples.jsonl, summary.json, every command.json, stdout, stderr and rss.env,
+# and the staged provider. terminal.json is compared with its wall-clock line
+# removed. host-before.json, host-after.json and tools.json name the host and
+# the runner tools, which differ by design between the two languages, so only
+# their key sets are compared.
+set -u
+
+simple_bin=""
+python_bin=/usr/bin/python3
+samples=30
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --simple) simple_bin=$2; shift 2 ;;
+        --python) python_bin=$2; shift 2 ;;
+        --samples) samples=$2; shift 2 ;;
+        *) echo "usage: $0 --simple BIN [--python BIN] [--samples 30|100]" >&2; echo "ERROR — nothing was checked (bad argument $1)"; exit 2 ;;
+    esac
+done
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+py_runner="$root/scripts/check/run-item5-matched-app-performance.py"
+spl_runner="$root/src/app/item5_perf/main.spl"
+for tool in "$python_bin" "$simple_bin"; do
+    if [ -z "$tool" ] || [ ! -x "$tool" ]; then echo "ERROR — nothing was checked (missing executable: ${tool:-<unset>})"; exit 2; fi
+done
+for tool in clang perl nm git sha256sum env; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $tool)"; exit 2; }
+done
+[ -f "$py_runner" ] && [ -f "$spl_runner" ] || { echo "ERROR — nothing was checked (runner sources missing)"; exit 2; }
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/item5-parity.XXXXXX") || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+# ITEM5_PARITY_KEEP=1 keeps the work directory for debugging.
+[ "${ITEM5_PARITY_KEEP:-0}" = 1 ] || trap 'rm -rf "$work"' EXIT INT TERM
+fx="$work/fixture"
+mkdir -p "$fx/bin" "$fx/evidence/staged" "$fx/evidence/receipts" "$fx/repo/src"
+
+sha() { sha256sum "$1" | cut -d' ' -f1; }
+
+# Source repository: the benchmark commit adds a test-only file over the functional commit.
+git -C "$fx/repo" init -q
+printf 'production source\n' > "$fx/repo/src/app.spl"
+git -C "$fx/repo" add src/app.spl
+git -C "$fx/repo" -c user.name=fixture -c user.email=fixture@invalid commit -q -m functional
+functional_commit=$(git -C "$fx/repo" rev-parse HEAD)
+printf 'test only\n' > "$fx/repo/test_only.txt"
+git -C "$fx/repo" add test_only.txt
+git -C "$fx/repo" -c user.name=fixture -c user.email=fixture@invalid commit -q -m benchmark
+app_commit=$(git -C "$fx/repo" rev-parse HEAD)
+app_tree=$(git -C "$fx/repo" rev-parse "HEAD^{tree}")
+
+# Synthetic apps: fixed timings so both runners see identical stdout.
+wire_hex=$(printf 'HTTP/1.1 200 OK\r\nContent-Length: 23\r\n\r\nITEM5_MATCHED_HTTP_BODY' | od -An -v -tx1 | tr -d ' \n')
+cat > "$fx/bin/db_scalar" <<'EOF'
+#!/bin/sh
+echo "warmup noise"
+echo "ITEM5_PERF_V1 kind=db size=$1 operations=32 ns=1000 checksum=7 results=4 provider_calls=0 warmups=3"
+EOF
+cat > "$fx/bin/db_vector" <<'EOF'
+#!/bin/sh
+echo "ITEM5_PERF_V1 kind=db size=$1 operations=32 ns=900 checksum=7 results=4 provider_calls=32 warmups=3"
+echo "vector stderr line" >&2
+EOF
+cat > "$fx/bin/http_scalar" <<EOF
+#!/bin/sh
+echo "ITEM5_PERF_V1 kind=http size=128 operations=128 ns=3000 checksum=9 results=128 provider_calls=0 warmups=3"
+echo "ITEM5_PERF_WIRE_V1 hex=$wire_hex"
+EOF
+cat > "$fx/bin/http_vector" <<EOF
+#!/bin/sh
+echo "ITEM5_PERF_V1 kind=http size=128 operations=128 ns=1000 checksum=9 results=128 provider_calls=128 warmups=3"
+echo "ITEM5_PERF_WIRE_V1 hex=$wire_hex"
+EOF
+chmod +x "$fx/bin/"*
+
+# Synthetic watchdog: runs the app after "--" and writes a quiescent receipt.
+cat > "$fx/bin/watchdog.pl" <<'EOF'
+use strict;
+my ($receipt, @app);
+while (@ARGV) { my $a = shift @ARGV; if ($a eq '--') { @app = @ARGV; last } $receipt = $1 if $a =~ /^--receipt=(.*)$/; }
+my $rc = system(@app) >> 8;
+open(my $fh, '>', $receipt) or die "receipt: $!";
+print $fh "status=complete\nexit_status=$rc\nquiescent=1\npeak_rss_kib=" . (1000 + scalar(@app)) . "\n";
+close $fh;
+exit 0;
+EOF
+printf 'int matched_provider_entry(void) { return 1; }\n' > "$work/provider.c"
+clang -shared -fPIC -o "$fx/bin/provider.so" "$work/provider.c" || { echo "ERROR — nothing was checked (clang -shared failed)"; exit 2; }
+printf 'compiler fixture\n' > "$fx/bin/compiler"
+printf 'runtime fixture\n' > "$fx/bin/runtime.a"
+
+runtime_sha=$(sha "$fx/bin/runtime.a")
+compiler_sha=$(sha "$fx/bin/compiler")
+printf '{"runtime_archive_sha256": "%s"}\n' "$runtime_sha" > "$fx/evidence/staged/producer-hello.json"
+for role in db-scalar db-vector http-scalar http-vector; do
+    printf 'status=complete\nexit_status=0\nquiescent=1\n' > "$fx/evidence/receipts/$role.rss.env"
+done
+cat > "$fx/evidence/evidence.env" <<EOF
+schema=item5-app-vector-runner-v1
+qualification=execution-evidence-only
+producer_compiler_sha256=$compiler_sha
+producer_source_commit=$functional_commit
+app_source_commit=$functional_commit
+provider_identity=7
+implementation_identity=3
+producer_hello_receipt_sha256=$(sha "$fx/evidence/staged/producer-hello.json")
+EOF
+
+entry() { printf '"%s": {"path": "%s", "sha256": "%s"}' "$1" "$2" "$(sha "$2")"; }
+write_manifest() {
+    # $1 output file, $2 schema, $3 db_vector app path
+    {
+        printf '{"schema": "%s", "mode": "production", ' "$2"
+        printf '"app_source_commit": "%s", "app_source_tree": "%s", ' "$app_commit" "$app_tree"
+        printf '"producer_source_commit": "%s", "functional_app_source_commit": "%s", ' "$functional_commit" "$functional_commit"
+        printf '"source_repository": "%s", "provider_id": 7, "implementation_id": 3, ' "$fx/repo"
+        entry db_scalar "$fx/bin/db_scalar"; printf ', '
+        entry db_vector "$3"; printf ', '
+        entry http_scalar "$fx/bin/http_scalar"; printf ', '
+        entry http_vector "$fx/bin/http_vector"; printf ', '
+        entry provider "$fx/bin/provider.so"; printf ', '
+        entry compiler "$fx/bin/compiler"; printf ', '
+        entry runtime "$fx/bin/runtime.a"; printf ', '
+        entry watchdog "$fx/bin/watchdog.pl"; printf ', '
+        entry functional_evidence "$fx/evidence/evidence.env"
+        printf '}\n'
+    } > "$1"
+}
+cat > "$fx/bin/db_vector_bad" <<'EOF'
+#!/bin/sh
+echo "ITEM5_PERF_V1 kind=db size=$1 operations=32 ns=900 checksum=7 results=4 provider_calls=31 warmups=3"
+EOF
+chmod +x "$fx/bin/db_vector_bad"
+write_manifest "$fx/good.json" item5-matched-app-performance-v1 "$fx/bin/db_vector"
+write_manifest "$fx/bad-schema.json" observer-v0 "$fx/bin/db_vector"
+write_manifest "$fx/bad-sample.json" item5-matched-app-performance-v1 "$fx/bin/db_vector_bad"
+
+runner_pin=$(sha "$simple_bin")
+checked=0
+failures=""
+now_ms() { date +%s%3N; }
+
+# run_pair CASE MANIFEST [extra twin args]: runs both runners into the SAME
+# output path in turn, so receipts that embed the output path stay comparable.
+run_pair() {
+    case_name=$1 manifest=$2
+    shift 2
+    out="$work/out-$case_name"
+    t0=$(now_ms)
+    (cd "$root" && "$python_bin" -B "$py_runner" --manifest "$manifest" --output "$out" --samples "$samples") > "$work/$case_name.py.stdout" 2> "$work/$case_name.py.stderr"
+    py_rc=$?
+    t1=$(now_ms)
+    [ -d "$out" ] && mv "$out" "$work/py-$case_name"
+    (cd "$root" && "$simple_bin" run "$spl_runner" --runner-sha256 "$runner_pin" --manifest "$manifest" --output "$out" --samples "$samples" "$@") > "$work/$case_name.spl.stdout" 2> "$work/$case_name.spl.stderr"
+    spl_rc=$?
+    t2=$(now_ms)
+    [ -d "$out" ] && mv "$out" "$work/spl-$case_name"
+    echo "case $case_name: python rc=$py_rc $((t1 - t0))ms, simple rc=$spl_rc $((t2 - t1))ms"
+    checked=$((checked + 1))
+    [ "$py_rc" = "$spl_rc" ] || failures="$failures $case_name:exit($py_rc!=$spl_rc)"
+}
+
+compare_trees() {
+    case_name=$1
+    py="$work/py-$case_name" spl="$work/spl-$case_name"
+    if [ ! -d "$py" ] && [ ! -d "$spl" ]; then return 0; fi
+    if [ ! -d "$py" ] || [ ! -d "$spl" ]; then failures="$failures $case_name:output-presence"; return 0; fi
+    (cd "$py" && find . -type f | LC_ALL=C sort) > "$work/$case_name.py.files"
+    (cd "$spl" && find . -type f | LC_ALL=C sort) > "$work/$case_name.spl.files"
+    cmp -s "$work/$case_name.py.files" "$work/$case_name.spl.files" || failures="$failures $case_name:file-set"
+    while IFS= read -r rel; do
+        [ -f "$spl/$rel" ] || continue
+        case "$rel" in
+            ./host-before.json|./host-after.json|./tools.json)
+                for side in py spl; do
+                    eval "dir=\$$side"
+                    grep -o '^  "[a-z_]*":' "$dir/$rel" > "$work/keys.$side"
+                done
+                cmp -s "$work/keys.py" "$work/keys.spl" || failures="$failures $case_name:$rel(keys)" ;;
+            ./terminal.json)
+                grep -v wall_seconds_including_setup "$py/$rel" | sed 's/,$//' > "$work/t.py"
+                grep -v wall_seconds_including_setup "$spl/$rel" | sed 's/,$//' > "$work/t.spl"
+                cmp -s "$work/t.py" "$work/t.spl" || failures="$failures $case_name:$rel" ;;
+            *)
+                cmp -s "$py/$rel" "$spl/$rel" || failures="$failures $case_name:$rel" ;;
+        esac
+        checked=$((checked + 1))
+    done < "$work/$case_name.py.files"
+}
+
+run_pair good "$fx/good.json"
+compare_trees good
+run_pair bad-schema "$fx/bad-schema.json"
+compare_trees bad-schema
+run_pair bad-sample "$fx/bad-sample.json"
+compare_trees bad-sample
+
+# Trust anchor: the twin alone must refuse an unpinned or mismatched runner before any effect.
+(cd "$root" && "$simple_bin" run "$spl_runner" --manifest "$fx/good.json" --output "$work/out-unpinned") > /dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && [ ! -e "$work/out-unpinned" ] || failures="$failures unpinned(rc=$rc)"
+(cd "$root" && "$simple_bin" run "$spl_runner" --runner-sha256 0000000000000000000000000000000000000000000000000000000000000000 --manifest "$fx/good.json" --output "$work/out-mismatch") > /dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && [ ! -e "$work/out-mismatch" ] || failures="$failures mismatched-pin(rc=$rc)"
+checked=$((checked + 2))
+
+if [ "$checked" -le 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+if [ -n "$failures" ]; then
+    for f in "$work"/*.spl.stderr; do echo "--- $f"; tail -5 "$f"; done
+    echo "FAIL — $checked comparison(s) checked, mismatches:$failures"
+    exit 1
+fi
+echo "PASS — $checked comparison(s) checked, python and simple runners agree on exit codes and receipt bytes"
+exit 0
