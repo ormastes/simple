@@ -177,13 +177,12 @@ fails at `hamt_node_tag`. `<seed> test` interprets and prints nothing.
 fix; the rule is exercised with `set_strict_any(true)`, the default with one
 warning-mode test, and the full report list through
 `take_uninferred_any_reports`). On the tree rebased over #12253:
-`cargo test -p simple-compiler --lib hir::` is 586 passed, 1 failed;
-`implicit_generic_tests` 21/21, `conditional_empty_array_tests` 16/16. The one
-failure is `calls::some_record_payload_tests::scalar_dynamic_and_array_payloads_keep_the_existing_erased_route`:
-it expects `Some(value)` with `value: [i64]` to stay `any`, while the `Some`
-arm that types an array payload as `Option<[i64]>` is release-line code
-(6a2d359e87d); neither the test nor that arm is touched by this branch. It was
-not run on the bare release tip.
+`cargo test -p simple-compiler --lib hir::` is 588 passed, 0 failed;
+`implicit_generic_tests` 21/21, `conditional_empty_array_tests` 16/16.
+`calls::some_record_payload_tests::scalar_dynamic_and_array_payloads_keep_the_existing_erased_route`
+failed on the bare release tip (3e63398dd11) since #12253 types
+`Some(<array with a declared type>)` as `Option<[T]>`; it is split here into the
+scalar/dynamic erased-route test and an `Option<[i64]>` test.
 
 ### Review fixes (Fable review of 9f740e8287c)
 
