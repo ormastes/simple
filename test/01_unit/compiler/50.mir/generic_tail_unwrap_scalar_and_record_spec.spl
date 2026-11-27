@@ -232,7 +232,29 @@ val PROBE_SOURCE: text =
     "fn call_pick_second_inferred_int() -> i64:\n" +
     "    pick_second(\"k\", Some(77)) ?? -1\n\n" +
     "fn call_opt_lambda_inferred_int() -> i64:\n" +
-    "    call_opt(\\: Some(42)) ?? -1\n"
+    "    call_opt(\\: Some(42)) ?? -1\n\n" +
+    "fn call_id_opt_u64_unwrap() -> u64:\n" +
+    "    val v: u64 = 1152921504606846981u64\n" +
+    "    id_opt(Some(v)).unwrap()\n\n" +
+    "fn call_tuple_at_u64_unwrap(pl: i64) -> u64:\n" +
+    "    tuple_at<u64>(pl, 0).unwrap()\n\n" +
+    "fn call_id_opt_u64_coalesce() -> u64:\n" +
+    "    val v: u64 = 1152921504606846981u64\n" +
+    "    id_opt(Some(v)) ?? 0u64\n\n" +
+    "fn call_id_opt_if_char(ch: char, fallback: char) -> char:\n" +
+    "    if val c = id_opt(Some(ch)):\n" +
+    "        return c\n" +
+    "    fallback\n\n" +
+    "fn call_id_opt_named_int() -> i64:\n" +
+    "    id_opt(v: Some(77)) ?? -1\n\n" +
+    "fn call_pick_second_named_int() -> i64:\n" +
+    "    pick_second(v: Some(77), k: \"k\") ?? -1\n\n" +
+    "fn call_opt_lambda_named_int() -> i64:\n" +
+    "    call_opt(f: \\: Some(42)) ?? -1\n\n" +
+    "fn call_opt_lambda_if_rec() -> i64:\n" +
+    "    if val r = call_opt(\\: Some(ProbeRec(x: 11, y: 22))):\n" +
+    "        return r.y\n" +
+    "    -1\n"
 
 fn _extract_mir_calls(function: MirFunction) -> text:
     var calls: [text] = []
@@ -377,7 +399,8 @@ describe "erased generic -> T tail unwrap/if-val/match for scalars and records":
             expect(m.contains("rt_value_u64")).to_equal(false)
             expect(m.contains("rt_value_as_int_wide")).to_equal(false)
         val ex_u64 = fns["call_tuple_u64_exists"] ?? "missing"
-        expect(ex_u64).to_contain("rt_value_as_u64")
+        expect(ex_u64).to_contain("rt_is_some")
+        expect(ex_u64.contains("rt_value_as_u64")).to_equal(false)
         expect(ex_u64.contains("rt_value_u64")).to_equal(false)
         expect(fns["call_req_unwrap_bool"] ?? "missing").to_contain("rt_enum_new")
         expect(fns["call_presence_bool_opt"] ?? "missing").to_contain("rt_enum_new")
@@ -421,16 +444,46 @@ describe "erased generic -> T tail unwrap/if-val/match for scalars and records":
     it "never decodes explicit-turbofish Result/Wrap passthrough and decodes inferred -> T? calls":
         val fns = lower_probe().fns
         val r_int = fns["call_res_passthrough_int"] ?? "missing"
+        expect(r_int).to_contain("res_passthrough")
         expect(r_int.contains("rt_value_as_int_wide")).to_equal(false)
         expect(r_int.contains("rt_value_int_wide")).to_equal(false)
         val r_flt = fns["call_res_passthrough_flt"] ?? "missing"
+        expect(r_flt).to_contain("res_passthrough")
         expect(r_flt.contains("rt_value_as_float")).to_equal(false)
         expect(r_flt.contains("rt_value_float")).to_equal(false)
         val w_int = fns["call_id_wrap_int"] ?? "missing"
+        expect(w_int).to_contain("id_wrap")
         expect(w_int.contains("rt_value_as_int_wide")).to_equal(false)
         expect(w_int.contains("rt_value_int_wide")).to_equal(false)
-        for name in ["call_id_opt_inferred_int", "call_pick_second_inferred_int"]:
+        for name in ["call_id_opt_inferred_int", "call_pick_second_inferred_int", "call_id_opt_named_int", "call_pick_second_named_int"]:
             val m = fns[name] ?? "missing"
             expect(m).to_contain("rt_value_int_wide")
             expect(m).to_contain("rt_value_as_int_wide")
-        expect(fns["call_opt_lambda_inferred_int"] ?? "missing").to_contain("rt_value_as_int_wide")
+        for name in ["call_opt_lambda_inferred_int", "call_opt_lambda_named_int"]:
+            val m = fns[name] ?? "missing"
+            expect(m).to_contain("call_opt")
+            expect(m).to_contain("rt_value_as_int_wide")
+        val u64_uw = fns["call_id_opt_u64_unwrap"] ?? "missing"
+        expect(u64_uw).to_contain("id_opt")
+        expect(u64_uw).to_contain("rt_value_u64")
+        expect(u64_uw.split("rt_value_as_u64").len()).to_equal(3)
+        expect(u64_uw.contains("rt_value_as_int_wide")).to_equal(false)
+        val tup_u64_uw = fns["call_tuple_at_u64_unwrap"] ?? "missing"
+        expect(tup_u64_uw).to_contain("tuple_at")
+        expect(tup_u64_uw.split("rt_value_as_u64").len()).to_equal(2)
+        expect(tup_u64_uw.contains("rt_value_u64")).to_equal(false)
+        expect(tup_u64_uw.contains("rt_value_as_int_wide")).to_equal(false)
+        val u64_nc = fns["call_id_opt_u64_coalesce"] ?? "missing"
+        expect(u64_nc).to_contain("id_opt")
+        expect(u64_nc).to_contain("rt_value_u64")
+        expect(u64_nc.split("rt_value_as_u64").len()).to_equal(3)
+        expect(u64_nc.contains("rt_value_as_int_wide")).to_equal(false)
+        val ch_if = fns["call_id_opt_if_char"] ?? "missing"
+        expect(ch_if).to_contain("id_opt")
+        expect(ch_if).to_contain("rt_is_some")
+        expect(ch_if).to_contain("rt_unwrap_or_self")
+        val rec_cb = fns["call_opt_lambda_if_rec"] ?? "missing"
+        expect(rec_cb).to_contain("call_opt")
+        expect(rec_cb).to_contain("rt_is_some")
+        expect(rec_cb.contains("rt_value_int_wide")).to_equal(false)
+        expect(rec_cb.contains("rt_value_as_int_wide")).to_equal(false)

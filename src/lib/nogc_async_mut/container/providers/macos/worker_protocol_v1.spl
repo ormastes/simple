@@ -38,7 +38,7 @@ fn _mac_worker_token(value: text) -> bool:
             return false
     true
 
-fn _mac_worker_context(identity: RuntimeIdentityV1) -> Result<[i64], text>:
+fn _mac_worker_context(identity: RuntimeIdentityV1) -> Result<[u8], text>:
     if (not _mac_worker_token(identity.pod_uid) or identity.attempt <= 0 or
             identity.provider_generation <= 0 or not _mac_worker_token(identity.operation_id) or
             not _mac_worker_token(identity.node_boot_id) or identity.native_id != "" or
@@ -50,12 +50,12 @@ fn _mac_worker_context(identity: RuntimeIdentityV1) -> Result<[i64], text>:
         identity.operation_id + "|" + identity.node_boot_id + "|" + identity.engine + "|"
     Ok(crypto_text_to_bytes(context))
 
-fn _mac_worker_key(key: [u8], nonce: [u8]) -> Result<[i64], text>:
+fn _mac_worker_key(key: [u8], nonce: [u8]) -> Result<[u8], text>:
     if key.len() != 32 or nonce.len() != 32:
         return Err("mac-worker-key-and-nonce-must-be-32-bytes")
-    var result: [i64] = []
+    var result: [u8] = []
     for byte in key:
-        result.push(byte as i64)
+        result.push(byte)
     Ok(result)
 
 fn _mac_worker_u32(frame: [u8], offset: i64) -> i64:
@@ -77,12 +77,12 @@ fn _mac_worker_shape(operation: i64, sequence: i64, length: i64) -> Result<bool,
         return Err("mac-worker-control-payload-forbidden")
     Ok(true)
 
-fn _mac_worker_tag(key: [i64], context: [i64], frame: [u8], count: i64) -> [i64]:
-    var message: [i64] = []
+fn _mac_worker_tag(key: [u8], context: [u8], frame: [u8], count: i64) -> [u8]:
+    var message: [u8] = []
     for byte in context:
         message.push(byte)
     for index in 0..count:
-        message.push(frame[index] as i64)
+        message.push(frame[index])
     hmac_sha256_bytes(key, message)
 
 # Controller-side framing. Requires the same externally provisioned secret,
@@ -102,12 +102,12 @@ pub fn mac_worker_encode_request_v1(identity: RuntimeIdentityV1, key: [u8],
         frame.push(byte)
     val tag = _mac_worker_tag(secret, context, frame, frame.len())
     for byte in tag:
-        frame.push(byte as u8)
+        frame.push(byte)
     Ok(frame)
 
 pub class MacWorkerSessionV1:
-    secret: [i64]
-    context: [i64]
+    secret: [u8]
+    context: [u8]
     nonce: [u8]
     next_sequence: i64
     submitted: bool
@@ -144,7 +144,7 @@ pub class MacWorkerSessionV1:
         var difference: i64 = 0
         for index in 0..32:
             difference = difference | ((frame[10 + index] as i64) ^ (self.nonce[index] as i64))
-            difference = difference | ((frame[tag_offset + index] as i64) ^ tag[index])
+            difference = difference | ((frame[tag_offset + index] as i64) ^ (tag[index] as i64))
         if black_box(difference) != 0:
             return Err("mac-worker-authentication-failed")
         if operation == MAC_WORKER_SUBMIT_V1 and self.submitted:

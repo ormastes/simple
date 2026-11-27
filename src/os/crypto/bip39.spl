@@ -19,6 +19,7 @@
 use os.crypto.bip39_wordlist.{bip39_word, bip39_word_index}
 use std.crypto.pbkdf2.{pbkdf2_sha512_bytes}
 use std.crypto.sha256.{sha256_bytes}
+use std.crypto.types.{crypto_text_to_bytes}
 
 # ============================================================================
 # Error type
@@ -108,15 +109,6 @@ fn _split_mnemonic(s: text) -> list:
         result.push(word)
     result
 
-# Encode ASCII text as list of i64 bytes.
-fn _text_to_list(s: text) -> list:
-    var result = []
-    var i = 0
-    while i < s.len():
-        result.push(s.char_code_at(i))
-        i = i + 1
-    result
-
 # ============================================================================
 # Entropy → Mnemonic
 # ============================================================================
@@ -137,7 +129,7 @@ fn bip39_entropy_to_mnemonic(entropy: [u8]) -> Result<text, Bip39Error>:
 
     # Compute SHA-256 checksum of entropy
     val ent_list = _u8_to_list(entropy)
-    val hash_list = sha256_bytes(ent_list)
+    val hash_list = _u8_to_list(sha256_bytes(entropy))
 
     # Build extended byte list: entropy bytes followed by hash bytes
     var ext = []
@@ -227,7 +219,8 @@ fn bip39_mnemonic_to_entropy(mnemonic: text) -> Result<[u8], Bip39Error>:
         eni = eni + 1
 
     # Compute SHA-256 of entropy and verify checksum bits
-    val hash_list = sha256_bytes(entropy_list)
+    val entropy_bytes = _list_to_u8(entropy_list)
+    val hash_list = _u8_to_list(sha256_bytes(entropy_bytes))
 
     var cs_ok = true
     var ci = 0
@@ -241,7 +234,7 @@ fn bip39_mnemonic_to_entropy(mnemonic: text) -> Result<[u8], Bip39Error>:
     if not cs_ok:
         return Err(Bip39Error.InvalidChecksum)
 
-    Ok(_list_to_u8(entropy_list))
+    Ok(entropy_bytes)
 
 # ============================================================================
 # Mnemonic → Seed
@@ -252,8 +245,7 @@ fn bip39_mnemonic_to_entropy(mnemonic: text) -> Result<[u8], Bip39Error>:
 # For ASCII mnemonics NFKD normalization is identity.
 fn bip39_mnemonic_to_seed(mnemonic: text, passphrase: text) -> [u8]:
     """Derive 64-byte seed from BIP-39 mnemonic and passphrase."""
-    val password_list = _text_to_list(mnemonic)
+    val password = crypto_text_to_bytes(mnemonic)
     val salt_text = "mnemonic" + passphrase
-    val salt_list = _text_to_list(salt_text)
-    val seed_list = pbkdf2_sha512_bytes(password_list, salt_list, 2048, 64)
-    _list_to_u8(seed_list)
+    val salt = crypto_text_to_bytes(salt_text)
+    pbkdf2_sha512_bytes(password, salt, 2048, 64)

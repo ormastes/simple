@@ -251,14 +251,24 @@ fn sha1_reset(ctx: (list, list, i64, i64)) -> (list, list, i64, i64):
 # Public one-shot API
 # =============================================================================
 
-# SHA-1 hash of byte list (returns 20-byte list).
-fn sha1_bytes(bytes: [i64]) -> [i64]:
-    sha1_finish(sha1_initial_hash(), bytes)
+# SHA-1 hash of a byte array (returns 20 bytes). The FIPS 180-4 core above
+# is word-oriented ([i64]); the message is widened once at entry and the
+# digest narrowed once at exit.
+fn sha1_bytes(bytes: [u8]) -> [u8]:
+    var words_in: [i64] = []
+    for b in bytes:
+        words_in.push(b as i64)
+    val digest = sha1_finish(sha1_initial_hash(), words_in)
+    var out: [u8] = [0u8; 20]
+    var i = 0
+    while i < 20:
+        out[i] = digest[i].to_u8()
+        i = i + 1
+    out
 
-# SHA-1 hash of text (returns 20-byte list).
-fn sha1_tuple_text(text: text) -> list:
-    val bytes = crypto_text_to_bytes(text)
-    sha1_bytes(bytes)
+# SHA-1 hash of text (returns 20 bytes).
+fn sha1_tuple_text(text: text) -> [u8]:
+    sha1_bytes(crypto_text_to_bytes(text))
 
 # SHA-1 hash of text (returns lowercase hex string).
 fn sha1_hex(text: text) -> text:
@@ -542,15 +552,15 @@ fn sha1_x4_message(m0: list, m1: list, m2: list, m3: list) -> (list, list, list,
         val d3 = _sha1_state_to_bytes(h3_state)
         (d0, d1, d2, d3)
 
-# Hex-encode a 20-byte digest list.
+# Hex-encode a 20-byte digest word list (the x4 lanes emit byte values as i64).
 fn sha1_digest_to_hex(digest: list) -> text:
     """Convert a 20-byte SHA-1 digest to lowercase hex text."""
-    bytes_to_hex(digest)
+    var raw: [u8] = []
+    for v in digest:
+        raw.push((v as i64).to_u8())
+    bytes_to_hex(raw)
 
 # Public byte-array adapter for Git's legacy object IDs. The underlying digest
 # routine remains the shared implementation above.
 pub fn sha1_u8_hex(raw: [u8]) -> text:
-    var input: list = []
-    for byte in raw:
-        input.push(byte.to_i64())
-    sha1_digest_to_hex(sha1_bytes(input))
+    bytes_to_hex(sha1_bytes(raw))

@@ -475,6 +475,26 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     value
 }
 
+/// Raw pointer/length ABI twin of [`rt_file_read_text`] for the low-level sffi
+/// tier (`src/compiler/70.backend/sffi_minimal.spl`). Distinct name so the raw
+/// `(ptr, len) -> i64?` view never shares a name with the typed
+/// `(text) -> text?` view: the seed keys extern return types by bare name.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_text_raw(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    rt_file_read_text(path_ptr, path_len)
+}
+
+/// Raw pointer/length ABI twin of [`rt_file_read_regular_no_follow_bounded`];
+/// see [`rt_file_read_text_raw`].
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded_raw(
+    path_ptr: *const u8,
+    path_len: u64,
+    max_bytes: i64,
+) -> RuntimeValue {
+    rt_file_read_regular_no_follow_bounded(path_ptr, path_len, max_bytes)
+}
+
 /// Byte-array sibling of `rt_file_read_regular_no_follow_bounded` for binary
 /// payloads (images, archives). Identical admission arms and bound (O_NOFOLLOW
 /// open, regular-file check via metadata, hard byte cap, EINTR-safe bounded
@@ -3116,6 +3136,35 @@ mod tests {
             let result = rt_file_read_text(path_ptr, path_len);
             let read_content = extract_string(result);
             assert_eq!(read_content, content);
+        }
+    }
+
+    /// Raw-ABI twins (sffi_minimal tier) are pure forwarders: identical
+    /// content for an existing file, identical NIL for a missing one, and the
+    /// same bound/refusal behaviour for the no-follow bounded read.
+    #[test]
+    fn test_file_read_raw_twins_match_typed_entrypoints() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("raw-twin.txt");
+        let content = "raw twin\nline two\n";
+        fs::write(&file_path, content.as_bytes()).unwrap();
+        let path = file_path.to_str().unwrap();
+        let (ptr, len) = str_to_ptr(path);
+        let missing = temp_dir.path().join("missing.txt");
+        let missing = missing.to_str().unwrap();
+        let (mptr, mlen) = str_to_ptr(missing);
+        unsafe {
+            assert_eq!(extract_string(rt_file_read_text_raw(ptr, len)), content);
+            assert_eq!(extract_string(rt_file_read_text(ptr, len)), content);
+            assert!(rt_file_read_text_raw(mptr, mlen).is_nil());
+            assert!(rt_file_read_text(mptr, mlen).is_nil());
+            let max = content.len() as i64;
+            assert_eq!(
+                extract_string(rt_file_read_regular_no_follow_bounded_raw(ptr, len, max)),
+                extract_string(rt_file_read_regular_no_follow_bounded(ptr, len, max))
+            );
+            assert!(rt_file_read_regular_no_follow_bounded_raw(ptr, len, max - 1).is_nil());
+            assert!(rt_file_read_regular_no_follow_bounded_raw(mptr, mlen, max).is_nil());
         }
     }
 

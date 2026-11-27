@@ -2172,6 +2172,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Environment Variable Operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_env_get", &[I64, I64], &[I64]), // name_ptr, name_len -> RuntimeValue
+    RuntimeFuncSpec::new("rt_env_get_raw", &[I64, I64], &[I64]), // raw ABI twin (sffi_minimal): name_ptr, name_len -> RuntimeValue; never text-expanded
     RuntimeFuncSpec::new("rt_env_get_i64", &[I64, I64, I64], &[I64]), // name_ptr, name_len, default -> i64
     RuntimeFuncSpec::new("rt_lexer_source_set", &[I64, I64], &[I8]), // source_ptr, source_len -> bool
     RuntimeFuncSpec::new("rt_lexer_source_slice", &[I64, I64], &[I64]), // start, end -> RuntimeValue
@@ -2262,6 +2263,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_canonicalize", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64], &[I64]),    // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_regular_no_follow_bounded", &[I64, I64, I64], &[I64]), // path_ptr, path_len, max_bytes -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_read_regular_no_follow_bounded_raw", &[I64, I64, I64], &[I64]), // raw ABI twin (sffi_minimal); never text-expanded
+    RuntimeFuncSpec::new("rt_file_read_text_raw", &[I64, I64], &[I64]), // raw ABI twin (sffi_minimal); never text-expanded
     RuntimeFuncSpec::new("rt_file_read_regular_no_follow_bounded_bytes", &[I64, I64, I64], &[I64]), // path_ptr, path_len, max_bytes -> RuntimeValue ([u8])
     RuntimeFuncSpec::new("rt_file_read_regular_no_follow_last_failure", &[], &[I64]), // -> arm code of the last NIL return
     RuntimeFuncSpec::new("rt_file_read_text_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
