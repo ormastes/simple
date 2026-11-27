@@ -1,0 +1,162 @@
+# Parity: the phase-3 Hello matrix twin's pure decisions equal the Python owner.
+#
+# Golden files are produced by the UNCHANGED Python owner through
+# scripts/bootstrap/tests/hello-sanity-matrix-parity.shs (golden-posix.txt from
+# Linux Python, golden-nt.txt from native Windows Python). Both goldens are
+# checked on every host: the twin takes the host class as a parameter.
+use std.spec
+use std.common.json.value.{JsonValue, json_parse_value, json_value_field, json_value_items, json_value_as_text, json_value_parse_or_null}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use scripts.bootstrap.lib.hello_matrix_policy.{SdnField, EnvPair, buildrunner_summary, apply_buildrunner_status, matrix_exit_code, matrix_status, phase_interpreter_required, phase_buildrunner_required, interpreter_argv, interpreter_env, sdn_render, inherited_build_settings, nested_session, first_command_executable, verify_capture_receipt_text, runtime_identity_member, posix_relpath, replace_inputs}
+use scripts.bootstrap.lib.hello_matrix_quote.{shlex_split, shlex_join, list2cmdline, response_tokens}
+use scripts.bootstrap.lib.hello_matrix_darwin.{DarwinInput, darwin_validate_arguments, json_dump_sorted, darwin_replay_argv}
+
+val PARITY = "test/fixtures/bootstrap/hello_sanity_matrix_parity"
+val RS = "\x1e"
+val US = "\x1f"
+
+# sha256 of the one-letter fixture contents the cases use (precomputed: the
+# pure decisions only compare digests, never compute them).
+val SHAS: [(text, text)] = [("A", "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"), ("O", "c4694f2e93d5c4e7d51f9c5deb75e6cc8be5e1114178c6a45b6fc2c566a0aa8c"), ("L", "72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"), ("X", "4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015"), ("M", "08f271887ce94707da822d5263bae19d5519cb3614e0daedc4c7ce5dab7473f1"), ("P", "5c62e091b8c0565f1bafad0dad5934276143ae2ccef7a5381e8ada5b1a8d26d2"), ("C", "6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d")]
+
+fn sha256_text(content: text) -> text:
+    for pair in SHAS:
+        if pair.0 == content:
+            return pair.1
+    "unknown-fixture-digest:" + content
+
+fn lst(items: [text]) -> text:
+    "L:" + items.join(RS)
+
+fn tf(v: bool) -> text:
+    if v: "True" else: "False"
+
+fn pairs(args: [text], start: i64) -> [EnvPair]:
+    var out: [EnvPair] = []
+    var i = start
+    while i + 1 < args.len():
+        out.push(EnvPair(key: args[i], value: args[i + 1]))
+        i = i + 2
+    out
+
+fn kv(items: [EnvPair]) -> [text]:
+    var out: [text] = []
+    for p in items:
+        out.push(p.key + "=" + p.value)
+    out
+
+fn split_us(value: text) -> [text]:
+    if value == "": [] else: value.split(US)
+
+fn file_sha(files: [text], name: text) -> text:
+    for spec in files:
+        val at = spec.index_of("=") ?? -1
+        if at > 0 and spec.substring(0, at) == name:
+            return sha256_text(spec.substring(at + 1, spec.len()))
+    ""
+
+fn list_or_err(r: Result<[text], text>) -> text:
+    match r:
+        case Ok(v): lst(v)
+        case Err(e): "E:" + e
+
+fn compute(fn_name: text, a: [text], windows: bool) -> text:
+    if fn_name == "summary": return "S:" + buildrunner_summary(a)
+    if fn_name == "apply": return "S:" + apply_buildrunner_status(a[0], a[1])
+    if fn_name == "exit": return "S:{matrix_exit_code(a[0])}"
+    if fn_name == "mstatus": return "S:" + matrix_status(a[0].to_int(), a[1], a[2])
+    if fn_name == "caps":
+        val p = a[0].to_int()
+        return "S:" + tf(phase_interpreter_required(p)) + "," + tf(phase_buildrunner_required(p))
+    if fn_name == "interp_argv": return lst(interpreter_argv(a[0].to_int(), a[1], windows))
+    if fn_name == "interp_env": return lst(kv(interpreter_env(a[0].to_int())))
+    if fn_name == "sdn":
+        var fields: [SdnField] = []
+        var i = 0
+        while i + 2 < a.len():
+            fields.push(SdnField(key: a[i + 1], kind: a[i], value: a[i + 2]))
+            i = i + 3
+        return "S:" + sdn_render(fields, windows)
+    if fn_name == "shlex_split": return list_or_err(shlex_split(a[0]))
+    if fn_name == "resp_posix": return list_or_err(response_tokens(a[0], false))
+    if fn_name == "resp_nt": return list_or_err(response_tokens(a[0], true))
+    if fn_name == "shlex_join": return "S:" + shlex_join(a)
+    if fn_name == "list2cmdline": return "S:" + list2cmdline(a)
+    if fn_name == "first_exe":
+        match first_command_executable(a[0]):
+            case Ok(v): return "S:" + v
+            case Err(e): return "E:" + e
+    if fn_name == "inherited":
+        match inherited_build_settings(pairs(a, 0), windows):
+            case Ok(v): return lst(kv(v))
+            case Err(e): return "E:" + e
+    if fn_name == "nested": return "S:" + tf(nested_session(pairs(a, 1), a[0] == "1"))
+    if fn_name == "receipt":
+        match verify_capture_receipt_text(a[0], sha256_text(a[1]), sha256_text(a[2]), sha256_text(a[3])):
+            case Ok(_): return "S:OK"
+            case Err(e): return "E:" + e
+    if fn_name == "replace":
+        val tokens = split_us(a[0])
+        val files = split_us(a[1])
+        var shas: [text] = []
+        for t in tokens:
+            shas.push(if t.starts_with("-"): "" else: file_sha(files, t))
+        return list_or_err(replace_inputs(tokens, shas, "<TMP>/root", "<TMP>/ext/main.o", sha256_text(a[2]), "<TMP>/ext/prov.o", sha256_text(a[3])))
+    if fn_name == "darwin_validate":
+        match darwin_validate_arguments(a):
+            case Ok(_): return "S:OK"
+            case Err(e): return "E:" + e
+    if fn_name == "json_dump":
+        match json_parse_value(a[0]):
+            case Ok(v):
+                match json_dump_sorted(v):
+                    case Ok(t): return "S:" + t
+                    case Err(e): return "E:" + e
+            case Err(e): return "E:" + e
+    if fn_name == "rt_member": return "S:" + tf(runtime_identity_member(a[0]))
+    if fn_name == "relpath": return "S:" + posix_relpath(a[0], a[1])
+    if fn_name == "darwin_replay":
+        val argv0 = split_us(a[0])
+        val files = split_us(a[1])
+        var argv: [text] = ["--ld-path=<TMP>/linker", "--no-default-config"]
+        var resolved: [text] = ["<TMP>/root/--ld-path=<TMP>/linker", "<TMP>/root/--no-default-config"]
+        var inputs: [DarwinInput] = []
+        for x in argv0:
+            argv.push(x)
+            resolved.push("<TMP>/root/" + x)
+            val sha = file_sha(files, x)
+            if not x.starts_with("-") and sha != "":
+                inputs.push(DarwinInput(path: "<TMP>/root/" + x, sha256: sha))
+        return list_or_err(darwin_replay_argv(argv, resolved, inputs, "<TMP>/ext/main.o", sha256_text(a[2]), "<TMP>/ext/prov.o", sha256_text(a[3]), "<TMP>/final", "<TMP>/driver"))
+    "E:unknown parity case " + fn_name
+
+fn mismatches(golden_name: text, windows: bool) -> [text]:
+    val cases = file_read_text(PARITY + "/cases.jsonl").split("\n")
+    val golden = file_read_text(PARITY + "/" + golden_name).split("\n")
+    var bad: [text] = []
+    var checked = 0
+    for i in 0..cases.len():
+        if cases[i] == "":
+            continue
+        val case_value = json_value_parse_or_null(cases[i])
+        val expected = json_value_as_text(json_value_parse_or_null(golden[i])) ?? "<bad golden>"
+        if expected == "SKIP":
+            continue
+        val name = json_value_as_text(json_value_field(case_value, "fn")) ?? ""
+        var args: [text] = []
+        for item in json_value_items(json_value_field(case_value, "args")):
+            args.push(json_value_as_text(item) ?? "")
+        val actual = compute(name, args, windows)
+        checked = checked + 1
+        if actual != expected:
+            bad.push("#{i} {name}: expected={expected} actual={actual}")
+    if checked < 200:
+        bad.push("only {checked} case(s) checked in {golden_name}")
+    bad
+
+describe "hello matrix twin parity with the Python owner":
+    it "matches every POSIX golden result":
+        expect(mismatches("golden-posix.txt", false)).to_equal([])
+
+    it "matches every native-Windows golden result":
+        expect(mismatches("golden-nt.txt", true)).to_equal([])

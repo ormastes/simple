@@ -1,0 +1,147 @@
+#!/bin/sh
+# Python oracle for the phase-3 Hello matrix twin's pure decisions.
+#
+# Feeds test/fixtures/bootstrap/hello_sanity_matrix_parity/cases.jsonl to the
+# UNCHANGED Python owner (hello-sanity-matrix.py + -darwin.py) and writes one
+# JSON-quoted canonical result per case. The Simple side
+# (test/01_unit/scripts/hello_matrix_parity_spec.spl) recomputes every case and
+# must match the committed golden file byte for byte.
+#
+#   sh scripts/bootstrap/tests/hello-sanity-matrix-parity.shs --check     # diff vs committed golden
+#   sh scripts/bootstrap/tests/hello-sanity-matrix-parity.shs --generate  # rewrite golden for this host
+#
+# Host class: golden-posix.txt (Linux/Darwin Python) or golden-nt.txt (native
+# Windows Python). Python is allowed here: it is the phase-1/2 owner being
+# compared against, not a phase-3 dependency.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+root=$(CDPATH= cd -- "$here/../../.." && pwd -P)
+mode=${1:---check}
+case "$mode" in --check|--generate) ;; *) echo "usage: $0 --check|--generate" >&2; exit 2 ;; esac
+py=${PYTHON:-}
+if [ -z "$py" ]; then
+  for candidate in python3 python py; do
+    if command -v "$candidate" >/dev/null 2>&1; then py=$candidate; break; fi
+  done
+fi
+[ -n "$py" ] || { echo "ERROR — nothing was checked (no python for the oracle)" >&2; exit 2; }
+fixtures="$root/test/fixtures/bootstrap/hello_sanity_matrix_parity"
+plat=$("$py" -c 'import os; print("nt" if os.name == "nt" else "posix")' | tr -d '\r')
+golden="$fixtures/golden-$plat.txt"
+out=$(mktemp "${TMPDIR:-/tmp}/hello-parity.XXXXXX")
+trap 'rm -f "$out"' EXIT INT TERM
+"$py" - "$root" "$fixtures/cases.jsonl" "$out" <<'PY'
+import hashlib, importlib.util, json, os, posixpath, sys, tempfile
+from pathlib import Path
+root, cases, out = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+def load(name, rel):
+    spec = importlib.util.spec_from_file_location(name, root / rel)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+M = load("hello_matrix", "scripts/bootstrap/hello-sanity-matrix.py")
+D = load("hello_matrix_darwin", "scripts/bootstrap/hello-sanity-matrix-darwin.py")
+U, RS = "\x1f", "\x1e"
+NT = os.name == "nt"
+def L(items): return "L:" + RS.join(items)
+def S(value): return "S:" + str(value)
+def pairs(args): return dict(zip(args[0::2], args[1::2]))
+def files(spec): return dict(item.split("=", 1) for item in spec.split(U)) if spec else {}
+def norm(text, tmp): return text.replace(str(tmp), "<TMP>").replace("\\", "/") if NT else text.replace(str(tmp), "<TMP>")
+def run(fn, a):
+    if fn == "summary": return S(M.buildrunner_summary(set(a)))
+    if fn == "apply": return S(M.apply_buildrunner_status(*a))
+    if fn == "exit": return S(M.matrix_exit_code(a[0]))
+    if fn == "mstatus": return S(M.matrix_status(int(a[0]), a[1], a[2]))
+    if fn == "caps": return S("%s,%s" % M.phase_capabilities(int(a[0])))
+    if fn == "interp_argv": return L(M.interpreter_invocation(int(a[0]), a[1])[0])
+    if fn == "interp_env": return L(k + "=" + v for k, v in M.interpreter_invocation(int(a[0]), "c")[1].items())
+    if fn == "sdn":
+        values = {}
+        for kind, key, value in zip(a[0::3], a[1::3], a[2::3]):
+            values[key] = value if kind == "s" else int(value) if kind == "i" else value == "true"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.sdn"
+            M.sdn(path, values)
+            return S(path.read_bytes().decode())
+    if fn == "shlex_split": return L(__import__("shlex").split(a[0]))
+    if fn == "resp_posix": return L(M.response_tokens(a[0], False))
+    if fn == "resp_nt": return L(M.response_tokens(a[0], True))
+    if fn == "shlex_join": return S(__import__("shlex").join(a))
+    if fn == "list2cmdline": return S(__import__("subprocess").list2cmdline(a))
+    if fn == "first_exe": return S(M.first_command_executable(a[0]))
+    if fn == "inherited": return L(k + "=" + v for k, v in M.inherited_build_settings(pairs(a)).items())
+    if fn == "nested": return S(M.nested_session(pairs(a[1:]), a[0] == "1"))
+    if fn == "receipt":
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            for name, data in [("cap", a[1]), ("out", a[2]), ("lnk", a[3])]:
+                (t / name).write_bytes(data.encode())
+            (t / "cap.receipt").write_bytes(a[0].encode())
+            M.verify_capture_receipt(t / "cap", t / "out", t / "lnk")
+            return S("OK")
+    if fn == "replace":
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+            (t / "root").mkdir(); (t / "ext").mkdir()
+            for name, data in files(a[1]).items():
+                (t / "root" / name).write_bytes(data.encode())
+            (t / "ext" / "main.o").write_bytes(a[2].encode())
+            (t / "ext" / "prov.o").write_bytes(a[3].encode())
+            result = M.replace_inputs(a[0].split(U), t / "root", t / "ext" / "main.o", t / "ext" / "prov.o")
+            return L(norm(x, t) for x in result)
+    if fn == "darwin_validate": D.validate_arguments(a); return S("OK")
+    if fn == "json_dump": return S(json.dumps(json.loads(a[0]), sort_keys=True))
+    if fn == "rt_member": p = Path(a[0]); return S(p.suffix in {".a", ".lib", ".o", ".obj", ".dll", ".so", ".dylib"} or p.name == "hosted-runtime.env")
+    if fn == "relpath": return S(posixpath.relpath(a[0], a[1]))
+    if fn == "darwin_replay":
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+            (t / "root").mkdir(); (t / "ext").mkdir()
+            for name, data in files(a[1]).items():
+                (t / "root" / name).write_bytes(data.encode())
+            for name, data in [("driver", "D"), ("linker", "K"), ("captured", "O")]:
+                (t / name).write_bytes(data.encode())
+            (t / "ext" / "main.o").write_bytes(a[2].encode())
+            (t / "ext" / "prov.o").write_bytes(a[3].encode())
+            argv = a[0].split(U)
+            record = {"driver": str(t / "driver"), "driver_sha256": D.digest(t / "driver"),
+                      "linker": str(t / "linker"), "linker_sha256": D.digest(t / "linker"),
+                      "cwd": str(t / "root"), "argv": ["--ld-path=" + str(t / "linker"), "--no-default-config", *argv],
+                      "inputs": {str((t / "root" / x).resolve()): D.digest(t / "root" / x) for x in argv
+                                 if not x.startswith("-") and (t / "root" / x).is_file()},
+                      "output": str(t / "captured"), "output_sha256": D.digest(t / "captured")}
+            (t / "link.json").write_text(json.dumps(record, sort_keys=True))
+            command, _ = D.replay_inputs(t / "link.json", t / "captured", t / "driver", t / "linker",
+                                         t / "ext" / "main.o", t / "ext" / "prov.o", t / "final")
+            return L(norm(str(x), t) for x in command)
+    raise SystemExit("unknown parity case " + fn)
+lines = []
+for raw in open(cases, encoding="utf-8"):
+    case = json.loads(raw)
+    if case["platform"] == "nt" and not NT:
+        result = "SKIP"
+    else:
+        try:
+            result = run(case["fn"], case["args"])
+        except ValueError as error:
+            result = "E:" + str(error)
+    lines.append(json.dumps(result) + "\n")
+with open(out, "w", encoding="utf-8", newline="\n") as stream:
+    stream.write("".join(lines))
+PY
+count=$(wc -l < "$out" | tr -d ' ')
+[ "$count" -gt 0 ] || { echo "ERROR — nothing was checked (oracle produced 0 results)" >&2; exit 2; }
+if [ "$mode" = --generate ]; then
+  cp "$out" "$golden"
+  echo "PASS — $count case(s) generated into $(basename "$golden")"
+  exit 0
+fi
+[ -f "$golden" ] || { echo "ERROR — nothing was checked (missing $golden)" >&2; exit 2; }
+if cmp -s "$out" "$golden"; then
+  echo "PASS — $count case(s) checked, Python oracle matches $(basename "$golden")"
+  exit 0
+fi
+diff "$golden" "$out" | head -20 >&2 || true
+echo "FAIL — Python oracle differs from $(basename "$golden")"
+exit 1

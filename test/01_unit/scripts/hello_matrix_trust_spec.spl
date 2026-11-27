@@ -1,0 +1,53 @@
+# Trust anchor + reproduction-archive admission of the phase-3 Hello matrix twin.
+use std.spec
+use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_decide}
+use scripts.bootstrap.lib.hello_matrix_tar.{tar_members, _safe}
+
+val GOOD = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val OTHER = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn pin(schema: text, status: text, kind: text, sha: text) -> text:
+    "schema=" + schema + "\nstatus=" + status + "\nartifact_kind=" + kind + "\nstage3_sha256=" + sha + "\n"
+
+fn admitted(sha: text) -> text:
+    pin("simple-bootstrap-stage3-provenance-v5", "pass", "pure-simple-bootstrap-compiler", sha)
+
+fn decided(content: text, running: text) -> bool:
+    match verified_stage_pin_decide(content, running):
+        case Ok(_): true
+        case Err(_): false
+
+# One ustar header block: name + size + typeflag, checksum unchecked by reader.
+fn header(name: text, kind: u8) -> [u8]:
+    var block: [u8] = []
+    for i in 0..512: block.push(0u8)
+    for i in 0..name.len(): block[i] = name.char_code_at(i) as u8
+    for i in 0..11: block[124 + i] = 48u8
+    block[156] = kind
+    block
+
+describe "verified stage pin":
+    it "admits only an exact digest of an admitted pure-Simple stage":
+        expect(decided(admitted(GOOD), GOOD)).to_equal(true)
+        expect(decided(admitted(GOOD), OTHER)).to_equal(false)
+        expect(decided(admitted(GOOD), "")).to_equal(false)
+        expect(decided("", GOOD)).to_equal(false)
+        expect(decided(pin("simple-bootstrap-stage3-provenance-v5", "fail", "pure-simple-bootstrap-compiler", GOOD), GOOD)).to_equal(false)
+        expect(decided(pin("simple-bootstrap-stage3-provenance-v5", "pass", "rust-seed", GOOD), GOOD)).to_equal(false)
+        expect(decided(pin("simple-bootstrap-stage3-provenance-v3", "pass", "pure-simple-bootstrap-compiler", GOOD), GOOD)).to_equal(false)
+        expect(decided(admitted(GOOD) + "stage3_sha256=" + GOOD + "\n", GOOD)).to_equal(false)
+        expect(decided(admitted(GOOD.upper()), GOOD.upper())).to_equal(false)
+
+describe "reproduction archive admission":
+    it "admits regular files and directories and refuses other members or escapes":
+        val ok = header("repro/", 53u8) + header("repro/response.txt", 48u8)
+        match tar_members(ok):
+            case Ok(m): expect(m.len()).to_equal(2)
+            case Err(e): expect(e).to_equal("")
+        match tar_members(header("repro/link", 50u8)):
+            case Ok(_): expect("admitted").to_equal("refused")
+            case Err(e): expect(e).to_equal("nonregular linker reproduction member")
+        expect(_safe("repro/a.o")).to_equal(true)
+        expect(_safe("../a.o")).to_equal(false)
+        expect(_safe("/etc/passwd")).to_equal(false)
+        expect(_safe("C:/x")).to_equal(false)

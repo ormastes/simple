@@ -1,0 +1,90 @@
+# Minimal ustar + pax reader for LLD --reproduce archives (Python owner used
+# tarfile.extractall(filter="data")). Only regular files and directories are
+# admitted; any other member type fails closed with the Python owner's message.
+# Paths that are absolute or escape the destination are refused (data filter).
+use std.common.text_bytes.{bytes_to_text}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes, file_write_bytes, dir_create_all}
+
+pub struct TarMember:
+    name: text
+    is_dir: bool
+    offset: i64
+    size: i64
+
+pub fn _cstr(b: [u8], start: i64, width: i64) -> text:
+    var end = start
+    while end < start + width and end < b.len() and b[end] != 0u8:
+        end = end + 1
+    bytes_to_text(b[start..end])
+
+pub fn _octal(b: [u8], start: i64, width: i64) -> i64:
+    var value = 0
+    for i in start..(start + width):
+        val c = b[i] as i64
+        if c >= 48 and c <= 55:
+            value = value * 8 + (c - 48)
+    value
+
+# pax records: "<len> key=value\n"...
+pub fn _pax_path(body: text) -> text:
+    var found = ""
+    for record in body.split("\n"):
+        val space = record.index_of(" ") ?? -1
+        if space < 0:
+            continue
+        val kv = record.substring(space + 1, record.len())
+        if kv.starts_with("path="):
+            found = kv.substring(5, kv.len())
+    found
+
+pub fn tar_members(archive: [u8]) -> Result<[TarMember], text>:
+    var out: [TarMember] = []
+    var at = 0
+    var pax_name = ""
+    while at + 512 <= archive.len():
+        if archive[at] == 0u8:
+            break
+        val size = _octal(archive, at + 124, 12)
+        val kind = archive[at + 156] as i64
+        val body = at + 512
+        var name = _cstr(archive, at, 100)
+        val prefix = _cstr(archive, at + 345, 155)
+        if prefix != "": name = prefix + "/" + name
+        if kind == 120:
+            pax_name = _pax_path(bytes_to_text(archive[body..(body + size)]))
+        elif kind == 103:
+            ()
+        elif kind == 48 or kind == 0 or kind == 53:
+            if pax_name != "": name = pax_name
+            pax_name = ""
+            out.push(TarMember(name: name, is_dir: kind == 53, offset: body, size: size))
+        else:
+            return Err("nonregular linker reproduction member")
+        at = body + ((size + 511) / 512) * 512
+    Ok(out)
+
+pub fn _safe(name: text) -> bool:
+    if name.starts_with("/") or name.starts_with("\\") or name.contains(":"):
+        return false
+    for part in name.replace("\\", "/").split("/"):
+        if part == "..":
+            return false
+    true
+
+pub fn tar_extract(archive_path: text, dest: text) -> Result<i64, text>:
+    val archive = file_read_bytes(archive_path)
+    val members = match tar_members(archive):
+        case Ok(m): m
+        case Err(e): return Err(e)
+    for m in members:
+        if not _safe(m.name):
+            return Err("linker reproduction member escapes destination: " + m.name)
+        val path = dest + "/" + m.name
+        if m.is_dir:
+            dir_create_all(path)
+        else:
+            val slash = path.last_index_of("/") ?? -1
+            if slash > 0: dir_create_all(path.substring(0, slash))
+            if not file_write_bytes(path, archive[m.offset..(m.offset + m.size)]):
+                return Err("cannot extract linker reproduction member: " + m.name)
+    Ok(members.len())

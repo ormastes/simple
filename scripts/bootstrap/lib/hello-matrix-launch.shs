@@ -1,0 +1,42 @@
+#!/bin/sh
+# POSIX child launcher for scripts/bootstrap/hello-sanity-matrix.spl.
+#
+# No Simple spawn API sets cwd, an exact environment, exclusive stdout/stderr
+# files and a new session at once, so this does it and then execs: the pid the
+# twin holds stays the pid of the final program (sh -> perl -> env -> argv).
+#   hello-matrix-launch.shs CWD STDOUT STDERR SESSION -- K=V... -- ARGV...
+# SESSION: new (setsid, Python start_new_session=True), group (setpgid(0,0),
+# Python process_group=0), or none. STDOUT/STDERR "-" inherit. Files are
+# created exclusively (Python open(..., "xb")). Exit 125 = launcher refusal.
+set -eu
+[ "$#" -ge 6 ] || exit 125
+cwd=$1 out=$2 err=$3 session=$4
+shift 4
+[ "$1" = "--" ] || exit 125
+shift
+# Rotate K=V... -- ARGV... into K=V... ARGV... for `env -i`.
+count=$#
+seen=0
+i=0
+while [ "$i" -lt "$count" ]; do
+  arg=$1
+  shift
+  i=$((i + 1))
+  if [ "$seen" -eq 0 ] && [ "$arg" = "--" ]; then
+    seen=1
+    continue
+  fi
+  set -- "$@" "$arg"
+done
+[ "$seen" -eq 1 ] || exit 125
+cd "$cwd" || exit 125
+set -C
+if [ "$out" != "-" ]; then exec >"$out" || exit 125; fi
+if [ "$err" != "-" ]; then exec 2>"$err" || exit 125; fi
+set +C
+case "$session" in
+  new) exec perl -MPOSIX -e 'POSIX::setsid() > 0 or exit 125; exec { $ARGV[0] } @ARGV; exit 127' env -i "$@" ;;
+  group) exec perl -MPOSIX -e 'POSIX::setpgid(0, 0) or exit 125; exec { $ARGV[0] } @ARGV; exit 127' env -i "$@" ;;
+  none) exec env -i "$@" ;;
+  *) exit 125 ;;
+esac
