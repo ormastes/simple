@@ -1,0 +1,441 @@
+#!/bin/sh
+# Bounded observer evidence checks; does not execute a compiler or infer a fix.
+#
+# POSIX sh + awk + sha256sum/od/cmp/wc/readlink. Pure-Simple port of the former
+# sdk-observer-evidence-v1.py (GitHub runners have no bin/simple, so .shs).
+#
+# Usage:
+#   sdk-observer-evidence-v1.shs bind --root D --source S --sha256 H --bytes N \
+#       --seed-sha256 H --control-root D
+#   sdk-observer-evidence-v1.shs records --kind control|sdk --log F --output F [--data-root D]
+#
+# Exit: 0 ok, 1 an evidence assertion failed, 2 usage error.
+#
+# Deliberate (fail-closed) differences from the Python original, all of which
+# only reject inputs the original would also accept:
+#   - a record block must be 7-bit ASCII with no control byte except LF;
+#   - the six quoted record fields must be JSON string literals (no \u0000,
+#     no lone surrogates, no non-string JSON values);
+#   - a stray CR anywhere in the observer log is rejected.
+set -u
+LC_ALL=C
+export LC_ALL
+
+die() {
+  printf 'sdk-observer-evidence-v1: FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+usage() {
+  printf 'sdk-observer-evidence-v1: usage error: %s\n' "$1" >&2
+  exit 2
+}
+
+digest() {
+  sha256sum -- "$1" | awk '{print $1}'
+}
+
+is_plain_file() {
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+# pairs_get FILE SEP KEY: Python pairs() + lookup. Fails on a duplicate field,
+# a non-comment line without SEP, or a missing key. Value is whitespace-stripped.
+pairs_get() {
+  [ -f "$1" ] || die "missing $1"
+  _out=$(awk -v sep="$2" -v want="$3" '
+    function strip(s) { sub(/^[ \t\r\n\v\f]+/, "", s); sub(/[ \t\r\n\v\f]+$/, "", s); return s }
+    {
+      sub(/\r$/, "")
+      if ($0 == "" || substr($0, 1, 1) == "#") next
+      i = index($0, sep)
+      if (i == 0) { print "FAILbad line"; exit }
+      k = substr($0, 1, i - 1)
+      if (k in seen) { print "FAILduplicate field " k; exit }
+      seen[k] = 1
+      v[k] = strip(substr($0, i + length(sep)))
+    }
+    END {
+      if (want in v) print "OK" v[want]; else print "FAILmissing field " want
+    }' "$1") || die "cannot read $1"
+  case $_out in
+    OK*) PAIR_VALUE=${_out#OK} ;;
+    FAIL*) die "${_out#FAIL} in $1" ;;
+    *) die "pairs parse error in $1" ;;
+  esac
+}
+
+file_size() {
+  wc -c < "$1" | tr -d ' \t\r\n'
+}
+
+strip_ws() {
+  _s=$1
+  _s=${_s#"${_s%%[![:space:]]*}"}
+  _s=${_s%"${_s##*[![:space:]]}"}
+  printf '%s' "$_s"
+}
+
+do_bind() {
+  root= source= sha= bytes= seed_sha= control_root=
+  while [ $# -gt 0 ]; do
+    [ $# -ge 2 ] || usage "missing value for $1"
+    case $1 in
+      --root) root=$2 ;;
+      --source) source=$2 ;;
+      --sha256) sha=$2 ;;
+      --bytes) bytes=$2 ;;
+      --seed-sha256) seed_sha=$2 ;;
+      --control-root) control_root=$2 ;;
+      *) usage "unknown option $1" ;;
+    esac
+    shift 2
+  done
+  for _v in "$root" "$source" "$sha" "$bytes" "$seed_sha" "$control_root"; do
+    [ -n "$_v" ] || usage "bind requires --root --source --sha256 --bytes --seed-sha256 --control-root"
+  done
+  case $bytes in
+    ''|*[!0-9]*) die "--bytes must be a decimal integer" ;;
+  esac
+
+  compiler=$root/handoff/linux-x86_64-p1/simple
+  phase=$root/handoff/linux-x86_64-p1/PHASE
+  diag=$root/diagnostics
+  evidence=$diag/evidence
+  is_plain_file "$compiler" || die "compiler is not a regular file"
+  [ -f "$phase" ] && printf '1\n' | cmp -s - "$phase" || die "PHASE is not exactly 1"
+  [ "$(file_size "$compiler")" -eq "$bytes" ] || die "compiler byte size mismatch"
+  [ "$(digest "$compiler")" = "$sha" ] || die "compiler sha256 mismatch"
+  # ELF64 little-endian header, ET_EXEC/ET_DYN-as-2, EM_X86_64 (62).
+  [ "$(od -An -tx1 -N6 "$compiler" | tr -d ' \n')" = 7f454c460201 ] || die "compiler is not ELF64 LE"
+  [ "$(od -An -tx1 -j16 -N4 "$compiler" | tr -d ' \n')" = 02003e00 ] || die "compiler type/machine mismatch"
+
+  pairs_get "$evidence/seed-preflight.env" = seed_sha256
+  pre_seed=$PAIR_VALUE
+  pairs_get "$evidence/seed-preflight.env" = schema
+  pre_schema=$PAIR_VALUE
+  pairs_get "$evidence/seed-preflight.env" = status
+  pre_status=$PAIR_VALUE
+  pairs_get "$evidence/seed-preflight.env" = git_head
+  pre_head=$PAIR_VALUE
+  pairs_get "$evidence/seed-preflight.env" = source_snapshot_sha256
+  pre_snap=$PAIR_VALUE
+  pairs_get "$evidence/seed-preflight.env" = git_state_sha256
+  pre_git=$PAIR_VALUE
+  seed=$diag/producer/simple
+  is_plain_file "$seed" || die "seed is not a regular file"
+  seed_actual=$(digest "$seed")
+  [ "$seed_actual" = "$seed_sha" ] && [ "$seed_sha" = "$pre_seed" ] || die "seed sha256 mismatch"
+  [ "$pre_schema" = simple-bootstrap-preflight-v1 ] || die "preflight schema mismatch"
+  [ "$pre_status" = pass ] && [ "$pre_head" = "$source" ] || die "preflight status/head mismatch"
+  bindings=$evidence/seed-preflight-bindings
+  [ -f "$bindings/source-inputs.txt" ] && [ "$(digest "$bindings/source-inputs.txt")" = "$pre_snap" ] \
+    || die "source snapshot digest mismatch"
+  [ -f "$bindings/git-state.env" ] && [ "$(digest "$bindings/git-state.env")" = "$pre_git" ] \
+    || die "git state digest mismatch"
+  pairs_get "$bindings/git-state.env" = head
+  [ "$PAIR_VALUE" = "$source" ] || die "git-state head mismatch"
+
+  manifest=$bindings/source-inputs.txt
+  [ "$(file_size "$manifest")" -le 33554432 ] || die "manifest exceeds 32MiB"
+  witnesses=$(awk '
+    BEGIN {
+      sel["src/compiler/00.common/sdk_errno_observer_v1.spl"] = 1
+      sel["src/compiler/20.hir/hir_lowering/types.spl"] = 1
+      sel["src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl"] = 1
+      sel["src/compiler/80.driver/driver_hir_pipeline_lowering.spl"] = 1
+    }
+    function unhex(h,   i, out, c, d, hi) {
+      if (length(h) % 2 != 0 || h ~ /[^0-9a-fA-F]/) return "\001BAD"
+      out = ""
+      for (i = 1; i <= length(h); i += 2) {
+        out = out sprintf("%c", index("0123456789abcdef", tolower(substr(h, i, 1))) * 16 - 16 + \
+          index("0123456789abcdef", tolower(substr(h, i + 1, 1))) - 1)
+      }
+      return out
+    }
+    substr($0, 1, 9) == "file-hex:" {
+      n = split($0, p, ":")
+      if (n != 5) { print "FAIL\tmalformed file-hex row"; exit }
+      name = unhex(p[3])
+      if (name == "\001BAD") { print "FAIL\tmalformed file-hex name"; exit }
+      if (name in sel) {
+        if (name in seen) { print "FAIL\tduplicate selected source witness"; exit }
+        seen[name] = 1
+        print "W\t" name "\t" p[5]
+      }
+    }' "$manifest") || die "cannot read manifest"
+  case $witnesses in
+    FAIL*) die "${witnesses#FAIL	}" ;;
+  esac
+  nseen=0
+  wtmp=${TMPDIR:-/tmp}/sdk-observer-bind.$$
+  printf '%s\n' "$witnesses" > "$wtmp"
+  tab=$(printf '\t')
+  while IFS=$tab read -r _tag _name _want; do
+    [ "$_tag" = W ] || continue
+    [ -f "$control_root/$_name" ] || { rm -f "$wtmp"; die "selected source missing: $_name"; }
+    [ "$(digest "$control_root/$_name")" = "$_want" ] || { rm -f "$wtmp"; die "selected source witness mismatch: $_name"; }
+    nseen=$((nseen + 1))
+  done < "$wtmp"
+  rm -f "$wtmp"
+  [ "$nseen" -eq 4 ] || die "instrumented producer source witnesses missing"
+
+  hello=$evidence/hello
+  [ -f "$hello/exit-status" ] || die "missing hello exit-status"
+  [ "$(strip_ws "$(cat "$hello/exit-status")")" = 0 ] || die "hello exit status not 0"
+  [ -f "$hello/stdout" ] && { printf 'phase-ladder-1-ok\n' | cmp -s - "$hello/stdout" \
+    || printf 'phase-ladder-1-ok\r\n' | cmp -s - "$hello/stdout"; } || die "hello stdout mismatch"
+  [ -f "$hello/stderr" ] && [ ! -s "$hello/stderr" ] || die "hello stderr not empty"
+  pairs_get "$hello/hello.link-receipt" : simple-link-receipt
+  [ "$PAIR_VALUE" = 1 ] || die "link receipt version mismatch"
+  pairs_get "$hello/hello.link-receipt" : output-sha256
+  link_out=$PAIR_VALUE
+  [ -f "$hello/hello" ] && [ "$(digest "$hello/hello")" = "$link_out" ] || die "hello output sha256 mismatch"
+
+  printf 'schema: sdk-observer-producer-binding-v1\nproducer_source: %s\nproducer_sha256: %s\nproducer_bytes: %s\nphase: 1\nseed_sha256: %s\nretained_hello_sha256: %s\nretained_hello_exit: 0\nhello_rerun: false\nqualification: provisional-diagnostic-only\nsdk_qualification: BLOCKED\np3: skipped\n' \
+    "$source" "$sha" "$bytes" "$seed_sha" "$link_out" > "$root/producer-binding.sdn" \
+    || die "cannot write producer-binding.sdn"
+}
+
+do_records() {
+  log= output= kind= data_root=
+  while [ $# -gt 0 ]; do
+    [ $# -ge 2 ] || usage "missing value for $1"
+    case $1 in
+      --log) log=$2 ;;
+      --output) output=$2 ;;
+      --kind) kind=$2 ;;
+      --data-root) data_root=$2 ;;
+      *) usage "unknown option $1" ;;
+    esac
+    shift 2
+  done
+  [ -n "$log" ] && [ -n "$output" ] && [ -n "$kind" ] || usage "records requires --kind --log --output"
+  case $kind in
+    control|sdk) ;;
+    *) usage "--kind must be control or sdk" ;;
+  esac
+  [ -f "$log" ] || die "log is not a file"
+  [ "$(file_size "$log")" -le 67108864 ] || die "log exceeds 64MiB bound"
+  if [ -s "$log" ] && [ "$(tail -c 1 "$log" | od -An -tx1 | tr -d ' \n')" = 0a ]; then
+    final_nl=1
+  else
+    final_nl=0
+  fi
+  tmp=$(mktemp "${TMPDIR:-/tmp}/sdk-observer.XXXXXX") || die "mktemp failed"
+  trap 'rm -f "$tmp" "$tmp.awk" "$tmp.imp"' EXIT INT TERM
+  cat > "$tmp.awk" <<'AWKEOF'
+function fail(msg) { printf "FAIL\t%s\n", msg; failed = 1; exit 1 }
+function hexval(s,   i, v, d) {
+  v = 0
+  for (i = 1; i <= length(s); i++) {
+    d = index("0123456789abcdef", tolower(substr(s, i, 1)))
+    if (d == 0) return -1
+    v = v * 16 + d - 1
+  }
+  return v
+}
+function utf8(cp) {
+  if (cp < 128) return sprintf("%c", cp)
+  if (cp < 2048) return sprintf("%c%c", 192 + int(cp / 64), 128 + cp % 64)
+  if (cp < 65536) return sprintf("%c%c%c", 224 + int(cp / 4096), 128 + int(cp / 64) % 64, 128 + cp % 64)
+  return sprintf("%c%c%c%c", 240 + int(cp / 262144), 128 + int(cp / 4096) % 64, 128 + int(cp / 64) % 64, 128 + cp % 64)
+}
+# Decode one JSON string literal (surrounding whitespace allowed). Sets JOK.
+function jstr(v,   n, i, c, e, out, cp, lo) {
+  JOK = 0
+  sub(/^[ ]+/, "", v); sub(/[ ]+$/, "", v)
+  n = length(v)
+  if (n < 2 || substr(v, 1, 1) != "\"" || substr(v, n, 1) != "\"") return ""
+  out = ""
+  i = 2
+  while (i <= n - 1) {
+    c = substr(v, i, 1)
+    if (c == "\"") return ""
+    if (c != "\\") { out = out c; i++; continue }
+    if (i + 1 > n - 1) return ""
+    e = substr(v, i + 1, 1)
+    if (e == "\"" || e == "\\" || e == "/") { out = out e; i += 2 }
+    else if (e == "b") { out = out sprintf("%c", 8); i += 2 }
+    else if (e == "f") { out = out sprintf("%c", 12); i += 2 }
+    else if (e == "n") { out = out "\n"; i += 2 }
+    else if (e == "r") { out = out sprintf("%c", 13); i += 2 }
+    else if (e == "t") { out = out sprintf("%c", 9); i += 2 }
+    else if (e == "u") {
+      if (i + 5 > n - 1) return ""
+      cp = hexval(substr(v, i + 2, 4))
+      if (cp < 1) return ""
+      i += 6
+      if (cp >= 55296 && cp < 56320) {
+        if (substr(v, i, 2) != "\\u" || i + 5 > n - 1) return ""
+        lo = hexval(substr(v, i + 2, 4))
+        if (lo < 56320 || lo > 57343) return ""
+        cp = 65536 + (cp - 55296) * 1024 + (lo - 56320)
+        i += 6
+      } else if (cp >= 56320 && cp < 57344) return ""
+      out = out utf8(cp)
+    } else return ""
+  }
+  JOK = 1
+  return out
+}
+function normint(s) {
+  # decimal integer text (no sign handling needed for our ranges) -> canonical string
+  sub(/^\+/, "", s)
+  neg = 0
+  if (substr(s, 1, 1) == "-") { neg = 1; s = substr(s, 2) }
+  sub(/^0+/, "", s)
+  if (s == "") return "0"
+  return (neg ? "-" : "") s
+}
+function isint(s) { return s ~ /^[+-]?[0-9]+$/ }
+function process_block(   nl, lines, i, k, v, p, fields, cnt, key, seq, pid, begin, endv, allowed_ok, raw) {
+  nl = split(block, lines, "\n")
+  # block ends with "\n" so the last element is empty
+  delete fields
+  cnt = 0
+  for (i = 1; i < nl; i++) {
+    p = index(lines[i], ": ")
+    if (p == 0) fail("record line without ': '")
+    k = substr(lines[i], 1, p - 1)
+    v = substr(lines[i], p + 2)
+    if (k in fields) fail("duplicate record key " k)
+    fields[k] = v
+    cnt++
+  }
+  if (cnt != nreq) fail("incomplete/unavailable/foreign record")
+  for (k in req) if (!(k in fields)) fail("incomplete/unavailable/foreign record")
+  if (fields["schema"] != "sdk-worker-reexport-observation-v1") fail("record schema mismatch")
+  if (!isint(fields["sequence"]) || !isint(fields["process_id"])) fail("sequence/process_id not integers")
+  seq = normint(fields["sequence"]); pid = normint(fields["process_id"])
+  if (pid !~ /^[1-9][0-9]*$/ || seq !~ /^[0-7]$/) fail("process_id/sequence out of range")
+  if (!isint(fields["sdk-observer-begin"]) || !isint(fields["sdk-observer-end"])) fail("begin/end not integers")
+  if (normint(fields["sdk-observer-begin"]) != seq || seq != normint(fields["sdk-observer-end"])) fail("begin/end sequence mismatch")
+  if (fields["initialization_scope"] != "0") fail("initialization_scope not 0")
+  split("found complete valid owner_frozen body_frozen", bools, " ")
+  for (i = 1; i <= 5; i++) if (fields[bools[i]] != "true" && fields[bools[i]] != "false") fail("boolean field " bools[i])
+  split("registry_generation registry_count facade_index memo_slot terminal_index owner_generation owner_count body_generation body_count", ints, " ")
+  for (i = 1; i <= 9; i++) if (!isint(fields[ints[i]])) fail("integer field " ints[i])
+  split("module_name importer normalized_importer wanted branch terminal_item", qs, " ")
+  for (i = 1; i <= 6; i++) {
+    dec[qs[i]] = jstr(fields[qs[i]])
+    if (!JOK) fail("quoted field " qs[i] " is not a JSON string")
+  }
+  norm = dec["importer"]; gsub(/\\/, "/", norm)
+  if (dec["normalized_importer"] != norm) fail("normalized_importer mismatch")
+  suffix = "/nogc_sync_mut/io/path_identity.spl"
+  ni = dec["normalized_importer"]
+  if (length(ni) < length(suffix) || substr(ni, length(ni) - length(suffix) + 1) != suffix) fail("importer is not path_identity.spl")
+  if (dec["wanted"] != "path_errno_address") fail("wanted mismatch")
+  if (kind == "sdk") {
+    if (!(dec["branch"] in allowed)) fail("branch not allowed: " dec["branch"])
+  }
+  if ((pid SUBSEP seq) in group) fail("duplicate PID/sequence")
+  group[pid SUBSEP seq] = 1
+  if (!(pid in pidseen)) { pidseen[pid] = 1; npid++ }
+  pidcount[pid]++
+  if (seq + 0 > pidmax[pid]) pidmax[pid] = seq + 0
+  if (kind == "control") {
+    if (dec["branch"] != "enabled-native-control") fail("control branch mismatch")
+    if (dec["module_name"] != "fixture.module") fail("control module mismatch")
+    if (fields["owner_generation"] != "17" || fields["body_generation"] != "19") fail("control generation mismatch")
+    if (fields["terminal_index"] != "126" || dec["terminal_item"] != "path_errno_address") fail("control terminal mismatch")
+    if (fields["found"] != "true") fail("control found mismatch")
+  }
+  nrows++
+  rows_pid[nrows] = pid; rows_seq[nrows] = seq; rows_branch[nrows] = dec["branch"]
+  rows_imp[nrows] = dec["normalized_importer"]
+}
+BEGIN {
+  nreq = split("sdk-observer-begin schema sequence process_id initialization_scope module_name importer normalized_importer wanted branch registry_generation registry_count facade_index memo_slot terminal_index terminal_item found complete valid owner_generation owner_count owner_frozen body_generation body_count body_frozen sdk-observer-end", rl, " ")
+  for (i = 1; i <= nreq; i++) req[rl[i]] = 1
+  split("registry-invalid index-bounds physical-index generation memo-verified-negative memo-negative-recheck-found memo-negative-recheck-miss memo-terminal-bounds memo-positive fresh-found fresh-miss registered-hop", al, " ")
+  for (i in al) allowed[al[i]] = 1
+  active = 0; nblocks = 0; nrows = 0; npid = 0
+}
+{
+  line = $0
+  if (line ~ /[^ -~]/) {
+    # control bytes (incl. CR/tab) or non-ASCII only matter inside a record or on an observer line
+    if (active || index(line, "sdk-observer-") > 0) fail("record/observer line has control or non-ASCII byte")
+  }
+  last_line = line
+  if (substr(line, 1, 20) == "sdk-observer-begin: ") {
+    if (active) fail("nested/interleaved record")
+    active = 1; block = ""; bsize = 0
+  }
+  if (active) {
+    block = block line "\n"
+    bsize += length(line) + 1
+    if (bsize > 2048) fail("record exceeds byte bound")
+    if (substr(line, 1, 18) == "sdk-observer-end: ") {
+      nblocks++
+      if (nblocks > 1024) fail("record inventory exceeds bound")
+      process_block()
+      active = 0
+    }
+  } else if (index(line, "sdk-observer-") > 0) fail("orphan observer fragment")
+}
+END {
+  if (failed) exit 1
+  if (active) fail("unterminated observer record")
+  if (nblocks == 0) fail("no actual worker observer records")
+  for (p in pidseen) if (pidcount[p] != pidmax[p] + 1) fail("missing sequence in retained capture")
+  if (kind == "control" && (npid != 1 || nblocks != 8)) fail("enabled control did not exercise actual shared cap")
+  printf "OK\t%d\t%d\n", nblocks, npid
+  for (i = 1; i <= nrows; i++) printf "ROW\t%s\t%s\t%s\t%s\n", rows_pid[i], rows_seq[i], rows_branch[i], rows_imp[i]
+}
+AWKEOF
+  awk -v kind="$kind" -f "$tmp.awk" "$log" > "$tmp" || true
+  # The unterminated-last-line case: awk cannot see a missing final LF, so the
+  # END-of-file check is done here against the captured block state.
+  if [ "$final_nl" = 0 ] && [ -s "$log" ] && tail -n 1 "$log" | grep -q '^sdk-observer-end: '; then
+    die "incomplete terminal line"
+  fi
+  head1=$(head -n 1 "$tmp")
+  case $head1 in
+    FAIL*) die "$(printf '%s' "$head1" | cut -f2-)" ;;
+    OK*) ;;
+    *) die "record scan produced no verdict" ;;
+  esac
+  nblocks=$(printf '%s' "$head1" | cut -f2)
+  nproc=$(printf '%s' "$head1" | cut -f3)
+
+  if [ "$kind" = sdk ]; then
+    [ -n "$data_root" ] || die "SDK capture requires physical frozen-data binding"
+    [ -e "$data_root" ] || die "data root does not exist"
+    data=$(readlink -f "$data_root") || die "cannot resolve data root"
+    expected_path=$data/src/lib/nogc_sync_mut/io/path_identity.spl
+    [ -e "$expected_path" ] || die "expected path_identity.spl missing"
+    expected=$(readlink -f "$expected_path") || die "cannot resolve expected importer"
+    tail -n +2 "$tmp" | cut -f5 | sort -u > "$tmp.imp"
+    while IFS= read -r imp; do
+      case $imp in
+        /*) actual=$imp ;;
+        *) actual=$data/$imp ;;
+      esac
+      [ -e "$actual" ] || { rm -f "$tmp.imp"; die "importer does not exist: $imp"; }
+      resolved=$(readlink -f "$actual") || die "cannot resolve importer"
+      [ "$resolved" = "$expected" ] || { rm -f "$tmp.imp"; die "importer does not resolve to frozen data"; }
+    done < "$tmp.imp"
+    rm -f "$tmp.imp"
+  fi
+
+  raw_sha=$(digest "$log")
+  {
+    printf 'schema: sdk-observer-capture-v1\nstatus: CAPTURED_DIAGNOSTIC_DATA\n'
+    printf 'kind: %s\nraw_sha256: %s\nrecords: %s\nprocesses: %s\n' "$kind" "$raw_sha" "$nblocks" "$nproc"
+    printf 'resolver_fix_proved: false\nsdk_qualification: none\nrecords_observed:\n'
+    tail -n +2 "$tmp" | awk -F'\t' '{ printf "  - process: %s\n    sequence: %s\n    branch: %s\n", $2, $3, $4 }'
+  } > "$output" || die "cannot write capture output"
+}
+
+[ $# -ge 1 ] || usage "mode required: bind|records"
+mode=$1
+shift
+case $mode in
+  bind) do_bind "$@" ;;
+  records) do_records "$@" ;;
+  *) usage "unknown mode $mode" ;;
+esac
