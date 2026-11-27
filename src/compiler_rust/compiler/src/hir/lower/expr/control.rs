@@ -40,6 +40,59 @@ fn hir_arm_is_bottom(expr: &HirExpr) -> bool {
     expr.ty == TypeId::NIL || hir_expr_definitely_returns(expr)
 }
 
+/// An arm whose value is only an EMPTY `[]` / `{}` literal (possibly through
+/// blocks, a nested match/if chain whose every value arm is such a literal).
+/// Its default element/key type is not evidence about the join type, so a
+/// concrete sibling must win (same rule `lower_if` applies to `[]`).
+/// Bottom arms (`return`, NIL) are ignored; at least one arm must be weak.
+fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
+    weak_expr(expr) == Some(true)
+}
+
+// Some(true) = weak literal, Some(false) = concrete value, None = bottom.
+fn weak_expr(expr: &HirExpr) -> Option<bool> {
+    if hir_arm_is_bottom(expr) {
+        return None;
+    }
+    match &expr.kind {
+        HirExprKind::Array(items) => Some(items.is_empty()),
+        HirExprKind::Dict(pairs) => Some(pairs.is_empty()),
+        HirExprKind::Block(stmts) => weak_stmts(stmts),
+        HirExprKind::LetIn { body, .. } => weak_expr(body),
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => join_weak(weak_expr(then_branch), weak_expr(else_branch)),
+        _ => Some(false),
+    }
+}
+
+fn weak_stmts(stmts: &[HirStmt]) -> Option<bool> {
+    match stmts.last() {
+        Some(HirStmt::Expr(expr)) => weak_expr(expr),
+        Some(HirStmt::If {
+            then_block,
+            else_block: Some(else_block),
+            ..
+        }) => join_weak(weak_stmts(then_block), weak_stmts(else_block)),
+        Some(HirStmt::Return(_)) => None,
+        _ => Some(false),
+    }
+}
+
+fn join_weak(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (None, other) | (other, None) => other,
+        (Some(x), Some(y)) => Some(x && y),
+    }
+}
+
+/// True when the arm value is concrete (not bottom, not a weak empty literal).
+fn hir_value_is_concrete(expr: &HirExpr) -> bool {
+    weak_expr(expr) == Some(false)
+}
+
 /// Value type of a lowered tail `if`/`else` statement: the first arm whose
 /// tail value is neither bottom (NIL) nor an empty `[]` literal (its default
 /// element type is not evidence, see `lower_if`); an empty literal is used
@@ -50,7 +103,8 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
     fn arm_type(stmts: &[HirStmt]) -> Option<(TypeId, bool)> {
         match stmts.last() {
             Some(HirStmt::Expr(expr)) if !hir_arm_is_bottom(expr) => {
-                let empty = matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty());
+                let empty = matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty())
+                    || matches!(&expr.kind, HirExprKind::Dict(pairs) if pairs.is_empty());
                 Some((expr.ty, empty))
             }
             Some(HirStmt::If { .. }) => tail_if_type(stmts),
@@ -739,7 +793,12 @@ impl Lowerer {
         // `case Err(e): panic(e); case Ok(v): v` report `Nil` instead of
         // `v`'s real type.
         let then_is_bottom = hir_arm_is_bottom(&then_branch);
-        let result_ty = if then_is_bottom { else_branch.ty } else { then_ty };
+        // A weak empty `[]`/`{}` arm must not win the join over a concrete
+        // sibling (its default element type is not evidence).
+        let then_is_weak_vs_concrete = !then_is_bottom
+            && hir_value_is_weak_empty(&then_branch)
+            && hir_value_is_concrete(&else_branch);
+        let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
 
         Ok(HirExpr {
             kind: HirExprKind::If {

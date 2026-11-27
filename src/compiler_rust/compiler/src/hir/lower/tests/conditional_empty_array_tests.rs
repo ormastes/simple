@@ -172,31 +172,65 @@ fn multi_branch_and_nested_if_empty_arrays_propagate_sibling_element_to_all_leav
     );
 }
 
+const TAG_CLASSES: &str = concat!(
+    "class Tag:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n    fn entries() -> Dict<text, Tag>?:\n        None\n",
+    "class Other:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n",
+    "fn other_label(o: Other) -> text:\n    o.label() ?? \"\"\n",
+);
+
+fn local_ty(module: &crate::hir::HirModule, func: &str, local: &str) -> Option<HirType> {
+    let function = module.functions.iter().find(|f| f.name == func).unwrap();
+    let l = function.locals.iter().find(|l| l.name == local).unwrap();
+    module.types.get(l.ty).cloned()
+}
+
 #[test]
 fn nested_tail_match_arm_keeps_payload_type_for_dict_index_receiver() {
-    // Repro for codegen_bare_method_receiver_type_blind_candidate_selection: a
-    // `match` that is the sole body of an outer match arm is a tail match
+    // A `match` that is the sole body of an outer match arm is a tail match
     // STATEMENT; it used to type the arm block NIL/ANY, so `files` lost its
     // `Dict<text, Tag>` type and `files[k].label()` reached codegen as a bare
     // method call with 2+ candidates (CODEGEN-AMBIGUOUS-METHOD).
-    let source = concat!(
-        "class Tag:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n    fn entries() -> Dict<text, Tag>?:\n        None\n",
-        "class Other:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n",
-        "fn pick(outer: Tag?, key: text) -> text:\n",
-        "    val files = match outer:\n",
-        "        case Some(a):\n",
-        "            match a.entries():\n",
-        "                case Some(entries): entries\n",
-        "                case None: return \"x\"\n",
-        "        case None: return \"y\"\n",
-        "    files[key].label() ?? \"\"\n",
+    let source = format!(
+        "{TAG_CLASSES}fn pick(outer: Tag?, key: text) -> text:\n    val files = match outer:\n        case Some(a):\n            match a.entries():\n                case Some(entries): entries\n                case None: return \"x\"\n        case None: return \"y\"\n    files[key].label() ?? \"\"\n"
     );
-    let module = parse_and_lower(source).unwrap();
-    let function = module.functions.iter().find(|f| f.name == "pick").unwrap();
-    let files = function.locals.iter().find(|l| l.name == "files").unwrap();
-    assert!(
-        matches!(module.types.get(files.ty), Some(HirType::Dict { .. })),
-        "files must keep its Dict type, got {:?}",
-        module.types.get(files.ty)
+    let module = parse_and_lower(&source).unwrap();
+    let Some(HirType::Dict { key, value }) = local_ty(&module, "pick", "files") else {
+        panic!("files must keep its Dict type, got {:?}", local_ty(&module, "pick", "files"));
+    };
+    assert_eq!(key, TypeId::STRING);
+    assert!(matches!(module.types.get(value), Some(HirType::Struct { name, .. }) if name == "Tag"), "{:?}", module.types.get(value));
+}
+
+#[test]
+fn nested_match_empty_dict_arm_does_not_beat_concrete_sibling_dict() {
+    // `{}` default type is not evidence: the concrete outer sibling must win.
+    let source = format!(
+        "{TAG_CLASSES}enum K:\n    A\n    B\nfn pick(d: Dict<text, Tag>, a: i64?, k: K) -> text:\n    val files = match a:\n        case Some(x):\n            match k:\n                case K.A: {{}}\n                case K.B: d\n        case None: d\n    files[\"k\"].label() ?? \"\"\n"
     );
+    let module = parse_and_lower(&source).unwrap();
+    let Some(HirType::Dict { key, value }) = local_ty(&module, "pick", "files") else {
+        panic!("files must be the sibling Dict, got {:?}", local_ty(&module, "pick", "files"));
+    };
+    assert_eq!(key, TypeId::STRING);
+    assert!(matches!(module.types.get(value), Some(HirType::Struct { name, .. }) if name == "Tag"));
+}
+
+#[test]
+fn match_empty_array_arm_does_not_beat_concrete_sibling_array() {
+    // Nested, nested-if and flat shapes: `[]` (default [i32]) must not win the
+    // join over a `[f64]` sibling (silent wrong value: 1.75 vs 1006847761.25).
+    for body in [
+        "    val r = match a:\n        case Some(x):\n            match k:\n                case K.A: []\n                case K.B: return -1.0\n        case None: xs\n",
+        "    val r = match a:\n        case Some(x):\n            if c:\n                []\n            else:\n                return -1.0\n        case None: xs\n",
+        "    val r = match k:\n        case K.A: []\n        case K.B: xs\n",
+    ] {
+        let source = format!(
+            "enum K:\n    A\n    B\nfn h(xs: [f64], a: i64?, k: K, c: bool) -> f64:\n{body}    if r.len() > 0: r[0] + 0.25 else: -2.0\n"
+        );
+        let module = parse_and_lower(&source).unwrap();
+        let Some(HirType::Array { element, .. }) = local_ty(&module, "h", "r") else {
+            panic!("r must be an array for {body}");
+        };
+        assert_eq!(element, TypeId::F64, "{body}");
+    }
 }
