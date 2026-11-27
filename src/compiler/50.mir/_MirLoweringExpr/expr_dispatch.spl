@@ -522,6 +522,13 @@ impl MirLowering:
                         case HirTypeKind.Array(global_elem_type, _) | HirTypeKind.Slice(global_elem_type):
                             self.runtime_array_locals[dest.id] = true
                             self.mark_runtime_value_local(dest.id)
+                            match global_elem_type.kind:
+                                case HirTypeKind.Str:
+                                    self.runtime_elem_value_type[dest.id] = self.bootstrap_text_type()
+                                case HirTypeKind.Unit | HirTypeKind.Any | HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.TypeParam(_, _):
+                                    ()
+                                case _:
+                                    self.runtime_elem_value_type[dest.id] = self.lower_type(global_elem_type)
                             # A `[Struct]` global must carry its element struct
                             # name exactly like a `[Struct]` parameter/let local
                             # (function_lowering.spl param registration): without
@@ -5495,15 +5502,22 @@ impl MirLowering:
         if gpu_raw_pointer and self.current_gpu_kernel_target == "vulkan":
             index_local = self.vulkan_u32_local(index_local)
         var is_tuple_base = false
+        var base_had_unit_elem = false
         var tuple_field_mir_types: [MirType] = []
         if has_base_mir_type:
             match base_mir_type.kind:
                 case MirTypeKind.Array(element_type, _):
-                    result_type = element_type
-                    result_type_from_base = true
+                    if _sffi_enum_discriminant<MirTypeKind>(element_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Unit):
+                        base_had_unit_elem = true
+                    else:
+                        result_type = element_type
+                        result_type_from_base = true
                 case MirTypeKind.Slice(element_type):
-                    result_type = element_type
-                    result_type_from_base = true
+                    if _sffi_enum_discriminant<MirTypeKind>(element_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Unit):
+                        base_had_unit_elem = true
+                    else:
+                        result_type = element_type
+                        result_type_from_base = true
                 case MirTypeKind.Ptr(element_type, _) | MirTypeKind.Ref(element_type, _):
                     result_type = element_type
                     result_type_from_base = true
@@ -5627,6 +5641,24 @@ impl MirLowering:
             match index_result_hir_type.kind:
                 case HirTypeKind.TypeParam(_, _): erased_element_hir = Some(index_result_hir_type)
                 case _: ()
+        if not result_type_from_base:
+            if val noted_elem_type = self.noted_runtime_elem_type(base_local):
+                if _sffi_enum_discriminant<MirTypeKind>(noted_elem_type.kind) != _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Unit):
+                    result_type = noted_elem_type
+                    result_type_from_base = true
+        if not result_type_from_base and has_index_result_hir_type:
+            match index_result_hir_type.kind:
+                case HirTypeKind.Str:
+                    result_type = self.bootstrap_text_type()
+                    result_type_from_base = true
+                case HirTypeKind.Unit | HirTypeKind.Any | HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.TypeParam(_, _):
+                    ()
+                case _:
+                    result_type = self.lower_type(index_result_hir_type)
+                    result_type_from_base = true
+        if not result_type_from_base and base_had_unit_elem:
+            result_type = MirType.i64()
+            result_type_from_base = true
         if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base and not is_tuple_base:
             result_type = self.bootstrap_text_type()
         elif not result_type_from_base and has_index_result_hir_type:
