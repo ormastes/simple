@@ -9,7 +9,7 @@ use std.common.hash.hash_policy_v1.{hash_policy_v1_digest, HASH_POLICY_V1_XXH3_1
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, StoreGcV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_publish_root, immutable_store_v1_pin, immutable_store_v1_release_pin,
-    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, StoreFlagV1, StoreCountV1, StoreGenerationV1}
+    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
@@ -199,6 +199,29 @@ describe "immutable_store_v1 roots and pins":
         expect(file_exists(root + "/pins/pe/refs/" + k2)).to_equal(true)
         expect(immutable_store_v1_pin(root, "pe", "owner-b", [k1])).to_equal("pin-owner-mismatch")
         expect(dir_list(root + "/staging").len()).to_equal(0)
+        _store_cleanup(root)
+
+    it "merges into the winner when the staged create loses the rename":
+        val root = _store_root("pin-lost-rename")
+        val k1 = immutable_store_v1_ingest(root, "lost one".bytes(), HASH_POLICY_V1_XXH3_128).object_key
+        val k2 = immutable_store_v1_ingest(root, "lost two".bytes(), HASH_POLICY_V1_XXH3_128).object_key
+        expect(immutable_store_v1_pin(root, "pl", "owner-a", [k1])).to_equal("")
+        # Drive the staged create directly while pins/pl already exists: its
+        # rename loses and it must merge into the winner without residue.
+        expect(_isv1_pin_add_staged(root, root + "/pins/pl", "owner-a", [k2])).to_equal("")
+        expect(file_exists(root + "/pins/pl/refs/" + k1)).to_equal(true)
+        expect(file_exists(root + "/pins/pl/refs/" + k2)).to_equal(true)
+        expect(_isv1_pin_add_staged(root, root + "/pins/pl", "owner-b", [k1])).to_equal("pin-owner-mismatch")
+        expect(dir_list(root + "/staging").len()).to_equal(0)
+        _store_cleanup(root)
+
+    it "never recreates a pin dir that vanished under the in-place merge":
+        val root = _store_root("pin-vanished")
+        val k1 = immutable_store_v1_ingest(root, "vanish one".bytes(), HASH_POLICY_V1_XXH3_128).object_key
+        expect(_isv1_pin_add_in_place(root, root + "/pins/gone", "owner-a", [k1])).to_equal("pin-vanished")
+        expect(is_dir(root + "/pins/gone")).to_equal(false)
+        expect(immutable_store_v1_pin(root, "gone", "owner-a", [k1])).to_equal("")
+        expect(file_exists(root + "/pins/gone/owner")).to_equal(true)
         _store_cleanup(root)
 
     it "rejects a pin update or release by a different owner":
