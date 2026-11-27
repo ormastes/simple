@@ -1,0 +1,141 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 5%
+
+"""
+## Purpose and audience
+Unit and scaling contract for the DrawIR tiled software replay path
+(`engine2d_draw_ir_render_tiled`): proves 510-tile (30x17) topology parity,
+O(k) full-tile opaque-barrier retirement on deep layer stacks, split-tile
+coverage proof parity, fail-closed plan validation, and the absence of per-tile
+command allocation / coalescing / env lookups in the tiled executor.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use std.gpu.engine2d.engine.Engine2D
+use common.ui.draw_ir.{DrawIrCommand, draw_ir_rect}
+use std.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_render_tiled,
+    engine2d_draw_ir_render_tiled_unculled
+}
+
+fn _make_grid(cols: i32, rows: i32, tile_px: i32, w: i32, h: i32) -> ([i32], [i32], [i32], [i32], [bool], [i32], [i32]):
+    val tiles = cols * rows
+    var tx: [i32] = [0; tiles]
+    var ty: [i32] = [0; tiles]
+    var tw: [i32] = [0; tiles]
+    var th: [i32] = [0; tiles]
+    var live: [bool] = [true; tiles]
+    var starts: [i32] = [0; tiles + 1]
+    var items: [i32] = [0; tiles * 2]
+    var t: i32 = 0
+    while t < tiles:
+        val col = t % cols
+        val row = t / cols
+        tx[t] = col * tile_px
+        ty[t] = row * tile_px
+        tw[t] = if tx[t] + tile_px > w: w - tx[t] else: tile_px
+        th[t] = if ty[t] + tile_px > h: h - ty[t] else: tile_px
+        starts[t] = t * 2
+        items[t * 2] = 0
+        items[t * 2 + 1] = 1
+        t = t + 1
+    starts[tiles] = tiles * 2
+    (tx, ty, tw, th, live, starts, items)
+
+describe "DrawIR tiled scaling and barrier contract":
+    it "preserves bit-exact parity and 510-tile occlusion counts across 30x17 geometry":
+        step("Build 30x17 = 510 tile grid matching 8K topology at scaled tile size")
+        val cols: i32 = 30
+        val rows: i32 = 17
+        val tile_px: i32 = 16
+        val w: i32 = cols * tile_px
+        val h: i32 = rows * tile_px
+        val commands = [
+            draw_ir_rect("under", 0, 0, w, h, 0xFFDC2626u32),
+            draw_ir_rect("barrier", 0, 0, w, h, 0xFF2563EBu32)
+        ]
+        val (tx, ty, tw, th, live, starts, items) = _make_grid(cols, rows, tile_px, w, h)
+        var opt_eng = Engine2D.create_with_backend(w, h, "software")
+        val opt = engine2d_draw_ir_render_tiled(opt_eng, commands, tx, ty, tw, th, live, starts, items)
+        var ref_eng = Engine2D.create_with_backend(w, h, "software")
+        val oracle = engine2d_draw_ir_render_tiled_unculled(ref_eng, commands, tx, ty, tw, th, live, starts, items)
+        expect(opt.tiles_rendered).to_equal(510)
+        expect(opt.ops_rendered).to_equal(510)
+        expect(opt.ops_occluded).to_equal(510)
+        expect(oracle.ops_rendered).to_equal(1020)
+        expect(oracle.ops_occluded).to_equal(0)
+        expect(opt.readback.pixels).to_equal(oracle.readback.pixels)
+        opt.engine.shutdown()
+        oracle.engine.shutdown()
+
+    it "retires deep stacked opaque layers via full-tile barrier fast-path":
+        step("Stack 24 full-viewport opaque layers across 4 tiles")
+        var commands: [DrawIrCommand] = []
+        var k: i32 = 0
+        while k < 24:
+            val color = if k == 23: 0xFF10B981u32 else: 0xFF334155u32
+            commands.push(draw_ir_rect("layer", 0, 0, 8, 8, color))
+            k = k + 1
+        var starts: [i32] = [0, 24, 48, 72, 96]
+        var items: [i32] = []
+        var tile = 0
+        while tile < 4:
+            var idx = 0
+            while idx < 24:
+                items.push(idx)
+                idx = idx + 1
+            tile = tile + 1
+        var opt_eng = Engine2D.create_with_backend(8, 8, "software")
+        val opt = engine2d_draw_ir_render_tiled(
+            opt_eng, commands, [0, 4, 0, 4], [0, 0, 4, 4], [4, 4, 4, 4], [4, 4, 4, 4],
+            [true, true, true, true], starts, items)
+        var ref_eng = Engine2D.create_with_backend(8, 8, "software")
+        val oracle = engine2d_draw_ir_render_tiled_unculled(
+            ref_eng, commands, [0, 4, 0, 4], [0, 0, 4, 4], [4, 4, 4, 4], [4, 4, 4, 4],
+            [true, true, true, true], starts, items)
+        expect(opt.ops_rendered).to_equal(4)
+        expect(opt.ops_occluded).to_equal(92)
+        expect(oracle.ops_rendered).to_equal(96)
+        expect(opt.readback.pixels).to_equal(oracle.readback.pixels)
+        opt.engine.shutdown()
+        oracle.engine.shutdown()
+
+    it "handles split-tile occlusion parity and rejects negative tile dimensions":
+        step("Verify two opaque halves occlude the full tile underlay")
+        val commands = [
+            draw_ir_rect("under", 0, 0, 4, 4, 0xFFDC2626u32),
+            draw_ir_rect("left", 0, 0, 2, 4, 0xFF16A34Au32),
+            draw_ir_rect("right", 2, 0, 2, 4, 0xFF2563EBu32)
+        ]
+        var opt_eng = Engine2D.create_with_backend(4, 4, "software")
+        val opt = engine2d_draw_ir_render_tiled(
+            opt_eng, commands, [0], [0], [4], [4], [true], [0, 3], [0, 1, 2])
+        var ref_eng = Engine2D.create_with_backend(4, 4, "software")
+        val oracle = engine2d_draw_ir_render_tiled_unculled(
+            ref_eng, commands, [0], [0], [4], [4], [true], [0, 3], [0, 1, 2])
+        expect(opt.ops_occluded).to_equal(1)
+        expect(opt.ops_rendered).to_equal(2)
+        expect(opt.readback.pixels).to_equal(oracle.readback.pixels)
+        opt.engine.shutdown()
+        oracle.engine.shutdown()
+
+        var bad_eng = Engine2D.create_with_backend(4, 4, "software")
+        val bad = engine2d_draw_ir_render_tiled(
+            bad_eng, commands, [0], [0], [-1], [4], [true], [0, 1], [0])
+        expect(bad.unsupported_kinds).to_equal("invalid-tile-plan")
+        expect(bad.ops_rendered).to_equal(0)
+        expect(bad.readback.pixels.len()).to_equal(0)
+        bad.engine.shutdown()
+
+    it "keeps tiled replay free of per-tile coalescing and per-tile env lookups":
+        val src = file_read("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+        expect(src).to_contain("_engine2d_draw_ir_find_full_tile_barrier")
+        expect(src).to_contain("_engine2d_draw_ir_render_commands_indexed")
+        expect(src).to_contain("_engine2d_draw_ir_render_tiled_mode")
+        val mode_pos = src.index_of("fn _engine2d_draw_ir_render_tiled_mode") ?? -1
+        val export_pos = src.index_of("export Engine2dDrawIrAdvResult") ?? -1
+        expect(mode_pos).to_be_greater_than(-1)
+        expect(export_pos).to_be_greater_than(mode_pos)
+        val tiled_tail = src.substring(mode_pos, export_pos)
+        expect(tiled_tail).to_contain("engine2d_draw_ir_lcd_text_enabled()")
+        expect(tiled_tail.contains("engine2d_draw_ir_coalesce_plain_fills")).to_equal(false)

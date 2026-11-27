@@ -1,0 +1,127 @@
+"""
+## Purpose and audience
+Purpose: Pin the device column of a collapsed table's INNER column rule at
+device scale 4 (384 dpi) when Chrome 159's auto column edge is fractional.
+Chrome sizes auto columns in LayoutUnits and paints the shared 1px collapsed
+rule centred on that fractional edge, snapped to the device grid. Simple
+painted it at 4 x the whole-CSS-px rule, one device px left of Chrome on the
+catalog `css-paint` table (device 1664..1667 vs Chrome 1665..1668, about 1,000
+of the page's 16,133 differing px at 4x). At 1x the same rule already sits on
+Chrome's column and must not move.
+Audience: browser-engine table layout and device-scale paint maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new --disable-gpu
+--hide-scrollbars --window-size=900,400 --force-device-scale-factor=K
+--screenshot`). The catalog table inside `<div style="margin-left:45px;
+width:Wpx">`, `*{box-sizing:border-box}`, `body{margin:0;font:16px/1.5
+sans-serif}`, `table{width:100%;border-collapse:collapse}`, `th,td{padding:8px;
+border:1px solid #cbd5e1;text-align:left}`, Feature/Expected header plus the
+Text/Visible and Layout/Aligned rows. Colour runs along device row y (a row
+that crosses only the vertical rules), `position:colour` wherever the colour
+changes; column edges from getBoundingClientRect:
+
+| W   | K | row y | column edge (CSS px) | Chrome 159 runs |
+|-----|---|-------|----------------------|-----------------|
+| 810 | 4 | 16, 176 | 416.87109375 | 180:cbd5e1 184:ffffff 1665:cbd5e1 1669:ffffff 3416:cbd5e1 3420:ffffff |
+| 760 | 4 | 16    | 393.90625    | 180:cbd5e1 184:ffffff 1574:cbd5e1 1578:ffffff 3216:cbd5e1 3220:ffffff |
+| 600 | 4 | 16    | 320.46875    | 180:cbd5e1 184:ffffff 1280:cbd5e1 1284:ffffff 2576:cbd5e1 2580:ffffff |
+| 810 | 1 | 4, 44 | 416.87109375 | 45:cbd5e1 46:ffffff 416:cbd5e1 417:ffffff 854:cbd5e1 855:ffffff |
+
+W=600 is the negative case: its edge rounds onto the whole-px rule at k=4.
+
+Three columns, W=500, Item/Longer heading text/Qty header plus a Bolt/Visible/12
+row (the middle cell moves BOTH edges): column edges 140 and 461.765625 CSS px;
+Chrome 159 at k=4, rows 16 and 176:
+`180:cbd5e1 184:ffffff 558:cbd5e1 562:ffffff 1845:cbd5e1 1849:ffffff 2176:cbd5e1 2180:ffffff`.
+
+Short row, W=810: the catalog table with the Text/Visible row cut to one cell
+(rows of 2, 1, 2 cells). Column edge 416.859375 CSS px. Chrome 159 at k=4: rows
+16 and 340 `180:cbd5e1 184:ffffff 1665:cbd5e1 1669:ffffff 3416:cbd5e1 3420:ffffff`,
+short row 176 `180:cbd5e1 184:ffffff 1665:cbd5e1 1669:ffffff` (the rule does not
+jog); at k=1 row 44 `45:cbd5e1 46:ffffff 416:cbd5e1 417:ffffff`.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TABLE-COLLAPSED-RULE-DEVICE-EDGE-001 — at device scale k > 1 a collapsed table's inner column rule follows Chrome's fractional auto column edge.
+"""
+# @tag: unit, browser_engine, table, engine2d, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+val CW: i32 = 900
+val CH: i32 = 130
+
+fn _page(width: i32) -> text:
+    "<!doctype html><html><head><style>*{{box-sizing:border-box}}body{{margin:0;font:16px/1.5 sans-serif;color:#172033;background:#fff}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border:1px solid #cbd5e1;text-align:left}}</style></head><body><div style=\"margin-left:45px;width:" + width.to_text() + "px\"><table><thead><tr><th>Feature</th><th>Expected</th></tr></thead><tbody><tr><td>Text</td><td>Visible</td></tr><tr><td>Layout</td><td>Aligned</td></tr></tbody></table></div></body></html>"
+
+fn _page3(width: i32) -> text:
+    "<!doctype html><html><head><style>*{{box-sizing:border-box}}body{{margin:0;font:16px/1.5 sans-serif;color:#172033;background:#fff}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border:1px solid #cbd5e1;text-align:left}}</style></head><body><div style=\"margin-left:45px;width:" + width.to_text() + "px\"><table><thead><tr><th>Item</th><th>Longer heading text</th><th>Qty</th></tr></thead><tbody><tr><td>Bolt</td><td>Visible</td><td>12</td></tr></tbody></table></div></body></html>"
+
+fn _page_short(width: i32) -> text:
+    "<!doctype html><html><head><style>*{{box-sizing:border-box}}body{{margin:0;font:16px/1.5 sans-serif;color:#172033;background:#fff}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border:1px solid #cbd5e1;text-align:left}}</style></head><body><div style=\"margin-left:45px;width:" + width.to_text() + "px\"><table><thead><tr><th>Feature</th><th>Expected</th></tr></thead><tbody><tr><td>Text</td></tr><tr><td>Layout</td><td>Aligned</td></tr></tbody></table></div></body></html>"
+
+fn hex6(c: u32) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 20
+    while shift >= 0:
+        val d = ((c >> (shift as u32)) & 15u32) as i32
+        out = out + digits.substring(d, d + 1)
+        shift = shift - 4
+    out
+
+# `position:colour` at every colour change along device row y of a w-wide frame.
+fn row_runs(px: [u32], w: i32, y: i32) -> text:
+    var out = ""
+    var prev = 0xFFFFFFu32
+    var x = 0
+    while x < w:
+        val c = px[x + y * w] & 0xFFFFFFu32
+        if c != prev:
+            out = out + " " + x.to_text() + ":" + hex6(c)
+            prev = c
+        x = x + 1
+    out
+
+describe "collapsed table inner rule at a fractional column edge (Chrome 159)":
+    it "AC-1: k=4, the catalog table's inner rule sits at Chrome's device 1665..1668":
+        step("Chrome 159: column edge 416.871 CSS px, rule 1665..1668 on header and body rows")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(810), CW, CH, 4, "cpu_simd")
+        expect(px.len()).to_equal(CW * 4 * CH * 4)
+        expect(row_runs(px, CW * 4, 16)).to_equal(" 180:cbd5e1 184:ffffff 1665:cbd5e1 1669:ffffff 3416:cbd5e1 3420:ffffff")
+        expect(row_runs(px, CW * 4, 176)).to_equal(" 180:cbd5e1 184:ffffff 1665:cbd5e1 1669:ffffff 3416:cbd5e1 3420:ffffff")
+
+    it "AC-2: k=4, an edge 0.406 px past the whole px moves the rule two device px":
+        step("Chrome 159: column edge 393.906 CSS px, rule 1574..1577")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(760), CW, CH, 4, "cpu_simd")
+        expect(row_runs(px, CW * 4, 16)).to_equal(" 180:cbd5e1 184:ffffff 1574:cbd5e1 1578:ffffff 3216:cbd5e1 3220:ffffff")
+
+    it "AC-3: k=4, an edge that rounds onto the whole px keeps the rule (negative)":
+        step("Chrome 159: column edge 320.469 CSS px, rule 1280..1283 = 4 x 320")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(600), CW, CH, 4, "cpu_simd")
+        expect(row_runs(px, CW * 4, 16)).to_equal(" 180:cbd5e1 184:ffffff 1280:cbd5e1 1284:ffffff 2576:cbd5e1 2580:ffffff")
+
+    it "AC-4: k=1 keeps the rule on Chrome's whole column 416 (negative)":
+        step("Chrome 159 at k=1: rules at 45, 416, 854")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(810), CW, CH, 1, "cpu_simd")
+        expect(row_runs(px, CW, 4)).to_equal(" 45:cbd5e1 46:ffffff 416:cbd5e1 417:ffffff 854:cbd5e1 855:ffffff")
+        expect(row_runs(px, CW, 44)).to_equal(" 45:cbd5e1 46:ffffff 416:cbd5e1 417:ffffff 854:cbd5e1 855:ffffff")
+
+    it "AC-5: k=4, a middle cell moves both of its rules (three columns)":
+        step("Chrome 159: column edges 140 and 461.766 CSS px, rules 558..561 and 1845..1848")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page3(500), CW, CH, 4, "cpu_simd")
+        expect(row_runs(px, CW * 4, 16)).to_equal(" 180:cbd5e1 184:ffffff 558:cbd5e1 562:ffffff 1845:cbd5e1 1849:ffffff 2176:cbd5e1 2180:ffffff")
+        expect(row_runs(px, CW * 4, 176)).to_equal(" 180:cbd5e1 184:ffffff 558:cbd5e1 562:ffffff 1845:cbd5e1 1849:ffffff 2176:cbd5e1 2180:ffffff")
+
+    it "AC-6: k=4, a short row's rule stays on the column edge (no jog)":
+        step("Chrome 159: rows of 2, 1, 2 cells, rule 1665..1668 on every row")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page_short(810), CW, CH, 4, "cpu_simd")
+        expect(row_runs(px, CW * 4, 16)).to_equal(" 180:cbd5e1 184:ffffff 1665:cbd5e1 1669:ffffff 3416:cbd5e1 3420:ffffff")
+        expect(row_runs(px, CW * 4, 176)).to_equal(" 180:cbd5e1 184:ffffff 1665:cbd5e1 1669:ffffff")
+        expect(row_runs(px, CW * 4, 340)).to_equal(" 180:cbd5e1 184:ffffff 1665:cbd5e1 1669:ffffff 3416:cbd5e1 3420:ffffff")
+
+    it "AC-7: k=1, the short row keeps the whole-px rule (negative)":
+        step("Chrome 159 at k=1: short row rule at 416")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page_short(810), CW, CH, 1, "cpu_simd")
+        expect(row_runs(px, CW, 44)).to_equal(" 45:cbd5e1 46:ffffff 416:cbd5e1 417:ffffff")

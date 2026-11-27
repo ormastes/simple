@@ -30,6 +30,9 @@ use os.kernel.memory.vmm_address_space.{
 use os.kernel.memory.pmm.{pmm_free_page_raw}
 use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
 use os.kernel.types.task_types.{TaskContext, AddressSpace}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.abi.syscall_shim.{g_shim_scheduler}
 use os.kernel.arch_adapt.x86_64_user_entry.{x86_64_enter_user_task}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_read64, mmio_write8}
 
@@ -601,6 +604,13 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
         ss: 0x23,
         fpu_state: 0
     )
+    g_shim_scheduler = Scheduler.ensure_bootstrap_v1(g_shim_scheduler)
+    val prev_task = g_shim_scheduler.get_current()
+    val fs_exec_task = g_shim_scheduler.adopt_mapped_user_task_and_run_v1(
+        binary_path, entry, STACK_TOP_U, space, ctx, CapabilitySet.empty())
+    if fs_exec_task.id == 0u64:
+        destroy_user_address_space(space)
+        return -1
     serial_println("[spawn] entering user cs=0x2b iopl=3 rip=0x{entry} rsp=0x{user_rsp_u}")
     x86_64_enter_user_task(ctx, space.phys_root)
 
@@ -611,6 +621,7 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
     # next connection/command in the same boot.
     #
     val exit_rc = rt_x86_ring3_exit_rc()
+    g_shim_scheduler.finish_adopted_user_task_v1(fs_exec_task, prev_task, exit_rc.to_i32())
     # Control has returned to the kernel address space, so the process-private
     # PML4 now has no execution owner. The VMM destructor recursively releases
     # user leaves (PT_LOAD, stack, and optional heap) and private paging tables.

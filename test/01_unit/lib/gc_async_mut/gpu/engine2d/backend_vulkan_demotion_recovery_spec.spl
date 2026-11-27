@@ -1,0 +1,283 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 40%
+# @req REQ-ENGINE2D-VULKAN-DEMOTION-RECOVERY
+"""
+# VulkanBackend mid-frame demotion, swapchain receipt, and pixel fill contracts
+
+Verifies on any host without a live Vulkan driver:
+1. Mid-frame demotion from a live framebuffer (`d_framebuffer > 0`, `pipe_* == 0`)
+   transitions `cpu_fallback_host_surface = true`, preserves prior `host_buf`
+   content, paints subsequent primitives (rect, rect_outline, translucent blend,
+   line, circle, triangle, gradient, image), and returns full `w * h` pixels
+   with `source == "cpu_fallback"` (never `0` pixels).
+2. Window/headless swapchain presentation fails closed with truthful
+   `VulkanFrameReceipt` metadata when no swapchain is installed.
+3. ARGB interior rect fill produces exact opaque pixels without accidental
+   alpha blending.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{Engine2dGlassMaterialConfig}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+
+fn _make_demoting_backend(w: i32, h: i32, clear_color: u32) -> VulkanBackend:
+    var vk = VulkanBackend.create()
+    vk.w = w
+    vk.h = h
+    val total = w * h
+    vk.host_buf = [clear_color; total]
+    vk.d_framebuffer = 999999
+    vk.initialized = true
+    vk.dirty = false
+    vk.host_mirror_valid = true
+    vk.host_mirror_frame_fresh = true
+    vk.clip_x = 0
+    vk.clip_y = 0
+    vk.clip_w = w
+    vk.clip_h = h
+    vk.clip_enabled = false
+    vk
+
+fn _count_non_bg(pixels: [u32], bg: u32) -> i64:
+    var count: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] != bg:
+            count = count + 1
+        i = i + 1
+    count
+
+describe "VulkanBackend mid-frame demotion, swapchain receipts, and pixel fill":
+
+    it "transitions to cpu_fallback_host_surface on rect demotion and preserves full pixel readback":
+        step("Simulate device-to-host mid-frame demotion across mixed primitives")
+        val bg = 0xFF000000u32
+        var vk = _make_demoting_backend(16, 16, bg)
+
+        # First op fails compute dispatch cleanly (pipe == 0) -> demotes to host surface
+        vk.draw_rect_filled(1, 1, 4, 4, 0xFFFF0000u32)
+        expect(vk.cpu_fallback_used).to_equal(true)
+        expect(vk.cpu_fallback_host_surface).to_equal(true)
+        expect(vk.completion_unknown).to_equal(false)
+
+        # Subsequent primitives run directly on host fallback surface
+        vk.draw_rect(8, 1, 4, 4, 0xFF00FF00u32)
+        vk.draw_rect_blend(2, 2, 2, 2, 0x800000FFu32)
+        vk.draw_line(0, 14, 15, 14, 0xFFFFFF00u32, 1)
+        vk.draw_circle_filled(12, 10, 2, 0xFF00FFFFu32)
+        vk.draw_triangle_filled(0, 8, 4, 8, 2, 12, 0xFFFF00FFu32)
+        vk.draw_gradient_rect(6, 6, 4, 4, 0xFF102030u32, 0xFF506070u32)
+        vk.draw_image(14, 0, 2, 2, [0xFF123456u32, 0xFF123456u32, 0xFF123456u32, 0xFF123456u32])
+
+        val rb = vk.read_pixels_with_source()
+        expect(rb.source).to_equal("cpu_fallback")
+        expect(rb.pixel_count).to_equal(256)
+        expect(rb.pixels.len().to_i64()).to_equal(256)
+        expect(rb.pixels[1 * 16 + 1]).to_equal(0xFFFF0000u32)
+        expect(rb.pixels[2 * 16 + 2] != 0xFFFF0000u32).to_equal(true)
+        expect(rb.pixels[1 * 16 + 8]).to_equal(0xFF00FF00u32)
+        expect(rb.pixels[14 * 16 + 5]).to_equal(0xFFFFFF00u32)
+        expect(rb.pixels[10 * 16 + 12]).to_equal(0xFF00FFFFu32)
+        expect(rb.pixels[1]).to_equal(bg)
+        expect(rb.pixels[14]).to_equal(0xFF123456u32)
+
+        vk.d_framebuffer = 0
+        vk.shutdown()
+
+    it "demotes cleanly when non-rect primitives hit compute dispatch unavailability mid-frame":
+        step("Verify clear, draw_rect, draw_line, draw_circle_filled, draw_gradient_rect, and alpha rect demote cleanly")
+        var vk_clear = _make_demoting_backend(8, 8, 0xFF000000u32)
+        vk_clear.clear(0xFF224466u32)
+        expect(vk_clear.cpu_fallback_host_surface).to_equal(true)
+        val rb_clear = vk_clear.read_pixels_with_source()
+        expect(rb_clear.source).to_equal("cpu_fallback")
+        expect(rb_clear.pixels.len().to_i64()).to_equal(64)
+        expect(rb_clear.pixels[0]).to_equal(0xFF224466u32)
+        vk_clear.d_framebuffer = 0
+        vk_clear.shutdown()
+
+        var vk_line = _make_demoting_backend(8, 8, 0xFF000000u32)
+        vk_line.draw_line(0, 0, 7, 7, 0xFFFFFFFFu32, 1)
+        expect(vk_line.cpu_fallback_host_surface).to_equal(true)
+        val rb_line = vk_line.read_pixels_with_source()
+        expect(rb_line.source).to_equal("cpu_fallback")
+        expect(_count_non_bg(rb_line.pixels, 0xFF000000u32)).to_be_greater_than(0)
+        vk_line.d_framebuffer = 0
+        vk_line.shutdown()
+
+        var vk_alpha = _make_demoting_backend(8, 8, 0xFF111111u32)
+        vk_alpha.draw_rect_filled(2, 2, 4, 4, 0x80AABBCCu32)
+        expect(vk_alpha.cpu_fallback_host_surface).to_equal(true)
+        val rb_alpha = vk_alpha.read_pixels_with_source()
+        expect(rb_alpha.source).to_equal("cpu_fallback")
+        expect(rb_alpha.pixels.len().to_i64()).to_equal(64)
+        expect(rb_alpha.pixels[2 * 8 + 2] != 0xFF111111u32).to_equal(true)
+        vk_alpha.d_framebuffer = 0
+        vk_alpha.shutdown()
+
+    it "fails closed on swapchain presentation when no swapchain is registered":
+        step("Verify default swapchain state and fail-closed frame receipts")
+        var vk = VulkanBackend.create()
+        expect(vk.presentation_swapchain).to_equal(0)
+        expect(vk.presentation_mode).to_equal("none")
+        expect(vk.window_present_enabled()).to_equal(false)
+
+        expect(vk.present_window_device()).to_equal(false)
+        val win_rcpt = vk.latest_frame_receipt()
+        expect(win_rcpt.present_attempted).to_equal(true)
+        expect(win_rcpt.present_completed).to_equal(false)
+        expect(win_rcpt.device_present).to_equal(false)
+        expect(win_rcpt.swapchain_identity).to_equal(0)
+        expect(win_rcpt.fallback_reason).to_equal("window-swapchain-unavailable")
+
+        expect(vk.present_headless_device()).to_equal(false)
+        val hd_rcpt = vk.latest_frame_receipt()
+        expect(hd_rcpt.present_completed).to_equal(false)
+        expect(hd_rcpt.fallback_reason).to_equal("headless-swapchain-unavailable")
+        vk.shutdown()
+
+    it "fills exact ARGB interior color on opaque rect without unwanted blend":
+        step("Clear to 0xFF111111 and fill opaque 0xFFAABBCC rect")
+        var vk = VulkanBackend.create()
+        expect(vk.init_cpu_fallback_surface(8, 8, "argb-fill-check")).to_equal(true)
+        vk.clear(0xFF111111u32)
+        vk.draw_rect_filled(2, 2, 4, 4, 0xFFAABBCCu32)
+        val rb = vk.read_pixels_with_source()
+        expect(rb.source).to_equal("cpu_fallback")
+        expect(rb.pixels.len().to_i64()).to_equal(64)
+        expect(rb.pixels[0]).to_equal(0xFF111111u32)
+        expect(rb.pixels[3 * 8 + 3]).to_equal(0xFFAABBCCu32)
+        vk.shutdown()
+
+    it "fails closed when dirty device readback fails or completion is unknown":
+        step("Verify failed dirty readback does not promote host_buf or forge mirror freshness")
+        var vk = _make_demoting_backend(8, 8, 0x11223344u32)
+        vk.dirty = true
+        vk.host_mirror_frame_fresh = false
+        vk.draw_rect_filled(1, 1, 2, 2, 0xFFFF0000u32)
+
+        expect(vk.cpu_fallback_used).to_equal(true)
+        expect(vk.cpu_fallback_host_surface).to_equal(false)
+        expect(vk.host_mirror_frame_fresh).to_equal(false)
+        expect(vk.dirty).to_equal(true)
+        expect(vk.host_buf[1 * 8 + 1]).to_equal(0x11223344u32)
+        expect(vk.last_error).to_equal("Vulkan framebuffer readback byte count mismatch")
+        val rb_failed = vk.read_pixels_with_source()
+        expect(rb_failed.source).to_equal("readback_failed")
+        expect(rb_failed.pixels).to_equal([])
+
+        step("Verify completion_unknown with live d_framebuffer never delegates to cpu_fallback")
+        var vk_unk = _make_demoting_backend(8, 8, 0xFF556677u32)
+        vk_unk.draw_rect_filled(1, 1, 2, 2, 0xFF8899AAu32)
+        expect(vk_unk.cpu_fallback_host_surface).to_equal(true)
+        vk_unk.completion_unknown = true
+        val rb_unk = vk_unk.read_pixels_with_source()
+        expect(rb_unk.source).to_equal("completion_unknown")
+        expect(rb_unk.pixels).to_equal([])
+
+        vk.d_framebuffer = 0
+        vk.shutdown()
+        vk_unk.d_framebuffer = 0
+        vk_unk.shutdown()
+
+    it "handles present() on clean host-demoted surface and fails _present_device() on upload failure":
+        step("Demote surface, call present() while dirty==false, then simulate swapchain upload failure")
+        var vk = _make_demoting_backend(8, 8, 0xFF102030u32)
+        vk.draw_rect_filled(1, 1, 2, 2, 0xFF445566u32)
+        expect(vk.cpu_fallback_host_surface).to_equal(true)
+        expect(vk.dirty).to_equal(false)
+
+        vk.present()
+        val cache_rcpt = vk.latest_frame_receipt()
+        expect(cache_rcpt.present_mode).to_equal("cpu-fallback-host-surface")
+        expect(cache_rcpt.host_cache_refresh_completed).to_equal(true)
+        expect(vk.dirty).to_equal(false)
+        expect(vk.host_mirror_frame_fresh).to_equal(true)
+        expect(vk.host_buf[1 * 8 + 1]).to_equal(0xFF445566u32)
+
+        vk.presentation_swapchain = 999999
+        expect(vk.present_headless_device()).to_equal(false)
+        val hd_rcpt = vk.latest_frame_receipt()
+        expect(hd_rcpt.present_completed).to_equal(false)
+        expect(hd_rcpt.device_present).to_equal(false)
+        expect(hd_rcpt.fallback_reason).to_equal("headless-swapchain-host-upload-failed")
+
+        expect(vk.present_window_device()).to_equal(false)
+        val win_rcpt = vk.latest_frame_receipt()
+        expect(win_rcpt.present_completed).to_equal(false)
+        expect(win_rcpt.device_present).to_equal(false)
+        expect(win_rcpt.fallback_reason).to_equal("window-swapchain-host-upload-failed")
+
+        vk.presentation_swapchain = 0
+        vk.d_framebuffer = 0
+        vk.shutdown()
+
+    it "keeps all mixed-frame composite, blur, shadow, glass, gradient, and font ops on host_buf after demotion":
+        step("Demote cleanly, arm non-zero device pipeline handles, and exercise mixed-frame methods")
+        var vk = _make_demoting_backend(16, 16, 0xFF102030u32)
+        vk.draw_rect_filled(0, 0, 4, 4, 0xFFAA0000u32)
+        expect(vk.cpu_fallback_host_surface).to_equal(true)
+
+        vk.pipe_blit = 1
+        vk.pipe_affine_coverage_rect = 1
+        vk.session.pipe_glass_material = 1
+        vk.session.pipe_blur_rect = 1
+        vk.session.pipe_shadow_rect = 1
+        vk.session.pipe_css_group_restore = 1
+        vk.session.pipe_gradient_layer = 1
+
+        vk.draw_image_scaled(8, 0, 4, 4, 2, 2, [0xFF00FF00u32; 4])
+        vk.draw_image_scaled_blend(8, 8, 4, 4, 2, 2, [0x800000FFu32; 4])
+        expect(vk.draw_image_blend_checked(0, 8, 2, 2, [0x80FFFFFFu32; 4], 1000)).to_equal(false)
+        expect(vk.draw_affine_rect_coverage(4, 4, 2, 2, 2.0, 2.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0xFFFFFFFFu32)).to_equal(false)
+        vk.draw_blur_rect(12, 12, 3, 3, 1)
+        vk.draw_shadow_rect(4, 12, 2, 2, 1, 1, 1, 0x80000000u32)
+
+        val glass_cfg = Engine2dGlassMaterialConfig(
+            framebuffer_width: 16, framebuffer_height: 16,
+            x: 0, y: 0, width: 4, height: 4,
+            radius: 0, blur_radius: 1, saturation_milli: 1000,
+            surface_alpha_milli: 500, surface_color: 0xFFFFFFFFu32,
+            gradient_from: 0xFFFFFFFFu32, gradient_to: 0xFFFFFFFFu32,
+            gradient_enabled: false, gradient_layered_over_surface: false
+        )
+        expect(vk.draw_ir_apply_glass_material_device(glass_cfg)).to_equal(false)
+        expect(vk.last_error).to_equal("glass-device-host-surface-active")
+        expect(vk.draw_gradient_layer_device(0, 0, 2, 2, 1, [])).to_equal(false)
+        expect(vk.draw_css_group_restore_device(123, 0, 0, 2, 2, 200)).to_equal(false)
+
+        val batch = FontRenderBatch(
+            program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+            font_identity: "demoted-host-font", face_generation: 1, valid: true,
+            atlas_width: 1, atlas_height: 1, atlas_pixels: [0xFFFFFFFFu32],
+            quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+                width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xFFFFFFFFu32)],
+            atlas_generation: 1, dirty_rects: []
+        )
+        val fev = vk.composite_font_batch(0, 0, batch)
+        expect(fev.status).to_equal("unavailable")
+        expect(fev.reason).to_equal("cpu-fallback-host-surface-active")
+        vk.draw_text(0, 6, "A", 0xFFFFFF00u32, 7)
+
+        expect(vk.cpu_fallback_host_surface).to_equal(true)
+        expect(vk.dirty).to_equal(false)
+        expect(vk.host_mirror_frame_fresh).to_equal(true)
+        expect(vk.completion_unknown).to_equal(false)
+
+        val rb = vk.read_pixels_with_source()
+        expect(rb.source).to_equal("cpu_fallback")
+        expect(rb.pixels.len().to_i64()).to_equal(256)
+        expect(rb.pixels[0]).to_equal(0xFFAA0000u32)
+        expect(rb.pixels[9]).to_equal(0xFF00FF00u32)
+        expect(rb.pixels[9 * 16 + 9] != 0xFF102030u32).to_equal(true)
+
+        vk.pipe_blit = 0
+        vk.pipe_affine_coverage_rect = 0
+        vk.session.pipe_glass_material = 0
+        vk.session.pipe_blur_rect = 0
+        vk.session.pipe_shadow_rect = 0
+        vk.session.pipe_css_group_restore = 0
+        vk.session.pipe_gradient_layer = 0
+        vk.d_framebuffer = 0
+        vk.shutdown()

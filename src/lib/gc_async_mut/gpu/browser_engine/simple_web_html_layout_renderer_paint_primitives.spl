@@ -1595,17 +1595,8 @@ pub fn border_dash_runs(length: i32, thickness: i32, dotted: bool, device_k: i32
         val dots = _border_square_dot_runs(length, t)
         if dots.len() > 0:
             return dots
-    val min_n = (length + gap) / (dash + gap)
-    val max_n = min_n + 1
-    val min_gap_milli = ((length - min_n * dash) * 1000) / (min_n - 1)
-    val max_gap_milli = ((length - max_n * dash) * 1000) / (max_n - 1)
-    var n = min_n
-    var gap_milli = min_gap_milli
-    val d_min = if min_gap_milli > gap * 1000: min_gap_milli - gap * 1000 else: gap * 1000 - min_gap_milli
-    val d_max = if max_gap_milli > gap * 1000: max_gap_milli - gap * 1000 else: gap * 1000 - max_gap_milli
-    if max_gap_milli > 0 and d_max <= d_min:
-        n = max_n
-        gap_milli = max_gap_milli
+    val n = _border_dash_count(length, dash, gap)
+    val gap_milli = ((length - n * dash) * 1000) / (n - 1)
     var runs: [i32] = []
     var i = 0
     # cpu-lane-loop-ok: one run per dash of one side; bound is n <= length / dash + 1
@@ -1615,6 +1606,102 @@ pub fn border_dash_runs(length: i32, thickness: i32, dotted: bool, device_k: i32
         runs.push(if start + dash > length: length - start else: dash)
         i = i + 1
     runs
+
+# SelectBestDashGap: the dash count n (>= 2) whose fitted gap
+# (length - n dash) / (n - 1) is nearest the nominal gap; a tie takes more dashes.
+fn _border_dash_count(length: i32, dash: i32, gap: i32) -> i32:
+    val min_n = (length + gap) / (dash + gap)
+    val max_n = min_n + 1
+    val min_gap_milli = ((length - min_n * dash) * 1000) / (min_n - 1)
+    val max_gap_milli = ((length - max_n * dash) * 1000) / (max_n - 1)
+    val d_min = if min_gap_milli > gap * 1000: min_gap_milli - gap * 1000 else: gap * 1000 - min_gap_milli
+    val d_max = if max_gap_milli > gap * 1000: max_gap_milli - gap * 1000 else: gap * 1000 - max_gap_milli
+    if max_gap_milli > 0 and d_max <= d_min: max_n else: min_n
+
+# Alpha (0..255) of the dash [s, e) (milli px) over pixel p of a side. Along a
+# horizontal side Chrome 159 (Skia) paints the exact covered fraction; along a
+# vertical side the share of the four sub-scanline centres p + 1/8 .. 7/8
+# inside the dash (supersampled AA, measured as #3f / #7f / #bf steps).
+fn _border_dash_pixel_alpha(s: i64, e: i64, p: i64, vertical: bool) -> i32:
+    if vertical:
+        var hits = 0
+        # cpu-lane-loop-ok: the four sub-scanline centres of one pixel
+        for c in [125i64, 375i64, 625i64, 875i64]:
+            val yc = p * 1000 + c
+            if yc >= s and yc < e:
+                hits = hits + 1
+        return if hits == 4: 255 else: hits * 64
+    val lo = if s > p * 1000: s else: p * 1000
+    val hi = if e < p * 1000 + 1000: e else: p * 1000 + 1000
+    if hi <= lo:
+        return 0
+    (((hi - lo) * 255 + 500) / 1000) as i32
+
+# `dashed` runs [start, len, alpha, ...] along one straight side of `length`
+# DEVICE px and `thickness` DEVICE px, as Chrome 159 paints them: the dash
+# count of `border_dash_runs`, dash i at i * (length - dash) / (n - 1) (a
+# fractional position, not rounded), each partly covered end pixel its own
+# run at its coverage alpha (`_border_dash_pixel_alpha`). Solid and short sides
+# keep the whole-px runs of `border_dash_runs` at alpha 255.
+# reason: geometry helper shared by the raster and Draw IR border lanes
+# @allow(primitive_api)
+pub fn border_dash_aa_runs(length: i32, thickness: i32, vertical: bool) -> [i32]:
+    if length <= 0:
+        return []
+    val t = if thickness > 0: thickness else: 1
+    val dash = if t < 3: t * 3 else: t * 2
+    val gap = if t < 3: t * 2 else: t
+    var runs: [i32] = []
+    if length < 2 * dash + gap:
+        val whole = border_dash_runs(length, t, false, 1)
+        var w = 0
+        # cpu-lane-loop-ok: at most two runs of a short side
+        while w + 1 < whole.len():
+            runs.push(whole[w])
+            runs.push(whole[w + 1])
+            runs.push(255)
+            w = w + 2
+        return runs
+    val n = _border_dash_count(length, dash, gap)
+    var i = 0
+    # cpu-lane-loop-ok: one dash of one side per step; bound is n <= length / dash + 1
+    while i < n:
+        val s = (i as i64) * ((length - dash) as i64) * 1000 / ((n - 1) as i64)
+        val e = s + (dash as i64) * 1000
+        val first_full = (s + 999) / 1000
+        val end_full = e / 1000
+        if s % 1000 != 0:
+            val a0 = _border_dash_pixel_alpha(s, e, s / 1000, vertical)
+            if a0 > 0:
+                runs.push((s / 1000) as i32)
+                runs.push(1)
+                runs.push(a0)
+        if end_full > first_full:
+            runs.push(first_full as i32)
+            runs.push((end_full - first_full) as i32)
+            runs.push(255)
+        if e % 1000 != 0 and end_full < length as i64:
+            val a1 = _border_dash_pixel_alpha(s, e, end_full, vertical)
+            if a1 > 0:
+                runs.push(end_full as i32)
+                runs.push(1)
+                runs.push(a1)
+        i = i + 1
+    runs
+
+# `color` at `alpha` / 255 of its own opacity (an alpha byte of 0 is a colour
+# packed without one, i.e. opaque); 0 when nothing is left.
+# reason: colour helper shared by the raster and Draw IR border lanes
+# @allow(primitive_api)
+pub fn border_color_at_coverage(color: u32, alpha: i32) -> u32:
+    if alpha >= 255:
+        return color
+    val own = ((color >> 24) & 255u32) as i32
+    val base = if own == 0: 255 else: own
+    val a = (base * alpha + 127) / 255
+    if a <= 0:
+        return 0u32
+    ((a as u32) << 24) | (color & 0x00FFFFFFu32)
 
 # Row spans [start, len] (one per row, len may be 0) of a round dot of
 # diameter `d`: the pixels whose centre lies in the circle inscribed in the
@@ -1882,6 +1969,51 @@ fn _rounded_dash_point(s: f64, g: [f64], seg: [f64]) -> [f64]:
     val f = (s - seg[6]) / g[7] + 3.141592653589793
     [tl + g[7] * cos_f64(f), tl + g[7] * sin_f64(f)]
 
+# All dash runs of one side in ONE call, stored pixel by pixel into `out`.
+# Exactly what `_fb_border_side_clip` per run paints (opaque run: the colour;
+# coverage run: `blend_opacity` of the opaque colour at the rounded percent),
+# but a framebuffer-returning call per run cost ~2.7 ms in the interpreter,
+# and the coverage-alpha ends tripled the run count (900x760 page of six
+# 800px dashed boxes, k=1: 12 s on base -> 33 s with a call per run).
+fn _fb_dash_side_runs_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, is_horiz: bool, aa: [i32], color: u32, clip: ClipRect) -> [u32]:
+    var out = fb
+    var cx0 = if clip.x0 > 0: clip.x0 else: 0
+    var cy0 = if clip.y0 > 0: clip.y0 else: 0
+    val cx1 = if clip.x1 < fbw: clip.x1 else: fbw
+    val cy1 = if clip.y1 < fbh: clip.y1 else: fbh
+    var q = 0
+    # cpu-lane-loop-ok: one rect per dash run of one border side; bound is the run count
+    while q + 2 < aa.len():
+        val run_color = border_color_at_coverage(color, aa[q + 2])
+        if run_color != 0u32:
+            var x0 = if is_horiz: x + aa[q] else: x
+            var y0 = if is_horiz: y else: y + aa[q]
+            var x1 = if is_horiz: x0 + aa[q + 1] else: x + w
+            var y1 = if is_horiz: y + h else: y0 + aa[q + 1]
+            if x0 < cx0:
+                x0 = cx0
+            if y0 < cy0:
+                y0 = cy0
+            if x1 > cx1:
+                x1 = cx1
+            if y1 > cy1:
+                y1 = cy1
+            val translucent = _fb_border_translucent(run_color)
+            val src = run_color | 0xFF000000u32
+            val pct = (((run_color >> 24) & 255u32) as i32 * 100 + 127) / 255
+            var py = y0
+            # cpu-lane-loop-ok: rows of one dash run; bound is the run's clipped height
+            while py < y1:
+                val row = py * fbw
+                var px = x0
+                # cpu-lane-loop-ok: pixels of one dash run row; bound is the run's clipped width
+                while px < x1:
+                    out[row + px] = if translucent: blend_opacity(src, out[row + px], pct) else: run_color
+                    px = px + 1
+                py = py + 1
+        q = q + 3
+    out
+
 fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, is_horiz: bool, style: text, color: u32, clip: ClipRect) -> [u32]:
     if w <= 0 or h <= 0 or color == 0u32 or _border_style_disabled(style):
         return fb
@@ -1895,11 +2027,13 @@ fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
             return _fb_border_side_clip(out, fbw, fbh, x, y + h - line_t, w, line_t, color, clip)
         out = _fb_border_side_clip(out, fbw, fbh, x, y, line_t, h, color, clip)
         return _fb_border_side_clip(out, fbw, fbh, x + w - line_t, y, line_t, h, color, clip)
-    if style == "dashed" or style == "dotted":
-        val runs = border_dash_runs(if is_horiz: w else: h, t, style == "dotted", 1)
+    if style == "dashed":
+        return _fb_dash_side_runs_clip(out, fbw, fbh, x, y, w, h, is_horiz, border_dash_aa_runs(if is_horiz: w else: h, t, not is_horiz), color, clip)
+    if style == "dotted":
+        val runs = border_dash_runs(if is_horiz: w else: h, t, true, 1)
         var r = 0
         # cpu-lane-loop-ok: one rect per dash of one border side; bound is the run count
-        val dot = if style == "dotted": border_dot_row_spans(t) else: []
+        val dot = border_dot_row_spans(t)
         while r + 1 < runs.len():
             val cx = if is_horiz: x + runs[r] else: x
             val cy = if is_horiz: y else: y + runs[r]

@@ -21498,13 +21498,15 @@ bool rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled) {
 
 bool rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
-    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
+    tv.tv_sec = ms < 0 ? 0 : ms / 1000;
+    tv.tv_usec = ms < 0 ? 0 : (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
 bool rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
-    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
+    tv.tv_sec = ms < 0 ? 0 : ms / 1000;
+    tv.tv_usec = ms < 0 ? 0 : (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 

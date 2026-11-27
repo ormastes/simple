@@ -1,0 +1,75 @@
+# @cover src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl 40%
+# @req REQ-GPU-VIRTIO-FAIL-CLOSED-BOUNDS
+"""
+# VirtIO Venus ICD precondition bounds and probe contract
+
+Verifies invalid device paths, non-positive ring sizes, non-positive handles,
+non-positive memory/buffer sizes, and absent device probes all fail closed with
+structured `VenusCallStatus` / probe reports.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.gpu.vulkan_icd_virtio.{
+    venus_icd_connect, venus_icd_disconnect, venus_icd_is_connected,
+    venus_icd_create_device, venus_icd_allocate_memory, venus_icd_create_buffer,
+    venus_icd_probe_host, gpu_vendor_probe_host,
+    VenusCallStatus
+}
+
+describe "vulkan_icd_virtio precondition bounds and fail-closed probe":
+
+    it "rejects empty device paths and non-positive ring sizes in venus_icd_connect":
+        step("Verify empty path and zero/negative ring_size keep transport disconnected")
+        venus_icd_disconnect()
+        expect(venus_icd_connect("", 256)).to_equal(false)
+        expect(venus_icd_is_connected()).to_equal(false)
+        expect(venus_icd_connect("/dev/vgpu0", 0)).to_equal(false)
+        expect(venus_icd_is_connected()).to_equal(false)
+        expect(venus_icd_connect("/dev/vgpu0", -8)).to_equal(false)
+        expect(venus_icd_is_connected()).to_equal(false)
+
+    it "rejects non-positive handles and allocation/buffer sizes fail-closed":
+        step("Connect cleanly, test invalid handle and zero/negative size preconditions")
+        expect(venus_icd_connect("/dev/vgpu0", 64)).to_equal(true)
+
+        val bad_dev = venus_icd_create_device(0)
+        expect(bad_dev.is_ok).to_equal(false)
+        expect(bad_dev.status).to_equal(VenusCallStatus.Failed)
+        expect(bad_dev.error).to_equal("invalid-instance")
+
+        val bad_mem_h = venus_icd_allocate_memory(0, 1024)
+        expect(bad_mem_h.is_ok).to_equal(false)
+        expect(bad_mem_h.status).to_equal(VenusCallStatus.Failed)
+        expect(bad_mem_h.error).to_equal("invalid-device")
+
+        val zero_mem = venus_icd_allocate_memory(1, 0)
+        expect(zero_mem.is_ok).to_equal(false)
+        expect(zero_mem.status).to_equal(VenusCallStatus.Failed)
+        expect(zero_mem.error).to_equal("invalid-allocation-size")
+
+        val neg_mem = venus_icd_allocate_memory(1, -64)
+        expect(neg_mem.is_ok).to_equal(false)
+        expect(neg_mem.status).to_equal(VenusCallStatus.Failed)
+        expect(neg_mem.error).to_equal("invalid-allocation-size")
+
+        val zero_buf = venus_icd_create_buffer(1, 0)
+        expect(zero_buf.is_ok).to_equal(false)
+        expect(zero_buf.status).to_equal(VenusCallStatus.Failed)
+        expect(zero_buf.error).to_equal("invalid-buffer-size")
+
+        val neg_buf = venus_icd_create_buffer(1, -16)
+        expect(neg_buf.is_ok).to_equal(false)
+        expect(neg_buf.status).to_equal(VenusCallStatus.Failed)
+        expect(neg_buf.error).to_equal("invalid-buffer-size")
+
+        venus_icd_disconnect()
+
+    it "keeps host probes fail-closed when sysfs/DRM/virtio nodes are absent":
+        step("Run host probes and verify they return structured reports without fabricating handles")
+        val venus = venus_icd_probe_host()
+        val vendor = gpu_vendor_probe_host()
+        expect(venus.reason != "").to_equal(true)
+        expect(vendor.reason != "").to_equal(true)
+        if not venus.available:
+            expect(venus.vendor_id).to_equal(0)
+            expect(venus.device_id).to_equal(0)

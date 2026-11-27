@@ -1,6 +1,6 @@
 # Stage 2 CLI build exceeds 60 GiB RSS cap (1551-module leak_check closure)
 
-- **Status:** open
+- **Status:** open. Admission margin hardened (see Root cause and change); a first run of a new producer can still reach the cap
 - **Found:** 2026-11-27, bootstrap of pinned `967f9178950e` (release/1.0.0 head)
 - **Evidence:** Rust seed-built Stage 2, bootstrap verification campaign. Diagnostic only.
 
@@ -27,11 +27,67 @@ The tree RSS went from 55 GB to 62 GB in the last 60 s. The last progress line w
 - **Breach mechanism.** Two workers at about 27 GB, plus a new MIR child started by owner 0 in the final 29 s,
   together exceeded the 60 GiB tree cap. This is an inference: the `rss.env` files hold only tree totals.
 
+## Root cause and change (2026-11-27)
+The pool read the right limit and the wrong price.
+- **Limit.** The row exports `SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=62914560`, the same figure the
+  watchdog enforces (`rss_limit_kib=62914560`). Admission and watchdog agree on the cap.
+- **Price.** `scripts/bootstrap/lib/product-frontend-policy.shs:44,92` exports
+  `SIMPLE_HIR_SHARD_WORKER_KB=9000000` on every fanout host. The compiler treats that as an explicit
+  override, logged as `[hir-shard] admission worker estimate=9000000 kB` (log line 12637).
+  At 9 GB two workers fit 60 GiB on paper; the real pool needs far more (records below).
+- **An override switched off both margins.** `shard_commit_unmeasured_estimate_kib_v1`
+  (`src/app/cli/shard_mem_clamp.spl`) doubles the price while unmeasured and adds 25% to a
+  recorded peak, but under an override it did neither. A recorded peak up to half the worker
+  budget (30553426 KiB here) therefore re-admitted two workers.
+- **Change.** Under an override the recorded peak now keeps its 25% margin, with the override as
+  a floor. Under this cap a record above 24442740 KiB admits one worker at a time (the second
+  slot starts when the first worker exits); a 12 GB or 24 GB record still admits two.
+  Red/green on the pure admission model: `test/01_unit/app/cli/shard_peak_persistence_spec.spl`
+  and `shard_commit_admission_spec.spl`.
+- **What this does not show.** Whether it would have changed the second run is unknown: the only
+  record for this pin was written at 16:31 by the second run itself, so the record present at its
+  13:32 admission (if any) is not recoverable. The old code already refused a second worker for a
+  record above 30553426 KiB, so the change matters for records between 24.4M and 30.6M KiB.
+  No bootstrap was run.
+
+## Recorded pool peaks (file-worker, stage2-compiler-tests caches, KiB)
+`06ba866385d5` 47550100 and 39356044; `3dd00937c329` 54247532 and 14556356; `967f9178950e` 63498886;
+`e803fa9762cd` 15912940 and 13019388; `f43f68c218ef` 32617076 (still running).
+The record is a host commit delta split over live workers, so neighbours inflate it
+(63498886 is above the whole tree cap). Five of eight are over 3.5x the 9 GB override.
+
+## Still open
+- **First run of a new producer.** The record is keyed on the compiler binary and lives in the
+  per-candidate cache, so a new pin starts with no record and the 9 GB override admits two workers.
+  That run can still reach the cap. Closing this needs either a truthful static price for the
+  full-CLI file-worker pool (per-process peaks are not in the receipts, only tree totals) or a
+  price per unit (the 1551-module closure is known only inside the unit child, and nothing
+  carries it across workers).
+- **Start-time count.** `shard_worker_estimate_kib_v1` still lets an override hide the record, so
+  the log prints `workers=2` even when spawn admission runs them one at a time.
+- **Sticky serial.** The record only grows. A noise-inflated record keeps a pool serial until the
+  `.peak_kib` file is deleted, and a serialised pool runs under a row timeout scaled for two.
+
 ## Workaround
-Run the verification with one module worker:
-`BOOTSTRAP_VERIFY_MODULE_WORKERS=1` (default 2, `scripts/bootstrap/bootstrap-phase-verification.shs:224`).
+`BOOTSTRAP_VERIFY_MODULE_WORKERS` does not govern this row: it is read only for the
+`module_compile_*` rows (`scripts/bootstrap/bootstrap-phase-verification.shs:1986`). The row's
+worker count is `--threads`, from `BOOTSTRAP_VERIFY_BUILD_THREADS` (requested at
+`scripts/bootstrap/bootstrap-from-scratch.sh:6212`, fitted by the tree RSS plan); `1` is that
+plan's documented one-worker route. Not exercised in this investigation.
 
 ## Fix options (owner)
 1. Narrow `leak_check/external_runner.spl` so it does not import `driver_api_codegen_backends`
    for `aot_c_file`, for example by moving the helper to a leaf module.
 2. Have the file-worker planner bound or split a unit whose HIR closure is more than about 2× the usual maximum.
+
+## First-run fix (2026-11-27)
+`scripts/bootstrap/lib/product-frontend-policy.shs` priced a Linux HIR worker at
+9 GB (`SIMPLE_HIR_SHARD_WORKER_KB=9000000`), but `compiler_cli_build` HIR workers
+measured 18–30 GiB. The Linux branch now prices HIR at the measured 30 GiB
+(`31457280` KiB), just as parse was already repriced to 24 GiB. Under the 60 GiB cap,
+that is above the half-budget line (30553426 KiB), so the pool admits one HIR
+worker even on a pin's first run, when there is no peak record yet. Policy output on
+this Linux host: `SIMPLE_HIR_SHARD_WORKER_KB` was 9000000 and is now 31457280.
+The bootstrap policy tests `product-frontend-policy-test` and
+`phase-c-frontend-policy-test` already fail on Linux before this change,
+because they expect the Windows values.

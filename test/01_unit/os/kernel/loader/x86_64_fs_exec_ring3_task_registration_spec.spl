@@ -1,0 +1,198 @@
+# Host verification spec for x86_64 FS-exec ring-3 scheduler Task registration
+# Bug: doc/08_tracking/bug/fs_exec_ring3_fork_unreachable_spawnwait_2026-08-06.md
+# @req REQ-SSPEC-OS-KERNEL
+
+use std.spec.{describe, it, expect, step}
+use os.kernel.abi.syscall_shim.{g_shim_scheduler, shim_init}
+use os.kernel.abi.syscall_shim_process.{spl_handle_getpid}
+use os.kernel.abi.syscall_shim_file.{spl_handle_fork, spl_handle_waitpid}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.ipc.capability.{task_vmspace_of}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.task_types.{TaskId, TaskContext, AddressSpace, TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.posix.fd_table.{fd_table_init}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn _sample_user_ctx() -> TaskContext:
+    TaskContext(
+        rax: 0, rbx: 0, rcx: 0, rdx: 0,
+        rsi: 0, rdi: 0, rbp: 0, rsp: 0x800010u64,
+        r8: 0, r9: 0, r10: 0, r11: 0,
+        r12: 0, r13: 0, r14: 0, r15: 0,
+        rip: 0x401000u64,
+        rflags: 0x3002u64,
+        cs: 0x2bu64,
+        ss: 0x23u64,
+        fpu_state: 0
+    )
+
+describe "x86_64 FS-exec ring-3 scheduler task adoption":
+    it "registers the running ring-3 task so getpid, fork, and waitpid reach it":
+        step("initialize kernel shim and adopt a pre-mapped user address space")
+        fd_table_init()
+        shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(16))
+
+        # phys_root=1 avoids host MMIO page-table walks in sched_clone_task_impl
+        # while satisfying non-zero address space validation.
+        val space = AddressSpace(phys_root: 1u64, id: 9u64)
+        val ctx = _sample_user_ctx()
+        val prev_current = g_shim_scheduler.get_current()
+
+        val task_id = g_shim_scheduler.adopt_mapped_user_task_and_run_v1(
+            "/usr/bin/ring3_probe",
+            0x401000u64,
+            0x800000u64,
+            space,
+            ctx,
+            CapabilitySet.empty()
+        )
+        expect(task_id.id).to_be_greater_than(0)
+        expect(g_shim_scheduler.get_current().id).to_equal(task_id.id)
+
+        val adopted_tcb = g_shim_scheduler.get_task(task_id)
+        expect(adopted_tcb).to_not_equal(nil)
+
+        val vmspace = task_vmspace_of(task_id.id.to_u32())
+        expect(vmspace).to_not_equal(nil)
+
+        step("verify C-ABI getpid, fork, and waitpid operate on the adopted task")
+        val abi_pid = spl_handle_getpid(0, 0, 0, 0, 0, 0)
+        expect(abi_pid).to_equal(task_id.id as i64)
+
+        val child_pid = spl_handle_fork(0, 0, 0, 0, 0, 0)
+        expect(child_pid).to_be_greater_than(0)
+
+        # WNOHANG (1) must return 0 ("live child exists, not yet exited"),
+        # rather than -10 (ECHILD) or crashing on missing current parent task.
+        val wait_rc = spl_handle_waitpid(child_pid as u64, 0, 1, 0, 0, 0)
+        expect(wait_rc).to_equal(0)
+
+        step("retire adopted task, reap its slot cleanly, and prevent waitpid double-free")
+        g_shim_scheduler.finish_adopted_user_task_v1(task_id, prev_current, 42)
+        expect(g_shim_scheduler.get_current().id).to_equal(prev_current.id)
+        expect(g_shim_scheduler.get_task(task_id).is_none()).to_equal(true)
+        expect(task_vmspace_of(task_id.id.to_u32()).unwrap().pml4).to_equal(0u64)
+        expect(spl_handle_waitpid(task_id.id, 0, 1, 0, 0, 0)).to_equal(0 - 10)
+
+    it "reaps adopted tasks across 260 cycles and detaches address_space before wait_for_collect":
+        step("adopt and finish 260 tasks with non-trivial phys_root without exhausting MAX_TASKS or double-freeing")
+        fd_table_init()
+        shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(16))
+
+        # 0xDEAD0000 is non-0/non-1: if finish_adopted_user_task_v1 failed to
+        # clear address_space before reaping via wait_for_collect, host MMIO
+        # page-table teardown would fault immediately.
+        val space = AddressSpace(phys_root: 0xDEAD0000u64, id: 77u64)
+        var cyc = 0
+        while cyc < 260:
+            val tid = g_shim_scheduler.adopt_mapped_user_task_and_run_v1(
+                "/usr/bin/ring3_cycle",
+                0x401000u64,
+                0x800000u64,
+                space,
+                _sample_user_ctx(),
+                CapabilitySet.empty()
+            )
+            expect(tid.id).to_be_greater_than(0)
+            g_shim_scheduler.finish_adopted_user_task_v1(tid, TaskId(id: 0u64), 0)
+            expect(g_shim_scheduler.get_task(tid).is_none()).to_equal(true)
+            cyc = cyc + 1
+
+        expect(g_shim_scheduler.active_task_count()).to_equal(0)
+        expect(g_shim_scheduler.get_current().id).to_equal(0u64)
+
+        step("verify non-zero parent waitpid reaping leaves parent intact and child absent")
+        val parent_id = g_shim_scheduler.adopt_mapped_user_task_and_run_v1(
+            "/usr/bin/parent",
+            0x401000u64,
+            0x800000u64,
+            space,
+            _sample_user_ctx(),
+            CapabilitySet.empty()
+        )
+        expect(parent_id.id).to_be_greater_than(0)
+        val child_id = g_shim_scheduler.adopt_mapped_user_task_and_run_v1(
+            "/usr/bin/child",
+            0x401000u64,
+            0x800000u64,
+            space,
+            _sample_user_ctx(),
+            CapabilitySet.empty()
+        )
+        expect(child_id.id).to_be_greater_than(0)
+        g_shim_scheduler.finish_adopted_user_task_v1(child_id, parent_id, 7)
+        expect(g_shim_scheduler.get_current().id).to_equal(parent_id.id)
+        expect(g_shim_scheduler.get_task(child_id).is_none()).to_equal(true)
+        expect(g_shim_scheduler.get_task(parent_id).is_some()).to_equal(true)
+        expect(spl_handle_waitpid(child_id.id, 0, 1, 0, 0, 0)).to_equal(0 - 10)
+        g_shim_scheduler.finish_adopted_user_task_v1(parent_id, TaskId(id: 0u64), 0)
+        expect(g_shim_scheduler.active_task_count()).to_equal(0)
+
+    it "fails closed when all 256 task slots are occupied and current.id == 0 without overwriting tasks[0]":
+        step("fill all 256 task slots and assert adopt_mapped_user_task_and_run_v1 refuses cleanly")
+        fd_table_init()
+        shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(16))
+
+        var k = 0
+        while k < 256:
+            val created = g_shim_scheduler.create_task(
+                0x1000u64 + (k as u64),
+                TaskPriority.Normal,
+                CapabilitySet.empty()
+            )
+            expect(created.id).to_be_greater_than(0)
+            k = k + 1
+
+        expect(g_shim_scheduler.active_task_count()).to_equal(256)
+        expect(g_shim_scheduler.get_current().id).to_equal(0u64)
+        val slot0_id = g_shim_scheduler.task_id_at_active_index(0)
+        expect(slot0_id).to_be_greater_than(0)
+
+        val refused = g_shim_scheduler.adopt_mapped_user_task_and_run_v1(
+            "/usr/bin/overflow",
+            0x401000u64,
+            0x800000u64,
+            AddressSpace(phys_root: 1u64, id: 1u64),
+            _sample_user_ctx(),
+            CapabilitySet.empty()
+        )
+        expect(refused.id).to_equal(0u64)
+        expect(g_shim_scheduler.active_task_count()).to_equal(256)
+        expect(g_shim_scheduler.task_id_at_active_index(0)).to_equal(slot0_id)
+        expect(g_shim_scheduler.get_task(TaskId(id: slot0_id)).is_some()).to_equal(true)
+
+    it "fails closed when given a zero physical root without mutating active tasks":
+        step("reject zero phys_root in adopt_mapped_user_task_and_run_v1")
+        fd_table_init()
+        shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(16))
+
+        val before_count = g_shim_scheduler.active_task_count()
+        val zero_as = AddressSpace(phys_root: 0u64, id: 0u64)
+        val refused = g_shim_scheduler.adopt_mapped_user_task_and_run_v1(
+            "/usr/bin/invalid",
+            0x401000u64,
+            0x800000u64,
+            zero_as,
+            _sample_user_ctx(),
+            CapabilitySet.empty()
+        )
+        expect(refused.id).to_equal(0)
+        expect(g_shim_scheduler.active_task_count()).to_equal(before_count)
+
+    it "wires scheduler task adoption and teardown into x86_64_fs_exec_ring3":
+        step("verify ring-3 FS-exec handoff wraps x86_64_enter_user_task with task registration")
+        val src = rt_file_read_text("src/os/kernel/loader/x86_64_fs_exec_ring3.spl") ?? ""
+        val adopt_pos = src.find("g_shim_scheduler.adopt_mapped_user_task_and_run_v1(") ?? -1
+        val fail_pos = src.find("if fs_exec_task.id == 0u64:", adopt_pos) ?? -1
+        val enter_pos = src.find("x86_64_enter_user_task(ctx, space.phys_root)", fail_pos) ?? -1
+        val finish_pos = src.find("g_shim_scheduler.finish_adopted_user_task_v1(fs_exec_task, prev_task, exit_rc.to_i32())", enter_pos) ?? -1
+        val destroy_pos = src.find("destroy_user_address_space(space)", finish_pos) ?? -1
+
+        expect(adopt_pos).to_be_greater_than(0)
+        expect(fail_pos).to_be_greater_than(adopt_pos)
+        expect(enter_pos).to_be_greater_than(fail_pos)
+        expect(finish_pos).to_be_greater_than(enter_pos)
+        expect(destroy_pos).to_be_greater_than(finish_pos)

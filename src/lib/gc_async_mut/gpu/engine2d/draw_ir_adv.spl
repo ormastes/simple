@@ -1780,7 +1780,7 @@ fn _engine2d_draw_ir_css_background_pixels(
 fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp]) -> bool:
     for prop in style:
         val key = prop.key
-        val identity = key == "source" or key == "part" or key == "z-index" or key == "focused" or key == "image-role"
+        val identity = key == "source" or key == "part" or key == "z-index" or key == "focused" or key == "image-role" or key == "dash-runs"
         val background = key == "background-color" or key == "background-image" or key == "background-image-source-css" or key == "background-image-capability" or key == "background-image-composite-mode" or key == "background-image-fallback" or key == "background-image-fallback-reason"
         val border = key == "border-radius" or key == "border-top-left-radius" or key == "border-top-right-radius" or key == "border-bottom-right-radius" or key == "border-bottom-left-radius" or key == "border-top-width" or key == "border-right-width" or key == "border-bottom-width" or key == "border-left-width" or key == "border-top-color" or key == "border-right-color" or key == "border-bottom-color" or key == "border-left-color"
         val shadow = key == "box-shadow" or key == "box-shadow-raw" or key == "box-shadow-blur-radius" or engine2d_draw_ir_typed_shadow_key_supported(key)
@@ -2600,8 +2600,9 @@ fn _engine2d_draw_ir_exact_plain_bounds(
         return DrawIrRect(present: false, x: 0, y: 0, width: 0, height: 0)
     bounds
 
-fn _engine2d_draw_ir_prove_rect_covered(
-    commands: [DrawIrCommand], start_index: i64, target: DrawIrRect,
+fn _engine2d_draw_ir_prove_rect_covered_slice(
+    commands: [DrawIrCommand], tile_items: [i32], use_indices: bool,
+    start_index: i64, end_index: i64, target: DrawIrRect,
     offset_x: i32, offset_y: i32, active_clip: DrawIrRect,
     viewport_w: i32, viewport_h: i32, budget: i32
 ) -> Engine2dOcclusionProof:
@@ -2612,8 +2613,11 @@ fn _engine2d_draw_ir_prove_rect_covered(
         return Engine2dOcclusionProof(
             covered: false, remaining: 0, overflowed: true)
     var index = start_index
-    while index < commands.len():
-        val command = commands[index]
+    while index < end_index:
+        val command = if use_indices:
+            commands[tile_items[index]]
+        else:
+            commands[index]
         if command.? == None:
             index += 1
             continue
@@ -2640,27 +2644,31 @@ fn _engine2d_draw_ir_prove_rect_covered(
                     val right = draw_ir_rect_bounds(
                         ix1, intersection.y, target_x1 - ix1,
                         intersection.height)
-                    val top_proof = _engine2d_draw_ir_prove_rect_covered(
-                        commands, index + 1, top, offset_x, offset_y,
-                        active_clip, viewport_w, viewport_h, remaining)
+                    val top_proof = _engine2d_draw_ir_prove_rect_covered_slice(
+                        commands, tile_items, use_indices, index + 1, end_index,
+                        top, offset_x, offset_y, active_clip,
+                        viewport_w, viewport_h, remaining)
                     if not top_proof.covered:
                         return top_proof
                     remaining = top_proof.remaining
-                    val bottom_proof = _engine2d_draw_ir_prove_rect_covered(
-                        commands, index + 1, bottom, offset_x, offset_y,
-                        active_clip, viewport_w, viewport_h, remaining)
+                    val bottom_proof = _engine2d_draw_ir_prove_rect_covered_slice(
+                        commands, tile_items, use_indices, index + 1, end_index,
+                        bottom, offset_x, offset_y, active_clip,
+                        viewport_w, viewport_h, remaining)
                     if not bottom_proof.covered:
                         return bottom_proof
                     remaining = bottom_proof.remaining
-                    val left_proof = _engine2d_draw_ir_prove_rect_covered(
-                        commands, index + 1, left, offset_x, offset_y,
-                        active_clip, viewport_w, viewport_h, remaining)
+                    val left_proof = _engine2d_draw_ir_prove_rect_covered_slice(
+                        commands, tile_items, use_indices, index + 1, end_index,
+                        left, offset_x, offset_y, active_clip,
+                        viewport_w, viewport_h, remaining)
                     if not left_proof.covered:
                         return left_proof
                     remaining = left_proof.remaining
-                    val right_proof = _engine2d_draw_ir_prove_rect_covered(
-                        commands, index + 1, right, offset_x, offset_y,
-                        active_clip, viewport_w, viewport_h, remaining)
+                    val right_proof = _engine2d_draw_ir_prove_rect_covered_slice(
+                        commands, tile_items, use_indices, index + 1, end_index,
+                        right, offset_x, offset_y, active_clip,
+                        viewport_w, viewport_h, remaining)
                     if not right_proof.covered:
                         return right_proof
                     return Engine2dOcclusionProof(
@@ -2669,6 +2677,25 @@ fn _engine2d_draw_ir_prove_rect_covered(
         index += 1
     Engine2dOcclusionProof(
         covered: false, remaining: budget, overflowed: false)
+
+fn _engine2d_draw_ir_prove_rect_covered(
+    commands: [DrawIrCommand], start_index: i64, target: DrawIrRect,
+    offset_x: i32, offset_y: i32, active_clip: DrawIrRect,
+    viewport_w: i32, viewport_h: i32, budget: i32
+) -> Engine2dOcclusionProof:
+    _engine2d_draw_ir_prove_rect_covered_slice(
+        commands, [], false, start_index, commands.len(), target,
+        offset_x, offset_y, active_clip, viewport_w, viewport_h, budget)
+
+fn _engine2d_draw_ir_prove_rect_covered_indexed(
+    commands: [DrawIrCommand], tile_items: [i32],
+    start_index: i64, end_index: i64, target: DrawIrRect,
+    offset_x: i32, offset_y: i32, active_clip: DrawIrRect,
+    viewport_w: i32, viewport_h: i32, budget: i32
+) -> Engine2dOcclusionProof:
+    _engine2d_draw_ir_prove_rect_covered_slice(
+        commands, tile_items, true, start_index, end_index, target,
+        offset_x, offset_y, active_clip, viewport_w, viewport_h, budget)
 
 fn _engine2d_draw_ir_command_geometry(command: DrawIrCommand,
                                       x: i32, y: i32, w: i32, h: i32) -> DrawIrCommand:
@@ -2994,72 +3021,176 @@ fn _engine2d_draw_ir_select_damage_indexed(
 fn engine2d_draw_ir_lcd_text_enabled() -> bool:
     (env_get("SIMPLE_WEB_LCD_TEXT") ?? "") != "0"
 
-fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2dDrawIrCommandPlan, offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, prove_occlusion: bool = true) -> Engine2dDrawIrRenderOutcome:
-    var eng = engine
-    eng.set_lcd_text(engine2d_draw_ir_lcd_text_enabled())
-    # Surface dimensions read ONCE at loop entry and threaded down to the
-    # glass-material bounds check; deep re-reads of eng.width()/height()
-    # returned corrupted values on the freestanding lane (see
-    # _engine2d_draw_ir_render_glass_material).
-    val surface_fb_w = eng.width()
-    val surface_fb_h = eng.height()
-    var rendered = 0
-    var skipped = 0
-    var occluded = 0
-    var unsupported_kinds = ""
-    var cpu_composited_material_count = 0
-    var metal_device_glass_material_count = 0
-    var metal_device_glass_requested_count = 0
-    var metal_device_glass_unfulfilled_count = 0
-    var metal_device_glass_receipts: [Engine2dMetalGlassReceipt] = []
-    var glass_execution_target = ""
-    var glass_backend_handle: i64 = 0
-    var glass_device_identity: i64 = 0
-    var css_background_pixel_work_remaining = css_background_pixel_work_budget
-    var command_index: i64 = 0
-    for command in command_plan.commands:
-        val current_index = command_index
-        val command_weight = if command_plan.logical_weights.len() == 0:
-            1
+fn _engine2d_draw_ir_render_text_into_state(
+    state: _Engine2dDrawIrLoopState,
+    command: DrawIrCommand,
+    x: i32,
+    y: i32,
+    offset_x: i32,
+    offset_y: i32,
+    command_clip: DrawIrRect,
+    active_clip: DrawIrRect,
+    lcd_enabled: bool
+):
+    var eng = state.engine
+    val text_paint_clip = _engine2d_draw_ir_text_effective_clip(
+        command_clip, active_clip, offset_x, offset_y)
+    eng.set_lcd_text(lcd_enabled and _engine2d_draw_ir_style_value(command.computed_style, "text-lcd") != "0")
+    val font_identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
+    var font_ready = true
+    val shaped = _engine2d_draw_ir_shaping_requested(command)
+    var font_failure_kind = if shaped: "text-font-shaping" else: "text-font-identity"
+    val probe_this = _E2D_TEXT_PROBE and _e2d_text_probe_count < 8
+    if (env_get("SIMPLE_TRACE_FONT_STYLE") ?? "") == "1" and font_identity != "":
+        print "[draw-ir-font-trace] font_identity={font_identity}"
+    if font_identity != "":
+        font_ready = eng.select_font_identity(font_identity)
+    else if shaped:
+        font_ready = false
+    if font_ready:
+        val encoded_advances = _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths")
+        val has_resolved_advances = command.advance_widths.len() > 0 or encoded_advances != ""
+        val advances = _engine2d_draw_ir_text_advances(command)
+        if advances.len() > 0:
+            font_failure_kind = if shaped: "text-font-shaping" else: "text-font-batch"
+            var payload_valid = true
+            if shaped:
+                payload_valid = _engine2d_draw_ir_shaped_payload_valid(command, advances)
+            var drawn = false
+            val shadow_blur_px = _engine2d_draw_ir_text_shadow_blur_px(command)
+            if shaped:
+                if payload_valid:
+                    val pen_q4 = _engine2d_draw_ir_glyph_pen_q4(command)
+                    val shaped_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+                    drawn = if pen_q4.len() > 0: eng.draw_shaped_text_configured(x, y, command.glyph_run, command.color, engine2d_default_font_config_for(shaped_size, eng.baremetal_backend.is_some()), pen_q4) else: eng.draw_shaped_text(x, y, command.glyph_run, command.color, shaped_size)
+            elif shadow_blur_px > 0:
+                drawn = _engine2d_draw_ir_blurred_text_shadow(eng, x, y, command, advances, shadow_blur_px)
+            else:
+                val pen_origin = _engine2d_draw_ir_text_pen_origin_milli(command)
+                val size_milli = _engine2d_draw_ir_text_size_milli(command)
+                if command.width > 0:
+                    val letter_milli = _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli")
+                    val origin_pad = _engine2d_draw_ir_pen_origin_pad(pen_origin) + (if letter_milli < 0: _engine2d_draw_ir_pen_origin_pad(letter_milli) else: 0)
+                    val band = draw_ir_rect_intersection(
+                        text_paint_clip,
+                        draw_ir_rect_bounds(x - origin_pad, 0, command.width + 2 * origin_pad, eng.height()))
+                    eng.set_clip(band.x, band.y, band.width, band.height)
+                    drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli, _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli"), _engine2d_draw_ir_text_spacing_milli(command, "word-spacing-milli"))
+                    _engine2d_draw_ir_restore_clip(eng, text_paint_clip)
+                else:
+                    drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli, _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli"), _engine2d_draw_ir_text_spacing_milli(command, "word-spacing-milli"))
+            if probe_this:
+                _e2d_text_probe_count = _e2d_text_probe_count + 1
+                val branch_kind = if shaped and payload_valid: "shaped" else if not shaped: "resolved" else: "shaped-invalid"
+                val glyph_count = command.glyph_run.glyph_ids.len()
+                print("[e2d-text-probe] ir kind={branch_kind} shaped={shaped} payload_valid={payload_valid} glyphs={glyph_count} advances={advances.len()} drawn={drawn}")
+            if drawn:
+                state.rendered = state.rendered + 1
+            elif shaped:
+                font_ready = false
+            else:
+                eng.mark_cpu_fallback_reason("text-advance-arity")
+                _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
+                state.rendered = state.rendered + 1
+                val skip_shaped = if shaped: 1 else: 0
+                val skip_payload = if payload_valid: 1 else: 0
+                val skip_font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+                print("[e2d-ir] draw-false shaped={skip_shaped} payload_valid={skip_payload} advances={advances.len()} text_len={command.text_value.len()} glyphs={command.glyph_run.glyph_ids.len()} size={skip_font_size} text='{command.text_value}'")
+        elif has_resolved_advances:
+            eng.mark_cpu_fallback_reason("text-advance-arity")
+            _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
+            state.rendered = state.rendered + 1
+            print("[e2d-ir] text-advance-arity-fallback text_len={command.text_value.len()} shaped={shaped}")
         else:
-            command_plan.logical_weights[command_index]
-        command_index = command_index + 1
+            if probe_this:
+                _e2d_text_probe_count = _e2d_text_probe_count + 1
+                print("[e2d-text-probe] ir kind=plain len={command.text_value.len()}")
+            _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
+            state.rendered = state.rendered + 1
+    if not font_ready:
+        state.skipped = state.skipped + 1
+        state.unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(state.unsupported_kinds, font_failure_kind)
+    state.engine = eng
+
+class _Engine2dDrawIrLoopState:
+    engine: Engine2D
+    surface_fb_w: i32
+    surface_fb_h: i32
+    rendered: i32
+    skipped: i32
+    occluded: i32
+    unsupported_kinds: text
+    cpu_composited_material_count: i32
+    metal_device_glass_material_count: i32
+    metal_device_glass_requested_count: i32
+    metal_device_glass_unfulfilled_count: i32
+    metal_device_glass_receipts: [Engine2dMetalGlassReceipt]
+    glass_execution_target: text
+    glass_backend_handle: i64
+    glass_device_identity: i64
+    css_background_pixel_work_remaining: i64
+
+    static fn create(engine: Engine2D, css_background_pixel_work_budget: i64) -> _Engine2dDrawIrLoopState:
+        val w = engine.width()
+        val h = engine.height()
+        _Engine2dDrawIrLoopState(
+            engine: engine,
+            surface_fb_w: w,
+            surface_fb_h: h,
+            rendered: 0,
+            skipped: 0,
+            occluded: 0,
+            unsupported_kinds: "",
+            cpu_composited_material_count: 0,
+            metal_device_glass_material_count: 0,
+            metal_device_glass_requested_count: 0,
+            metal_device_glass_unfulfilled_count: 0,
+            metal_device_glass_receipts: [],
+            glass_execution_target: "",
+            glass_backend_handle: 0,
+            glass_device_identity: 0,
+            css_background_pixel_work_remaining: css_background_pixel_work_budget
+        )
+
+    me skip_if_invalid(command: DrawIrCommand, command_weight: i32) -> bool:
         # A nil display-list element must be skipped before any field access.
         # Keep the explicit comparison: freestanding codegen has miscompiled
         # `not` in this condition position.
         if command.? == None:
-            skipped = skipped + 1
-            continue
+            self.skipped = self.skipped + 1
+            return true
         # Affine commands always carry fractional local geometry, so test the
         # more specific v4 state first or the reason would always read
         # fractional-geometry-unsupported.
         if draw_ir_command_has_unsupported_v4_state(command):
-            skipped = skipped + command_weight
-            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, "affine-or-raster-policy-unsupported")
-            continue
+            self.skipped = self.skipped + command_weight
+            self.unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(
+                self.unsupported_kinds, "affine-or-raster-policy-unsupported")
+            return true
         if command.fractional_geometry.is_some():
-            skipped = skipped + command_weight
-            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, "fractional-geometry-unsupported")
-            continue
-        val exact_bounds = _engine2d_draw_ir_exact_plain_bounds(
-            command, offset_x, offset_y, active_clip,
-            surface_fb_w, surface_fb_h)
-        if prove_occlusion and exact_bounds.present:
-            val proof = _engine2d_draw_ir_prove_rect_covered(
-                command_plan.commands, current_index + 1, exact_bounds,
-                offset_x, offset_y, active_clip,
-                surface_fb_w, surface_fb_h,
-                ENGINE2D_DRAW_IR_OCCLUSION_PROOF_BUDGET)
-            if proof.covered:
-                skipped = skipped + command_weight
-                occluded = occluded + command_weight
-                continue
+            self.skipped = self.skipped + command_weight
+            self.unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(
+                self.unsupported_kinds, "fractional-geometry-unsupported")
+            return true
+        false
+
+    me execute_valid_command(
+        command: DrawIrCommand,
+        command_weight: i32,
+        offset_x: i32,
+        offset_y: i32,
+        images: [Engine2dResolvedDrawIrImage],
+        blend_images: bool,
+        metal_device_glass_required: bool,
+        active_clip: DrawIrRect,
+        lcd_enabled: bool
+    ):
         val command_kind: text = command.kind
         val x = offset_x + command.x
         val y = offset_y + command.y
         if _engine2d_draw_ir_outside_exact_clip(command, x, y, active_clip):
-            skipped = skipped + 1
-            continue
+            self.skipped = self.skipped + 1
+            return
         val command_clip = command.clip_rect
         var clip_set = false
         if command_clip.present:
@@ -3067,9 +3198,6 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                 draw_ir_rect_translate(command_clip, offset_x, offset_y),
                 active_clip
             )
-            # A plain (unstyled) rect wholly inside its clip paints the same
-            # pixels under the clip already in force (the active clip, which
-            # contains `clip`), so it skips the set/restore round trip.
             val plain_inside = (
                 command_kind == DRAW_IR_COMMAND_RECT and
                 command.computed_style.len() == 0 and
@@ -3077,66 +3205,75 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                 x.to_i64() + command.width.to_i64() <= clip.x.to_i64() + clip.width.to_i64() and
                 y.to_i64() + command.height.to_i64() <= clip.y.to_i64() + clip.height.to_i64())
             if not plain_inside:
-                eng.set_clip(
+                self.engine.set_clip(
                     clip.x, clip.y, clip.width, clip.height
                 )
                 clip_set = true
         if command_kind == DRAW_IR_COMMAND_RECT and command.computed_style.len() == 0:
-            # No style: no shadow, corner, backdrop, glass/Metal material,
-            # gradient, border or outline applies, so the box is its colour
-            # fill alone. Skipping `_engine2d_draw_ir_render_box` and its style
-            # scans saves ~0.5 ms per command in the interpreter; a
-            # Chrome-exact dashed side emits ~3 such rects per dash.
             if _engine2d_draw_ir_has_visible_alpha(command.color):
-                eng.draw_rect_filled(x, y, command.width, command.height, command.color)
-            rendered = rendered + command_weight
+                self.engine.draw_rect_filled(x, y, command.width, command.height, command.color)
+            self.rendered = self.rendered + command_weight
+        elif command_kind == DRAW_IR_COMMAND_RECT and _engine2d_draw_ir_style_value(command.computed_style, "dash-runs") != "":
+            # One dashed border side: "<vertical 0|1>,<offset>,<length>,<colour>..."
+            # device px along the side; each run is a full-thickness fill,
+            # exactly what one unstyled rect per run painted. Looked up by
+            # key: inside nested CSS opacity groups the command also carries
+            # `css-opacity-group-nest`, which the group pass reads.
+            val parts = _engine2d_draw_ir_style_value(command.computed_style, "dash-runs").split(",")
+            val vertical = parts.len() > 0 and parts[0] == "1"
+            var r = 1
+            # cpu-lane-loop-ok: one fill per dash run of one border side; bound is the encoded run count
+            while r + 2 < parts.len():
+                val off = (parts[r].to_int() ?? 0) as i32
+                val len = (parts[r + 1].to_int() ?? 0) as i32
+                val run_color = (parts[r + 2].to_int() ?? 0) as u32
+                if len > 0 and _engine2d_draw_ir_has_visible_alpha(run_color):
+                    if vertical:
+                        self.engine.draw_rect_filled(x, y + off, command.width, len, run_color)
+                    else:
+                        self.engine.draw_rect_filled(x + off, y, len, command.height, run_color)
+                r = r + 3
+            self.rendered = self.rendered + command_weight
         elif command_kind == DRAW_IR_COMMAND_RECT:
-            # A concrete Metal composition requests a device receipt for every
-            # canonical WM glass surface, even when its metadata or bounds are
-            # malformed. Counting before execution makes that loss visible to
-            # the composition/host fail-closed gate.
             val metal_requested = (metal_device_glass_required and
                 _engine2d_draw_ir_style_value(
                     command.computed_style, "wm-material-request") ==
                 "window-surface-glass")
             if metal_requested:
-                metal_device_glass_requested_count = (
-                    metal_device_glass_requested_count + 1)
+                self.metal_device_glass_requested_count = (
+                    self.metal_device_glass_requested_count + 1)
             val box = _engine2d_draw_ir_render_box(
-                eng, command, x, y, command.width, command.height,
-                surface_fb_w, surface_fb_h)
-            eng = box.engine
+                self.engine, command, x, y, command.width, command.height,
+                self.surface_fb_w, self.surface_fb_h)
+            self.engine = box.engine
             if box.glass_execution.execution_target == "cpu-scalar-glass-v1":
-                cpu_composited_material_count = cpu_composited_material_count + 1
-                glass_execution_target = box.glass_execution.execution_target
+                self.cpu_composited_material_count = self.cpu_composited_material_count + 1
+                self.glass_execution_target = box.glass_execution.execution_target
             elif box.glass_execution.execution_target == "metal-device-glass-v1":
                 if (box.glass_execution.backend_handle > 0 and
                     box.glass_execution.device_identity > 0):
-                    metal_device_glass_material_count = (
-                        metal_device_glass_material_count + 1)
-                    glass_execution_target = box.glass_execution.execution_target
-                    glass_backend_handle = box.glass_execution.backend_handle
-                    glass_device_identity = box.glass_execution.device_identity
+                    self.metal_device_glass_material_count = (
+                        self.metal_device_glass_material_count + 1)
+                    self.glass_execution_target = box.glass_execution.execution_target
+                    self.glass_backend_handle = box.glass_execution.backend_handle
+                    self.glass_device_identity = box.glass_execution.device_identity
             elif _engine2d_draw_ir_style_value(
                     command.computed_style,
                     "backdrop-filter-capability").len() >= 30:
-                # Contract-marked rect whose execution did not land on either
-                # counted target. Length-gated (not ==) so the receipt still
-                # fires if the equality above is itself the corrupted step.
                 print "[engine2d-glass] uncounted-contract-rect target={box.glass_execution.execution_target} target_len={box.glass_execution.execution_target.len()} reason={box.glass_execution.failure_reason}"
             if metal_requested and not (
                 box.glass_execution.execution_target ==
                     "metal-device-glass-v1" and
                 box.glass_execution.backend_handle > 0 and
                 box.glass_execution.device_identity > 0):
-                metal_device_glass_unfulfilled_count = (
-                    metal_device_glass_unfulfilled_count + 1)
+                self.metal_device_glass_unfulfilled_count = (
+                    self.metal_device_glass_unfulfilled_count + 1)
             if metal_requested:
                 val fulfilled = (box.glass_execution.execution_target ==
                     "metal-device-glass-v1" and
                     box.glass_execution.backend_handle > 0 and
                     box.glass_execution.device_identity > 0)
-                metal_device_glass_receipts.push(
+                self.metal_device_glass_receipts.push(
                     Engine2dMetalGlassReceipt(
                         material_id: command.component_id,
                         fulfilled: fulfilled,
@@ -3147,135 +3284,11 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                         readback_checksum: 0
                     )
                 )
-            rendered = rendered + command_weight
+            self.rendered = self.rendered + command_weight
         elif command_kind == DRAW_IR_COMMAND_TEXT:
-            # Clip logically in force for text paints below. Horizontal
-            # containment of degraded/fallback text must INTERSECT with this,
-            # never replace it (replacing discards the container/overflow clip).
-            val text_paint_clip = _engine2d_draw_ir_text_effective_clip(
-                command_clip, active_clip, offset_x, offset_y)
-            # Text remains on the canonical Engine2D font/batch route. The
-            # generic command clip also covers selection/caret rectangles.
-            eng.set_lcd_text(engine2d_draw_ir_lcd_text_enabled() and _engine2d_draw_ir_style_value(command.computed_style, "text-lcd") != "0")
-            val font_identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
-            var font_ready = true
-            val shaped = _engine2d_draw_ir_shaping_requested(command)
-            var font_failure_kind = if shaped: "text-font-shaping" else: "text-font-identity"
-            val probe_this = _E2D_TEXT_PROBE and _e2d_text_probe_count < 8
-            # Level-gated (default off, permanent): pins the font-identity
-            # value flowing into eng.select_font_identity from the Draw-IR
-            # text command's own computed_style, independent of whether the
-            # upstream Style object (fixed in section 16.2) computed it
-            # correctly. See doc/08_tracking/bug/
-            # jit_run_file_pipeline_gaps_2026-07-30.md section 16.4.
-            if (env_get("SIMPLE_TRACE_FONT_STYLE") ?? "") == "1" and font_identity != "":
-                print "[draw-ir-font-trace] font_identity={font_identity}"
-            if font_identity != "":
-                font_ready = eng.select_font_identity(font_identity)
-            else if shaped:
-                font_ready = false
-            if font_ready:
-                val encoded_advances = _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths")
-                val has_resolved_advances = command.advance_widths.len() > 0 or encoded_advances != ""
-                val advances = _engine2d_draw_ir_text_advances(command)
-                if advances.len() > 0:
-                    font_failure_kind = if shaped: "text-font-shaping" else: "text-font-batch"
-                    # Explicit nested branches (no mixed boolean and/or): the
-                    # entry-closure freestanding codegen drops the left operand
-                    # of mixed `and`, which sent non-shaped commands into the
-                    # shaped branch with an empty glyph run (rerun28: skip
-                    # text-font-batch while the advances path's own failure
-                    # receipt stayed silent — draw_text_with_advances was
-                    # never called).
-                    var payload_valid = true
-                    if shaped:
-                        payload_valid = _engine2d_draw_ir_shaped_payload_valid(command, advances)
-                    var drawn = false
-                    val shadow_blur_px = _engine2d_draw_ir_text_shadow_blur_px(command)
-                    if shaped:
-                        if payload_valid:
-                            val pen_q4 = _engine2d_draw_ir_glyph_pen_q4(command)
-                            val shaped_size = _engine2d_draw_ir_text_font_size(command.computed_style)
-                            drawn = if pen_q4.len() > 0: eng.draw_shaped_text_configured(x, y, command.glyph_run, command.color, engine2d_default_font_config_for(shaped_size, eng.baremetal_backend.is_some()), pen_q4) else: eng.draw_shaped_text(x, y, command.glyph_run, command.color, shaped_size)
-                    elif shadow_blur_px > 0:
-                        drawn = _engine2d_draw_ir_blurred_text_shadow(eng, x, y, command, advances, shadow_blur_px)
-                    else:
-                        # A resolved-advance run is bounded horizontally to the
-                        # command's laid-out extent: when the realized face is
-                        # wider than the face layout measured with (font
-                        # substitution or a degraded no-identity run), an
-                        # unbounded paint spills into adjacent boxes (observed
-                        # 2026-11-05). Vertical overflow stays visible, matching
-                        # CSS overflow:visible. Skipped when the command carries
-                        # no laid-out width (unstyled producers emit width=0):
-                        # an empty clip rect would erase the whole paint.
-                        val pen_origin = _engine2d_draw_ir_text_pen_origin_milli(command)
-                        val size_milli = _engine2d_draw_ir_text_size_milli(command)
-                        if command.width > 0:
-                            # The band widens by the pixels a fractional pen
-                            # origin can move the glyphs past the box.
-                            # A negative letter-spacing pulls the box end in past the
-                            # last glyph's ink; the band widens by that overhang.
-                            val letter_milli = _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli")
-                            val origin_pad = _engine2d_draw_ir_pen_origin_pad(pen_origin) + (if letter_milli < 0: _engine2d_draw_ir_pen_origin_pad(letter_milli) else: 0)
-                            val band = draw_ir_rect_intersection(
-                                text_paint_clip,
-                                draw_ir_rect_bounds(x - origin_pad, 0, command.width + 2 * origin_pad, eng.height()))
-                            eng.set_clip(band.x, band.y, band.width, band.height)
-                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli, _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli"), _engine2d_draw_ir_text_spacing_milli(command, "word-spacing-milli"))
-                            _engine2d_draw_ir_restore_clip(eng, text_paint_clip)
-                        else:
-                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli, _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli"), _engine2d_draw_ir_text_spacing_milli(command, "word-spacing-milli"))
-                    if probe_this:
-                        _e2d_text_probe_count = _e2d_text_probe_count + 1
-                        val branch_kind = if shaped and payload_valid: "shaped" else if not shaped: "resolved" else: "shaped-invalid"
-                        val glyph_count = command.glyph_run.glyph_ids.len()
-                        print("[e2d-text-probe] ir kind={branch_kind} shaped={shaped} payload_valid={payload_valid} glyphs={glyph_count} advances={advances.len()} drawn={drawn}")
-                    if drawn:
-                        rendered = rendered + 1
-                    elif shaped:
-                        # A shaped run whose payload does not describe the text
-                        # stays FAIL-CLOSED: painting it with the plain path
-                        # would show glyphs the shaper never authorised.
-                        font_ready = false
-                    else:
-                        # A resolved-advance run that could not be staged is a
-                        # different case: the text itself is known and only the
-                        # advances are unusable. Paint it with the font's own
-                        # advances rather than dropping it -- one unstageable
-                        # run used to cost every pixel of the page.
-                        eng.mark_cpu_fallback_reason("text-advance-arity")
-                        _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
-                        rendered = rendered + 1
-                        # Discriminator vs the callee-side receipt: this line
-                        # with shaped=false and NO [e2d-batch] line means the
-                        # callee returned true but the bool return crossing
-                        # delivered false; shaped=true here means the
-                        # failure-kind ternary mislabeled a shaped command.
-                        val skip_shaped = if shaped: 1 else: 0
-                        val skip_payload = if payload_valid: 1 else: 0
-                        val skip_font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
-                        print("[e2d-ir] draw-false shaped={skip_shaped} payload_valid={skip_payload} advances={advances.len()} text_len={command.text_value.len()} glyphs={command.glyph_run.glyph_ids.len()} size={skip_font_size} text='{command.text_value}'")
-                elif has_resolved_advances:
-                    # The resolved advances could not be staged (arity the
-                    # staging loop cannot consume, or a rejected width). That
-                    # used to mark the command unsupported, and a single such
-                    # run -- one em dash -- took every pixel of the page with
-                    # it. Paint the run with the font's own advances instead
-                    # and RECORD the boundary crossing; never drop the Draw IR.
-                    eng.mark_cpu_fallback_reason("text-advance-arity")
-                    _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
-                    rendered = rendered + 1
-                    print("[e2d-ir] text-advance-arity-fallback text_len={command.text_value.len()} shaped={shaped}")
-                else:
-                    if probe_this:
-                        _e2d_text_probe_count = _e2d_text_probe_count + 1
-                        print("[e2d-text-probe] ir kind=plain len={command.text_value.len()}")
-                    _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
-                    rendered = rendered + 1
-            if not font_ready:
-                skipped = skipped + 1
-                unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, font_failure_kind)
+            _engine2d_draw_ir_render_text_into_state(
+                self, command, x, y, offset_x, offset_y,
+                command_clip, active_clip, lcd_enabled)
         elif command_kind == DRAW_IR_COMMAND_IMAGE:
             val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
             if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
@@ -3304,11 +3317,11 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                         (css_y - y.to_i64())
                     var css_background_budget_admitted = false
                     if (metadata.valid and css_work > 0 and
-                        css_work <= css_background_pixel_work_remaining and
+                        css_work <= self.css_background_pixel_work_remaining and
                         css_x >= -2147483648 and css_x <= 2147483647 and
                         css_y >= -2147483648 and css_y <= 2147483647):
-                        css_background_pixel_work_remaining = (
-                            css_background_pixel_work_remaining - css_work)
+                        self.css_background_pixel_work_remaining = (
+                            self.css_background_pixel_work_remaining - css_work)
                         css_background_budget_admitted = true
                     var css = Engine2dCssBackgroundPixels(
                         valid: false, pixels: [])
@@ -3319,81 +3332,205 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                             css_bounds.width.to_i64(),
                             css_bounds.height.to_i64(), css_work)
                     if css.valid:
-                        eng.draw_image_blend(
+                        self.engine.draw_image_blend(
                             css_x.to_i32(), css_y.to_i32(),
                             css_bounds.width, css_bounds.height, css.pixels)
-                        rendered = rendered + 1
+                        self.rendered = self.rendered + 1
                     else:
-                        skipped = skipped + 1
-                        unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(
-                            unsupported_kinds, "image-css-background")
+                        self.skipped = self.skipped + 1
+                        self.unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(
+                            self.unsupported_kinds, "image-css-background")
                 else:
                     val clipped = _engine2d_draw_ir_materialize_image_damage(
                         image, x, y, command, active_clip,
                         offset_x, offset_y)
                     if clipped.valid:
                         if blend_images and not _engine2d_draw_ir_image_is_opaque(image):
-                            eng.draw_image_blend(
+                            self.engine.draw_image_blend(
                                 clipped.x, clipped.y, clipped.width,
                                 clipped.height, clipped.pixels)
                         else:
-                            eng.draw_image(
+                            self.engine.draw_image(
                                 clipped.x, clipped.y, clipped.width,
                                 clipped.height, clipped.pixels)
                     elif not clipped.handled:
                         if blend_images and not _engine2d_draw_ir_image_is_opaque(image):
                             if command.width == image.width and command.height == image.height:
-                                eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
+                                self.engine.draw_image_blend(x, y, image.width, image.height, image.pixels)
                             else:
-                                eng.draw_image_scaled_blend(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                                self.engine.draw_image_scaled_blend(x, y, command.width, command.height, image.width, image.height, image.pixels)
                         else:
-                            eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
-                    rendered = rendered + 1
+                            self.engine.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                    self.rendered = self.rendered + 1
             else:
-                skipped = skipped + 1
-                unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
-        elif command_kind == DRAW_IR_COMMAND_PATH and _engine2d_draw_ir_path_fill(eng, command, offset_x, offset_y):
-            rendered = rendered + 1
+                self.skipped = self.skipped + 1
+                self.unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(self.unsupported_kinds, command_kind)
+        elif command_kind == DRAW_IR_COMMAND_PATH and _engine2d_draw_ir_path_fill(self.engine, command, offset_x, offset_y):
+            self.rendered = self.rendered + 1
         elif command_kind == DRAW_IR_COMMAND_EDGE or command_kind == DRAW_IR_COMMAND_PATH:
             val stroke = _engine2d_draw_ir_linear_stroke(command, offset_x, offset_y)
             if not stroke.valid:
-                skipped = skipped + 1
-                unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
+                self.skipped = self.skipped + 1
+                self.unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(self.unsupported_kinds, command_kind)
             else:
                 var segment = 0
                 while segment < stroke.points.len() - 1:
                     val first = stroke.points[segment]
                     val second = stroke.points[segment + 1]
-                    eng.draw_line(first.x, first.y, second.x, second.y, stroke.color, 1)
+                    self.engine.draw_line(first.x, first.y, second.x, second.y, stroke.color, 1)
                     segment = segment + 1
-                rendered = rendered + 1
+                self.rendered = self.rendered + 1
         else:
-            skipped = skipped + 1
-            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
+            self.skipped = self.skipped + 1
+            self.unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(self.unsupported_kinds, command_kind)
         if clip_set:
             if active_clip.present:
-                eng.set_clip(
+                self.engine.set_clip(
                     active_clip.x, active_clip.y,
                     active_clip.width, active_clip.height
                 )
             else:
-                eng.clear_clip()
-    _engine2d_draw_ir_render_outcome(
-        eng,
-        rendered,
-        skipped,
-        unsupported_kinds,
-        cpu_composited_material_count,
-        metal_device_glass_material_count,
-        metal_device_glass_requested_count,
-        metal_device_glass_unfulfilled_count,
-        metal_device_glass_receipts,
-        glass_execution_target,
-        glass_backend_handle,
-        glass_device_identity,
-        css_background_pixel_work_remaining,
-        occluded
-    )
+                self.engine.clear_clip()
+
+    fn to_outcome() -> Engine2dDrawIrRenderOutcome:
+        _engine2d_draw_ir_render_outcome(
+            self.engine,
+            self.rendered,
+            self.skipped,
+            self.unsupported_kinds,
+            self.cpu_composited_material_count,
+            self.metal_device_glass_material_count,
+            self.metal_device_glass_requested_count,
+            self.metal_device_glass_unfulfilled_count,
+            self.metal_device_glass_receipts,
+            self.glass_execution_target,
+            self.glass_backend_handle,
+            self.glass_device_identity,
+            self.css_background_pixel_work_remaining,
+            self.occluded
+        )
+
+fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2dDrawIrCommandPlan, offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, prove_occlusion: bool = true) -> Engine2dDrawIrRenderOutcome:
+    val lcd_enabled = engine2d_draw_ir_lcd_text_enabled()
+    var eng = engine
+    eng.set_lcd_text(lcd_enabled)
+    var state = _Engine2dDrawIrLoopState.create(eng, css_background_pixel_work_budget)
+    var command_index: i64 = 0
+    for command in command_plan.commands:
+        val current_index = command_index
+        val command_weight = if command_plan.logical_weights.len() == 0:
+            1
+        else:
+            command_plan.logical_weights[command_index]
+        command_index = command_index + 1
+        if state.skip_if_invalid(command, command_weight):
+            continue
+        val exact_bounds = _engine2d_draw_ir_exact_plain_bounds(
+            command, offset_x, offset_y, active_clip,
+            state.surface_fb_w, state.surface_fb_h)
+        if prove_occlusion and exact_bounds.present:
+            val proof = _engine2d_draw_ir_prove_rect_covered(
+                command_plan.commands, current_index + 1, exact_bounds,
+                offset_x, offset_y, active_clip,
+                state.surface_fb_w, state.surface_fb_h,
+                ENGINE2D_DRAW_IR_OCCLUSION_PROOF_BUDGET)
+            if proof.covered:
+                state.skipped = state.skipped + command_weight
+                state.occluded = state.occluded + command_weight
+                continue
+        state.execute_valid_command(
+            command, command_weight, offset_x, offset_y, images,
+            blend_images, metal_device_glass_required, active_clip, lcd_enabled)
+    state.to_outcome()
+
+fn _engine2d_draw_ir_find_full_tile_barrier(
+    commands: [DrawIrCommand], tile_items: [i32],
+    start_pos: i64, end_pos: i64,
+    offset_x: i32, offset_y: i32, active_clip: DrawIrRect,
+    surface_fb_w: i32, surface_fb_h: i32
+) -> i64:
+    val viewport = draw_ir_rect_bounds(0, 0, surface_fb_w, surface_fb_h)
+    val effective_tile = if active_clip.present:
+        draw_ir_rect_intersection(active_clip, viewport)
+    else:
+        viewport
+    if effective_tile.width <= 0 or effective_tile.height <= 0:
+        return -1
+    var pos = end_pos - 1
+    while pos >= start_pos:
+        val command = commands[tile_items[pos]]
+        if command.? != None and ((command.color >> 24) & 0xFFu32) == 0xFFu32:
+            val bounds = _engine2d_draw_ir_exact_plain_bounds(
+                command, offset_x, offset_y, active_clip,
+                surface_fb_w, surface_fb_h)
+            if (bounds.present and
+                bounds.x <= effective_tile.x and
+                bounds.y <= effective_tile.y and
+                bounds.x + bounds.width >= effective_tile.x + effective_tile.width and
+                bounds.y + bounds.height >= effective_tile.y + effective_tile.height):
+                return pos
+        pos = pos - 1
+    -1
+
+# Indexed tile replay: executes commands[tile_items[start_pos..end_pos]] without
+# allocating or copying a per-tile command array or re-running plain-fill
+# coalescing per tile.
+fn _engine2d_draw_ir_render_commands_indexed(
+    engine: Engine2D,
+    commands: [DrawIrCommand],
+    tile_items: [i32],
+    start_pos: i64,
+    end_pos: i64,
+    offset_x: i32,
+    offset_y: i32,
+    images: [Engine2dResolvedDrawIrImage],
+    blend_images: bool,
+    metal_device_glass_required: bool,
+    active_clip: DrawIrRect,
+    css_background_pixel_work_budget: i64,
+    prove_occlusion: bool = true,
+    lcd_enabled: bool = true
+) -> Engine2dDrawIrRenderOutcome:
+    var state = _Engine2dDrawIrLoopState.create(engine, css_background_pixel_work_budget)
+    val barrier_pos = if prove_occlusion:
+        _engine2d_draw_ir_find_full_tile_barrier(
+            commands, tile_items, start_pos, end_pos,
+            offset_x, offset_y, active_clip,
+            state.surface_fb_w, state.surface_fb_h)
+    else:
+        -1
+    var pos = start_pos
+    while pos < end_pos:
+        val command = commands[tile_items[pos]]
+        if state.skip_if_invalid(command, 1):
+            pos = pos + 1
+            continue
+        if prove_occlusion:
+            val exact_bounds = _engine2d_draw_ir_exact_plain_bounds(
+                command, offset_x, offset_y, active_clip,
+                state.surface_fb_w, state.surface_fb_h)
+            if exact_bounds.present:
+                if pos < barrier_pos:
+                    state.skipped = state.skipped + 1
+                    state.occluded = state.occluded + 1
+                    pos = pos + 1
+                    continue
+                if pos + 1 < end_pos:
+                    val proof = _engine2d_draw_ir_prove_rect_covered_indexed(
+                        commands, tile_items, pos + 1, end_pos, exact_bounds,
+                        offset_x, offset_y, active_clip,
+                        state.surface_fb_w, state.surface_fb_h,
+                        ENGINE2D_DRAW_IR_OCCLUSION_PROOF_BUDGET)
+                    if proof.covered:
+                        state.skipped = state.skipped + 1
+                        state.occluded = state.occluded + 1
+                        pos = pos + 1
+                        continue
+        state.execute_valid_command(
+            command, 1, offset_x, offset_y, images,
+            blend_images, metal_device_glass_required, active_clip, lcd_enabled)
+        pos = pos + 1
+    state.to_outcome()
 
 fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
     _engine2d_draw_ir_render_command_plan(
@@ -4632,6 +4769,7 @@ struct Engine2dDrawIrTileOutcome:
     # intersect caller-owned damage. This is separate from physical command
     # culling because coalescing can give one command a logical weight > 1.
     ops_culled_by_damage: i32 = 0
+    ops_occluded: i32 = 0
 
 # Immutable caller-owned result of retained-damage planning. It deliberately
 # lives beside the executor rather than on Engine2D: the renderer remains the
@@ -5362,8 +5500,7 @@ fn engine2d_draw_ir_render_composition_damaged(
     engine2d_draw_ir_render_damaged_with_images(
         engine, batch.commands, images, damage_rects, readback_frame)
 
-fn engine2d_draw_ir_render_tiled(
-    engine: Engine2D,
+fn _engine2d_draw_ir_tile_plan_valid(
     commands: [DrawIrCommand],
     tile_x: [i32],
     tile_y: [i32],
@@ -5372,42 +5509,87 @@ fn engine2d_draw_ir_render_tiled(
     tile_live: [bool],
     tile_starts: [i32],
     tile_items: [i32]
+) -> bool:
+    val tiles = tile_x.len()
+    if (tile_y.len() != tiles or tile_w.len() != tiles or tile_h.len() != tiles or
+        tile_live.len() != tiles or tile_starts.len() != tiles + 1):
+        return false
+    val n_items = tile_items.len()
+    val n_commands = commands.len()
+    var t = 0
+    while t < tiles:
+        if tile_w[t] < 0 or tile_h[t] < 0:
+            return false
+        val s0 = tile_starts[t]
+        val e0 = tile_starts[t + 1]
+        if s0 < 0 or e0 < s0 or e0 > n_items:
+            return false
+        var s = s0
+        while s < e0:
+            val cmd_index = tile_items[s]
+            if cmd_index < 0 or cmd_index >= n_commands:
+                return false
+            s = s + 1
+        t = t + 1
+    true
+
+fn _engine2d_draw_ir_render_tiled_mode(
+    engine: Engine2D,
+    commands: [DrawIrCommand],
+    tile_x: [i32],
+    tile_y: [i32],
+    tile_w: [i32],
+    tile_h: [i32],
+    tile_live: [bool],
+    tile_starts: [i32],
+    tile_items: [i32],
+    prove_occlusion: bool
 ) -> Engine2dDrawIrTileOutcome:
     var eng = engine
     val tiles = tile_x.len()
+    if not _engine2d_draw_ir_tile_plan_valid(
+        commands, tile_x, tile_y, tile_w, tile_h, tile_live,
+        tile_starts, tile_items
+    ):
+        return Engine2dDrawIrTileOutcome(
+            engine: eng,
+            tiles_total: tiles,
+            tiles_rendered: 0,
+            tiles_skipped: tiles,
+            ops_rendered: 0,
+            ops_skipped: 0,
+            unsupported_kinds: "invalid-tile-plan",
+            readback: engine2d_readback([], "invalid-tile-plan"),
+            ops_occluded: 0
+        )
+    val lcd_enabled = engine2d_draw_ir_lcd_text_enabled()
+    eng.set_lcd_text(lcd_enabled)
     var tiles_rendered = 0
     var tiles_skipped = 0
     var ops_rendered = 0
     var ops_skipped = 0
+    var ops_occluded = 0
     var unsupported_kinds = ""
     val budget = eng.width().to_i64() * eng.height().to_i64()
     var images: [Engine2dResolvedDrawIrImage] = []
-    # Reuse one command scratch across live tiles. `clear()` preserves the
-    # backing capacity, removing one growing array allocation per live tile
-    # while retaining the existing coalescing/dispatch behavior.
-    var tile_commands: [DrawIrCommand] = []
     var t = 0
     while t < tiles:
         var replayed = false
         if tile_live[t]:
-            val s0 = tile_starts[t]
-            val e0 = tile_starts[t + 1]
+            val s0 = tile_starts[t].to_i64()
+            val e0 = tile_starts[t + 1].to_i64()
             if e0 > s0:
-                tile_commands.clear()
-                var s = s0
-                while s < e0:
-                    tile_commands.push(commands[tile_items[s]])
-                    s = s + 1
                 val clip = draw_ir_rect_bounds(
                     tile_x[t], tile_y[t], tile_w[t], tile_h[t])
                 eng.set_clip(clip.x, clip.y, clip.width, clip.height)
-                val outcome = _engine2d_draw_ir_render_commands(
-                    eng, tile_commands, 0, 0, images, false, false, clip,
-                    budget)
+                val outcome = _engine2d_draw_ir_render_commands_indexed(
+                    eng, commands, tile_items, s0, e0, 0, 0, images,
+                    false, false, clip, budget, prove_occlusion, lcd_enabled)
                 eng = outcome.engine
                 eng.clear_clip()
                 ops_rendered = ops_rendered + outcome.rendered
                 ops_skipped = ops_skipped + outcome.skipped
+                ops_occluded = ops_occluded + outcome.occluded
                 if (unsupported_kinds == "" and
                     outcome.unsupported_kinds != "" and
                     outcome.unsupported_kinds != "none"):
@@ -5428,8 +5610,39 @@ fn engine2d_draw_ir_render_tiled(
         ops_rendered: ops_rendered,
         ops_skipped: ops_skipped,
         unsupported_kinds: unsupported_kinds,
-        readback: readback
+        readback: readback,
+        ops_occluded: ops_occluded
     )
+
+fn engine2d_draw_ir_render_tiled(
+    engine: Engine2D,
+    commands: [DrawIrCommand],
+    tile_x: [i32],
+    tile_y: [i32],
+    tile_w: [i32],
+    tile_h: [i32],
+    tile_live: [bool],
+    tile_starts: [i32],
+    tile_items: [i32]
+) -> Engine2dDrawIrTileOutcome:
+    _engine2d_draw_ir_render_tiled_mode(
+        engine, commands, tile_x, tile_y, tile_w, tile_h, tile_live,
+        tile_starts, tile_items, true)
+
+fn engine2d_draw_ir_render_tiled_unculled(
+    engine: Engine2D,
+    commands: [DrawIrCommand],
+    tile_x: [i32],
+    tile_y: [i32],
+    tile_w: [i32],
+    tile_h: [i32],
+    tile_live: [bool],
+    tile_starts: [i32],
+    tile_items: [i32]
+) -> Engine2dDrawIrTileOutcome:
+    _engine2d_draw_ir_render_tiled_mode(
+        engine, commands, tile_x, tile_y, tile_w, tile_h, tile_live,
+        tile_starts, tile_items, false)
 
 export Engine2dDrawIrAdvResult
 export Engine2dDrawIrAdvOwnerResult
@@ -5460,6 +5673,7 @@ export engine2d_draw_ir_adv_strict_vulkan_window_present_with_images
 export engine2d_draw_ir_adv_strict_vulkan_readback
 export engine2d_draw_ir_command_samples_parent
 export engine2d_draw_ir_render_tiled
+export engine2d_draw_ir_render_tiled_unculled
 export engine2d_draw_ir_render_damaged
 export engine2d_draw_ir_render_damaged_with_images
 export engine2d_draw_ir_prepare_damage_plan

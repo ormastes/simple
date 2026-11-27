@@ -126,3 +126,20 @@ describe "wave-0 pool admission and enclosing tree cap enforcement":
         expect(override_wave0).to_equal(3)
         # Existing live workers already above estimate reserve their measured footprint against tree budget.
         expect(shard_pool_tree_admit_v1(42030828, 18000000, [30000000], 1)).to_equal(false)
+
+    # Stage 2 compiler_cli_build, pinned 967f9178950e, 2026-11-27 (bug
+    # stage2_cli_build_rss_cap_leak_check_closure): the campaign exports
+    # SIMPLE_HIR_SHARD_WORKER_KB=9000000 as an explicit override under a
+    # 62914560 KiB tree cap. A raw record up to half the worker budget
+    # re-admitted both workers; with its margin a record above 80% of that
+    # half admits one.
+    it "serialises an overridden pool whose recorded peak leaves no margin for two":
+        val worker_budget = shard_pool_tree_worker_budget_kib_v1(62914560, 62914560, 0, 1807708)
+        expect(worker_budget).to_equal(61106852)
+        expect(shard_pool_wave0_admitted_count_v1(2, 2, 120000000, 25165824, worker_budget, 9000000, worker_budget / 2, 9000000)).to_equal(1)
+        expect(shard_pool_wave0_admitted_count_v1(2, 2, 120000000, 25165824, worker_budget, 9000000, 28000000, 9000000)).to_equal(1)
+        # Two workers stay parallel while the recorded peak plus margin fits twice.
+        expect(shard_pool_wave0_admitted_count_v1(2, 2, 120000000, 25165824, worker_budget, 9000000, 12000000, 9000000)).to_equal(2)
+        expect(shard_pool_wave0_admitted_count_v1(2, 2, 120000000, 25165824, worker_budget, 9000000, 24000000, 9000000)).to_equal(2)
+        # No record yet (first run of a producer): the override alone prices the pool.
+        expect(shard_pool_wave0_admitted_count_v1(2, 2, 120000000, 25165824, worker_budget, 9000000, 0, 9000000)).to_equal(2)

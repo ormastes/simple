@@ -1,0 +1,113 @@
+# Real MirLowering fatal-error enforcement parity across 50.mir owners
+# @req REQ-MIR-ERROR-FATAL-FAMILY
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read, env_get_nullable, env_set_process, env_remove_process}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{SymbolTable}
+use compiler.hir.hir_types.{AsmTargetSpec, SymbolKind, HirType, HirTypeKind}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.driver.driver_mir_error_owner.{driver_mir_error_is_fatal_owned_v1}
+use compiler.driver.driver_pipeline_lowering.{_driver_collect_mir_errors}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+
+fn lower_mir_with_lowering(src: text, filename: text) -> [MirError]:
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    mir_lowering.errors
+
+fn restore_env_opt(key: text, prev: text?):
+    match prev:
+        case Some(value): env_set_process(key, value)
+        case None: env_remove_process(key)
+
+describe "MirLowering fatal error enforcement across 50.mir":
+    it "marks strict mutable array global diagnostics fatal so builds fail instead of exiting rc=0":
+        step("Invoke report_mutable_array_global on a mutable array symbol with SIMPLE_STRICT_ARRAY_GLOBALS unset then 1")
+        var syms = SymbolTable.new()
+        val elem_ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val arr_ty = HirType(kind: HirTypeKind.Array(elem_ty, nil), span: Span.empty())
+        val sym_id = syms.define("global_buf", SymbolKind.Variable, Some(arr_ty), Span.empty(), Visibility.Private, true, nil)
+
+        val prev = env_get_nullable("SIMPLE_STRICT_ARRAY_GLOBALS")
+        env_remove_process("SIMPLE_STRICT_ARRAY_GLOBALS")
+        var warn_lowering = MirLowering.new(syms)
+        warn_lowering.report_mutable_array_global(sym_id.id)
+        expect(warn_lowering.errors.len()).to_equal(0)
+
+        env_set_process("SIMPLE_STRICT_ARRAY_GLOBALS", "1")
+        var strict_lowering = MirLowering.new(syms)
+        strict_lowering.report_mutable_array_global(sym_id.id)
+        restore_env_opt("SIMPLE_STRICT_ARRAY_GLOBALS", prev)
+
+        expect(strict_lowering.errors.len()).to_equal(1)
+        expect(strict_lowering.errors[0].message).to_contain("mutable array-typed module global")
+        expect(strict_lowering.errors[0].fatal).to_equal(true)
+        expect(driver_mir_error_is_fatal_owned_v1(strict_lowering.errors[0])).to_equal(true)
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        _driver_collect_mir_errors(ctx, strict_lowering.errors)
+        expect(ctx.error_count_value).to_equal(1)
+
+    it "marks expression and type payload decode mismatches fatal so corrupt HIR fails builds":
+        step("Invoke payload_decode_failed and type_payload_decode_failed directly")
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.payload_decode_failed("HirExprKind.Call", Span.empty())
+        lowering.type_payload_decode_failed("HirTypeKind.Named", Span.empty())
+        expect(lowering.errors.len()).to_equal(2)
+        expect(lowering.errors[0].message).to_start_with("E-MIR-EXPR-PAYLOAD:")
+        expect(lowering.errors[0].fatal).to_equal(true)
+        expect(lowering.errors[1].message).to_start_with("E-MIR-TYPE-PAYLOAD:")
+        expect(lowering.errors[1].fatal).to_equal(true)
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        _driver_collect_mir_errors(ctx, lowering.errors)
+        expect(ctx.error_count_value).to_equal(2)
+
+    it "keeps asm_and_targets failures fatal while leaving version advisory note non-fatal":
+        step("Verify asm assert fails fatally and advisory note stays warning-only")
+        var mismatch_lowering = MirLowering.new(SymbolTable.new())
+        mismatch_lowering.lower_asm_assert(
+            AsmTargetSpec(
+                archs: ["riscv64"], has_os: false, os: "", has_abi: false, abi: "",
+                has_backend: false, backend: "", version_constraints: [], span: Span.empty()),
+            nil)
+        expect(mismatch_lowering.errors.len()).to_equal(1)
+        expect(mismatch_lowering.errors[0].message).to_contain("asm assert failed")
+        expect(mismatch_lowering.errors[0].fatal).to_equal(true)
+        expect(driver_mir_error_is_fatal_owned_v1(mismatch_lowering.errors[0])).to_equal(true)
+
+        var advisory_lowering = MirLowering.new(SymbolTable.new())
+        advisory_lowering.error("note: target backend differs from recommended version", None)
+        expect(advisory_lowering.errors[0].fatal).to_equal(false)
+        expect(driver_mir_error_is_fatal_owned_v1(advisory_lowering.errors[0])).to_equal(false)
+
+    it "uses self.error_fatal rather than self.error at all fatal MIR lowering sites in audited files":
+        step("Verify audited 50.mir sources no longer rely on self.error for fatal arms")
+        val expr_src = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        val calls_src = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        val switch_src = file_read("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
+        val fn_src = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        expect(expr_src.contains("self.error(message, None)")).to_equal(false)
+        expect(expr_src.contains("self.error(\"E-MIR-EXPR-PAYLOAD:")).to_equal(false)
+        expect(expr_src.contains("self.error(\"undefined variable")).to_equal(false)
+        expect(expr_src.contains("self.error(\"unsupported MIR expression:")).to_equal(false)
+        expect(expr_src.contains("self.error(\"unresolved method call:")).to_equal(false)
+        expect(calls_src.contains("self.error(\"unresolved method call:")).to_equal(false)
+        expect(switch_src.contains("self.error(\"match default binding has no resolved symbol\"")).to_equal(false)
+        expect(switch_src.contains("self.error(\"enum match:")).to_equal(false)
+        expect(switch_src.contains("self.error(\"enum construction: unregistered enum")).to_equal(false)
+        expect(fn_src.contains("self.error(\"E-MIR-TYPE-PAYLOAD:")).to_equal(false)
+        expect(fn_src.contains("self.error(\"E-MIR-TYPE-Any:")).to_equal(true)

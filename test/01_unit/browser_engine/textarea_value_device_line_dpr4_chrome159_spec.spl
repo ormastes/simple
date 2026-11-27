@@ -1,0 +1,78 @@
+"""
+## Purpose and audience
+Purpose: Pin the device rows of a `<textarea>` value's lines at device scale
+4, against Chrome 159.
+
+The UA textarea font is 13.333px monospace (DejaVu Sans Mono here). Chrome
+lays the value out on the face's `normal` line at the DEVICE size: 63 device
+px per line at k=4, with the baseline 50 rows below the line top. Simple
+painted the first line 1 row high (painter ascent 49 at the 53 px device
+size, and no device strut correction for the control's text) and stacked
+lines 2..n at k x 15 = 60 device px. The control box itself already matches
+(`form_control_device_extra_h`: rows x 63). Catalog forms-media 4x: the
+`Notes` textarea value is 2,497 of 30,324 mismatched px.
+
+Audience: web renderer form-control layout (layout_engine textarea label
+layout, layout_foundation device-dy / line-step tables) maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --window-size=400,300 --screenshot`, PAGE
+below). Rows holding a pixel with red < 128, device px:
+- k=4, `rows=3` textarea with no padding/border at (10,10), value
+  `EEE\nEEE\nEEE`, columns 40..240: ink rows 51..89, 114..152, 177..215.
+- k=4, the catalog-styled textarea (padding 8, 1px border) at (200,10),
+  `Editable text`, columns 860..1200: ink rows 85..126.
+- k=1, same page: 12..21 27..36 42..51 and 20..30 (Simple already matches).
+"""
+
+"""
+Traceability: REQ-WEB-TEXTAREA-DEVICE-LINE-001 — at device scale k a textarea value's lines sit on Chrome's device `normal` line (63 px at k=4).
+"""
+# @tag: unit, browser_engine, layout, form_control, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>*{{box-sizing:border-box}}body{{margin:0;background:#fff;color:#000}}textarea{{position:absolute;color:#000;background:#fff;resize:none}}</style></head><body><textarea rows=\"3\" style=\"left:10px;top:10px;padding:0;border:0\">EEE\nEEE\nEEE</textarea><textarea style=\"left:200px;top:10px;padding:8px;border:1px solid #94a3b8;border-radius:5px\">Editable text</textarea></body></html>"
+
+fn _red(px: u32) -> i32:
+    ((px >> 16u32) & 0xFFu32) as i32
+
+# "a..b " runs of rows holding ink (red < 128) in columns x0..x1, rows y0..y1.
+fn _ink_rows(px: [u32], k: i32, x0: i32, x1: i32, y0: i32, y1: i32) -> text:
+    val w = CSS_W * k
+    if px.len() != (w * CSS_H * k) as i64:
+        return "bad frame"
+    var out = ""
+    var start = -1
+    var y = y0
+    while y <= y1 + 1:
+        var ink = false
+        if y <= y1:
+            var x = x0
+            while x <= x1 and not ink:
+                if _red(px[y * w + x]) < 128:
+                    ink = true
+                x = x + 1
+        if ink and start < 0:
+            start = y
+        elif not ink and start >= 0:
+            out = out + "{start}..{y - 1} "
+            start = -1
+        y = y + 1
+    out
+
+describe "Textarea value lines sit on Chrome's device line at device scale 4 (Chrome 159)":
+    it "AC-1: a 3-line value at 4x has ink rows 51..89 114..152 177..215":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_ink_rows(px, 4, 40, 240, 40, 320)).to_equal("51..89 114..152 177..215 ")
+    it "AC-2: the catalog-styled textarea's first line at 4x has ink rows 85..126":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_ink_rows(px, 4, 860, 1200, 40, 320)).to_equal("85..126 ")
+    it "AC-3: at 1x the rows stay 12..21 27..36 42..51 and 20..30":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+        expect(_ink_rows(px, 1, 10, 60, 10, 80) + "| " + _ink_rows(px, 1, 215, 300, 10, 80)).to_equal("12..21 27..36 42..51 | 20..30 ")

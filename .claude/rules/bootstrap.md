@@ -415,6 +415,17 @@ and [bootstrap_options.md](../../doc/07_guide/tooling/bootstrap_options.md) for 
    - Every core bootstrap script carries a top-of-file `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER` banner.
    - Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible `PATH_ACTION|...|status=ALIVE` superset records without running actual compilation.
 
+## Python phase policy (owner, 2026-11-27)
+
+Python is allowed only up to the point where Phase 2 is built and verified:
+pre-p2 trust gates may stay Python, because judging an unverified Simple binary
+with itself is circular. From Phase 3 on, everything is pure Simple
+(`.spl`/`.shs`). A script used both pre-p2 and p3+ keeps its Python copy for the
+pre-p2 path, gains a Simple twin, and every p3+ caller uses the twin
+(duplication accepted; parity on identical inputs + runtime measured). Do not
+change hash pins of pre-p2 trust gates. Census:
+`doc/08_tracking/todo/python_phase_census_2026-11-27.md`.
+
 ## Seed build script (2026-11-24)
 
 `bin/simple.exe` is a legacy git-tracked seed and goes stale; do not commit new

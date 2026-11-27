@@ -370,6 +370,9 @@ class MetalBackend:
     # Device readbacks and material receipts must both use this owner field.
     device_identity: i64
     last_image_blend_target: text
+    # Non-empty when CPU-mirror rasterization mutated the current gpu_only frame;
+    # prevents read_pixels_with_source() from mislabelling it as device_readback.
+    cpu_composite_reason: text
 
     static fn create() -> MetalBackend:
         val backend = make_metal_backend()
@@ -395,6 +398,7 @@ fn make_metal_backend() -> MetalBackend:
         gpu_only: false,
         device_identity: 0,
         last_image_blend_target: "",
+        cpu_composite_reason: "",
         dirty: false,
         initialized: false,
         gpu_frame_complete: false,
@@ -477,6 +481,7 @@ impl RenderBackend for MetalBackend:
         self.clip_h = height
         self.clip_enabled = false
         self.gpu_only = false
+        self.cpu_composite_reason = ""
         self.dirty = false
         self.initialized = true
         self.gpu_frame_complete = false
@@ -529,6 +534,7 @@ impl RenderBackend for MetalBackend:
         self.w = width
         self.h = height
         self.gpu_only = false
+        self.cpu_composite_reason = ""
         val bytes = width.to_i64() * height.to_i64() * 4
         self.d_framebuffer = metal_sffi_alloc_buffer(self.session.device, bytes)
         if self.d_framebuffer == 0:
@@ -616,6 +622,7 @@ impl RenderBackend for MetalBackend:
         self.w = 0
         self.h = 0
         self.gpu_only = false
+        self.cpu_composite_reason = ""
         self.dirty = false
         self.initialized = false
         self.gpu_frame_complete = false
@@ -627,6 +634,7 @@ impl RenderBackend for MetalBackend:
         # flushes, but by then there is nothing left pending.
         self.font.flush()
         self.font.begin_frame()
+        self.cpu_composite_reason = ""
         if not self.gpu_only:
             self.mirror.clear(color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_clear != 0:
@@ -647,6 +655,7 @@ impl RenderBackend for MetalBackend:
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self._gpu_only_mask_emulation_active():
             self.mirror.draw_rect_filled(x, y, w, h, color)
+            self.cpu_composite_reason = "gpu-only-mask-emulation"
             self.dirty = true
             return
         if not self.gpu_only:
@@ -840,11 +849,17 @@ impl RenderBackend for MetalBackend:
             return empty
         self.mirror.read_pixels()
 
+    fn cpu_composite_reason_in_frame() -> text:
+        """Return CPU-mirror composite reason for current frame, or empty when pure GPU."""
+        self.cpu_composite_reason
+
     me read_pixels_with_source() -> Engine2DReadback:
         if self.gpu_frame_complete:
             val gpu_pixels = self.read_pixels_gpu_only()
             if gpu_pixels.len() == (self.w * self.h):
-                val source = readback_source_label(ReadbackSource.DeviceReadback)
+                val source = metal_resolve_gpu_only_readback_source(self.cpu_composite_reason)
+                if self.cpu_composite_reason != "":
+                    return engine2d_readback(gpu_pixels, source)
                 val readback = engine2d_readback_with_identity(
                     gpu_pixels, source, self.d_framebuffer,
                     self.device_identity)
@@ -1356,23 +1371,27 @@ impl MetalBackend:
         self.gpu_only and self.mirror.mask_buf.len() > 0
 
     me _begin_gpu_only_cpu_composite() -> bool:
-        # Fence a CPU-rasterized operation into the device framebuffer. The
-        # device is snapshotted before the unsupported operation and the exact
-        # SoftwareBackend result is uploaded afterward, retaining the original
-        # Metal framebuffer handle and device-readback provenance.
+        # Snapshot the device framebuffer before running a CPU-rasterized
+        # fallback operation on self.mirror. Once a frame relies on CPU-mirror
+        # compositing, cpu_composite_reason stays non-empty until clear/reset so
+        # read_pixels_with_source() reports cpu_mirror rather than device_readback.
         #
         # set_mask already snapshots once before installing the mask. While
         # that mask remains active, the mirror is authoritative for fallback
         # rasterization; downloading again would either reject the deliberately
         # incomplete GPU frame or discard masked changes not yet uploaded.
         if self._gpu_only_mask_emulation_active():
-            return self.mirror.buf.len() == self.w * self.h
+            if self.mirror.buf.len() == self.w * self.h:
+                self.cpu_composite_reason = "gpu-only-mask-emulation"
+                return true
+            return false
         if not self.initialized or self.d_framebuffer == 0 or not self.gpu_frame_complete:
             return false
         val pixels = self.read_pixels_gpu_only()
         if pixels.len() != self.w * self.h:
             return false
         self.mirror.buf = pixels
+        self.cpu_composite_reason = "gpu-only-cpu-composite"
         true
 
     me _commit_gpu_only_cpu_composite() -> bool:
@@ -1396,6 +1415,8 @@ impl MetalBackend:
                 i = i + 1
         val uploaded = metal_buffer_upload_ptr(self.d_framebuffer, host, byte_size) != 0
         metal_host_free(host)
+        if uploaded and self.cpu_composite_reason == "":
+            self.cpu_composite_reason = "gpu-only-cpu-composite"
         self.dirty = self.dirty or uploaded
         uploaded
 
@@ -2400,8 +2421,15 @@ impl MetalBackend:
             self.mirror.draw_rect_blend_mode(x, y, w, h, color, mode)
         self.gpu_frame_complete = false
 
+pub fn metal_resolve_gpu_only_readback_source(cpu_composite_reason: text) -> text:
+    """Return honest ReadbackSource label for a gpu_only Metal frame."""
+    if cpu_composite_reason != "":
+        return readback_source_label(ReadbackSource.CpuMirror)
+    readback_source_label(ReadbackSource.DeviceReadback)
+
 export MetalBackend
 export MetalErrorKind
 export metal_classify_error
+export metal_resolve_gpu_only_readback_source
 export probe_metal
 export make_metal_backend

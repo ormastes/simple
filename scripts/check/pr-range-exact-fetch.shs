@@ -1,0 +1,135 @@
+#!/bin/sh
+# pr-range-exact-fetch.shs — make `BASE..HEAD` in a shallow CI clone list
+# exactly the pull request's own commits.
+#
+# The fast-gates job fetches both PR endpoints at `--depth PR_COMMITS+41`.
+# For a linear PR that is exact. For a PR that MERGES ANOTHER LINE it is not:
+# the merged line's older ancestors sit inside the depth window but are
+# reachable from the base only through history deeper than the window, so the
+# shallow clone cannot prove they are already in the base and `rev-list
+# BASE..HEAD` reports them as new. Measured on PR #12180 (main merged into
+# release/1.0.0, 61 commits): the shallow clone listed 5,094 commits, and
+# every range gate scanned those — check-no-stale-snapshot-rewind alone blew
+# the 240 s tier budget.
+#
+# Fix: when the local count disagrees with the count GitHub reports for the
+# PR, fetch the COMMIT objects of the full history (`--filter=tree:0
+# --unshallow`: no trees, no blobs; 35 MB / 55 s measured on this repo) so
+# reachability is exact. Nothing is fetched when the counts already agree.
+#
+# Usage: pr-range-exact-fetch.shs <base-sha> <head-sha> <pr-commit-count>
+#        pr-range-exact-fetch.shs --selftest
+# Last stdout line: `OK — ...` exit 0 / `ERROR — ...` exit 2.
+set -u
+
+REMOTE=${PR_RANGE_REMOTE:-origin}
+
+range_count() {
+    git -C "$1" rev-list --count "$2..$3" 2>/dev/null
+}
+
+# ensure <repo> <base> <head> <want>
+ensure() {
+    e_repo=$1; e_base=$2; e_head=$3; e_want=$4
+    e_n=$(range_count "$e_repo" "$e_base" "$e_head")
+    if [ -z "$e_n" ]; then
+        echo "ERROR — nothing was checked (cannot list $e_base..$e_head)"
+        return 2
+    fi
+    if [ "$e_n" = "$e_want" ]; then
+        echo "OK — $e_n commit(s) in the range, matching the pull request; no fetch"
+        return 0
+    fi
+    if [ "$(git -C "$e_repo" rev-parse --is-shallow-repository 2>/dev/null)" != true ]; then
+        echo "OK — $e_n commit(s) in the range of a full clone (pull request reports $e_want)"
+        return 0
+    fi
+    if ! git -C "$e_repo" fetch --no-tags --no-recurse-submodules --quiet \
+            --filter=tree:0 --unshallow "$REMOTE" "$e_base" "$e_head" >&2; then
+        echo "ERROR — nothing was checked (shallow range has $e_n commit(s), the pull request $e_want, and the commit-only history fetch failed)"
+        return 2
+    fi
+    e_m=$(range_count "$e_repo" "$e_base" "$e_head")
+    echo "OK — range corrected from $e_n to $e_m commit(s) with commit-only history (pull request reports $e_want)"
+    return 0
+}
+
+fx_commit() {
+    echo "$2" >> "$1/src/f.txt"
+    git -C "$1" add src/f.txt >/dev/null 2>&1 && git -C "$1" commit -q -m "$2" >/dev/null 2>&1
+}
+
+selftest() {
+    st=$(mktemp -d) || return 1
+    trap 'rm -rf "$st"' EXIT INT TERM
+    r=$st/remote; fail=0
+    mkdir -p "$r/src"
+    ( cd "$r" && git init -q -b trunk . && git config user.email f@f && git config user.name f \
+        && git config commit.gpgsign false && git config uploadpack.allowFilter true \
+        && git config uploadpack.allowAnySHA1InWant true ) >/dev/null 2>&1 || return 1
+    for n in 1 2 3; do fx_commit "$r" "shared $n"; done
+    git -C "$r" branch release
+    for n in 1 2; do fx_commit "$r" "trunk-only $n"; done
+    git -C "$r" checkout -q release
+    n=1; while [ "$n" -le 20 ]; do fx_commit "$r" "release $n"; n=$((n + 1)); done
+    base=$(git -C "$r" rev-parse release)
+    old=$(git -C "$r" rev-parse release~19)
+    git -C "$r" checkout -q -b pr-merge release
+    git -C "$r" merge -q --no-ff -X ours -m "merge trunk into release" trunk >/dev/null 2>&1 || return 1
+    head=$(git -C "$r" rev-parse pr-merge)
+    git -C "$r" checkout -q -b pr-linear release
+    fx_commit "$r" "linear change"
+    lin=$(git -C "$r" rev-parse pr-linear)
+
+    mkclone() {
+        mkdir -p "$1" && git -C "$1" init -q . && git -C "$1" remote add origin "file://$r" \
+            && git -C "$1" config remote.origin.promisor true \
+            && git -C "$1" config remote.origin.partialclonefilter blob:none \
+            && git -C "$1" fetch -q --no-tags --filter=blob:none --depth=5 origin "$base" "$2" >/dev/null 2>&1
+    }
+
+    # 1. merge PR: 3 real commits, the shallow clone sees the shared trunk too.
+    c=$st/merge; mkclone "$c" "$head" || return 1
+    before=$(range_count "$c" "$base" "$head")
+    out=$(ensure "$c" "$base" "$head" 3 2>/dev/null); rc=$?
+    after=$(range_count "$c" "$base" "$head")
+    if [ "$before" = 3 ] || [ "$rc" -ne 0 ] || [ "$after" != 3 ]; then
+        echo "  [selftest FAIL] merge PR: before=$before after=$after rc=$rc ($out)"; fail=$((fail + 1))
+    fi
+    # Commit-only: an old base commit is now present, its tree is not.
+    if ! GIT_NO_LAZY_FETCH=1 git -C "$c" cat-file -e "$old" 2>/dev/null \
+        || GIT_NO_LAZY_FETCH=1 git -C "$c" cat-file -e "$old^{tree}" 2>/dev/null; then
+        echo "  [selftest FAIL] merge PR: history fetch was not commit-only"; fail=$((fail + 1))
+    fi
+
+    # 2. linear PR: already exact, must stay shallow (no fetch).
+    c=$st/linear; mkclone "$c" "$lin" || return 1
+    out=$(ensure "$c" "$base" "$lin" 1 2>/dev/null); rc=$?
+    if [ "$rc" -ne 0 ] || [ "$(git -C "$c" rev-parse --is-shallow-repository)" != true ] \
+        || [ "$(range_count "$c" "$base" "$lin")" != 1 ]; then
+        echo "  [selftest FAIL] linear PR was not left alone: rc=$rc ($out)"; fail=$((fail + 1))
+    fi
+
+    # 3. unreachable remote on a mismatch is an ERROR, never OK.
+    c=$st/dead; mkclone "$c" "$head" || return 1
+    git -C "$c" remote set-url origin "file://$st/absent"
+    out=$(ensure "$c" "$base" "$head" 3 2>/dev/null); rc=$?
+    if [ "$rc" -ne 2 ]; then
+        echo "  [selftest FAIL] failed history fetch returned rc=$rc ($out)"; fail=$((fail + 1))
+    fi
+
+    echo "  selftest: 3 fixture(s) run, $fail failure(s)"
+    [ "$fail" -eq 0 ]
+}
+
+if [ "${1:-}" = --selftest ]; then
+    if selftest; then echo "OK — selftest passed"; exit 0; fi
+    echo "ERROR — nothing was checked (selftest failed)"; exit 2
+fi
+
+if [ "$#" -ne 3 ]; then
+    echo "ERROR — nothing was checked (usage: $0 <base-sha> <head-sha> <pr-commit-count>)"
+    exit 2
+fi
+case "$3" in ''|*[!0-9]*) echo "ERROR — nothing was checked (pr-commit-count '$3' is not a number)"; exit 2 ;; esac
+ensure . "$1" "$2" "$3"

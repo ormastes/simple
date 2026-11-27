@@ -164,3 +164,14 @@ On release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53
 ## 2026-11-13 triage — lane live-p3-l2 (work/live-p3-l2-20261113, worktree lp2-wt, base origin/release/1.0.0 tip)
 
 **Verdict: PARTIAL (deferred).** Acceptance criteria (Xvfb/physical-surface live presentation, verification readback outside timed frames, zero-readback timed frames, 8K p50/p95 + RSS + receipts) require a Linux display environment; not attempted on this Windows lane.
+
+## 2026-11-27 W5-3 Fix & Host Contract Verification (`fix-implemented-verification-pending`)
+
+- **Source (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`)**:
+  - Confirmed canonical swapchain lifecycle wiring (`init_headless_present`, `init_window_present`, `init_external_window_present`, `_present_device`, `present_window_device`, `present_headless_device`, `latest_frame_receipt`, and swapchain cleanup in `shutdown`).
+  - Hardened `_present_device()` to sync `host_buf` once onto `d_framebuffer` before swapchain copy when presenting a demoted `cpu_fallback_host_surface` frame (failing closed with `<mode>-host-upload-failed` if upload fails), and updated `present()` to handle clean `cpu_fallback_host_surface` frames without hitting the `"none"` no-op path.
+- **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter` on Windows)**:
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine_vulkan_present_api_spec.spl`: 2/2 PASS.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine_vulkan_window_present_spec.spl`: 7/7 PASS.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_demotion_recovery_spec.spl`: 7/7 PASS (includes fail-closed swapchain receipts, `-host-upload-failed`, and clean `present()` host-surface verification).
+- **Pending**: live Linux Xvfb / physical display Vulkan presentation proof (`waiting-for: Linux Vulkan / lavapipe verification`).
