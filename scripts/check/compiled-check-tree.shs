@@ -1,0 +1,617 @@
+#!/bin/sh
+# compiled-check-tree.shs - run a compiled Simple checker in parallel,
+# bounded, resumable batches.  Pure POSIX sh + awk port of the former
+# compiled-check-tree.py (same flags, exit codes and durable evidence files).
+#
+# This file is orchestration only.  All Simple parsing/check semantics come
+# from the compiled checker supplied with --checker.  A failed batch is
+# isolated by rerunning only that batch's files one at a time, which yields
+# exact per-file outcomes without paying one process startup for every
+# passing source.
+#
+# Requirements (checked up front, exit 2): timeout(1) (or gtimeout), the GNU
+# `time` binary (SIMPLE_CHECK_TIME_BIN, default /usr/bin/time), sha256sum or
+# `shasum -a 256`.  Memory ceiling sampling needs /proc.
+#
+# Known deltas vs the Python tool (POSIX sh cannot observe them):
+#   - exit_code of a signalled checker is derived from the shell status
+#     (129..192 -> -(status-128)); a checker that itself exits 130 reads as
+#     signal 2.
+#   - elapsed_s comes from the `time` wall_s metric (0.01 s resolution).
+#   - a root that is a symlinked *.spl leaf is not followed.
+#
+# Usage: compiled-check-tree.shs --checker=PATH --output-dir=DIR
+#          [--root=DIR ...] [--workers=4] [--batch-size=32] [--timeout=120.0]
+#          [--max-rss-kib=0] [--rss-interval-s=2.0] [--max-files=N] [--resume]
+set -eu
+LC_ALL=C
+export LC_ALL
+
+TAB=$(printf '\t')
+NL='
+'
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+ROOT=$(CDPATH= cd -- "$self_dir/../.." && pwd -P)
+TIME_BIN=${SIMPLE_CHECK_TIME_BIN:-/usr/bin/time}
+DEFAULT_ROOTS="src/compiler${NL}src/app${NL}src/lib"
+TIME_FMT='user_s=%U\nsystem_s=%S\nwall_s=%e\nmax_rss_kb=%M'
+
+die() {
+    printf 'compiled-check-tree: %s\n' "$*" >&2
+    exit 2
+}
+
+usage_error() {
+    printf 'usage: compiled-check-tree.shs --checker=PATH --output-dir=DIR [--root=DIR ...] [--workers=N] [--batch-size=N] [--timeout=S] [--max-rss-kib=N] [--rss-interval-s=S] [--max-files=N] [--resume]\n' >&2
+    printf 'compiled-check-tree.shs: error: %s\n' "$*" >&2
+    exit 2
+}
+
+# Integers/floats are echoed the way Python would print int()/float().
+inorm() {
+    _v=${1#+}
+    _s=
+    case $_v in -*) _s=-; _v=${_v#-} ;; esac
+    while [ "${_v#0}" != "$_v" ] && [ ${#_v} -gt 1 ]; do _v=${_v#0}; done
+    printf '%s%s' "$_s" "$_v"
+}
+fnorm() {
+    _v=${1#+}
+    _s=
+    case $_v in -*) _s=-; _v=${_v#-} ;; esac
+    case $_v in *.*) ;; *) _v=$_v.0 ;; esac
+    while [ "${_v#0}" != "$_v" ] && [ "${_v#0.}" = "$_v" ]; do _v=${_v#0}; done
+    case $_v in .*) _v=0$_v ;; esac
+    while [ "${_v%0}" != "$_v" ] && [ "${_v%.0}" = "$_v" ]; do _v=${_v%0}; done
+    case $_v in *.) _v=${_v}0 ;; esac
+    printf '%s%s' "$_s" "$_v"
+}
+is_int() { case $1 in ''|*[!0-9+-]*) return 1 ;; esac; case $1 in *[0-9]*) return 0 ;; esac; return 1; }
+is_float() { case $1 in ''|*[!0-9.+-]*) return 1 ;; esac; case $1 in *[0-9]*) return 0 ;; esac; return 1; }
+positive() { case $1 in -*) return 1 ;; esac; case $1 in *[1-9]*) return 0 ;; esac; return 1; }
+
+resolve_path() {
+    if _r=$(readlink -f -- "$1" 2>/dev/null) && [ -n "$_r" ]; then
+        printf '%s' "$_r"
+        return 0
+    fi
+    case $1 in /*) _p=$1 ;; *) _p=$PWD/$1 ;; esac
+    _d=${_p%/*}
+    _b=${_p##*/}
+    [ -n "$_d" ] || _d=/
+    if _r=$(CDPATH= cd -- "$_d" 2>/dev/null && pwd -P); then
+        case $_r in /) printf '/%s' "$_b" ;; *) printf '%s/%s' "$_r" "$_b" ;; esac
+    else
+        printf '%s' "$_p"
+    fi
+}
+
+# ---- arguments (argparse-compatible: --k=v and --k v) ----------------------
+checker_arg=
+roots_arg=
+output_arg=
+workers=4
+batch_size=32
+timeout_s=120.0
+max_rss_kib=0
+rss_interval_s=2.0
+max_files=
+resume=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --resume) resume=1; shift; continue ;;
+        --checker=*|--root=*|--output-dir=*|--workers=*|--batch-size=*|--timeout=*|--max-rss-kib=*|--rss-interval-s=*|--max-files=*)
+            _k=${1%%=*}; _v=${1#*=}; shift ;;
+        --checker|--root|--output-dir|--workers|--batch-size|--timeout|--max-rss-kib|--rss-interval-s|--max-files)
+            [ $# -ge 2 ] || usage_error "argument $1: expected one argument"
+            _k=$1; _v=$2; shift 2 ;;
+        *) usage_error "unrecognized arguments: $1" ;;
+    esac
+    case $_k in
+        --checker) checker_arg=$_v ;;
+        --root) if [ -n "$roots_arg" ]; then roots_arg=$roots_arg$NL$_v; else roots_arg=$_v; fi ;;
+        --output-dir) output_arg=$_v ;;
+        --workers) is_int "$_v" || usage_error "argument --workers: invalid int value: '$_v'"; workers=$(inorm "$_v") ;;
+        --batch-size) is_int "$_v" || usage_error "argument --batch-size: invalid int value: '$_v'"; batch_size=$(inorm "$_v") ;;
+        --timeout) is_float "$_v" || usage_error "argument --timeout: invalid float value: '$_v'"; timeout_s=$(fnorm "$_v") ;;
+        --max-rss-kib) is_int "$_v" || usage_error "argument --max-rss-kib: invalid int value: '$_v'"; max_rss_kib=$(inorm "$_v") ;;
+        --rss-interval-s) is_float "$_v" || usage_error "argument --rss-interval-s: invalid float value: '$_v'"; rss_interval_s=$(fnorm "$_v") ;;
+        --max-files) is_int "$_v" || usage_error "argument --max-files: invalid int value: '$_v'"; max_files=$(inorm "$_v") ;;
+    esac
+done
+[ -n "$checker_arg" ] || usage_error "the following arguments are required: --checker"
+[ -n "$output_arg" ] || usage_error "the following arguments are required: --output-dir"
+
+# ---- validation (same order and messages as the Python tool) ---------------
+checker=$(resolve_path "$checker_arg")
+if [ ! -f "$checker" ] || [ ! -x "$checker" ]; then
+    die "checker is not executable: $checker"
+fi
+[ -f "$TIME_BIN" ] || die "/usr/bin/time is required"
+TIMEOUT_BIN=
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_BIN=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_BIN=gtimeout
+else
+    die "timeout(1) is required"
+fi
+SHA=
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA=sha256sum
+elif command -v shasum >/dev/null 2>&1; then
+    SHA="shasum -a 256"
+else
+    die "sha256sum or shasum is required"
+fi
+if [ "$workers" -lt 1 ] || [ "$batch_size" -lt 1 ] || ! positive "$timeout_s"; then
+    die "workers, batch size, and timeout must be positive"
+fi
+case $max_rss_kib in -*) die "--max-rss-kib must be >= 0 (0 disables the ceiling)" ;; esac
+positive "$rss_interval_s" || die "--rss-interval-s must be positive"
+
+roots=${roots_arg:-$DEFAULT_ROOTS}
+
+W=$(mktemp -d "${TMPDIR:-/tmp}/compiled-check-tree.XXXXXX")
+trap 'rm -rf -- "$W"' EXIT HUP INT TERM
+
+# ---- discovery --------------------------------------------------------------
+: > "$W/paths"
+printf '%s\n' "$roots" > "$W/roots"
+while IFS= read -r _root; do
+    case $_root in /*) _rr=$_root ;; *) _rr=$ROOT/$_root ;; esac
+    if [ -f "$_rr" ] && [ "${_rr%.spl}" != "$_rr" ]; then
+        printf '%s\n' "$(resolve_path "$_rr")" >> "$W/paths"
+    elif [ -d "$_rr" ]; then
+        _rd=$(CDPATH= cd -- "$_rr" && pwd -P)
+        find "$_rd" -type f -name '*.spl' -print >> "$W/paths"
+    else
+        die "source root does not exist: $_root"
+    fi
+done < "$W/roots"
+sort -u "$W/paths" > "$W/sorted"
+if [ -n "$max_files" ]; then
+    awk -v m="$max_files" '{ L[NR] = $0 } END { e = (m >= 0) ? ((m < NR) ? m : NR) : NR + m; for (i = 1; i <= e; i++) print L[i] }' "$W/sorted" > "$W/sorted.cut"
+    mv -f "$W/sorted.cut" "$W/sorted"
+fi
+[ -s "$W/sorted" ] || die "no .spl files discovered"
+
+tr '\n' '\000' < "$W/sorted" | xargs -0 $SHA | awk -v root="$ROOT/" -v mf="$W/manifest" -v cf="$W/count" '
+    {
+        if (substr($0, 1, 1) == "\\") $0 = substr($0, 2)
+        dg = substr($0, 1, 64); p = substr($0, 67)
+        if (index(p, root) == 1) p = substr(p, length(root) + 1)
+        printf "source-%06d\t%s\t%s\n", NR, dg, p > mf
+    }
+    END { print NR > cf }'
+read -r source_count < "$W/count"
+sha_of() { set -- $($SHA "$1"); printf '%s' "$1"; }
+manifest_digest=$(sha_of "$W/manifest")
+checker_digest=$(sha_of "$checker")
+
+output=$(resolve_path "$output_arg")
+if [ -e "$output" ] && [ "$resume" -eq 0 ]; then
+    die "output exists; pass --resume to reuse it: $output"
+fi
+mkdir -p "$output/batch" "$output/file"
+
+# ---- shared awk: JSON string escaping (json.dumps ensure_ascii) -------------
+AWK_JSON='
+function init_ord(   i) { for (i = 1; i < 256; i++) ORD[sprintf("%c", i)] = i; ORD_READY = 1 }
+function jesc(s,   i, n, c, o, b, cp, need, k, nb, ok) {
+    if (!ORD_READY) init_ord()
+    o = "\""; n = length(s)
+    for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c == "\"") o = o "\\\""
+        else if (c == "\\") o = o "\\\\"
+        else if (c == "\n") o = o "\\n"
+        else if (c == "\r") o = o "\\r"
+        else if (c == "\t") o = o "\\t"
+        else if (c == "\b") o = o "\\b"
+        else if (c == "\f") o = o "\\f"
+        else {
+            b = ORD[c] + 0
+            if (b < 32 || b == 127) o = o sprintf("\\u%04x", b)
+            else if (b < 128) o = o c
+            else {
+                need = -1
+                if (b >= 240 && b <= 244) { need = 3; cp = b - 240 }
+                else if (b >= 224 && b < 240) { need = 2; cp = b - 224 }
+                else if (b >= 194 && b < 224) { need = 1; cp = b - 192 }
+                ok = (need > 0)
+                for (k = 1; ok && k <= need; k++) {
+                    nb = ORD[substr(s, i + k, 1)] + 0
+                    if (nb < 128 || nb >= 192) ok = 0
+                    else cp = cp * 64 + nb - 128
+                }
+                if (!ok) o = o "\\ufffd"
+                else {
+                    i += need
+                    if (cp >= 65536) { cp -= 65536; o = o sprintf("\\u%04x\\u%04x", 55296 + int(cp / 1024), 56320 + cp % 1024) }
+                    else o = o sprintf("\\u%04x", cp)
+                }
+            }
+        }
+    }
+    return o "\""
+}
+function trim(s) { sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s }
+# Join pretty (indent=2) JSON lines S[2..n] into json.dumps default compact form.
+function compact(S, n, pre,   i, t, o, prev) {
+    o = pre; prev = "{"
+    for (i = 2; i <= n; i++) {
+        t = trim(S[i])
+        if (prev ~ /[\{\[]$/ || t ~ /^[\}\]]/) o = o t; else o = o " " t
+        prev = t
+    }
+    return o
+}
+# Parse one of our pretty result.json files into R[key]=value (strings unquoted).
+function readres(path,   line, k, v) {
+    split("", R); RN = 0
+    while ((getline line < path) > 0) {
+        RL[++RN] = line
+        if (match(line, /^ +"[A-Za-z_]+": /)) {
+            k = substr(line, RSTART, RLENGTH); sub(/^ +"/, "", k); sub(/": $/, "", k)
+            v = substr(line, RSTART + RLENGTH); sub(/,$/, "", v)
+            if (v ~ /^"/) { sub(/^"/, "", v); sub(/"$/, "", v) }
+            R[k] = v
+        }
+    }
+    close(path)
+}
+'
+
+OUT_J=$(OUT="$output" awk "$AWK_JSON"'BEGIN { s = jesc(ENVIRON["OUT"]); print substr(s, 2, length(s) - 2) }')
+
+# ---- run.json / summary.json (sorted-key pretty metadata) -------------------
+AWK_META='
+function meta(summary,   i, nr, rl, nf, fl) {
+    NS = 0
+    S[++NS] = "{"
+    if (summary) S[++NS] = "  \"batch_count\": " ENVIRON["X_batch_count"] ","
+    S[++NS] = "  \"batch_size\": " ENVIRON["M_batch_size"] ","
+    S[++NS] = "  \"checker\": " jesc(ENVIRON["M_checker"]) ","
+    S[++NS] = "  \"checker_digest\": " jesc(ENVIRON["M_checker_digest"]) ","
+    if (summary) {
+        S[++NS] = "  \"classification_file\": " jesc(ENVIRON["X_classification_file"]) ","
+        S[++NS] = "  \"complete_per_file_outcomes\": " ENVIRON["X_complete"] ","
+        nf = split(ENVIRON["X_families_block"], fl, "\n")
+        for (i = 1; i <= nf; i++) S[++NS] = fl[i]
+        S[++NS] = "  \"failed_batch_count\": " ENVIRON["X_failed_batch_count"] ","
+        S[++NS] = "  \"failing_files\": " ENVIRON["X_failing_files"] ","
+        S[++NS] = "  \"isolated_passes_from_failed_batches\": " ENVIRON["X_isolated_passes"] ","
+    }
+    S[++NS] = "  \"manifest_digest\": " jesc(ENVIRON["M_manifest_digest"]) ","
+    S[++NS] = "  \"max_rss_kib\": " ENVIRON["M_max_rss_kib"] ","
+    if (summary) S[++NS] = "  \"passed_files\": " ENVIRON["X_passed_files"] ","
+    S[++NS] = "  \"repo_root\": " jesc(ENVIRON["M_repo_root"]) ","
+    S[++NS] = "  \"roots\": ["
+    nr = split(ENVIRON["M_roots"], rl, "\n")
+    for (i = 1; i <= nr; i++) S[++NS] = "    " jesc(rl[i]) (i < nr ? "," : "")
+    S[++NS] = "  ],"
+    S[++NS] = "  \"rss_interval_s\": " ENVIRON["M_rss_interval_s"] ","
+    S[++NS] = "  \"schema_version\": 1,"
+    S[++NS] = "  \"source_count\": " ENVIRON["M_source_count"] ","
+    S[++NS] = "  \"timeout_s\": " ENVIRON["M_timeout_s"] ","
+    S[++NS] = "  \"workers\": " ENVIRON["M_workers"]
+    S[++NS] = "}"
+}
+function emit_pretty(path,   i) {
+    for (i = 1; i <= NS; i++) print S[i] > path
+    close(path)
+}
+'
+export M_batch_size="$batch_size" M_checker="$checker" M_checker_digest="$checker_digest" \
+    M_manifest_digest="$manifest_digest" M_max_rss_kib="$max_rss_kib" M_repo_root="$ROOT" \
+    M_roots="$roots" M_rss_interval_s="$rss_interval_s" M_source_count="$source_count" \
+    M_timeout_s="$timeout_s" M_workers="$workers"
+
+if [ "$resume" -eq 1 ] && [ -f "$output/run.json" ]; then
+    prev=$(awk '
+        /^  "checker_digest": "/ { v = $0; sub(/^[^:]*: "/, "", v); sub(/",?$/, "", v); cd = v }
+        /^  "manifest_digest": "/ { v = $0; sub(/^[^:]*: "/, "", v); sub(/",?$/, "", v); md = v }
+        /^  "batch_size": / { v = $0; sub(/^[^:]*: /, "", v); sub(/,$/, "", v); bs = v }
+        END { printf "%s\t%s\t%s\n", cd, md, bs }' "$output/run.json")
+    IFS=$TAB read -r _pcd _pmd _pbs <<EOF
+$prev
+EOF
+    [ "$_pcd" = "$checker_digest" ] || die "resume mismatch for checker_digest"
+    [ "$_pmd" = "$manifest_digest" ] || die "resume mismatch for manifest_digest"
+    [ "$_pbs" = "$batch_size" ] || die "resume mismatch for batch_size"
+fi
+cp "$W/manifest" "$output/manifest.tsv"
+OUT="$output" awk "$AWK_JSON$AWK_META"'BEGIN { meta(0); emit_pretty(ENVIRON["OUT"] "/run.json") }'
+
+# ---- batches ----------------------------------------------------------------
+awk -F'\t' -v B="$batch_size" -v dir="$W" '
+    { b = int((NR - 1) / B) + 1
+      if (b != nb) { if (nb) close(cur); nb = b; cur = sprintf("%s/batch-%06d.paths", dir, b) }
+      printf "%s\t%s\n", $1, $3 > cur }
+    END { close(cur); for (i = 1; i <= nb; i++) printf "batch-%06d\n", i > (dir "/batch.ids"); print nb > (dir "/batch.count") }' "$W/manifest"
+read -r batch_count < "$W/batch.count"
+
+rss_sampler=unsupported
+if [ -d /proc ]; then rss_sampler=proc-tree; fi
+
+tree_rss() {
+    grep -H -E '^(VmRSS|PPid):' /proc/[0-9]*/status 2>/dev/null | awk -F: -v root="$1" '
+        { n = $1; sub(/^\/proc\//, "", n); sub(/\/status$/, "", n)
+          if ($2 == "PPid") pp[n] = $3 + 0; else if ($2 == "VmRSS") rss[n] = $3 + 0 }
+        END {
+            inT[root] = 1; ch = 1
+            while (ch) { ch = 0; for (p in pp) if (!(p in inT) && (pp[p] in inT)) { inT[p] = 1; ch = 1 } }
+            tot = 0; for (p in inT) tot += rss[p]; print tot
+        }'
+}
+
+sample_loop() {
+    # $1 = pid of the timeout wrapper (its own process group), $2 = task id
+    _peak=0
+    while kill -0 "$1" 2>/dev/null; do
+        _s=$(tree_rss "$1")
+        if [ -n "$_s" ]; then
+            if [ "$_s" -gt "$_peak" ]; then _peak=$_s; fi
+            printf '%s\n' "$_peak" >| "$W/$2.peak"
+            if [ "$_s" -gt "$max_rss_kib" ]; then
+                : >| "$W/$2.rss"
+                kill -s TERM "$1" 2>/dev/null || :
+                sleep 2
+                kill -s KILL -- "-$1" 2>/dev/null || :
+                break
+            fi
+        fi
+        sleep "$rss_interval_s"
+    done
+}
+
+# run_task <id> <subdir> <pathsfile>
+run_task() {
+    _id=$1; _sub=$2; _pf=$3
+    _stem=$output/$_sub/$_id
+    _o=$_stem.stdout.log; _e=$_stem.stderr.log; _m=$_stem.metrics
+    set --
+    while IFS=$TAB read -r _i _p; do set -- "$@" "$_p"; done < "$_pf"
+    _n=$#
+    rm -f "$_m" "$W/$_id.rss" "$W/$_id.peak"
+    "$TIMEOUT_BIN" -k 2 "$timeout_s" "$TIME_BIN" -f "$TIME_FMT" -o "$_m" "$checker" --progress count "$@" >| "$_o" 2>| "$_e" &
+    _pid=$!
+    _sp=
+    if [ "$max_rss_kib" -gt 0 ] && [ "$rss_sampler" = proc-tree ]; then
+        sample_loop "$_pid" "$_id" &
+        _sp=$!
+    fi
+    _rc=0
+    wait "$_pid" || _rc=$?
+    if [ -n "$_sp" ]; then
+        kill "$_sp" 2>/dev/null || :
+        wait "$_sp" 2>/dev/null || :
+    fi
+    _mu=0.0; _ms=0.0; _mw=0.0; _mr=0; _have_wall=0
+    if [ -f "$_m" ]; then
+        while IFS= read -r _l || [ -n "$_l" ]; do
+            _val=${_l#*=}
+            case $_l in
+                user_s=*) if is_float "$_val"; then _mu=$(fnorm "$_val"); fi ;;
+                system_s=*) if is_float "$_val"; then _ms=$(fnorm "$_val"); fi ;;
+                wall_s=*) if is_float "$_val"; then _mw=$(fnorm "$_val"); _have_wall=1; fi ;;
+                max_rss_kb=*) if is_int "$_val"; then _mr=$(inorm "$_val"); fi ;;
+            esac
+        done < "$_m"
+    fi
+    _rss=false; _timed=false
+    if [ -f "$W/$_id.rss" ]; then _rss=true; fi
+    _ec=$_rc
+    if [ "$_rss" = false ] && { [ "$_rc" -eq 124 ] || { [ "$_rc" -eq 137 ] && [ "$_have_wall" -eq 0 ]; }; }; then
+        _timed=true
+    fi
+    if [ "$_timed" = true ]; then
+        if [ "$_rc" -eq 124 ]; then _ec=-15; else _ec=-9; fi
+    elif [ "$_rc" -gt 128 ] && [ "$_rc" -le 192 ]; then
+        _ec=$((128 - _rc))
+    fi
+    _peak=0
+    if [ -f "$W/$_id.peak" ]; then read -r _peak < "$W/$_id.peak"; fi
+    _elapsed=$_mw
+    if [ "$_timed" = true ]; then _elapsed=$timeout_s; fi
+    _sums=$($SHA "$_o" "$_e")
+    _d1=${_sums%%[ *]*}
+    _rest=${_sums#*$NL}
+    _d2=${_rest%%[ *]*}
+    {
+        printf '{\n'
+        printf '  "elapsed_s": %s,\n' "$_elapsed"
+        printf '  "exit_code": %s,\n' "$_ec"
+        printf '  "file_count": %s,\n' "$_n"
+        printf '  "metrics": {\n'
+        printf '    "max_rss_kb": %s,\n' "$_mr"
+        printf '    "system_s": %s,\n' "$_ms"
+        printf '    "user_s": %s,\n' "$_mu"
+        printf '    "wall_s": %s\n' "$_mw"
+        printf '  },\n'
+        printf '  "rss_ceiling_exceeded": %s,\n' "$_rss"
+        printf '  "rss_ceiling_kib": %s,\n' "$max_rss_kib"
+        printf '  "rss_sampler": "%s",\n' "$rss_sampler"
+        printf '  "rss_tree_peak_kib": %s,\n' "$_peak"
+        printf '  "stderr": "%s/%s/%s.stderr.log",\n' "$OUT_J" "$_sub" "$_id"
+        printf '  "stderr_digest": "%s",\n' "$_d2"
+        printf '  "stdout": "%s/%s/%s.stdout.log",\n' "$OUT_J" "$_sub" "$_id"
+        printf '  "stdout_digest": "%s",\n' "$_d1"
+        printf '  "timed_out": %s\n' "$_timed"
+        printf '}\n'
+    } >| "$_stem.result.json"
+}
+
+# run_pool <tasks-file: id TAB subdir TAB pathsfile> <label>; skips resumed results.
+run_pool() {
+    _tasks=$1
+    _q=$W/q.$2
+    mkdir -p "$_q"
+    _w=0
+    while [ "$_w" -lt "$workers" ]; do
+        (
+            set -C
+            while IFS=$TAB read -r _tid _tsub _tpf; do
+                if [ "$resume" -eq 1 ] && [ -f "$output/$_tsub/$_tid.result.json" ]; then continue; fi
+                if { true > "$_q/$_tid"; } 2>/dev/null; then
+                    run_task "$_tid" "$_tsub" "$_tpf"
+                fi
+            done < "$_tasks"
+        ) &
+        _w=$((_w + 1))
+    done
+    wait
+}
+
+cd "$ROOT"
+: > "$W/batch.tasks"
+while IFS= read -r _bid; do
+    printf '%s\tbatch\t%s\n' "$_bid" "$W/$_bid.paths" >> "$W/batch.tasks"
+done < "$W/batch.ids"
+run_pool "$W/batch.tasks" batch
+
+# batch-results.jsonl + failed batch list
+export OUT="$output" JF="$output/batch-results.jsonl" FF="$W/failed.ids"
+: > "$JF"
+: > "$FF"
+awk "$AWK_JSON"'
+    { bid = $0; readres(ENVIRON["OUT"] "/batch/" bid ".result.json")
+      print compact(RL, RN, "{\"batch_id\": " jesc(bid) ", ") >> ENVIRON["JF"]
+      if (R["exit_code"] != "0" || R["timed_out"] == "true" || R["rss_ceiling_exceeded"] == "true") print bid >> ENVIRON["FF"] }' "$W/batch.ids"
+failed_batch_count=0
+while IFS= read -r _fb; do failed_batch_count=$((failed_batch_count + 1)); done < "$W/failed.ids"
+
+# ---- isolate failed batches, one file per task ------------------------------
+: > "$W/file.tasks"
+while IFS= read -r _fb; do
+    while IFS=$TAB read -r _fid _fpath; do
+        printf '%s\t%s\n' "$_fid" "$_fpath" > "$W/$_fid.paths"
+        printf '%s\tfile\t%s\n' "$_fid" "$W/$_fid.paths" >> "$W/file.tasks"
+    done < "$W/$_fb.paths"
+done < "$W/failed.ids"
+if [ -s "$W/file.tasks" ]; then
+    run_pool "$W/file.tasks" file
+fi
+
+# ---- per-file outcomes, classification TSV, summary -------------------------
+AWK_DIAG='
+function bword(c) { return c ~ /[A-Za-z0-9_]/ }
+function has_word(lt, w,   pos, start, a, b) {
+    start = 1
+    while ((pos = index(substr(lt, start), w)) > 0) {
+        pos += start - 1
+        a = (pos > 1) ? substr(lt, pos - 1, 1) : ""
+        b = substr(lt, pos + length(w), 1)
+        if (!bword(a) && !bword(b)) return 1
+        start = pos + 1
+    }
+    return 0
+}
+function sub_line_n(s,   out, ls, rs, pre, post, prev) {
+    out = ""; prev = ""
+    while (1) {
+        ls = tolower(s)
+        if (!match(ls, /line [0-9]+/)) break
+        rs = RSTART
+        pre = (rs == 1) ? prev : substr(s, rs - 1, 1)
+        post = substr(s, rs + RLENGTH, 1)
+        if (!bword(pre) && !bword(post)) { out = out substr(s, 1, rs - 1) "line <n>"; prev = "n"; s = substr(s, rs + RLENGTH) }
+        else { out = out substr(s, 1, rs); prev = substr(s, rs, 1); s = substr(s, rs + 1) }
+    }
+    return out s
+}
+function slurp(path,   l, t) {
+    t = ""
+    while ((getline l < path) > 0) t = t l "\n"
+    close(path)
+    return t
+}
+function diag_family(T, ec,   lt, g, n, i, line, LN, firstl, fam) {
+    lt = tolower(T)
+    if (match(lt, /(error|warning)\[[^]]+\]/)) {
+        g = substr(T, RSTART, RLENGTH); sub(/^[A-Za-z]+\[/, "", g); sub(/\]$/, "", g)
+        fam = toupper(g)
+    } else if (index(T, "SSpec") > 0 && (index(lt, "guidance") > 0 || index(T, "expect") > 0)) fam = "sspec_guidance"
+    else if (match(lt, /unexpected (token|character)/)) fam = "parser_unexpected_token"
+    else if (has_word(lt, "expected")) fam = "parser_expected_form"
+    else if (match(T, /\.spl:[ \t\r\n]*check failed/)) fam = "parser_error_without_diagnostic"
+    else if (index(lt, "file not found") > 0) fam = "file_not_found"
+    else fam = "exit_" ec "_unclassified"
+    DFAM = fam
+    gsub(/\r/, "\n", T)
+    n = split(T, LN, "\n"); firstl = ""
+    for (i = 1; i <= n; i++) {
+        line = trim(LN[i])
+        if (line == "" || substr(line, 1, 17) == "All checks passed" || index(line, "error(s) found") > 0) continue
+        if (match(line, /^[^:]+\.spl(:[0-9]+(:[0-9]+)?)?:?[ \t\r\n]*/)) line = "<source>: " substr(line, RLENGTH + 1)
+        line = sub_line_n(line)
+        firstl = substr(line, 1, 500)
+        break
+    }
+    DTXT = (firstl != "") ? firstl : "checker exited " ec " without a diagnostic line"
+}
+'
+: > "$output/file-results.jsonl"
+CLASS_HDR="id${TAB}source_digest${TAB}path${TAB}error_family${TAB}classification${TAB}diagnostic"
+export CLASS_HDR FAILEDFILE="$W/failed.ids" FRF="$output/file-results.jsonl" \
+    CLF="$output/failure-classification.tsv" CNTF="$W/counts" FAMF="$W/families"
+awk -F'\t' -v B="$batch_size" "$AWK_JSON$AWK_DIAG"'
+function row(bid, cls, dg, fam, ecs, id, p, st, sd, od,   r) {
+    r = "{\"batch_id\": " jesc(bid) ", \"classification\": " jesc(cls) ", \"diagnostic\": " jesc(dg) ", \"error_family\": " jesc(fam) ", \"exit_code\": " ecs ", \"id\": " jesc(id) ", \"path\": " jesc(p) ", \"source_digest\": " jesc(sd) ", \"status\": " jesc(st)
+    if (od != "") r = r ", \"stderr_digest\": " jesc(R["stderr_digest"]) ", \"stdout_digest\": " jesc(R["stdout_digest"])
+    return r "}"
+}
+BEGIN {
+    out = ENVIRON["OUT"]; ff = ENVIRON["FRF"]; cf = ENVIRON["CLF"]
+    while ((getline l < ENVIRON["FAILEDFILE"]) > 0) failed[l] = 1
+    close(ENVIRON["FAILEDFILE"])
+    print ENVIRON["CLASS_HDR"] > cf
+}
+{
+    id = $1; sd = $2; p = $3; total++
+    bid = sprintf("batch-%06d", int((total - 1) / B) + 1)
+    if (!(bid in failed)) { print row(bid, "not_applicable", "", "none", "0", id, p, "pass_in_batch", sd, "") > ff; next }
+    readres(out "/file/" id ".result.json")
+    ec = R["exit_code"] + 0; timed = (R["timed_out"] == "true"); rss = (R["rss_ceiling_exceeded"] == "true")
+    if (ec == 0 && !timed && !rss) {
+        print row(bid, "not_applicable", "", "none", "0", id, p, "pass_individual_after_failed_batch", sd, "x") > ff
+        iso++; next
+    }
+    if (timed) { fam = "timeout"; dtx = "checker invocation exceeded its bounded timeout" }
+    else if (rss) { fam = "rss_ceiling"; dtx = "checker process tree exceeded the --max-rss-kib ceiling (" R["rss_ceiling_kib"] " KiB)" }
+    else if (ec < 0) { fam = "signal_" (-ec); dtx = "checker terminated by signal " (-ec) }
+    else {
+        diag_family(slurp(out "/file/" id ".stdout.log") "\n" slurp(out "/file/" id ".stderr.log"), ec)
+        fam = DFAM; dtx = DTXT
+    }
+    print row(bid, "needs_triage", dtx, fam, ec, id, p, "fail_individual", sd, "x") > ff
+    gsub(/[\t\n]/, " ", dtx)
+    printf "%s\t%s\t%s\t%s\tneeds_triage\t%s\n", id, sd, p, fam, dtx > cf
+    nfail++; FAM[fam]++
+}
+END {
+    close(ff); close(cf)
+    nk = 0; for (k in FAM) KEYS[++nk] = k
+    for (i = 2; i <= nk; i++) { v = KEYS[i]; j = i - 1; while (j >= 1 && KEYS[j] > v) { KEYS[j + 1] = KEYS[j]; j-- } KEYS[j + 1] = v }
+    if (nk == 0) fb = "  \"error_families\": {},"
+    else {
+        fb = "  \"error_families\": {"
+        for (i = 1; i <= nk; i++) fb = fb "\n    " jesc(KEYS[i]) ": " FAM[KEYS[i]] (i < nk ? "," : "")
+        fb = fb "\n  },"
+    }
+    printf "%d\t%d\n", nfail, iso > ENVIRON["CNTF"]
+    print fb > ENVIRON["FAMF"]
+    close(ENVIRON["CNTF"]); close(ENVIRON["FAMF"])
+}' "$output/manifest.tsv"
+IFS=$TAB read -r failing_files isolated_passes < "$W/counts"
+passed_files=$((source_count - failing_files))
+if [ "$failing_files" -gt 0 ] || [ "$failed_batch_count" -gt 0 ]; then rc=1; else rc=0; fi
+
+X_families_block=$(cat "$W/families")
+export X_batch_count="$batch_count" X_classification_file="$output/failure-classification.tsv" \
+    X_complete=true X_families_block \
+    X_failed_batch_count="$failed_batch_count" X_failing_files="$failing_files" \
+    X_isolated_passes="$isolated_passes" X_passed_files="$passed_files"
+awk "$AWK_JSON$AWK_META"'BEGIN { meta(1); emit_pretty(ENVIRON["OUT"] "/summary.json"); print compact(S, NS, "{") }'
+exit "$rc"

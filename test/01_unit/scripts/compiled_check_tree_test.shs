@@ -1,10 +1,15 @@
 #!/bin/sh
+# Regression test for scripts/check/compiled-check-tree.shs and
+# scripts/check/classify-compiled-check-results.shs (pure-sh ports of the
+# former Python tools). Assertions are plain grep/awk over the durable JSON.
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/compiled-check-tree-test.XXXXXX")
 trap 'rm -rf -- "$work_dir"' EXIT HUP INT TERM
 mkdir -p "$work_dir/sources"
+tree_tool="$repo_root/scripts/check/compiled-check-tree.shs"
+classify_tool="$repo_root/scripts/check/classify-compiled-check-results.shs"
 
 printf 'fn ok_one() -> i64:\n    1\n' > "$work_dir/sources/a.spl"
 printf 'fn ok_two() -> i64:\n    2\n' > "$work_dir/sources/b.spl"
@@ -30,7 +35,7 @@ SH
 chmod +x "$fake_checker"
 
 set +e
-python3 "$repo_root/scripts/check/compiled-check-tree.py" \
+sh "$tree_tool" \
     --checker="$fake_checker" \
     --root="$work_dir/sources" \
     --output-dir="$work_dir/evidence" \
@@ -41,17 +46,147 @@ status=$?
 set -e
 test "$status" -eq 1
 
-python3 - "$work_dir/evidence/summary.json" <<'PY'
-import json
-import sys
+sj="$work_dir/evidence/summary.json"
+grep -q '^  "source_count": 5,$' "$sj"
+grep -q '^  "passed_files": 4,$' "$sj"
+grep -q '^  "failing_files": 1,$' "$sj"
+grep -q '^  "complete_per_file_outcomes": true,$' "$sj"
+test "$(awk '/"error_families": \{/{f=1;next} f&&/\}/{f=0} f' "$sj")" = '    "E-FAKE": 1'
+# stdout carries the same summary as one compact line (json.dumps separators)
+grep -q '"error_families": {"E-FAKE": 1}' "$work_dir/summary.out"
+grep -q '"source_count": 5' "$work_dir/summary.out"
+test "$(wc -l < "$work_dir/summary.out" | tr -d ' ')" = 1
+test "$(wc -l < "$work_dir/evidence/file-results.jsonl" | tr -d ' ')" = 5
+test "$(wc -l < "$work_dir/evidence/batch-results.jsonl" | tr -d ' ')" = 3
+test "$(grep -c '"status": "fail_individual"' "$work_dir/evidence/file-results.jsonl")" = 1
+test "$(grep -c '"status": "pass_in_batch"' "$work_dir/evidence/file-results.jsonl")" = 3
+test "$(grep -c '"status": "pass_individual_after_failed_batch"' "$work_dir/evidence/file-results.jsonl")" = 1
+test "$(wc -l < "$work_dir/evidence/failure-classification.tsv" | tr -d ' ')" = 2
 
-summary = json.load(open(sys.argv[1], encoding="utf-8"))
-assert summary["source_count"] == 5
-assert summary["passed_files"] == 4
-assert summary["failing_files"] == 1
-assert summary["error_families"] == {"E-FAKE": 1}
-assert summary["complete_per_file_outcomes"] is True
-PY
+# A second run without --resume refuses to overwrite the evidence directory.
+set +e
+sh "$tree_tool" \
+    --checker "$fake_checker" --root "$work_dir/sources" \
+    --output-dir "$work_dir/evidence" --workers 2 --batch-size 2 --timeout 10 \
+    > "$work_dir/refuse.out" 2> "$work_dir/refuse.err"
+refuse_status=$?
+set -e
+test "$refuse_status" -eq 2
+grep -q 'output exists; pass --resume' "$work_dir/refuse.err"
+
+# --resume reuses durable results and reproduces the same verdict.
+set +e
+sh "$tree_tool" \
+    --checker="$fake_checker" --root="$work_dir/sources" \
+    --output-dir="$work_dir/evidence" --workers=2 --batch-size=2 --timeout=10 \
+    --resume > "$work_dir/resume.out"
+resume_status=$?
+set -e
+test "$resume_status" -eq 1
+cmp -s "$work_dir/summary.out" "$work_dir/resume.out"
+
+# Resuming with a different batch size must fail closed.
+set +e
+sh "$tree_tool" \
+    --checker="$fake_checker" --root="$work_dir/sources" \
+    --output-dir="$work_dir/evidence" --batch-size=3 --resume \
+    > /dev/null 2> "$work_dir/mismatch.err"
+mismatch_status=$?
+set -e
+test "$mismatch_status" -eq 2
+grep -q 'resume mismatch for batch_size' "$work_dir/mismatch.err"
+
+# A missing checker is a usage error, not a pass.
+set +e
+sh "$tree_tool" \
+    --checker="$work_dir/no-such-checker" --root="$work_dir/sources" \
+    --output-dir="$work_dir/evidence-none" > /dev/null 2> "$work_dir/nochecker.err"
+nochecker_status=$?
+set -e
+test "$nochecker_status" -eq 2
+grep -q 'checker is not executable' "$work_dir/nochecker.err"
+
+# classify-compiled-check-results.shs routes the durable per-file failures.
+cls_dir="$work_dir/cls"
+mkdir -p "$cls_dir/sources"
+printf 'fn ok() -> i64:\n    1\n' > "$cls_dir/sources/ok.spl"
+printf 'val s = "abc\n' > "$cls_dir/sources/lex.spl"
+printf 'match x:\n    1 => 2\n' > "$cls_dir/sources/arrow.spl"
+printf 'PARSEODD\n' > "$cls_dir/sources/odd.spl"
+printf 'RAWPAR\n' > "$cls_dir/sources/par.spl"
+cls_checker="$cls_dir/fake-checker"
+cat > "$cls_checker" <<'SH'
+#!/bin/sh
+status=0
+for arg in "$@"; do
+    case "$arg" in
+        --progress|count) continue ;;
+    esac
+    case "$(cat "$arg")" in
+        'val s = "abc'*) echo "[parser_error] path $arg line 1:9: unterminated string"; status=1 ;;
+        'match x:'*) echo "[parser_error] line 2:7: unexpected token in expression: =>"; status=1 ;;
+        PARSEODD*) echo "[parser_error] line 1:1: expected ident, got 5"; status=1 ;;
+        RAWPAR*) echo "error[E-PAR-001]: raw text concurrency"; status=1 ;;
+    esac
+done
+exit "$status"
+SH
+chmod +x "$cls_checker"
+set +e
+sh "$tree_tool" \
+    --checker="$cls_checker" --root="$cls_dir/sources" \
+    --output-dir="$cls_dir/evidence" --workers=2 --batch-size=2 --timeout=10 \
+    > "$cls_dir/summary.out"
+cls_status=$?
+set -e
+test "$cls_status" -eq 1
+sh "$classify_tool" --evidence-dir="$cls_dir/evidence" > "$cls_dir/route.out"
+rm_="$cls_dir/evidence/routing-manifest.jsonl"
+test "$(wc -l < "$rm_" | tr -d ' ')" = 4
+grep -q '"route_key": "source_lexical_error"' "$rm_"
+grep -q '"route_key": "source_foreign_match_arrow"' "$rm_"
+grep -q '"route_key": "pure_parser_keyword_identifier_gap"' "$rm_"
+grep -q '"route_key": "checker_raw_text_concurrency_lint"' "$rm_"
+grep -q '"classification": "invalid_source"' "$rm_"
+grep -q '"observed_status": "fail_individual"' "$rm_"
+rs="$cls_dir/evidence/routing-summary.json"
+grep -q '^  "actionable_outcomes": 4,$' "$rs"
+grep -q '^  "routing_complete": true,$' "$rs"
+grep -q '^  "manifest_sources": 5,$' "$rs"
+grep -q '"routing_complete": true' "$cls_dir/route.out"
+# A source edited after the sweep invalidates the evidence (fail closed).
+printf 'edited\n' >> "$cls_dir/sources/lex.spl"
+set +e
+sh "$classify_tool" --evidence-dir="$cls_dir/evidence" > /dev/null 2> "$cls_dir/stale.err"
+stale_status=$?
+set -e
+test "$stale_status" -ne 0
+grep -q 'source changed since sweep' "$cls_dir/stale.err"
+
+# Timeout phase: a batch that outlives --timeout is killed and isolated; its
+# member is classified `timeout` (fail closed).
+to_dir="$work_dir/timeout"
+mkdir -p "$to_dir/sources"
+printf 'fn t_one() -> i64:\n    1\n' > "$to_dir/sources/t_a.spl"
+to_checker="$to_dir/fake-slow-checker"
+cat > "$to_checker" <<'SH'
+#!/bin/sh
+sleep 30
+SH
+chmod +x "$to_checker"
+set +e
+sh "$tree_tool" \
+    --checker="$to_checker" \
+    --root="$to_dir/sources" \
+    --output-dir="$to_dir/evidence" \
+    --workers=1 \
+    --batch-size=1 \
+    --timeout=1 > "$to_dir/summary.out"
+status=$?
+set -e
+test "$status" -eq 1
+grep -q '^  "timed_out": true$' "$to_dir/evidence/batch/batch-000001.result.json"
+grep -q '"error_families": {"timeout": 1}' "$to_dir/summary.out"
 
 # Memory ceiling phase (doc/08_tracking/bug/executable_checker_failed_only_retry_peak_rss_2026-08-02):
 # a checker batch whose process tree exceeds --max-rss-kib is killed and every
@@ -77,7 +212,7 @@ SH
 chmod +x "$slow_checker"
 
 set +e
-python3 "$repo_root/scripts/check/compiled-check-tree.py" \
+sh "$tree_tool" \
     --checker="$slow_checker" \
     --root="$ceiling_dir/sources" \
     --output-dir="$ceiling_dir/evidence" \
@@ -90,28 +225,17 @@ status=$?
 set -e
 test "$status" -eq 1
 
-python3 - "$ceiling_dir/evidence" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-out = Path(sys.argv[1])
-batch = json.loads((out / "batch" / "batch-000001.result.json").read_text(encoding="utf-8"))
-assert batch["rss_ceiling_exceeded"] is True, batch
-assert batch["rss_sampler"] == "proc-tree", batch
-assert batch["rss_ceiling_kib"] == 1, batch
-assert batch["rss_tree_peak_kib"] > 1, batch
-rows = [
-    json.loads(line)
-    for line in (out / "file-results.jsonl").read_text(encoding="utf-8").splitlines()
-    if line.strip()
-]
-assert len(rows) == 2, rows
-assert all(row["error_family"] == "rss_ceiling" for row in rows), rows
-assert all(row["classification"] == "needs_triage" for row in rows), rows
-summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
-assert summary["error_families"] == {"rss_ceiling": 2}, summary
-assert summary["complete_per_file_outcomes"] is True, summary
-PY
+out="$ceiling_dir/evidence"
+br="$out/batch/batch-000001.result.json"
+grep -q '^  "rss_ceiling_exceeded": true,$' "$br"
+grep -q '^  "rss_sampler": "proc-tree",$' "$br"
+grep -q '^  "rss_ceiling_kib": 1,$' "$br"
+peak=$(sed -n 's/^  "rss_tree_peak_kib": \([0-9]*\),$/\1/p' "$br")
+test "$peak" -gt 1
+test "$(wc -l < "$out/file-results.jsonl" | tr -d ' ')" = 2
+test "$(grep -c '"error_family": "rss_ceiling"' "$out/file-results.jsonl")" = 2
+test "$(grep -c '"classification": "needs_triage"' "$out/file-results.jsonl")" = 2
+grep -q '"error_families": {"rss_ceiling": 2}' "$ceiling_dir/summary.out"
+grep -q '^  "complete_per_file_outcomes": true,$' "$out/summary.json"
 
 echo "compiled check tree: PASS (ceiling phase: rss_ceiling fail-closed)"

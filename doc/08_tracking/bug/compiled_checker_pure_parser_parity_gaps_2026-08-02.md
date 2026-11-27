@@ -100,13 +100,13 @@ type-grammar owner:
 ## Reproduction
 
 ```bash
-python3 scripts/check/compiled-check-tree.py \
+sh scripts/check/compiled-check-tree.shs \
   --checker=/absolute/path/to/simple-check \
   --root=src/compiler --root=src/app --root=src/lib \
   --output-dir=build/mini_builds/full-tree-compiled-check-bounded-cycle1 \
   --workers=4 --batch-size=64 --timeout=120
 
-python3 scripts/check/classify-compiled-check-results.py \
+sh scripts/check/classify-compiled-check-results.shs \
   --evidence-dir=build/mini_builds/full-tree-compiled-check-bounded-cycle1
 ```
 

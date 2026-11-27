@@ -582,7 +582,7 @@ The shell mode is appropriate for short probes. For an inventory-to-end run,
 use the compiled checker so the manifest and terminal rows survive interruption:
 
 ```sh
-python3 scripts/check/compiled-check-tree.py \
+sh scripts/check/compiled-check-tree.shs \
   --checker=/absolute/path/to/simple-check \
   --root=src/compiler --root=src/app --root=src/lib \
   --output-dir=build/mini_builds/full-tree-check \

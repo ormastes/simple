@@ -13,12 +13,12 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 - ARCHIVE_EVIDENCE: 5 (owner: keep)
 - BOTH: 3
 - DEAD: 1
-- DEAD_CANDIDATE: 8 (owner: keep)
+- DEAD_CANDIDATE: 7 (owner: keep)
 - OWNED_HELLO_SANITY: 13
-- P3_PLUS_ONLY: 31 (net, after 21 rows moved to the four classes below; excludes the 2 PORTED rows below; includes durable_wal_fsync)
-- PORTED by the gates lane: 2 (`sdk-observer-evidence-v1` #12231, `qmp-send-virtio-input`; `check-rt-*` x4 follow in work/py-gates-2)
+- P3_PLUS_ONLY: 24 (rows still unported)
+- PORTED by the gates lane: 9 (rows with class PORTED; `check-rt-*` x4, `compiled-check-tree` and `classify-compiled-check-results` in work/py-gates-2/-4)
 - INDEPENDENT_ORACLE: 9 (policy exception, stays Python)
-- BLOCKED: 5 (see `python_test_oracle_piped_process_gaps_2026-11-27.md`)
+- BLOCKED: 6 (5: `python_test_oracle_piped_process_gaps_2026-11-27.md`; 1: `unchanged-materialized-alias`, `sffi_path_lstat_reparse_identity_gap_2026-11-28.md`)
 - BENCHMARK_FIXTURE: 1 (kept)
 - PERF_LANE: 6 (owned by the perf lane)
 - PRE_P2_ONLY: 20
@@ -33,7 +33,7 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `doc/08_tracking/bug/evidence/target_profile_2026_11_14/cache_probe.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete; owner decision 2026-11-27: keep (backs bug reports) |
 | `doc/08_tracking/bug/evidence/target_profile_2026_11_14/extract.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete; owner decision 2026-11-27: keep (backs bug reports) |
 | `doc/08_tracking/bug/evidence/target_profile_2026_11_14/run_probe.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete; owner decision 2026-11-27: keep (backs bug reports) |
-| `scripts/audit/unchanged-materialized-alias.py` | P3_PLUS_ONLY | scripts/audit/direct-env-runtime-guard.shs | port DEFERRED: Windows reparse-point/junction identity (st_file_attributes 0x400), identity tuple and a threaded 5 s budget have no POSIX sh equivalent; needs an owner decision (sh with fail-closed scan on Windows, or .spl) |
+| `scripts/audit/unchanged-materialized-alias.py` | BLOCKED | scripts/audit/direct-env-runtime-guard.shs | owner decision 2026-11-27: port to `.spl`; BLOCKED on missing lstat/reparse/readlink/identity/bounded-process std API, see `doc/08_tracking/bug/sffi_path_lstat_reparse_identity_gap_2026-11-28.md`; `.py` stays; caller already falls back to scanning when it is absent |
 | `scripts/bench/checker-performance.py` | P3_PLUS_ONLY | test/01_unit/scripts/checker_performance_harness_test.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/bootstrap/bootstrap-module-progress.py` | BOTH | scripts/bootstrap/bootstrap-phase-verification.shs | bootstrap-phase-verification.shs runs for p2 and p3/p4 |
 | `scripts/bootstrap/bounded-error-summary.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
@@ -74,8 +74,8 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/check/check-windows-cross-caller.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
 | `scripts/check/check-windows-cross-import-authority.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
 | `scripts/check/check-windows-private-root-sdk.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
-| `scripts/check/classify-compiled-check-results.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
-| `scripts/check/compiled-check-tree.py` | P3_PLUS_ONLY | scripts/check/classify-compiled-check-results.py test/01_unit/scripts/compiled_check_tree_test.shs | port DEFERRED (gates lane, next PR) |
+| `scripts/check/classify-compiled-check-results.py` | PORTED | - | ported to `scripts/check/classify-compiled-check-results.shs` (work/py-gates-4-20261128; owner decision: keep and port); `.py` deleted |
+| `scripts/check/compiled-check-tree.py` | PORTED | test/01_unit/scripts/compiled_check_tree_test.shs | ported to `scripts/check/compiled-check-tree.shs` (work/py-gates-4-20261128); `.py` deleted; doc/guide callers updated |
 | `scripts/check/diagnose_macos_existing_hostarch.py` | P3_PLUS_ONLY | .github/workflows/macos-existing-candidate-hostarch-diagnostic.yml .github/workflows/macos-phase23-evidence.yml | EXCEPTION (owner decision 2026-11-27, same class as RenderDoc): runs inside lldb's embedded Python (`command script import`, `import lldb`); stays Python |
 | `scripts/check/lib/bootstrap-stage3/sanity-base-controls.py` | OWNED_HELLO_SANITY | scripts/bootstrap/tests/sanity-base-controls-test.py scripts/check/lib/bootstrap-stage3/sanity.shs | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
 | `scripts/check/lib/bootstrap-stage3/sanity-version-composition.py` | OWNED_HELLO_SANITY | scripts/bootstrap/resume-stage2-version-admission.shs scripts/check/lib/bootstrap-stage3/sanity.shs | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |

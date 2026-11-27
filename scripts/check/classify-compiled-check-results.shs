@@ -1,0 +1,359 @@
+#!/bin/sh
+# classify-compiled-check-results.shs - classify durable results from
+# compiled-check-tree.shs into owner routes.  Pure POSIX sh + awk port of the
+# former classify-compiled-check-results.py (same flags, exit codes, and
+# routing-manifest.jsonl / routing-summary.json bytes).
+#
+# Usage: classify-compiled-check-results.shs --evidence-dir=DIR
+#
+# Exit: 0 ok; 1 evidence missing/unreadable or a source changed since the
+# sweep (fail closed); 2 usage error.
+#
+# Known deltas vs the Python tool: character classes (\w, \s, \b) are ASCII
+# only, lines split on LF/CRLF only (not \v, \f, U+2028), and a primary
+# diagnostic whose message is empty after a trailing-whitespace backtrack is
+# treated the same way Python's `.+` backtracking resolves it.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+ROOT=$(CDPATH= cd -- "$self_dir/../.." && pwd -P)
+
+usage_error() {
+    printf 'usage: classify-compiled-check-results.shs --evidence-dir=DIR\n' >&2
+    printf 'classify-compiled-check-results.shs: error: %s\n' "$*" >&2
+    exit 2
+}
+
+evidence_arg=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --evidence-dir=*) evidence_arg=${1#*=}; shift ;;
+        --evidence-dir)
+            [ $# -ge 2 ] || usage_error "argument --evidence-dir: expected one argument"
+            evidence_arg=$2; shift 2 ;;
+        *) usage_error "unrecognized arguments: $1" ;;
+    esac
+done
+[ -n "$evidence_arg" ] || usage_error "the following arguments are required: --evidence-dir"
+
+if _r=$(readlink -f -- "$evidence_arg" 2>/dev/null) && [ -n "$_r" ]; then
+    base=$_r
+else
+    base=$(CDPATH= cd -- "$evidence_arg" 2>/dev/null && pwd -P) || base=$evidence_arg
+fi
+if [ ! -f "$base/file-results.jsonl" ] || [ ! -f "$base/manifest.tsv" ]; then
+    echo "classification requires file-results.jsonl and manifest.tsv" >&2
+    exit 1
+fi
+
+SHA=
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA=sha256sum
+elif command -v shasum >/dev/null 2>&1; then
+    SHA="shasum -a 256"
+else
+    echo "classify-compiled-check-results: sha256sum or shasum is required" >&2
+    exit 1
+fi
+
+W=$(mktemp -d "${TMPDIR:-/tmp}/classify-compiled-check.XXXXXX")
+trap 'rm -rf -- "$W"' EXIT HUP INT TERM
+
+AWK_LIB='
+function init_ord(   i) { for (i = 1; i < 256; i++) ORD[sprintf("%c", i)] = i; ORD_READY = 1 }
+function jesc(s,   i, n, c, o, b, cp, need, k, nb, ok) {
+    if (!ORD_READY) init_ord()
+    o = "\""; n = length(s)
+    for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c == "\"") o = o "\\\""
+        else if (c == "\\") o = o "\\\\"
+        else if (c == "\n") o = o "\\n"
+        else if (c == "\r") o = o "\\r"
+        else if (c == "\t") o = o "\\t"
+        else if (c == "\b") o = o "\\b"
+        else if (c == "\f") o = o "\\f"
+        else {
+            b = ORD[c] + 0
+            if (b < 32 || b == 127) o = o sprintf("\\u%04x", b)
+            else if (b < 128) o = o c
+            else {
+                need = -1
+                if (b >= 240 && b <= 244) { need = 3; cp = b - 240 }
+                else if (b >= 224 && b < 240) { need = 2; cp = b - 224 }
+                else if (b >= 194 && b < 224) { need = 1; cp = b - 192 }
+                ok = (need > 0)
+                for (k = 1; ok && k <= need; k++) {
+                    nb = ORD[substr(s, i + k, 1)] + 0
+                    if (nb < 128 || nb >= 192) ok = 0
+                    else cp = cp * 64 + nb - 128
+                }
+                if (!ok) o = o "\\ufffd"
+                else {
+                    i += need
+                    if (cp >= 65536) { cp -= 65536; o = o sprintf("\\u%04x\\u%04x", 55296 + int(cp / 1024), 56320 + cp % 1024) }
+                    else o = o sprintf("\\u%04x", cp)
+                }
+            }
+        }
+    }
+    return o "\""
+}
+function hexval(h,   i, v, d) {
+    v = 0
+    for (i = 1; i <= length(h); i++) { d = index("0123456789abcdef", tolower(substr(h, i, 1))) - 1; if (d < 0) return -1; v = v * 16 + d }
+    return v
+}
+function utf8(cp) {
+    if (cp < 128) return sprintf("%c", cp)
+    if (cp < 2048) return sprintf("%c%c", 192 + int(cp / 64), 128 + cp % 64)
+    if (cp < 65536) return sprintf("%c%c%c", 224 + int(cp / 4096), 128 + int(cp / 64) % 64, 128 + cp % 64)
+    return sprintf("%c%c%c%c", 240 + int(cp / 262144), 128 + int(cp / 4096) % 64, 128 + int(cp / 64) % 64, 128 + cp % 64)
+}
+function jun(s,   o, i, n, c, e, cp, lo) {
+    o = ""; n = length(s)
+    for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c != "\\") { o = o c; continue }
+        e = substr(s, i + 1, 1); i++
+        if (e == "n") o = o "\n"
+        else if (e == "t") o = o "\t"
+        else if (e == "r") o = o "\r"
+        else if (e == "b") o = o "\b"
+        else if (e == "f") o = o "\f"
+        else if (e == "u") {
+            cp = hexval(substr(s, i + 1, 4)); i += 4
+            if (cp >= 55296 && cp < 56320 && substr(s, i + 1, 2) == "\\u") {
+                lo = hexval(substr(s, i + 3, 4))
+                if (lo >= 56320 && lo < 57344) { cp = 65536 + (cp - 55296) * 1024 + (lo - 56320); i += 6 }
+            }
+            o = o utf8(cp < 0 ? 65533 : cp)
+        } else o = o e
+    }
+    return o
+}
+function trim(s) { sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s }
+function compact(S, n, pre,   i, t, o, prev) {
+    o = pre; prev = "{"
+    for (i = 2; i <= n; i++) {
+        t = trim(S[i])
+        if (prev ~ /[\{\[]$/ || t ~ /^[\}\]]/) o = o t; else o = o " " t
+        prev = t
+    }
+    return o
+}
+# String value of "key": "..." inside one JSON line (unescaped), "" if absent.
+function jget(line, key,   re, v) {
+    re = "\"" key "\": \"([^\"\\\\]|\\\\.)*\""
+    if (!match(line, re)) return ""
+    v = substr(line, RSTART + length(key) + 5, RLENGTH - length(key) - 6)
+    return jun(v)
+}
+function has(s, t) { return index(s, t) > 0 }
+function starts(s, t) { return substr(s, 1, length(t)) == t }
+function endsw(s, t) { return length(s) >= length(t) && substr(s, length(s) - length(t) + 1) == t }
+'
+
+AWK_RULES='
+# Port of invalid_source_reason: sets IR (route) and IE (evidence); returns 1 on hit.
+function invalid_source_reason(message, source, path,   lm) {
+    lm = tolower(message)
+    IR = ""; IE = ""
+    if (has(lm, "refutable pattern") || has(lm, "var without initializer")) { IR = "source_contract_violation"; IE = "diagnostic states an enforced source contract" }
+    else if (has(lm, "@packed struct fields") || has(lm, "integer literal out of range")) { IR = "source_contract_violation"; IE = "diagnostic states an enforced representation/literal contract" }
+    else if (has(lm, "use # for comments") || has(lm, "unterminated string")) { IR = "source_lexical_error"; IE = "source contains a rejected comment or unterminated literal" }
+    else if (has(lm, "expected string literal in asm block")) { IR = "source_asm_syntax"; IE = "asm operand uses foreign compiler syntax" }
+    else if (starts(source, "from ") || starts(source, "import ")) { IR = "source_foreign_import_syntax"; IE = "Python-style import in a .spl source" }
+    else if (has(source, "//")) { IR = "source_foreign_comment_syntax"; IE = "C/Rust-style comment in a .spl source" }
+    else if (source ~ /fn[ \t]+[A-Za-z0-9_]+<[^>]+></ || source ~ /(class|fn)[ \t]+[A-Za-z0-9_]+\[[^]]+\]/) { IR = "source_legacy_generic_syntax"; IE = "legacy/square or repeated generic parameter syntax" }
+    else if (source ~ /:[ \t]*\*[A-Za-z0-9_]/) { IR = "source_foreign_pointer_type"; IE = "Rust/C pointer type spelling" }
+    else if (has(source, "sort_by(|") || has(source, ".map(|")) { IR = "source_rust_closure_syntax"; IE = "Rust closure spelling in a .spl source" }
+    else if (has(source, "=>")) { IR = "source_foreign_match_arrow"; IE = "foreign match-arm arrow; Simple uses case blocks" }
+    else if (has(source, "->") && (has(source, "Result.") || source ~ /^[0-9]+[ \t]*->/ || starts(source, "Ok(") || starts(source, "Err(") || starts(source, "DmaDir."))) { IR = "source_foreign_match_arrow"; IE = "Rust-style match arm in a .spl source" }
+    else if (has(source, " case ") && has(source, ";")) { IR = "source_inline_match_semicolon"; IE = "multiple match arms compressed with semicolons" }
+    else if (source == "else:" || source == "case _:") { IR = "source_empty_control_body"; IE = "empty branch/match arm" }
+    else if (has(source, " then") || (has(source, " if ") && has(source, " else ") && !starts(source, "if "))) { IR = "source_foreign_conditional_expression"; IE = "foreign inline conditional spelling" }
+    else if (starts(source, "if val ==") || starts(source, "if val >") || starts(source, "if val <")) { IR = "source_reserved_binding_name"; IE = "`val` is parsed as a binding keyword, not an identifier" }
+    else if (starts(source, "var fn ") || (has(source, "self") && starts(source, "fn "))) { IR = "source_legacy_function_syntax"; IE = "legacy function modifier/receiver spelling" }
+    else if (starts(source, "export ") && has(source, " = ")) { IR = "source_export_assignment"; IE = "export assignment is not a declaration" }
+    else if (source ~ /^(struct|class)[ \t]+[A-Za-z0-9_]+$/) { IR = "source_incomplete_declaration"; IE = "type declaration has no body delimiter" }
+    else if (endsw(message, "EOF '"'"''"'"'")) { IR = "source_forward_declaration_without_body"; IE = "bodyless function declaration reaches EOF" }
+    else if (starts(source, "val result = if ") && has(source, " then")) { IR = "source_foreign_conditional_expression"; IE = "foreign then-form conditional" }
+    else if (starts(source, ".")) { IR = "source_foreign_fluent_chain"; IE = "leading-dot fluent chain is not a Simple statement" }
+    else if (has(source, " { ") && has(source, " } else { ")) { IR = "source_foreign_brace_expression"; IE = "C/Rust brace-form conditional" }
+    else if (starts(source, "val ") && has(source, " for _ in ")) { IR = "source_comprehension_syntax"; IE = "unsupported comprehension spelling" }
+    else if (starts(source, "fn ") && has(source, "list[")) { IR = "source_legacy_type_syntax"; IE = "square generic type spelling" }
+    else if (starts(path, "src/app/interpreter/") && starts(source, "If {")) { IR = "source_rust_enum_variant_syntax"; IE = "Rust struct-variant spelling" }
+    return IR != ""
+}
+# Port of classify_failure: sets CLS CROUTE CONF OWNER EVID.
+function classify_failure(path, text, message, source,   lm, route, ev) {
+    CONF = "high"
+    if (has(text, "E-PAR-")) { CLS = "checker_false_positive"; CROUTE = "checker_raw_text_concurrency_lint"; OWNER = "src/app/check/main.spl; src/app/cli/check.spl"; EVID = "lint matched forbidden text inside its own implementation or canonical rt_pool owner"; return }
+    if (has(text, "E-SSPEC-CHECK")) { CLS = "invalid_source_for_check_surface"; CROUTE = "sspec_command_block_layout"; OWNER = "source/test layout owner"; EVID = "checker intentionally requires command-block source to run through bin/simple test"; return }
+    if (has(text, "Usage: simple check") && path == "src/app/check/main.spl") { CLS = "checker_false_positive"; CROUTE = "checker_entry_path_argument_collision"; OWNER = "src/app/check/main.spl get_cli_args"; EVID = "target path equals embedded entry suffix and is discarded as argv prefix"; return }
+    if (invalid_source_reason(message, source, path)) { CLS = "invalid_source"; CROUTE = IR; OWNER = path; EVID = IE; return }
+    lm = tolower(message)
+    if (starts(path, "src/compiler/85.mdsoc/") && has(lm, "got =")) { route = "pure_parser_metadata_block_gap"; ev = "Rust parser parse_metadata_block explicitly accepts arch/config/metadata key=value blocks" }
+    else if (has(source, "m{") || has(source, "img{")) { route = "pure_parser_custom_block_gap"; ev = "Rust parser exposes custom block expressions including m{...}" }
+    else if (starts(source, "if val ") && has(source, ".") && has(source, " = ")) { route = "pure_parser_enum_if_val_pattern_gap"; ev = "Rust parser_patterns supports dotted enum-variant patterns" }
+    else if (has(source, "&") && (has(source, "fn ") || has(source, "Option<&") || has(source, "match &mut"))) { route = "pure_parser_reference_type_gap"; ev = "Rust parser_types handles Ampersand reference capabilities" }
+    else if (has(source, "[u") && has(source, ";")) { route = "pure_parser_fixed_array_type_gap"; ev = "Rust parser_types explicitly accepts [T; N]" }
+    else if (starts(source, "export ")) { route = "pure_parser_structured_or_keyword_export_gap"; ev = "canonical sources use structured/star/keyword-named exports" }
+    else if (has(lm, "unexpected token in class body") || starts(source, "pub fn ") || starts(source, "pub file:") || starts(source, "type:") || starts(source, "pass:") || starts(source, "after:")) { route = "pure_parser_class_member_gap"; ev = "canonical parser permits keyword method/field names and public members" }
+    else if (has(lm, "expected type annotation") || has(lm, "expected )") || has(lm, "expected parameter name")) { route = "pure_parser_type_or_multiline_signature_gap"; ev = "canonical parser supports reference/function/empty-array types, capabilities, and multiline signatures" }
+    else if (has(lm, "expected ident, got")) { route = "pure_parser_keyword_identifier_gap"; ev = "Rust parser helper accepts contextual keywords as method/field names" }
+    else if (has(lm, "expected :, got =") || has(lm, "unexpected token in expression: =")) { route = "pure_parser_assignment_context_gap"; ev = "valid metadata/member/destructuring context was parsed as an expression" }
+    else if (has(lm, "expected :, got fn") || has(lm, "expected ident, got (")) { route = "pure_parser_declaration_boundary_gap"; ev = "valid following declaration/destructuring was consumed by the previous construct" }
+    else if (has(lm, "dedent")) { route = "pure_parser_dedent_context_gap"; ev = "isolated canonical source reaches a false expression-at-dedent state" }
+    else if (has(lm, "expected :, got is")) { route = "pure_parser_type_test_gap"; ev = "canonical `is Type` expression rejected" }
+    else if (has(lm, "unexpected token in expression: *")) { route = "pure_parser_pointer_deref_gap"; ev = "canonical raw-pointer dereference rejected" }
+    else if (has(lm, "unknown(") && has(source, "...")) { route = "pure_parser_relative_import_gap"; ev = "relative import ellipsis token is lexed but not accepted by pure parser" }
+    else if (has(lm, "expected :, got (") && (has(source, "m{") || has(source, "."))) { route = "pure_parser_custom_or_method_call_gap"; ev = "canonical custom block or method call parsed as a declaration" }
+    else if (has(lm, "expected =, got (")) { route = "pure_parser_keyword_receiver_gap"; ev = "contextual keyword receiver parsed as a declaration" }
+    else if (has(lm, "expected :, got newline") || has(lm, "unexpected token in expression: newline")) { route = "pure_parser_declaration_newline_gap"; ev = "canonical declaration/custom-block boundary rejected at newline" }
+    else { route = "pure_parser_unmatched_surface_gap"; ev = "isolated repository source rejected without a proven source-contract violation" }
+    CLS = "checker_parser_false_positive"; CROUTE = route
+    CONF = (route == "pure_parser_unmatched_surface_gap") ? "medium" : "high"
+    OWNER = "src/compiler/10.frontend/core parser parity"; EVID = ev
+}
+# Port of primary_diagnostic: sets PL PC PM (line, column, message).
+function primary_diagnostic(text,   off, pos, R, Q, Z, k, e, tail, w, rest, j, msg, hit) {
+    PL = 0; PC = 0; PM = ""
+    off = 0
+    while ((pos = index(substr(text, off + 1), "[parser_error]")) > 0) {
+        off += pos
+        R = substr(text, off + 14)
+        hit = 0
+        if (match(R, /^[ \t\r\n]+path[ \t\r\n]+/)) {
+            Q = substr(R, RLENGTH + 1)
+            e = index(Q, "\n"); if (e == 0) e = length(Q) + 1
+            for (k = 0; k <= e - 1; k++) {
+                Z = substr(Q, k + 1)
+                if (match(Z, /^[ \t\r\n]+line[ \t\r\n]+[0-9]+:[0-9]+:/)) { hit = 1; break }
+            }
+        }
+        if (!hit) { Z = R; if (match(Z, /^[ \t\r\n]+line[ \t\r\n]+[0-9]+:[0-9]+:/)) hit = 1 }
+        if (!hit) continue
+        tail = substr(Z, RLENGTH + 1)
+        msg = substr(Z, 1, RLENGTH)
+        sub(/^[ \t\r\n]+line[ \t\r\n]+/, "", msg); sub(/:$/, "", msg)
+        PL = msg; sub(/:.*/, "", PL); PC = msg; sub(/^[0-9]+:/, "", PC)
+        PL = PL + 0; PC = PC + 0
+        match(tail, /^[ \t\r\n]*/); w = RLENGTH
+        rest = substr(tail, w + 1)
+        j = w
+        if (rest == "" || substr(rest, 1, 1) == "\n") {
+            if (w >= 1 && substr(tail, w, 1) != "\n") j = w - 1
+            else { PL = 0; PC = 0; PM = ""; continue }
+        }
+        msg = substr(tail, j + 1)
+        e = index(msg, "\n"); if (e > 0) msg = substr(msg, 1, e - 1)
+        PM = trim(msg)
+        return
+    }
+}
+function slurp(path,   l, t) {
+    t = ""
+    while ((getline l < path) > 0) t = t l "\n"
+    close(path)
+    return t
+}
+function src_line(path, n,   l, i, r) {
+    r = ""
+    for (i = 1; (getline l < path) > 0; i++) if (i == n) { sub(/\r$/, "", l); r = l; break }
+    close(path)
+    return trim(r)
+}
+function fail(msg) { print msg > "/dev/stderr"; exit 1 }
+function dict_block(name, A, last,   nk, k, KEYS, i, v, j, o) {
+    nk = 0; for (k in A) KEYS[++nk] = k
+    for (i = 2; i <= nk; i++) { v = KEYS[i]; j = i - 1; while (j >= 1 && KEYS[j] > v) { KEYS[j + 1] = KEYS[j]; j-- } KEYS[j + 1] = v }
+    if (nk == 0) return "  \"" name "\": {}" last
+    o = "  \"" name "\": {"
+    for (i = 1; i <= nk; i++) o = o "\n    " jesc(KEYS[i]) ": " A[KEYS[i]] (i < nk ? "," : "")
+    return o "\n  }" last
+}
+'
+
+# Pass 1: list readable source files of fail_individual rows (digest check input).
+ROOT_DIR=$ROOT BASE=$base MODE=list awk -F'\t' "$AWK_LIB"'
+BEGIN {
+    base = ENVIRON["BASE"]; root = ENVIRON["ROOT_DIR"]
+    while ((getline l < (base "/manifest.tsv")) > 0) { n = split(l, f, "\t"); if (n != 3) { print "manifest.tsv: malformed row" > "/dev/stderr"; exit 1 }; MP[f[1]] = f[3] }
+    while ((getline line < (base "/file-results.jsonl")) > 0) {
+        if (jget(line, "status") != "fail_individual") continue
+        p = jget(line, "path")
+        sp = (substr(p, 1, 1) == "/") ? p : root "/" p
+        if ((getline x < sp) >= 0) { print sp; close(sp) }
+    }
+}' > "$W/srcs"
+: > "$W/digests"
+if [ -s "$W/srcs" ]; then
+    tr '\n' '\000' < "$W/srcs" | xargs -0 $SHA > "$W/digests"
+fi
+manifest_digest=$($SHA "$base/manifest.tsv")
+manifest_digest=${manifest_digest%% *}
+
+: > "$W/rows"
+ROOT_DIR=$ROOT BASE=$base MANIFEST_DIGEST=$manifest_digest DIGESTS=$W/digests ROWS=$W/rows awk -F'\t' "$AWK_LIB$AWK_RULES"'
+BEGIN {
+    base = ENVIRON["BASE"]; root = ENVIRON["ROOT_DIR"]
+    while ((getline l < ENVIRON["DIGESTS"]) > 0) { if (substr(l, 1, 1) == "\\") l = substr(l, 2); DG[substr(l, 67)] = substr(l, 1, 64) }
+    nman = 0
+    while ((getline l < (base "/manifest.tsv")) > 0) {
+        n = split(l, f, "\t")
+        if (n != 3) fail("manifest.tsv: malformed row")
+        if (!(f[1] in MD)) nman++
+        MD[f[1]] = f[2]; MP[f[1]] = f[3]
+    }
+    nact = 0
+    while ((getline line < (base "/file-results.jsonl")) > 0) {
+        if (line == "") continue
+        status = jget(line, "status")
+        if (status != "fail_individual") continue
+        id = jget(line, "id"); path = jget(line, "path"); sdig = jget(line, "source_digest")
+        resf = base "/file/" id ".result.json"
+        so = ""; se = ""
+        while ((getline rl < resf) > 0) {
+            if (rl ~ /^  "stdout": /) so = jget(rl, "stdout")
+            else if (rl ~ /^  "stderr": /) se = jget(rl, "stderr")
+        }
+        if (close(resf) < 0 || so == "" || se == "") fail("missing or unreadable result for " id)
+        combined = slurp(se) "\n" slurp(so)
+        primary_diagnostic(combined)
+        sp = (substr(path, 1, 1) == "/") ? path : root "/" path
+        if ((getline x < sp) >= 0) {
+            close(sp)
+            if (DG[sp] != sdig) fail("source changed since sweep: " path)
+        } else fail("source missing: " path)
+        source = (PL > 0) ? src_line(sp, PL) : ""
+        classify_failure(path, combined, PM, source)
+        if (!(id in MD)) fail("id not in manifest: " id)
+        row = "{\"classification\": " jesc(CLS) ", \"column\": " PC ", \"confidence\": " jesc(CONF) ", \"diagnostic\": " jesc(PM) ", \"evidence\": " jesc(EVID) ", \"id\": " jesc(id) ", \"line\": " PL ", \"observed_status\": " jesc(status) ", \"owner_surface\": " jesc(OWNER) ", \"path\": " jesc(MP[id]) ", \"route_key\": " jesc(CROUTE) ", \"source_digest\": " jesc(MD[id]) ", \"source_excerpt\": " jesc(source) "}"
+        printf "%s\t%s\t%s\n", CROUTE, MP[id], row >> ENVIRON["ROWS"]
+        nact++; ROUTES[CROUTE]++; CLASSES[CLS]++
+    }
+    NS = 0
+    S[++NS] = "{"
+    S[++NS] = "  \"actionable_outcomes\": " nact ","
+    S[++NS] = dict_block("classifications", CLASSES, ",")
+    S[++NS] = "  \"evidence_dir\": " jesc(base) ","
+    S[++NS] = "  \"manifest_digest\": " jesc(ENVIRON["MANIFEST_DIGEST"]) ","
+    S[++NS] = "  \"manifest_sources\": " nman ","
+    S[++NS] = dict_block("routes", ROUTES, ",")
+    S[++NS] = "  \"routing_complete\": true,"
+    S[++NS] = "  \"schema_version\": 1"
+    S[++NS] = "}"
+    # expand embedded newlines of dict blocks into separate lines for compaction
+    m = 0; split("", T)
+    for (i = 1; i <= NS; i++) { c = split(S[i], parts, "\n"); for (j = 1; j <= c; j++) T[++m] = parts[j] }
+    out = base "/routing-summary.json"
+    for (i = 1; i <= m; i++) print T[i] > out
+    close(out)
+    print compact(T, m, "{")
+}'
+
+LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2 "$W/rows" | cut -f3- > "$base/routing-manifest.jsonl"
