@@ -481,7 +481,7 @@ impl Lowerer {
     /// `is_float_into_int`). Called beside `reject_callable_for_enum_slot` at
     /// every call site whose parameter types are resolved.
     pub(crate) fn reject_float_for_int_slot(&self, expected: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
-        if !is_float_into_int(expected, value.ty) {
+        if !is_float_into_int(expected, value.ty) || self.guessed_float_in_function.get() {
             return Ok(());
         }
         let name = |t: TypeId| match t {
@@ -1369,6 +1369,7 @@ impl Lowerer {
         // `Expr::Identifier` has no span, so the enclosing function's
         // declaration line is the tightest source location available.
         self.current_function_line = Some(f.span.line);
+        let previous_guessed_float = self.guessed_float_in_function.replace(false);
         self.lifetime_context.set_function(&func_name);
 
         // Enter function scope for lifetime tracking
@@ -1739,6 +1740,7 @@ impl Lowerer {
         self.current_class_type = previous_class_type;
         self.current_function_name = previous_function_name;
         self.current_function_line = previous_function_line;
+        self.guessed_float_in_function.set(previous_guessed_float);
         self.active_fn_generic_params = previous_fn_generics;
         self.active_fn_generic_bounds = previous_fn_bounds;
 

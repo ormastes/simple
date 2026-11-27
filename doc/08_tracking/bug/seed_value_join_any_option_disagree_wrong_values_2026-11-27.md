@@ -442,8 +442,8 @@ worked by accident:
 - `src/lib/gc_async_mut/pure/nn/embedding.spl` (two copies of the lookup loop):
   the row index read from an `[f64]` tensor was used as an array index and
   pushed into `last_indices: [i64]` unconverted; the comment said "convert from
-  f64 to i64" but the code was `val idx_int = idx`. Now `idx as i64`, and the
-  bounds test compares against `0`. Found by the float-index error through
+  f64 to i64" but the code was `val idx_int = idx`. Now `idx as i64`, with the
+  negative test kept on the float (`idx < 0.0`). Found by the float-index error through
   `test/01_unit/lib/gc_async_mut/embedding_spec.spl`.
 
 ### Residuals found in review (NOT fixed here)
@@ -465,6 +465,39 @@ The first two behave the same on `r` and on the fixed seed.
   both arms one type.
 - Arms typed through a generic call or an untyped lambda (`gen(x)`, `y: y +
   1`) are ANY and belong to class (A); they still print garbage.
+
+#### Second review (2026-11-28, seed `e`)
+
+- FIXED here: a return type GUESSED by the untyped-receiver suffix search
+  (`o.pos()` with untyped `o`, `A.pos() -> i64` and `B.pos() -> f64`) made the
+  float-index error fire in 4 of 6 runs. Two causes. (1) The search took the
+  shortest matching name out of a HashMap, so equal-length names (`A.pos`,
+  `B.pos`) were picked by hash order per run; ties now break by name, which
+  makes every lane deterministic (it also flaked the 2026-11-24 float-argument
+  rule on seed `r`). (2) A guess is not evidence: once a suffix guess yields a
+  float in a function, the float-into-int errors (argument, index, int-slot
+  join) and the int/float value join are skipped for the rest of that function
+  (`guessed_float_in_function`). The exemption is PER FUNCTION, which is coarse:
+  one guessed float switches the checks off for unrelated, well-typed joins
+  later in the same function. A per-expression marker (the guessed call and
+  the locals bound from it) is the follow-up. The declared-return check is
+  unchanged.
+- Interaction with (A) after #12260: an untyped (ANY) arm against a typed arm
+  is the `uninferred-any` warning and is never judged here (`join_class` skips
+  ANY). But a call that (A) now instantiates implicitly is TYPED: with
+  `fn un(x): x`, `if c: un(1) else: "t"` is `i64` vs `text` and is E1003 (it
+  printed a garbage word for the text arm on seed `20261128d`).
+- OPEN: a float slice bound (`xs[a:3]` with `a: f64`) is not checked; only the
+  plain index is.
+- OPEN: the interpreter accepts a float WRITE index (`xs[1.0] = 99`); the
+  lowering rejects only the read form on must-be-integer receivers.
+- OPEN (feature gap, separate): int literals in an array literal do not adopt
+  `f64` at an annotated slot; `takes([1, 2])` into a `[f64]` parameter prints
+  `0.5`-style garbage. The value-join promotion does not reach array literals.
+- `embedding.spl`: `idx as i64` alone truncated `-0.5` to row 0, where the
+  original `idx_int < 0.0` test sent every negative index down the zero path.
+  The bounds test is now `idx < 0.0 or idx_int >= num_embeddings`, so negative
+  fractions keep the zero path.
 
 ### Sweep of existing code (2026-11-27)
 
@@ -515,7 +548,9 @@ reach. The five specs (the four above plus `embedding_spec`) pass through
 `value_join_rule_leaves_agreeing_bottom_weak_unsafe_and_statement_forms_alone`,
 `script_entry_functions_keep_the_untyped_join_and_compiled_entries_do_not`.
 `promoted_float_join_never_reaches_an_int_slot`,
-`nested_empty_literals_are_weak_at_every_depth`.
+`nested_empty_literals_are_weak_at_every_depth`,
+`nested_hollow_then_arm_takes_the_concrete_sibling_type`,
+`guessed_float_method_return_never_triggers_float_into_int_errors`.
 One older pin was removed because it now is the error (`[1]` vs `[text]`), and
 the `[]` vs dict pin moved inside `unsafe:`. The `["typed"; 0]` vs `[1]` pin is
 kept: an explicit empty repeat is a weak arm, so that join still lowers.

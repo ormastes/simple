@@ -76,6 +76,10 @@ pub struct Lowerer {
     pub(super) suffix_guessed_return_types: HashSet<TypeId>,
     /// Set by `lookup_method_return_type` when its result came from that guess.
     pub(super) last_method_return_guessed: std::cell::Cell<bool>,
+    /// Sticky per function: a suffix-search guess produced a FLOAT type in the
+    /// function being lowered. A guessed float is not evidence, so the
+    /// float-into-int errors and the int/float value join skip that function.
+    pub(super) guessed_float_in_function: std::cell::Cell<bool>,
     /// Declaration line of the function currently being lowered. Recorded so the
     /// `lenient_types` unresolved-name fallback can attribute the global it
     /// emits to a source location; `Expr::Identifier` carries no span of its own.
@@ -507,6 +511,7 @@ impl Lowerer {
             current_function_name: None,
             suffix_guessed_return_types: HashSet::new(),
             last_method_return_guessed: std::cell::Cell::new(false),
+            guessed_float_in_function: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
@@ -621,6 +626,7 @@ impl Lowerer {
             current_function_name: None,
             suffix_guessed_return_types: HashSet::new(),
             last_method_return_guessed: std::cell::Cell::new(false),
+            guessed_float_in_function: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
@@ -758,6 +764,7 @@ impl Lowerer {
             current_function_name: None,
             suffix_guessed_return_types: HashSet::new(),
             last_method_return_guessed: std::cell::Cell::new(false),
+            guessed_float_in_function: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
             value_tail_match: None,
