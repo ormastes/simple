@@ -29,14 +29,14 @@
 #   print t0.len()                         # 0 (original unchanged)
 #   print t3.len()                         # 3
 
-use std.persistent_trie.trie_node.{trie_empty_node, trie_get, trie_set, trie_remove, trie_contains, trie_count, trie_collect_entries, trie_keys_with_prefix, trie_longest_prefix}
+use std.persistent_trie.trie_node.{TrieNode, trie_empty_node, trie_get, trie_set, trie_remove, trie_contains, trie_count, trie_collect_entries, trie_keys_with_prefix, trie_longest_prefix}
 
 # ============================================================================
 # PersistentTrie
 # ============================================================================
 
 class PersistentTrie<V>:
-    root      # Trie node: [value_or_nil, children] or nil
+    root: TrieNode<V>?   # Trie root node (None = empty)
     size: i64
 
     # ------------------------------------------------------------------
@@ -44,13 +44,13 @@ class PersistentTrie<V>:
     # ------------------------------------------------------------------
 
     # Get the value associated with `key`, or nil if not present.
-    fn get(key: text):
+    fn get(key: text) -> V?:
         trie_get(self.root, key, 0)
 
     # Get the value associated with `key`, or `default_val` if not present.
     fn get_or(key: text, default_val: V) -> V:
         val result = trie_get(self.root, key, 0)
-        if result != nil:
+        if result != None:
             return result
         default_val
 
@@ -63,12 +63,12 @@ class PersistentTrie<V>:
     # ------------------------------------------------------------------
 
     # Insert or update `key` with `value`. Returns a NEW trie.
-    fn set(key: text, value) -> PersistentTrie<V>:
+    fn set(key: text, value: V) -> PersistentTrie<V>:
         val new_root = trie_set(self.root, key, value, 0)
         # Determine new size: if the key was already present, size stays the same
         val old_val = trie_get(self.root, key, 0)
         var new_size = self.size
-        if old_val == nil:
+        if old_val == None:
             new_size = self.size + 1
         PersistentTrie(root: new_root, size: new_size)
 
@@ -76,7 +76,7 @@ class PersistentTrie<V>:
     # If the key is not present, returns this trie unchanged.
     fn remove(key: text) -> PersistentTrie<V>:
         val old_val = trie_get(self.root, key, 0)
-        if old_val == nil:
+        if old_val == None:
             # Key not present — no change
             return self
         val new_root = trie_remove(self.root, key, 0)
@@ -99,20 +99,20 @@ class PersistentTrie<V>:
     # ------------------------------------------------------------------
 
     # Return an array of all keys that start with the given prefix.
-    fn keys_with_prefix(prefix: text):
+    fn keys_with_prefix(prefix: text) -> [text]:
         trie_keys_with_prefix(self.root, prefix, 0, prefix)
 
     # Return the longest key in the trie that is a prefix of `query`.
     # Returns nil if no key is a prefix of the query.
-    fn longest_prefix(query: text):
-        trie_longest_prefix(self.root, query, 0, nil)
+    fn longest_prefix(query: text) -> text?:
+        trie_longest_prefix(self.root, query, 0, None)
 
     # ------------------------------------------------------------------
     # Higher-order operations
     # ------------------------------------------------------------------
 
     # Return a new trie containing only entries where `pred(key, value)` is true.
-    fn filter(pred: fn()) -> PersistentTrie<V>:
+    fn filter(pred: fn(text, V) -> bool) -> PersistentTrie<V>:
         var result = PersistentTrie.empty()
         val all_entries = self.entries()
         var i = 0
@@ -126,7 +126,7 @@ class PersistentTrie<V>:
 
     # Fold (reduce) over all entries.
     # `f(accumulator, key, value)` is called for each entry.
-    fn fold(init, f: fn()):
+    fn fold<A>(init: A, f: fn(A, text, V) -> A) -> A:
         var acc = init
         val all_entries = self.entries()
         var i = 0
@@ -138,7 +138,7 @@ class PersistentTrie<V>:
         acc
 
     # Return a new trie with all values transformed by `f(key, value)`.
-    fn map_values(f: fn()) -> PersistentTrie<V>:
+    fn map_values(f: fn(V) -> V) -> PersistentTrie<V>:
         var result = PersistentTrie.empty()
         val all_entries = self.entries()
         var i = 0
@@ -159,9 +159,9 @@ class PersistentTrie<V>:
     # ------------------------------------------------------------------
 
     # Return an array of all keys.
-    fn keys():
+    fn keys() -> [text]:
         val all_entries = self.entries()
-        var result = []
+        var result: [text] = []
         var i = 0
         val n = len(all_entries)
         while i < n:
@@ -170,9 +170,9 @@ class PersistentTrie<V>:
         result
 
     # Return an array of all values.
-    fn values():
+    fn values() -> [V]:
         val all_entries = self.entries()
-        var result = []
+        var result: [V] = []
         var i = 0
         val n = len(all_entries)
         while i < n:
@@ -181,12 +181,12 @@ class PersistentTrie<V>:
         result
 
     # Return an array of [key, value] pairs.
-    fn entries():
+    fn entries() -> [(text, V)]:
         trie_collect_entries(self.root, "")
 
     # Convert to a mutable dict (built-in hash map).
-    fn to_dict():
-        var result = {}
+    fn to_dict() -> Dict<text, V>:
+        var result: Dict<text, V> = {}
         val all_entries = self.entries()
         var i = 0
         val n = len(all_entries)
@@ -212,7 +212,7 @@ class PersistentTrie<V>:
             i = i + 1
         result
 
-    static fn from_entries(entries: []) -> PersistentTrie<V>:
+    static fn from_entries(entries: [(text, V)]) -> PersistentTrie<V>:
         var result = PersistentTrie.empty()
         var i = 0
         val n = len(entries)
@@ -223,7 +223,7 @@ class PersistentTrie<V>:
         result
 
     static fn empty() -> PersistentTrie<V>:
-        PersistentTrie(root: nil, size: 0)
+        PersistentTrie(root: None, size: 0)
 
 # ============================================================================
 # Factory Functions
@@ -237,6 +237,8 @@ export PersistentTrie
 export PersistentTrie__empty, PersistentTrie__from_entries, PersistentTrie__from_dict
 
 # Re-exported from trie_node.spl
+export TrieNode, TrieEdge
+export trie_node_has_value, trie_node_child_count
 export trie_empty_node
 export trie_copy_dict
 export trie_get, trie_set, trie_remove

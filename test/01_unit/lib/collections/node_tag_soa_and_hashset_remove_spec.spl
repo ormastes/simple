@@ -2,7 +2,7 @@ use std.spec.*
 use std.io_runtime.{hash_text}
 use std.nogc_async_immut.persistent_trie.{PersistentTrie}
 use std.nogc_async_immut.persistent_trie.trie_node.{
-    TRIE_TAG_NO_VAL, TRIE_TAG_HAS_VAL, TRIE_TAG_MASK,
+    trie_node_has_value, trie_node_child_count,
     trie_empty_node, trie_get, trie_set, trie_remove,
     trie_contains, trie_count, trie_collect_entries,
     trie_keys_with_prefix, trie_longest_prefix
@@ -17,36 +17,32 @@ use std.nogc_sync_mut.src.collections.adaptive_text_map.AdaptiveTextMap
 describe "Node-tag packed PersistentTrie, SoA OrderedTextSet, in-place HashSet.remove, and lazy AdaptiveText containers":
 
     describe "PersistentTrie flat 2-bit tag + child-count packed nodes":
-        it "packs NO_VAL and HAS_VAL headers into flat arrays without inner pair arrays":
+        it "tracks value presence and child count on trie nodes":
             val empty_node = trie_empty_node()
-            expect(empty_node.len()).to_equal(1)
-            expect(empty_node[0] & TRIE_TAG_MASK).to_equal(TRIE_TAG_NO_VAL)
-            expect(empty_node[0] >> 2).to_equal(0)
+            expect(trie_node_has_value(empty_node)).to_equal(false)
+            expect(trie_node_child_count(empty_node)).to_equal(0)
             expect(trie_count(empty_node)).to_equal(0)
             expect(trie_get(empty_node, "", 0)).to_be_nil()
 
-            # Single-character key: root is NO_VAL with 1 child -> [((1 << 2) | 1), "a", [2, 10]]
-            val n1 = trie_set(nil, "a", 10, 0)
-            expect(n1[0] & TRIE_TAG_MASK).to_equal(TRIE_TAG_NO_VAL)
-            expect(n1[0] >> 2).to_equal(1)
-            expect(n1.len()).to_equal(3)
+            # Single-character key: root has no value and 1 child
+            val n1 = trie_set(None, "a", 10, 0)
+            expect(trie_node_has_value(n1)).to_equal(false)
+            expect(trie_node_child_count(n1)).to_equal(1)
 
-            # Second sibling key + empty-prefix value on root: HAS_VAL with 2 children -> 2 + 2*2 = 6 slots
+            # Second sibling key + empty-prefix value on root: value present with 2 children
             val n2 = trie_set(n1, "b", 20, 0)
             val n3 = trie_set(n2, "", 99, 0)
-            expect(n3[0] & TRIE_TAG_MASK).to_equal(TRIE_TAG_HAS_VAL)
-            expect(n3[0] >> 2).to_equal(2)
-            expect(n3.len()).to_equal(6)
+            expect(trie_node_has_value(n3)).to_equal(true)
+            expect(trie_node_child_count(n3)).to_equal(2)
             expect(trie_get(n3, "", 0)).to_equal(99)
             expect(trie_get(n3, "a", 0)).to_equal(10)
             expect(trie_get(n3, "b", 0)).to_equal(20)
             expect(trie_count(n3)).to_equal(3)
 
-            # Removing root value converts HAS_VAL back to NO_VAL while keeping 2 children (len == 5)
+            # Removing root value clears the value while keeping 2 children
             val n4 = trie_remove(n3, "", 0)
-            expect(n4[0] & TRIE_TAG_MASK).to_equal(TRIE_TAG_NO_VAL)
-            expect(n4[0] >> 2).to_equal(2)
-            expect(n4.len()).to_equal(5)
+            expect(trie_node_has_value(n4)).to_equal(false)
+            expect(trie_node_child_count(n4)).to_equal(2)
             expect(trie_contains(n4, "", 0)).to_equal(false)
             expect(trie_get(n4, "a", 0)).to_equal(10)
             expect(trie_get(n4, "b", 0)).to_equal(20)
