@@ -333,6 +333,7 @@ impl Lowerer {
             // evidence about the join type: a concrete else-arm wins.
             if hir_value_is_weak_empty(&then_hir)
                 && hir_value_is_concrete(other)
+                && other.ty != TypeId::ANY
                 && self.same_collection_kind(then_hir.ty, other.ty)
                 && !matches!(then_branch, Expr::ArrayRepeat { .. })
             {
@@ -817,7 +818,8 @@ impl Lowerer {
         // sibling (its default element type is not evidence).
         let then_is_weak_vs_concrete = !then_is_bottom
             && hir_value_is_weak_empty(&then_branch)
-            && hir_value_is_concrete(&else_branch);
+            && hir_value_is_concrete(&else_branch)
+            && else_branch.ty != TypeId::ANY;
         let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
 
         Ok(HirExpr {
