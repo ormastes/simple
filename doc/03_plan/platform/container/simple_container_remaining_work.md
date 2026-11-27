@@ -21,7 +21,7 @@
 ## Remaining work
 
 Each item has an owner-host requirement and the evidence that closes it.
-Tracked in `doc/08_tracking/todo/todo_db.sdn` (rows 468-475).
+Tracked in `doc/08_tracking/todo/todo_db.sdn` (rows 468-480).
 
 ### 1. Increment 4 — pure-Simple Windows backend (Windows host)
 `SimpleContainerOwnerV2.PureSimple` behind SimpleContainer.
@@ -59,3 +59,11 @@ Tracked in `doc/08_tracking/todo/todo_db.sdn` (rows 468-475).
 
 ### 7. P2 backlog
 Carried by reference, not duplicated: see the "Open (P2, next increment)" list in `doc/03_plan/platform/container/simple_container_improvement.md`.
+
+### 8. Open at session close (2026-11-27)
+Landed this run on `release/1.0.0`: #12115-#12143 (store hardening, view conflicts, GC quarantine restore, `rt_dir_sync`, root claim compaction, SCV gc per-run owner). Still open, each tracked in `doc/08_tracking/todo/todo_db.sdn`:
+- Keep-marked pin tombs (`pin-owner-changed-unrestored`) and `pins/<id>.r<n>` restored pins are not surfaced to their owner or reclaimed (todo 476).
+- SCV gc keeps unmarked `scv-gc:` pins forever; ageing them out needs a liveness signal, not a timeout (todo 477).
+- Windows native-build smoke of `dir_sync` never reaches link on this host (two runs, >17 and ~34 min, frontend only) (todo 478).
+- Storage view junction TOCTOU between parent walk and open; needs handle-relative opens (todo 479).
+- 18 undefined-but-used strict-use imports block flipping `SIMPLE_STRICT_USE` on by default; see `doc/08_tracking/bug/strict_use_default_blocked_by_unprovided_imports_2026-11-27.md` (todo 480).
