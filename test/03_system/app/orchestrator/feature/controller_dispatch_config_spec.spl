@@ -88,10 +88,39 @@ describe "private local-inprocess controller dispatch installation":
         expect(loaded.policy.source_digest == context.policy.source_digest).to_equal(true)
         expect(dir_remove(fixture.parent, true)).to_equal(true)
 
+    it "creates its files 0600 itself under a group and world readable caller umask":
+        step("Creates its files 0600 itself under a group and world readable caller umask")
+        val fixture = dispatch_config_fixture_v1()
+        # The runner inherits the caller umask (run it under umask 022; the seed has no umask extern).
+        # The probe proves that umask is not 077: a plain create keeps group or world bits.
+        val probe_created = file_create_exclusive(fixture.parent + "/umask-probe", "probe")
+        val probe_mode = file_mode_bits(fixture.parent + "/umask-probe")
+        expect(probe_created).to_equal(true)
+        if probe_mode > 0 and (probe_mode & 0o077) == 0:
+            expect(dir_remove(fixture.parent, true)).to_equal(true)
+            pending("BLOCKED: caller umask is 077, so this run cannot show the installer is umask-independent; rerun under umask 022")
+            return
+        val installed = controller_dispatch_config_install_v1(fixture.root, "controller", fixture.config_bytes, fixture.policy_bytes)
+        expect(installed.is_ok()).to_equal(true)
+        expect(file_mode_bits(fixture.root + "/dispatch-config.sdn") == 0o600).to_equal(true)
+        expect(file_mode_bits(fixture.root + "/authority-policy.sdn") == 0o600).to_equal(true)
+        dispatch_config_assert_bytes_v1(fixture)
+        expect(controller_dispatch_context_load_v1(fixture.root, "controller").is_ok()).to_equal(true)
+        expect(dir_remove(fixture.parent, true)).to_equal(true)
+
+    it "still refuses a pre-existing group and world readable file with identical bytes":
+        step("Still refuses a pre-existing group and world readable file with identical bytes")
+        val fixture = dispatch_config_fixture_v1()
+        expect(file_atomic_write_mode(fixture.root + "/authority-policy.sdn", fixture.policy_bytes, 0o644)).to_equal(true)
+        expect(controller_dispatch_config_install_v1(fixture.root, "controller", fixture.config_bytes, fixture.policy_bytes).unwrap_err() == "dispatch-file-not-private").to_equal(true)
+        expect(file_mode_bits(fixture.root + "/authority-policy.sdn") == 0o644).to_equal(true)
+        expect(not file_is_regular_no_follow(fixture.root + "/dispatch-config.sdn")).to_equal(true)
+        expect(dir_remove(fixture.parent, true)).to_equal(true)
+
     it "replays identical installation and completes a retained partial policy publication":
         step("Replays identical installation and completes a retained partial policy publication")
         val fixture = dispatch_config_fixture_v1()
-        expect(file_create_exclusive(fixture.root + "/authority-policy.sdn", fixture.policy_bytes)).to_equal(true)
+        expect(file_atomic_write_mode(fixture.root + "/authority-policy.sdn", fixture.policy_bytes, 0o600)).to_equal(true)
         expect(file_fsync(fixture.root + "/authority-policy.sdn")).to_equal(true)
         expect(directory_fsync(fixture.root)).to_equal(true)
         expect(not file_is_regular_no_follow(fixture.root + "/dispatch-config.sdn")).to_equal(true)

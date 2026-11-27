@@ -11,7 +11,7 @@ enrolled-host specs, replacing the placeholder fixtures it can produce.
 ## Compatibility and limitations
 Keys are fresh OS-entropy Ed25519 seeds written as OpenSSH private files by the canonical encoder; each
 run uses new keys under a private temp root and nothing is a real secret. Fixture classes that need a
-live enrolled Host (V6 attach/invoke/detach) or a producer not yet written (installer parent, profiles) report
+live enrolled Host (V6 attach/invoke/detach) or a producer not yet written (installer parent, host-config encoder, live template measurements) report
 `pending("BLOCKED: ...")` with the exact missing input, never a skip.
 ## Verification guidance and troubleshooting
 A refusal case that reports Ok means a forged, swapped or wrongly formatted fixture would be accepted by
@@ -30,6 +30,20 @@ use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{host_li
 use app.orchestrator.host_identity_key_v1.host_identity_private_public_v1
 use app.orchestrator.controller_gateway_v1.controller_gateway_request_decode_v1
 use test.fixtures.orchestrator.enrolled_host_signed_fixture_v1.*
+use std.common.contracts.container.machine_policy_v1.{machine_container_policy_decode_v1, machine_container_policy_bytes_v1}
+use std.common.contracts.container.linux_fresh_epoch_v1.{linux_fresh_epoch_profile_decode_v1, linux_fresh_epoch_provider_matches_v1,
+    linux_fresh_epoch_workload_terminal_mode_v1, linux_fresh_epoch_workload_build_root_prefix_v1}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{linux_oci_engine_policy_decode_v1, linux_oci_engine_policy_encode_v1}
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.linux_oci_installed_policy_decode_v3
+use std.nogc_sync_mut.io.linux_installed_supervisor_profile_v1.supervisor_profile_decode_v1
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.LinuxMachineProcessContextV1
+use std.nogc_sync_mut.io.host_linux_service_records_v4.{host_linux_service_agent_helper_template_v4,
+    host_linux_service_remote_build_template_v4}
+use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_decode_v3,
+    group_process_stream_template_encode_v3}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 
 fn fixture_inputs_v1(parent: text, host_root: text) -> EnrolledFixtureInputsV1:
     EnrolledFixtureInputsV1(controller_id: "fixture-controller", approver_id: "fixture-approver",
@@ -38,6 +52,41 @@ fn fixture_inputs_v1(parent: text, host_root: text) -> EnrolledFixtureInputsV1:
         provider_identity_digest: sha256_text("fixture-provider"), machine_parent: parent + "/machine-parent",
         host_root: host_root, physical_cpu_millis: 8000, physical_memory_bytes: 8589934592,
         reserved_cpu_millis: 1000, reserved_memory_bytes: 1073741824, now_ms: 1800000000000)
+
+fn fixture_host_profile_v1() -> EnrolledFixtureHostProfileInputsV1:
+    EnrolledFixtureHostProfileInputsV1(authority_id: "fixture-authority", service_name: "simple-orch", service_uid: 1001,
+        service_gid: 1001, subid_start: 200000, subid_count: 65536, host_unit: "simple-orchestrator-host.service",
+        provider_unit: "simple-podman.service", provider_socket_unit: "simple-podman.socket",
+        partition_cgroup: "/sys/fs/cgroup/simple.slice", provider_executable: "/usr/bin/podman",
+        provider_executable_sha256: sha256_text("fixture-podman"), broker_executable: "/opt/simple/bin/simple",
+        broker_executable_sha256: sha256_text("fixture-broker"), graph_root: "/var/lib/simple-host/podman/graph",
+        run_root: "/run/simple-host/podman", partition_cpu_millis: 6000, partition_memory_bytes: 6442450944,
+        outside_cpu_millis: 1000, outside_memory_bytes: 1073741824,
+        workload_build_root_prefix: "/var/lib/simple-host/live-work", workload_terminal_mode: "tty")
+
+fn fixture_process_v1(uid: i64) -> LinuxMachineProcessContextV1:
+    LinuxMachineProcessContextV1(real_uid: uid, effective_uid: uid, process_id: 1, thread_id: 1,
+        authority_namespace_id: "fixture-namespace", identity_digest: sha256_text("fixture-process"), generation: 1)
+
+fn fixture_template_inputs_v1() -> EnrolledFixtureTemplateInputsV1:
+    EnrolledFixtureTemplateInputsV1(root: "/run/simple-host/launch-agent", worker_id: "worker_1", generation: 7,
+        snapshot_digest: "d".repeat(64), cache_identity: "e".repeat(64), memory_limit_bytes: 1048576,
+        program: "/opt/helper", producer_digest: "a".repeat(64), directory: "/work", timeout_ms: 5000,
+        broker_program: "/opt/broker", broker_digest: "b".repeat(64), delegated_cgroup: "/sys/fs/cgroup/service",
+        helper_cpu_millis: 25, helper_quota_us: 2500, helper_period_us: 100000,
+        broker_cgroup: "/sys/fs/cgroup/service/broker", broker_device: 11, broker_inode: 22, broker_generation: 3,
+        broker_policy_digest: "c".repeat(64), broker_quota_us: 250000, broker_period_us: 1000000,
+        broker_memory_limit_bytes: 536870912)
+
+fn fixture_template_field_v1(source: text) -> text:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 2,
+        max_nodes: 8, max_rows: 0, max_cells: 0, max_columns: 4)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(fields):
+            match fields["template"]:
+                case SdnValue.String(value): value
+                case _: ""
+        case _: ""
 
 fn fixture_verify_v1(authority: EnrolledFixtureAuthorityV1, credential: HostEnrollmentCredentialV1,
         now: i64) -> Result<bool, text>:
@@ -181,5 +230,92 @@ describe "Enrolled Linux Host signed fixtures from the canonical encoders":
     it "reports the signed installer fixture parent as blocked on the binding's pinned inputs":
         pending("BLOCKED: no producer yet (todo 486); the parent holds fixture-enrollment.sdn and fixture-credential.sdn (the binding and credential above) plus host-config, engine-policy, broker-policy and agent-helper-template, whose producers are todo 484")
 
-    it "reports the container profiles as blocked on an unwritten generator":
-        pending("BLOCKED: no profile generator yet (todo 481); machine_container_policy_bytes_v1, linux_oci_engine_policy_encode_v1 and linux_fresh_epoch_profile_decode_v1 exist, but the fresh-epoch and supervisor values pin the installed host's units, cgroups and broker executable")
+    it "generates decoder-valid machine policy, fresh-epoch and supervisor profiles from the canonical encoders":
+        val parent = secure_temp_dir("/tmp", "orch-signed-fixture-").unwrap()
+        val inputs = fixture_inputs_v1(parent, parent + "/host")
+        val host = fixture_host_profile_v1()
+        step("Generate all three profiles and the engine policy they share")
+        val generated = enrolled_fixture_profiles_v1(inputs, host)
+        if generated.is_err():
+            fail("profile generation failed: " + generated.unwrap_err())
+            return
+        val profiles = generated.unwrap()
+        step("The pinned provider identity is the observed engine identity, not the podman executable sha256")
+        val identity = enrolled_fixture_engine_identity_v1(host, "4.9.3")
+        expect(identity.is_ok()).to_equal(true)
+        expect(identity.unwrap().byte_len()).to_equal(64)
+        expect(identity.unwrap() == host.provider_executable_sha256).to_equal(false)
+        expect(identity.unwrap() == enrolled_fixture_engine_identity_v1(host, "5.0.0").unwrap()).to_equal(false)
+        expect(enrolled_fixture_engine_identity_v1(host, "").is_err()).to_equal(true)
+        step("The machine policy is wire V2, canonical, standalone and names the service UID principal")
+        val machine = machine_container_policy_decode_v1(profiles.machine_policy)
+        expect(machine.is_ok()).to_equal(true)
+        expect(machine_container_policy_bytes_v1(machine.unwrap()).unwrap()).to_equal(profiles.machine_policy)
+        expect(machine.unwrap().local_principals).to_equal(["linux:uid:1001"])
+        expect(machine.unwrap().providers[0].policy_bytes).to_equal(profiles.engine_policy)
+        expect(machine_container_policy_decode_v1(profiles.machine_policy.replace("version: 2", "version: 1")).is_err()).to_equal(true)
+        expect(machine_container_policy_decode_v1(profiles.machine_policy.replace("standalone", "managed")).is_err()).to_equal(true)
+        step("The fresh-epoch profile pins the real machine and engine digests and the workload admission keys")
+        val fresh = linux_fresh_epoch_profile_decode_v1(profiles.fresh_epoch_profile)
+        expect(fresh.is_ok()).to_equal(true)
+        expect(fresh.unwrap().text_v1("machinePolicyDigest").unwrap()).to_equal(sha256_text(profiles.machine_policy))
+        expect(fresh.unwrap().text_v1("providerPolicyDigest").unwrap()).to_equal(sha256_text(profiles.engine_policy))
+        expect(linux_fresh_epoch_workload_terminal_mode_v1(fresh.unwrap()).unwrap()).to_equal("tty")
+        expect(linux_fresh_epoch_workload_build_root_prefix_v1(fresh.unwrap()).unwrap()).to_equal("/var/lib/simple-host/live-work")
+        expect(linux_fresh_epoch_provider_matches_v1(fresh.unwrap(), profiles.engine_policy).is_ok()).to_equal(true)
+        expect(linux_fresh_epoch_profile_decode_v1(profiles.fresh_epoch_profile.replace("cgroupfs", "systemd")).is_err()).to_equal(true)
+        expect(linux_fresh_epoch_profile_decode_v1(profiles.fresh_epoch_profile + "\n").is_err()).to_equal(true)
+        step("The supervisor profile carries the canonical installed policy with TTY exec admission")
+        val installed = linux_oci_installed_policy_decode_v3(profiles.installed_policy)
+        expect(installed.is_ok()).to_equal(true)
+        expect(installed.unwrap().exec_terminal_mode).to_equal("tty")
+        val supervisor = supervisor_profile_decode_v1(profiles.supervisor_profile, sha256_text(profiles.machine_policy), fixture_process_v1(1001))
+        if supervisor.is_err(): fail("supervisor profile refused: " + supervisor.unwrap_err())
+        expect(supervisor.is_ok()).to_equal(true)
+        expect(supervisor.unwrap().provider_policy).to_equal(profiles.installed_policy)
+        step("A different machine policy digest, another UID or a dropped user-manager inhibition is refused")
+        expect(supervisor_profile_decode_v1(profiles.supervisor_profile, sha256_text("other"), fixture_process_v1(1001)).is_err()).to_equal(true)
+        expect(supervisor_profile_decode_v1(profiles.supervisor_profile, sha256_text(profiles.machine_policy), fixture_process_v1(1002)).is_err()).to_equal(true)
+        expect(supervisor_profile_decode_v1(profiles.supervisor_profile.replace("user@1001.service", "user@1002.service"),
+            sha256_text(profiles.machine_policy), fixture_process_v1(1001)).is_err()).to_equal(true)
+
+    it "reports the installed profile openers as blocked on the seed":
+        pending("BLOCKED: the installed openers (linux_installed_supervisor_profile_open_v1, linux machine policy owner) fail on the seed with unknown extern function gettid; the generated bytes are decoder-verified above and opened natively in the guest (todo 481)")
+
+    it "generates engine-policy and helper and broker templates that the Host loaders accept":
+        val parent = secure_temp_dir("/tmp", "orch-signed-fixture-").unwrap()
+        val inputs = fixture_inputs_v1(parent, parent + "/host")
+        val authority = enrolled_fixture_authority_v1(inputs).unwrap()
+        step("engine-policy.sdn is the canonical provider engine policy")
+        val engine = linux_oci_engine_policy_encode_v1(enrolled_fixture_engine_policy_v1(fixture_host_profile_v1())).unwrap()
+        expect(linux_oci_engine_policy_encode_v1(linux_oci_engine_policy_decode_v1(engine).unwrap()).unwrap()).to_equal(engine)
+        step("Broker policy and both helper templates come from the canonical stream template encoder")
+        val t = fixture_template_inputs_v1()
+        val broker = enrolled_fixture_broker_policy_v1(inputs, t, ["--output"])
+        val agent = enrolled_fixture_agent_helper_template_v1(inputs, t)
+        val remote = enrolled_fixture_remote_build_template_v1(inputs, t)
+        if broker.is_err() or agent.is_err() or remote.is_err():
+            fail("template generation failed: " + (if broker.is_err(): broker.unwrap_err() elif agent.is_err(): agent.unwrap_err() else: remote.unwrap_err()))
+            return
+        val pins = [sha256_text("host-config-not-generated"), sha256_text(engine), sha256_text(broker.unwrap()),
+            sha256_text(agent.unwrap()), sha256_text(remote.unwrap())]
+        val binding = enrolled_fixture_binding_v1(inputs, authority.policy_bytes, pins).unwrap()
+        expect(binding.engine_policy_digest).to_equal(sha256_text(engine))
+        expect(host_linux_service_agent_helper_template_v4(binding, agent.unwrap()).is_ok()).to_equal(true)
+        expect(host_linux_service_remote_build_template_v4(binding, remote.unwrap()).is_ok()).to_equal(true)
+        val inner = group_process_stream_template_decode_v3(fixture_template_field_v1(broker.unwrap()))
+        expect(inner.is_ok()).to_equal(true)
+        expect(group_process_stream_template_encode_v3(inner.unwrap()).unwrap()).to_equal(fixture_template_field_v1(broker.unwrap()))
+        expect(inner.unwrap().profile_v3.unwrap().broker.reserved_cpu_millis).to_equal(binding.reserved_cpu_millis)
+        expect(inner.unwrap().profile_v3.unwrap().broker.reserved_memory_bytes).to_equal(binding.reserved_memory_bytes)
+        step("A padded template, or one template offered under the other's kind, is refused")
+        expect(host_linux_service_agent_helper_template_v4(binding, agent.unwrap() + "\n").is_err()).to_equal(true)
+        var swapped = binding
+        swapped.agent_helper_template_digest = sha256_text(remote.unwrap())
+        expect(host_linux_service_agent_helper_template_v4(swapped, remote.unwrap()).is_err()).to_equal(true)
+
+    it "reports host-config.sdn as blocked on a missing canonical encoder":
+        pending("BLOCKED: no canonical HostConfig encoder (host_config_v1 has decode_host_config only, todo 484); binding.sdn needs all five pins, so the guest binding stays blocked until it exists")
+
+    it "reports the helper and broker template measurements as blocked on a live installed Host":
+        pending("BLOCKED: the three template generators above need the installed broker cgroup's device, inode and generation, its policy digest and the helper/broker executable digests, which only the live Root owner measures; no producer of those measurements exists yet (todo 484)")
