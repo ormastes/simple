@@ -22,9 +22,10 @@ source mode by file kind and config; syntactic checks only in the seed.
 - **Seed** = `src/compiler_rust`. **Self-hosted** = `src/compiler`.
   **Stdlib** = `src/lib`.
 - **Seed scope (decided):** the full inference engine is built once, in the
-  self-hosted compiler. The seed gets the two in-flight lanes, fixes for its
-  silent mis-typings, syntactic twins of the checks, and monomorphization of
-  explicit generics (code generation, not inference).
+  self-hosted compiler. The seed gets fixes for its silent mis-typings and
+  syntactic twins of the checks. Two seed lanes go beyond that and are **open
+  owner questions (Q13)**, kept in the table but marked: S2-A (type variables
+  in the seed, lane d29-c) and S3-E (seed monomorphization).
 - Lanes gated on an owner question say so; the questions still open are
   collected under "Open owner decisions" below.
 
@@ -63,7 +64,7 @@ source mode by file kind and config; syntactic checks only in the seed.
 | S1-B | Seed: extend the judged set to struct, enum, tuple, `Option`; both locations in the message | G1 | M | S1-A; Q4 |
 | S1-C | Shared fixture corpus + expected-verdict manifest | G0 | S | none |
 | S1-D | Self-hosted: unify value arms, error on mismatch, `Option` join | G1 | M | S1-C, S4-A; Q4 |
-| S2-A | Seed: stage-1 implicit generic (identity shape), `UninferredType`, script-entry attribute (in flight, lane d29-c) | G0 | M | none |
+| S2-A | Seed: stage-1 implicit generic (identity shape), `UninferredType` as a **warning** first, script-entry attribute (in flight, lane d29-c). Inference in the seed: scope **open (Q13)** | G0 | M | none; **Q13** |
 | S2-B | Self-hosted: fresh type variable per unannotated parameter (`bind_mono` / `Infer(0,0)` fix) | G0 | S | none |
 | S2-C | Self-hosted: one inference engine; write inferred types back to HIR | G1 | L | S2-B |
 | S2-D | Privacy precondition: classify the 386 private functions with no same-file call site; enforce file privacy or widen scope | G0 | M | none |
@@ -73,16 +74,16 @@ source mode by file kind and config; syntactic checks only in the seed.
 | S3-A | Self-hosted: T3. Generalize at SCC exit, one instance per distinct call-site type vector, value restriction, cap on implicit generics, over-cap error (bodies emitted by S3-D) | G3 | M | S2-E |
 | S3-B | Self-hosted: refuse polymorphic recursion, higher-rank use, tag-dispatching bodies | G3 | M | S2-E |
 | S3-C | Monomorphization baseline: record binary size, bootstrap time and compile time on the erased build; dry-run instance collector that reports instance counts for the 1,208 explicit generics | G1 | M | none |
-| S3-D | Self-hosted: restore/rebuild the `40.mono` stage (instance collection, body substitution, naming, post-mono check that no type parameter or `Any` reaches MIR); remove the erased lowering and the `E-GEN-001` refusal for safe code | G2 | L | S3-C, S2-C |
-| S3-E | Seed: monomorphize explicit generics; `type_resolver.rs:295-297` stops erasing `T` to `ANY` | G2 | L | S3-C |
+| S3-D | Self-hosted: restore/rebuild the `40.mono` stage (instance collection, body substitution, naming, post-mono check that no type parameter or `Any` reaches MIR); remove the erased lowering for safe code | G2 | L | S3-C, S2-C |
+| S3-E | **Open (Q13).** Seed: monomorphize explicit generics; `type_resolver.rs:320-322` stops erasing `T` to `ANY`. Runs only if the owner decides the bootstrap-only seed must monomorphize | G2 | L | S3-C; **Q13** |
 | S3-F | Cross-module instance dedup by canonical type vector; object-cache keys per instance; generic bodies in the interface an importer depends on | G3 | M | S3-D |
 | S3-G | Budget gates: instance-count, code-size, build-time and run-time benchmark checks against the S3-C baseline | G4 | M | S3-D, S3-E; Q11 |
 | S3-H | Retire the erased-model statements: `.claude/rules/language.md`, the 2026-10-31 generics plan header, any guard that assumes erasure, the guides | G5 | S | S3-D, S3-E |
-| S4-A | Self-hosted: resolve `source_mode` per unit (file kind, `simple.sdn`, CLI, header attribute), store it on the parsed and HIR module and in the cache key; replace the `CompileMode.Interpret` gates and the `parser_path_is_script` use | G0 | M | Q7a for names |
+| S4-A | Self-hosted: resolve `source_mode` per unit (file kind, `simple.sdn`, CLI, header attribute), store it on the parsed and HIR module and in the cache key; replace the `CompileMode.Interpret` gates and the `parser_path_is_script` use | G0 | M | none |
 | S4-B | Seed: the same resolution; replace the top-level-statement heuristics, including `set_entry_script_mode` (lane d29-e) and `SCRIPT_ENTRY_ATTR` (lane d29-c) | G1 | M | S1-A, S2-A, S4-A |
 | S4-C | Unsafe rule: any `unsafe` block or function admits `any`; drop the `type_erasure` requirement from the escape checker and its messages; seed `@unsafe` functions set the unsafe depth; ratchet `any` uses inside unsafe | G0 | M | none |
 | S4-D | Self-hosted: `any` diagnostics in every profile as warnings, scope widened from `src/compiler/**` to all safe code | G1 | M | S4-A, S4-C |
-| S4-H | Interpreter in compiled mode: the interpreter and the test runner run the front-end checks for compiled-mode units; `simple.sdn` rows for directories that are script by choice | G2 | M | S4-A, S4-B; Q7b |
+| S4-H | Interpreter in compiled mode: the interpreter and the test runner run the front-end checks for compiled-mode units; `simple.sdn` rows for directories that are script by choice | G2 | M | S4-A, S4-B |
 | S4-E | Self-hosted: unannotated `pub`/exported function and method diagnostic, with the inferred signature as a fix-it | G3 | M | S2-E |
 | S4-F | Seed: syntactic twins (written `any` outside unsafe; unannotated parameter of an **exported** function in a compiled-mode unit) | G2 | M | S4-B, S4-C |
 | S4-G | Ratchets and baselines, per-directory severity, interface-digest invariance test | G4 | M | S4-D, S4-E, S4-F |
@@ -96,8 +97,8 @@ source mode by file kind and config; syntactic checks only in the seed.
 | S6-F | Stdlib `FfiCodec<T>` with scalar and handle codecs, monomorphized and inlined (interim: compiler-inserted decode at statically known `T`); class and ratchet `tagged` rows | G3 | M | S3-D |
 | S6-G | `f64`-packed arrays in both runtimes, the legacy C array and the interpreter; typed unboxed `Array<f64>` / `Array<i64>` / `Array<u8>` access as the default | G3 | L | S6-E, S3-D |
 | S7-A | Differential harness: both compilers over the corpus against the manifest | G1 | M | S1-C |
-| S7-B | Twin conformance guard: same verdict, text and code for every check both compilers implement; cap constant, source-mode resolution and instance keys equal | G4 | S | S3-A, S3-E, S4-F |
-| S7-C | Bootstrap-closure proof: seed builds the annotated closure without inferring; self-hosted rules clean on it | G4 | M | S8-A, S4-D, S2-E |
+| S7-B | Twin conformance guard: same verdict, text and code for every check both compilers implement; source-mode resolution equal (and instance keys, if S3-E runs) | G4 | S | S4-B, S4-F |
+| S7-C | Bootstrap-closure proof: seed builds the annotated closure without inferring (its S4-F warning covers exported functions only; private ones are checked by the self-hosted rules); self-hosted rules clean on it | G4 | M | S8-A, S4-D, S4-F, S2-E |
 | S8-A | Annotate the bootstrap closure: 12 unannotated-parameter functions and 25 `any` uses in `src/compiler`, plus the std prefixes it imports | G0 | S | none |
 | S8-B | JSON/YAML/SDN helper APIs take `JsonValue`/`SdnValue` instead of `any` (about 510 uses) | G1 | M | S9-A |
 | S8-C | Explicit `any` to `<T>`: generic stand-ins (about 180) and callbacks / user data (about 55) | G1 | M | none |
@@ -106,8 +107,9 @@ source mode by file kind and config; syntactic checks only in the seed.
 | S8-F | Rewrite genuinely dynamic bodies to enums/records (about 170 raw, about 60 unique) | G4 | M | S3-B |
 | S8-G | Seed std remainder (401 explicit uses, less what S6-D and S8-D take) | G2 | M | S6-D, S8-D |
 | S8-H | Residual untyped `[]` (1,963 sites), `nil` bindings (58), mixed containers (about 20) that inference does not resolve | G3 | S to M | S2-F |
-| S8-I | Unresolved names, types and imports stop becoming `ANY`: warn, then error | G5 | M | S4-G |
-| S8-J | Flip to error: per directory as its baseline empties, then global | G6 | S | all |
+| S8-I | Unresolved names, types and imports stop becoming `ANY`: **warning only**; its error flip is part of S8-J, never earlier | G5 | M | S4-G |
+| S8-J | Flip to error: per directory as its baseline empties; global flip needs empty `src/` baselines **and** a deployed self-hosted binary on Windows, macOS and Linux. Covers all compiled-mode safe code whether or not Q9 builds trait objects | G6 | S | all |
+| S8-K | Migrate the units the seed untyped-value rule newly flags: 75 library units, 611 sites (oauth, mqtt, persistent collections, compression, dns, benchmark, ...), one sub-lane per family | G1 | L, split per family | S2-A |
 | S9-A | Fix the enum bugs a sum-type migration hits: payload dict copied on return; `T?` match silent fall-through | G0 | M | none |
 | S9-B | Self-hosted: multi-implementor dynamic dispatch for `dyn Trait`; one object layout shared with the seed; object-safety check in the seed | G1 | L | **Q9** |
 | S9-C | First `dyn Trait` migration targets (open-set cases left on the baseline by S8) | G5 | M | S9-B |
@@ -117,8 +119,8 @@ source mode by file kind and config; syntactic checks only in the seed.
 | Group | Lanes that run together | Opens when |
 |-------|-------------------------|------------|
 | G0 | S1-A, S1-C, S2-A, S2-B, S2-D, S4-A, S4-C, S6-A, S6-B, S6-C, S8-A, S9-A | now |
-| G1 | S1-B, S1-D, S2-C, S2-F, S2-G, S3-C, S4-B, S4-D, S6-D, S6-E, S7-A, S8-B, S8-C, S8-D, S9-B | their G0 inputs landed; Q4 for S1-B/S1-D, Q9 for S9-B |
-| G2 | S2-E, S3-D, S3-E, S4-F, S4-H, S8-G | S2-C, S2-D, S3-C, S4-B landed |
+| G1 | S1-B, S1-D, S2-C, S2-F, S2-G, S3-C, S4-B, S4-D, S6-D, S6-E, S7-A, S8-B, S8-C, S8-D, S8-K, S9-B | their G0 inputs landed; Q4 for S1-B/S1-D, Q9 for S9-B |
+| G2 | S2-E, S3-D, S3-E (if Q13), S4-F, S4-H, S8-G | S2-C, S2-D, S3-C, S4-B landed |
 | G3 | S3-A, S3-B, S3-F, S4-E, S6-F, S6-G, S8-H | S2-E, S3-D landed |
 | G4 | S3-G, S4-G, S5-A, S7-B, S7-C, S8-E, S8-F | S3-A, S3-B, S3-E, S4-D..F landed |
 | G5 | S3-H, S5-B, S8-I, S9-C | S3-G, S4-G, S5-A, S9-B landed |
@@ -144,15 +146,17 @@ They meet at S2-C: the mono stage needs inferred types written back to HIR.
 | Full monomorphization, reversing the 2026-10-31 erased-body decision | S3-C..S3-H added (replacing the optional "selective specialization" lane); S6-F and S6-G are default work, no longer gated |
 | `any` allowed in any `unsafe` block or function, and in script mode; no `type_erasure` capability | S4-C is unblocked and moves to G0; it removes the capability requirement instead of wiring grants |
 | Source mode by file kind and config, not by execution engine | S4-A/S4-B resolve and carry `source_mode`; S4-H added for the interpreter in compiled mode; the seed heuristics from lanes d29-e and d29-c are replaced |
-| Seed: syntactic checks only; full HM inference only in the self-hosted compiler | no seed twins of S2-C, S2-E, S3-A, S3-B, S5-A; S3-E (seed mono of explicit generics) stays, being code generation |
+| Seed: syntactic checks only; full HM inference only in the self-hosted compiler | no seed twins of S2-C, S2-E, S3-A, S3-B, S5-A; S2-A and S3-E go beyond syntactic checks and are open (Q13) |
+| Source-mode defaults and names: `.shs` / `.sscript` script, `.spl` compiled; `@source_mode(...)` > `--source-mode` > `simple.sdn [source_mode]` > file kind | S4-A and S4-B implement exactly this; no naming question remains |
+| Spec files (`*_spec.spl`) and examples are compiled mode | the 618 `any` uses under `test/` are in scope and migrate under S8-D |
 
 ### Still open
 
 | Decision | Assumed by the plan | If answered the other way |
 |----------|---------------------|---------------------------|
 | **Q8** Enforce file privacy (386 of 553 non-exported unannotated functions have no same-file caller) | enforce, after S2-D classifies them | up to 386 functions move from T2 to T1 and S8-E grows |
-| **Q7a** Names of the source-mode config key, flag and attribute | `[source_mode]`, `--source-mode`, `@source_mode(...)` | rename only; S4-A/S4-B |
-| **Q7b** A `.spl` file with top-level statements is compiled-mode by default | yes | spec files and examples leave the scope of S8-D and need a config default instead |
+| **Q13** Seed items beyond syntactic checks: keep S2-A (type variables in the seed) and run S3-E (seed monomorphization)? | S2-A lands as a bounded bug fix with its rejection as a warning; S3-E does not run | if the seed must monomorphize, S3-E (L) runs and S7-B compares instance keys; if S2-A must be reduced, lane d29-c is cut back to the value-join fix |
+| **Q12** Disagreeing arms are an error from the start in the seed, with no warning phase | yes (S1-A) | S1-A ships as a warning and joins the S8-J flip |
 | **Q9** Trait objects: build multi-implementor dispatch in the self-hosted compiler | owner to choose | without it S9-B and S9-C do not run; open-set `any` sites migrate to enums or stay baselined |
 | **Q11** Monomorphization budget values | set from the S3-C baseline | S3-G |
 | Q2 cap value, Q3 uncalled private functions, Q4 `Option` joins, Q10 proposals | see design §13.2 | local to S3-A, S2-E, S1-B/S1-D |
@@ -223,9 +227,11 @@ generic function";
 `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md`
 §1A, `doc/08_tracking/bug/monomorphization_deleted_2026-10-31.md`), under
 which `src/compiler/40.mono` was deleted. Neither compiler monomorphizes
-today. Implicit generics are fewer than 30 functions [est]; one known real
-case to use as the first fixture is `_join` in
-`src/lib/common/serialization/__init__.spl` (`[i64]` and `[bool]`). The
+today. Implicit generics are fewer than 30 functions [est], and no real case
+is verified yet (the census sample found 0 of 15). The first fixture is
+therefore synthetic; real candidates to check when the classifier first runs
+are unannotated helpers such as `negate(z)` / `conjugate(z)` in
+`src/lib/common/complex/arithmetic.spl`. The
 explicit generics are 1,208 declarations [est] with an **unknown** instance
 count, which is why S3-C comes first.
 
@@ -234,8 +240,8 @@ count, which is why S3-C comes first.
 | S3-A | self-hosted `type_infer/generalization.spl`, `type_infer/generic_calls.spl`; one shared constant for the cap | a function called at 2 type vectors has 2 instances; the same vector from 5 call sites is 1 instance; `cap + 1` vectors refused with the call sites listed; a `var` binding is not generalized; an explicit `<T>` function is not capped |
 | S3-B | self-hosted: detection in the S2-E SCC module; `30.types/higher_rank_poly*.spl` | polymorphic recursion refused with both instantiations and locations; a parameter used at two types in one body refused; a body that dispatches on a runtime tag refused with "use an enum"; ordinary recursion still inferred |
 | S3-C | measurement scripts under `scripts/check/`; a collector-only pass over the typed HIR (no code generation); results recorded under `doc/10_metrics/` by the usual generator | recorded on a named binary identity: stage 2/3 binary size, bootstrap wall time per stage, compile time of the generic-heavy modules; instance count per generic and in total for `src/compiler` and `src/lib`; the top generics by instance count listed. No budget is proposed without these numbers |
-| S3-D | self-hosted: new `src/compiler/40.mono/` (instance collection, type substitution over bodies, instance naming, post-mono verification), driver wiring in `80.driver/`; `50.mir/_MirLowering/function_lowering.spl` (the `TypeParam` to tagged-`i64` lowering) and `50.mir/_MirLoweringExpr/switch_operators_calls.spl` (`refuse_generic_template_call`, `E-GEN-001`); starting points: `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md`, `doc/05_design/compiler/generics/generic_instantiation_model.md`, the deleted stage in git history before `200a05f5bc8` | a generic called at `i64` and at `text` produces two function symbols; the `i64` instance contains no box, decode or tag operation (inspect MIR or IR); no `TypeParam`, `Infer` or `Any` reaches MIR from safe code (the verifier fails a fixture that tries); generic types and their methods are instantiated too; interpreter, JIT and native agree on the differential fixtures; the bootstrap completes |
-| S3-E | seed `compiler/src/hir/lower/type_resolver.rs` (lines 295-297 resolve a single-letter type name to `ANY`), a real pass behind `PipelineStage::Monomorphize` (`pipeline_parallel.rs`), MIR lowering and codegen for instances | the same two-symbol and no-tag-operation fixtures pass in the seed; the seed builds `src/compiler`; seed and self-hosted agree on instance keys for the shared corpus. Explicit generics only: the seed does not infer |
+| S3-D | self-hosted: new `src/compiler/40.mono/` (instance collection, type substitution over bodies, instance naming, post-mono verification), driver wiring in `80.driver/`; `50.mir/_MirLowering/function_lowering.spl` (the `TypeParam` to tagged-`i64` lowering) (no generic-call refusal exists on this line: `20.hir/hir_lowering/_Items/declaration_lowering.spl:325` only mentions `E-GEN-001` in a comment); starting points: `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md`, `doc/05_design/compiler/generics/generic_instantiation_model.md`, the deleted stage in git history before `200a05f5bc8` | a generic called at `i64` and at `text` produces two function symbols; the `i64` instance contains no box, decode or tag operation (inspect MIR or IR); no `TypeParam`, `Infer` or `Any` reaches MIR from safe code (the verifier fails a fixture that tries); generic types and their methods are instantiated too; interpreter, JIT and native agree on the differential fixtures; the bootstrap completes |
+| S3-E | **open (Q13); runs only if the owner decides the seed must monomorphize.** seed `compiler/src/hir/lower/type_resolver.rs` (lines 320-322 resolve a single-letter type name to `ANY`), a real pass behind `PipelineStage::Monomorphize` (`pipeline_parallel.rs`), MIR lowering and codegen for instances | the same two-symbol and no-tag-operation fixtures pass in the seed; the seed builds `src/compiler`; seed and self-hosted agree on instance keys for the shared corpus. Explicit generics only: the seed does not infer |
 | S3-F | self-hosted `80.driver/driver_build/incremental.spl` and the object cache keys; module interface data (`interface_digest_of`); `40.mono` instance table | the same instance requested by two modules is emitted once; editing a generic body invalidates its instances and their users, and nothing else; editing a private non-generic body still invalidates no importer |
 | S3-G | checks under `scripts/check/` wired through `config/check/must_check_gates.sdn`; benchmark fixtures | a build over the size, time or instance budget fails with the offending generics named; a run-time benchmark set is recorded next to size, so a size win cannot hide a speed loss; the budget values are the ones the owner set (Q11) |
 | S3-H | `.claude/rules/language.md` ("Generics are erased"), the header of the 2026-10-31 generics plan, any guard under `scripts/check/` that assumes erasure, `doc/07_guide/language/type_system.md`, `doc/05_design/compiler/generics/generic_instantiation_model.md` | every statement that generics are erased is either removed or dated as historical; no guard still enforces an erased-model assumption. Lands only after S3-D and S3-E, never before: until then those statements are true |
@@ -266,9 +272,9 @@ first, behind one definition of "safe code".
 | S4-H | seed interpreter entry (`driver/src/exec_core.rs`, `SIMPLE_JIT_STRICT` fallback path) and the test runner (`src/app/test_runner_new/test_runner_main.spl`, `std.test_runner.test_runner_execute`: interpreter, SMF, native and compile modes); `simple.sdn` rows for directories chosen to be script | a compiled-mode unit run with `--mode` interpreter gets the same safe-code diagnostics as a native build of the same file; a typed lowering error is not demoted to an interpreter fallback; a script-mode unit runs unchanged; the list of directories marked script is explicit in config, not in code |
 
 The digest test in S4-G is the check behind the build-speed argument in §10.2
-and must not be dropped as obvious. S4-H depends on Q7b: if spec files are
-compiled-mode by default, expect the 618 explicit `any` uses under `test/` to
-warn on its first run; that is S8-D scope, not a reason to mark `test/` script.
+and must not be dropped as obvious. Spec files and examples are$
+compiled-mode (decided), so expect the 618 explicit `any` uses under `test/` to
+warn on the first S4-H run; that is S8-D scope, not a reason to mark `test/` script.
 
 ## S5: trait-bound inference for method calls
 
@@ -309,7 +315,7 @@ implement, and a bootstrap closure that needs no inference from the seed.
 |------|-------|------------|
 | S7-A | harness under `scripts/check/` driving both compilers over `test/fixtures/type_inference/` against the manifest | a deliberately divergent fixture makes it fail; a compiler that produces no verdict is an ERROR, not a pass; zero fixtures compared is an ERROR |
 | S7-B | a guard reading the cap constant, source-mode cases, instance keys and message table of both compilers | the constants differ: FAIL; a check implemented by both with different text or code: FAIL |
-| S7-C | none new; evidence only | with S8-A landed, the seed builds `src/compiler` with its unannotated-parameter warning at zero for the closure; the self-hosted rules report zero on the closure; the sanctioned bootstrap (`.claude/rules/bootstrap.md`) completes |
+| S7-C | none new; evidence only | with S8-A landed, the seed builds `src/compiler` with its S4-F warning (exported functions only) at zero for the closure; the self-hosted rules report zero on the closure; the sanctioned bootstrap (`.claude/rules/bootstrap.md`) completes |
 
 Until a full-CLI self-hosted binary is deployed, self-hosted lanes are verified
 through whichever self-hosted entry point can compile the fixtures; record
@@ -331,8 +337,21 @@ shows the kinds, not the directories, determine the fix.
 | S8-F | about 60 unique | persistent collections, `deep_equal`/`type_of` users |
 | S8-G | remainder of 401 | seed std `synchronization` (39), `mcp` (36) |
 | S8-H | unknown until S2-F lands; expected small | spread |
-| S8-I | unknown; hidden today | seed lenient fallbacks (`type_resolver.rs`, `import_loader.rs`) |
+| S8-I (warning only) | unknown; hidden today | seed lenient fallbacks (`type_resolver.rs`, `import_loader.rs`) |
 | S8-J | n/a | severity table; the "Staged warnings" notes in the guides |
+| S8-K | 611 sites in 75 units (lane d29-c finding) | oauth, mqtt, persistent collections, compression, dns, benchmark and the other families the seed rule flags |
+
+**S8-K.** Lane d29-c's seed rule (a value of uninferable type reaching a typed
+use) newly rejects 75 library units. It therefore ships as a **warning** and
+goes to error with S8-J. One sub-lane per family; the mirrored trees are fixed
+together. These overlap S8-E and S8-F: a site fixed there leaves this list.
+
+**S8-J scope.** The flip covers all compiled-mode safe code. If trait objects
+are not built (Q9 answered no), open-set `any` sites are resolved before the
+flip by an `enum` where the set can be closed, otherwise by an `unsafe` body
+behind a generic signature, counted by the unsafe-`any` ratchet with a reason.
+No site is exempted by staying on a baseline. S8-I adds warnings only; nothing
+from S8-I becomes an error before S8-J.
 
 Per-site choice, in this order: add the annotation; make it an explicit
 generic; replace a closed `any` with an `enum`; replace an open `any` with a
@@ -377,7 +396,7 @@ rewriter outside the compiler pipeline and is not part of S9-B.
   access as intrinsics; an S6 lane is not accepted on a test pass alone.
 - **Monomorphization has no numbers yet.** Instance count, size and build-time cost are unknown until S3-C. S3-D is large and touches every generic in the bootstrap closure; a budget miss found late is expensive, so S3-C gates it.
 - **Reversing 2026-10-31 discards working code.** The erased execution model stays until S3-D and S3-E pass; S3-H removes the statements only afterwards.
-- **Spec files become compiled-mode** if Q7b is confirmed: 618 explicit `any` uses under `test/` enter scope (S8-D).
+- **Spec files and examples are compiled-mode** (decided): 618 explicit `any` uses under `test/` enter scope (S8-D).
 - **S2-C is the long pole.** Nothing after S2 produces better code until
   inferred types reach HIR; before that the engine only diagnoses.
 - **S2-D may move functions between tiers.** If privacy is not enforced, up

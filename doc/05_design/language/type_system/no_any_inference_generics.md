@@ -96,7 +96,7 @@ callbacks 5%; handles 2%; mixed containers 2%; reflection 1 to 2%.
   deleted (commit `200a05f5bc8`); the owner decision of 2026-10-31 is one
   erased body per generic function, with `T` a tagged word boxed and decoded at
   boundaries. The seed resolves a single uppercase letter type name straight to
-  `ANY` (`compiler/src/hir/lower/type_resolver.rs:295-297`). **There is no
+  `ANY` (`compiler/src/hir/lower/type_resolver.rs:320-322`). **There is no
   monomorphizer anywhere.** The 2026-11-27 decision reverses this (§6); the
   bullet describes the code as it is today.
 - **Self-hosted diagnostics.** `E-ANY-COMPILE-001` / `W-ANY-COMPILE-001`
@@ -192,6 +192,11 @@ top-level statements and no `main`: `set_entry_script_mode` in d29-e,
 `SCRIPT_ENTRY_ATTR` in d29-c). That is **not** the decided definition and is
 to be replaced by the resolved source mode (§3.2, plan S4-A/S4-B).
 
+Finding from lane d29-c: its seed rule (a value of uninferable type reaching a
+typed use is rejected in safe code) newly rejects **75 library units, 611
+sites** (oauth, mqtt, persistent collections, compression, dns, benchmark and
+others). The rule therefore ships as a warning first (§12, plan S8-K).
+
 ## 3. Where `any` is allowed
 
 ### 3.1 `unsafe` (decided 2026-11-27)
@@ -252,9 +257,9 @@ named and filled as proposals below.
   (`TestExecutionMode`: interpreter, SMF, native, compile, safe mode) and the
   self-hosted `CompileMode` (`Interpret`, `Jit`, `Aot`, `Check`, `Sdn`,
   `SmfExec`). These choose an engine and say nothing about source mode.
-- **Not found:** a config key that sets source mode, and a statement of which
-  mode a `.spl` file with top-level statements is in. Both are proposals
-  below and need confirming (Q7a, Q7b).
+- **Not in the tree before this decision:** a config key that sets source
+  mode, and a statement of which mode a `.spl` file with top-level statements
+  is in. Both are now decided (§13.1, D5 and D6) and specified below.
 
 #### Default by file kind
 
@@ -267,24 +272,23 @@ named and filled as proposals below.
 A `.spl` file is `compiled` by default **whether or not it has top-level
 statements**. Top-level statements decide how an entry point is synthesized,
 not which rules apply. This is where the decided rule differs from the
-heuristics now in the tree (below), and it means spec files and examples are
-compiled-mode source unless config says otherwise (Q7b).
+heuristics now in the tree (below). Decided (D6): spec files (`*_spec.spl`)
+and examples are compiled-mode source and follow the safe-code rules.
 
-#### Config, and precedence
+#### Config, and precedence (decided, D5)
 
 Most-local wins, the same order the strictness tier already uses:
 
-1. **File-header attribute** on the unit (proposed spelling
-   `@source_mode(script)` / `@source_mode(compiled)`).
-2. **CLI flag** for the invocation (proposed `--source-mode=script|compiled`),
+1. **File-header attribute** on the unit: `@source_mode(script)` /
+   `@source_mode(compiled)`.
+2. **CLI flag** for the invocation: `--source-mode=script|compiled`,
    applying to the entry unit only.
-3. **`simple.sdn`**: a project default and per-path overrides (proposed
-   `[source_mode] default = "compiled"` plus path-prefix rows, for example
-   `"examples/" = "script"`).
+3. **`simple.sdn`**: `[source_mode]`, a project default
+   (`default = "compiled"`) plus path-prefix rows.
 4. **File kind** default from the table above.
 
-The key and attribute names are proposals (Q7a); the precedence and the
-existence of a config override are the decision. An environment variable is
+The row syntax inside `[source_mode]` is an implementation detail of plan
+S4-A. An environment variable is
 deliberately not in the list: mode must be a property of the source tree, so
 that the same file means the same thing on every machine.
 
@@ -453,8 +457,12 @@ If type variables remain after the body is solved and call sites supply
 different closed types, the function is generalized over the remaining
 variables and instantiated per distinct call-site type vector. The inferred
 variables become ordinary type parameters and take the same path as an
-explicit `<T>`. One known real case today: `_join` in
-`lib/common/serialization/__init__.spl`, reached with `[i64]` and `[bool]`.
+explicit `<T>`. No real T3 case is verified yet: the census sample found 0 of
+15 private functions with disagreeing call sites. Candidates to check when the
+classifier first runs are unannotated helpers whose callers pass different
+types, such as `curry2(f)` in `lib/common/functions.spl` (exported, so T1
+today) and the tuple helpers `negate(z)` / `conjugate(z)` in
+`lib/common/complex/arithmetic.spl`.
 
 Uses of an inferred `T` inside a T3 body:
 
@@ -463,8 +471,9 @@ Uses of an inferred `T` inside a T3 body:
 | passed along, stored, returned | fine |
 | method call `x.len()` | a **method-presence constraint** checked at each instantiation; if exactly one trait declares the method, infer `T: Trait`; otherwise error "annotate" (S5) |
 | tuple index `z.0` | infer a tuple of the arity fixed by use |
+| indexing `xs[0]` | an **indexable constraint** (`T` is `[E]`, `text` or a dict), checked at each instantiation like a method; the result type is the element type of that instance |
 | named field `p.name` | T2 only; in T3 an error. No row polymorphism. The seed's receiver-blind field search is the unsound shortcut this replaces |
-| arithmetic / comparison | requires a numeric bound, else error. Arithmetic on an erased `T` is a known wrong-code class |
+| arithmetic / comparison | requires a numeric bound, else error: without a bound there is no operator to select for the instance. (Under today's erased model the same shape lowers to tagged-word arithmetic, a known wrong-code class) |
 
 ### 5.4 Instance cap and deduplication
 
@@ -535,7 +544,7 @@ Neither compiler monomorphizes today.
 |-------|-------------|------|
 | Self-hosted `40.mono` stage | deleted; older design in `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md` and `doc/05_design/compiler/generics/generic_instantiation_model.md` (marked partly superseded) | restore or rebuild: instance collection from the typed HIR, type substitution over bodies, instance naming, and a post-mono check that no type parameter, `Infer` or `Any` reaches MIR |
 | Self-hosted erased path | `TypeParam` lowers to a tagged `i64` (`50.mir/_MirLowering/function_lowering.spl`); box and decode at `T` boundaries | removed for safe code once instances exist; kept only for `unsafe` and script values |
-| Seed | a single uppercase letter type name resolves to `ANY` (`compiler/src/hir/lower/type_resolver.rs:295-297`); `PipelineStage::Monomorphize` is a label only; the JIT instantiator compile step is unimplemented | a real monomorphization pass for **explicit** generics. This is code generation, not inference, so it is inside the syntactic-only seed scope (§11) |
+| Seed | a single uppercase letter type name resolves to `ANY` (`compiler/src/hir/lower/type_resolver.rs:320-322`); `PipelineStage::Monomorphize` is a label only; the JIT instantiator compile step is unimplemented | whether the seed monomorphizes at all is open (Q13, §11.2); if it does, a real pass for **explicit** generics only |
 | Instance identity | none | canonical closed type vector as the key; one instance per key per program, shared across modules |
 | Cross-module instances | none | an instance of a generic from module A requested by module B is emitted once. The body of an exported generic becomes something importers depend on, unlike a private function body |
 
@@ -637,7 +646,7 @@ which a generator emits
 
 **This registry does not exist yet** [read]. Today
 `check-sffi-v2-authority.shs` aggregates per-module authority guards; the v2
-contract types are design-only (`doc/05_design/platform/sffi_v2_hardening.md`);
+contract types are design-only (`doc/04_architecture/platform/sffi_v2_hardening.md`);
 `rt_alias_map.sdn` is a migration map; `sffi_gen` reads `@Lib` specs and emits
 Rust wrappers only; and the seed interpreter has a third, hand-written
 dispatch table (`compiler/src/interpreter_extern/mod.rs`) that the parity
@@ -860,75 +869,112 @@ and lowering cost, not the unifier.
 
 ## 11. Seed and self-hosted parity
 
-The rule set is defined once, in this document. **Decided 2026-11-27:** the
-Rust seed gets syntactic checks only; full HM inference exists only in the
-self-hosted compiler. Monomorphization of explicit generics is code
-generation, not inference, and is built in both (§6.1).
+The rule set is defined once, in this document. **Decided 2026-11-27: the Rust
+seed gets syntactic checks only. Full HM inference exists only in the
+self-hosted compiler.** The seed is bootstrap-only: it has to compile
+`src/compiler` plus the std prefixes it imports, and once those are annotated
+(plan S8-A) it never needs to infer.
+
+### 11.1 What each compiler implements
 
 | Piece | Seed | Self-hosted |
 |-------|------|-------------|
-| Unifier + occurs check | has | has |
-| Fresh variable per unannotated parameter | needs (lowering assigns `ANY` before the checker runs) | needs (the `bind_mono` fix) |
-| Generalize / instantiate | has, uncalled | has, called |
-| Call-site driven inference for private functions | needs | needs |
-| Types written back to HIR | needs; the checker returns nothing (large) | partial |
-| Trait-bound solving | none | has a solver |
-| any/untyped diagnostics | none | has, profile-gated |
+| Source-mode resolution, unsafe rule | yes (same predicate) | yes |
+| Written `any` outside unsafe | yes, syntactic | yes |
+| Unannotated parameter of an exported function in a compiled-mode unit | yes, syntactic | yes |
+| Fixes for existing silent mis-typings (lambda `I64`, `[]` as `[I32]`, then-arm join) | yes; these are wrong regardless of this design | n/a |
+| Fresh variable per unannotated parameter | **no** | yes (the `bind_mono` fix) |
+| Call-site driven inference, tiers T2/T3/T4 | **no** | yes |
+| Types written back to HIR | **no** | yes |
+| Trait-bound inference | **no** | yes |
+| Monomorphization | **open** (Q13) | yes |
 
-**Recommended (census):** do **not** port full inference to the seed. The seed
-is bootstrap-only and has to compile `src/compiler` plus the std prefixes it
-imports; once those are annotated the seed never needs to infer. The seed gets
+The type crate of the seed already has a unifier, `generalize` and
+`instantiate`; they stay uncalled. That is the meaning of "syntactic only".
 
-- the in-flight lanes (typed arm join; stage-1 identity instantiation);
-- fixes for its silent mis-typings (lambda `I64`, `[]` as `[I32]`, then-arm
-  join), which are wrong regardless of this design;
-- the **syntactic** twins of the checks: written `any` outside unsafe, and an
-  unannotated parameter of an exported function in a compiled-mode module.
+### 11.2 Two seed items that go beyond syntactic checks
 
-The full engine (tiers, write-back, bounds) is built once, in the self-hosted
-compiler. The direction of disagreement is then safe: a program the
-self-hosted HM accepts is always accepted by the more lenient seed. The reverse
-(seed accepts, self-hosted refuses) is expected for unmigrated code and is
-what the warn phase reports.
+Both are listed as open owner questions (Q13) rather than assumed.
 
-**Consequence, stated plainly.** `bin/simple` is currently the Rust seed and
-no full-CLI self-hosted binary is deployed (`.claude/rules/commands.md`). Tiers
-T2 and T3, write-back and bound inference therefore do not exist in the
-deployed compiler until a self-hosted binary is deployed. Until then users of
-`bin/simple` get the arm join, stage-1 identity instantiation, the mis-typing
-fixes, the syntactic warnings and (when it lands) monomorphized explicit
-generics, and nothing more.
+- **Lane d29-c (plan S2-A)** gives unannotated parameters type variables in
+  the seed and instantiates the identity shape at call sites. That is
+  inference, in the seed. It exists because it fixes a silent wrong-value bug.
+  Either it is kept as a bounded bug fix (identity shape only, never extended),
+  or it is reduced to the syntactic rule plus the value-join fix.
+- **Seed monomorphization (plan S3-E, large).** Full monomorphization was
+  decided for the language. Whether the **seed** must monomorphize is a
+  separate question: the seed only builds the compiler, and a seed that keeps
+  erased generics still produces a working stage 1 as long as the self-hosted
+  compiler it builds monomorphizes from stage 2 on. The cost of not doing it is
+  that seed-built and self-built binaries differ in generic code generation,
+  which the stage-2/stage-3 comparison in the bootstrap must tolerate.
 
-Under `SIMPLE_BOOTSTRAP=1` the seed skips lint and several checks and forces
-lenient types [read], so it accepts whatever the self-hosted checker accepts,
-and more. The seed's syntactic warnings must therefore never be stricter than
-the self-hosted rule: they cover written `any` and unannotated **exported**
-signatures, not private functions that the self-hosted compiler would infer.
+### 11.3 Consequences
 
-Parity that is required either way: same verdict from both compilers on the
-shared fixture corpus for every check both implement; same message text and
-codes; same cap constant; same source-mode resolution; same instance keys.
+`bin/simple` is currently the Rust seed and no full-CLI self-hosted binary is
+deployed (`.claude/rules/commands.md`). Tiers T2 and T3, write-back and bound
+inference therefore do not exist in the deployed compiler until a self-hosted
+binary is deployed. Until then users of `bin/simple` get the syntactic
+warnings, the mis-typing fixes and whatever Q13 keeps, and nothing more.
+
+The direction of disagreement is safe: a program the self-hosted HM accepts is
+always accepted by the more lenient seed. Under `SIMPLE_BOOTSTRAP=1` the seed
+skips lint and several checks and forces lenient types [read]. The syntactic
+warnings of the seed must therefore never be stricter than the self-hosted
+rule: they cover written `any` and unannotated **exported** signatures, not
+private functions that the self-hosted compiler would infer.
+
+Parity that is required: same verdict from both compilers on the shared
+fixture corpus for every check both implement; same message text and codes;
+same source-mode resolution.
 
 ## 12. Rollout
 
 Warn first, then error, the same pattern as the other staged rules in
 `doc/07_guide/quick_reference/syntax_quick_reference.md` ("Staged warnings").
 
-1. Source mode (§3.2) and the unsafe rule (§3.1) implemented first; no
+1. Source mode (§3.2) and the unsafe rule (§3.1) are implemented first; no
    other check is meaningful without them.
 2. Diagnostics land as **warnings** in every profile, with baselines frozen so
    new sites fail review and old ones do not.
 3. Migration (S8) drives the baselines to zero, bootstrap closure first.
-4. A directory flips to **error** when its baseline is empty; the global flip
-   follows when `src/` is clean.
+4. A directory flips to **error** when its baseline is empty.
 
-Disagreeing arms and uninferable types that would otherwise compute on a
-tagged word are errors from the start in the seed lanes: they replace silent
-wrong values, not working code.
+**Global flip, one trigger.** The quick reference says staged warnings become
+errors once Windows, macOS and Linux all have a working self-hosted binary.
+That and "the baselines are empty" are the same gate, not two: the full rules
+exist only in the self-hosted compiler (§11), so the global flip needs **both**
+an empty baseline for `src/` and a deployed self-hosted binary on the three
+hosts. Per-directory flips before that are enforced by the ratchet in CI, not
+by the deployed compiler.
+
+**What the flip covers if trait objects are not built (Q9 answered no).** The
+flip still covers all compiled-mode safe code. Open-set `any` sites that were
+waiting for `dyn Trait` must be resolved before it: rewritten to an `enum`
+where the set can be closed, otherwise moved behind a generic signature with
+an `unsafe` body, each such move counted by the unsafe-`any` ratchet with a
+stated reason. No site is exempted by leaving it on a baseline.
+
+**Unresolved names** (lenient seed fallbacks that turn an unknown name, type or
+import into `ANY`) warn first like everything else and go to error only as
+part of the global flip, never earlier.
+
+**What the first seed rejection showed.** Lane d29-c made the seed reject a
+value of uninferable type reaching a typed use. On the library that newly
+rejects **75 units (611 sites)**, in families including oauth, mqtt,
+persistent collections, compression, dns and benchmark (lane d29-c finding).
+That rule therefore ships as a **warning** first and follows the same
+warn-to-error path, with one migration lane per family (plan S8-K).
+
+**One exception to warn-first, for confirmation (Q12).** Disagreeing
+`if`/`match` arms (lane d29-e) are an error from the start in the seed. The
+argument is that the previous behaviour was a silent wrong value, and the
+census found no such disagreement in existing source by grep. It is listed as
+open because it is the only rule in this design that does not warn first.
 
 ## 13. Owner decisions
 
-### 13.1 Decided 2026-11-27
+### 13.1 Decided
 
 | # | Decision | Where |
 |---|----------|-------|
@@ -936,18 +982,19 @@ wrong values, not working code.
 | D2 | **`any` is allowed in any `unsafe` block or function, and in script mode.** No separate `type_erasure` capability | §3.1 |
 | D3 | **Source mode is set by file kind and config**, not by execution engine; the interpreter can run compiled-mode source | §3.2 |
 | D4 | **Seed scope: syntactic checks only.** Full HM inference exists only in the self-hosted compiler | §11 |
+| D5 | **Source-mode defaults and names.** `.shs` / `.sscript` are script by default, `.spl` is compiled. Precedence: file-header `@source_mode(...)`, then CLI `--source-mode`, then `simple.sdn` `[source_mode]`, then file kind | §3.2 |
+| D6 | **Spec files (`*_spec.spl`) and examples are compiled mode.** The 618 explicit `any` uses under `test/` are in scope and migrate under plan S8-D | §3.2 |
 
 ### 13.2 Still open
 
 - **Q8. File privacy.** 386 of 553 non-exported unannotated functions have no
   same-file caller (§5.2). Enforce file privacy, widen inference scope to the
   package, or treat those functions as must-annotate?
-- **Q7a.** Names of the source-mode config key, CLI flag and file-header
-  attribute (§3.2 proposes `[source_mode]`, `--source-mode`,
-  `@source_mode(...)`). No existing key was found in the tree.
-- **Q7b.** Confirm that a `.spl` file with top-level statements is `compiled`
-  by default, which puts spec files and examples under the safe-code rules
-  unless config marks their directories `script`.
+- **Q13. Seed items beyond syntactic checks** (§11.2): keep lane d29-c's
+  type variables in the seed as a bounded bug fix, or reduce it; and must the
+  seed monomorphize (plan S3-E), given it is bootstrap-only?
+- **Q12. Errors from the start.** Confirm that disagreeing arms are an error
+  in the seed without a warning phase (§12).
 - **Q2.** Instance cap for implicit generics. Proposed 4.
 - **Q3.** A private function with no call sites and an undetermined
   signature: error, or unused-code warning?

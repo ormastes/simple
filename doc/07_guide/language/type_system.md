@@ -86,7 +86,7 @@ simple check --show-types src/lib.spl # Show inferred types
 simple check --verbose src/*.spl      # Verbose with suggestions
 ```
 
-The standalone type checker is optional -- it only runs when you use `simple check` or `--type-check` flags. The rules under "Current Type Rules" below are separate: they are enforced during compilation.
+The standalone type checker is optional -- it only runs when you use `simple check` or `--type-check` flags. The rules under "Current Type Rules" below are separate from that checker and belong to compilation itself; each bullet says whether it is enforced today or staged.
 
 ### Forward References
 
@@ -150,7 +150,9 @@ and an ERROR after phase 3 (staged). See
   builds:** the self-hosted ban applies only at Robust/Critical strictness and
   the seed has no such diagnostic.
 - `if`/`match` arms used as a value must have one type; different types are a
-  compile error naming both arms. Int and float arms widen to float.
+  compile error naming both arms. Int and float arms widen to float. **Not yet
+  enforced on the release line:** it lands with stage S1 of the no-`any` plan;
+  until then the first arm silently decides the type.
 - For mixed data use an `enum` (closed set) instead of `any`. Trait objects
   (`dyn Trait`) are intended for open sets, but the self-hosted compiler
   cannot yet dispatch a trait call with several implementors; do not migrate

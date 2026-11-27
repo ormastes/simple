@@ -100,7 +100,7 @@ fn first(xs):                        # private, called with [i64] and [text]:
 | Private function, call sites agree | inferred, one monomorphic copy |
 | Private function, call sites disagree | implicit generic, instances capped and deduplicated |
 | Over the cap, polymorphic recursion, higher-rank | compile error: annotate |
-| `if`/`match` arms of different types | compile error naming both arms (int/float arms widen to float) |
+| `if`/`match` arms of different types | compile error naming both arms (int/float arms widen to float); lands with plan stage S1 |
 | Type cannot be determined | compile error, never a fallback to `any` |
 | `any`, `[any]` | only inside `unsafe` and in script mode |
 
@@ -116,8 +116,10 @@ attribute, CLI flag or `simple.sdn` row can change it, most local wins. The
 interpreter also runs compiled-mode source, as `bin/simple test` does, and
 applies the compiled rules to it. A module a script imports is still checked
 as safe code. Generics are being moved to per-type copies (monomorphization).
-None of this is enforced in default builds yet, and the config key names are
-not final; see the design doc §3.2 and §6.
+Precedence: `@source_mode(...)` in the file header, then `--source-mode`, then
+`simple.sdn` `[source_mode]`, then file kind. Spec files (`*_spec.spl`) and
+examples are compiled mode. None of this is enforced in default builds yet
+(the arm rule lands with plan stage S1); see the design doc §3.2, §6 and §12.
 
 ---
 
@@ -530,7 +532,10 @@ s.char_at(99)                       # "" (char_at keeps its over-run policy)
 - Staged warnings (non-exhaustive match, `any` outside `unsafe:` or script mode,
   unannotated `pub` functions, char used as
   `i64`, char-vs-text compare, new `'...'` raw strings) become errors once
-  Windows, macOS and Linux all have a working self-hosted Simple binary.
+  Windows, macOS and Linux all have a working self-hosted Simple binary. For
+  the `any` and annotation rules the flip additionally needs empty migration
+  baselines for `src/`; the one exception proposed is disagreeing `if`/`match`
+  arms, an error from the start (design doc §12).
 - **Lexer switch is staged:** until it lands (after the stage3 self-build
   passes) the old multi-scalar `'...'` raw-string form still lexes; do not
   write new ones (`scripts/check/check-no-single-quoted-raw-string.shs`).
