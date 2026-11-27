@@ -729,3 +729,19 @@ Checked and left (not green, need an owner call or a larger rewrite):
   but it then fails further on `incompatible invocation did not explain rejection`.
 - `runtime_memory_owner_composition`: `core_array.spl` no longer carries the documented
   "retain the whole bounded scope" contract.
+
+## Batch 3 (2026-11-27): 3 wired, 4 checked and left
+Wired: `dbfs_file_meta_cache_cardinality`, `decorators_cache_cardinality`,
+`duplicate_cache_stats_key_snapshot` (class 3, real source fixes, see
+`cache_stats_materialize_dict_keys_2026-11-27.md`).
+Left, tests ahead of the script (feature never implemented; git history shows no version of the script
+ever carried the pinned behaviour):
+- `check_no_sabotage_residue_contract`: test expects `PASS - N tracked source file(s) scanned, M marker
+  candidate file(s)` verdicts and a primary/worktree split; the guard only reports ERROR when no marker
+  file exists (a marker-free tree is "nothing checked").
+- `native_smoke_matrix_progress_contract`: expects `NATIVE_SMOKE_BUILD_TIMEOUT` and a
+  `[case] START build_deadline=Ns` receipt; `scripts/check/native-smoke-matrix.shs` has neither.
+- `phase2_capsule_schema_layout_contract`: `phase2-runtime-capsule.shs verify` rejects the canonical POSIX
+  v1 capsule built by the test (identity fixture vs current schema), needs an owner read.
+- `performance_target_identity_external`: importer reason for retained build-origin placeholders differs
+  (not investigated further).
